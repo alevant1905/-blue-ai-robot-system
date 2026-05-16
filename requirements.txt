@@ -25,6 +25,15 @@ ytmusicapi>=1.3.0
 # Smart Home Integration (Optional - for Philips Hue)
 # No additional packages needed - uses direct HTTP requests
 
+# Document RAG System (for semantic PDF search)
+chromadb>=0.5.0             # Vector database with built-in embeddings (>=0.5 for NumPy 2.x compat)
+pypdf>=4.0.0                # PDF text extraction (maintained successor to PyPDF2)
+python-docx>=1.0.0          # Word .doc/.docx text extraction
+openpyxl>=3.1.0             # Excel .xlsx text extraction
+python-pptx>=0.6.23         # PowerPoint .pptx text extraction
+striprtf>=0.0.26            # Rich Text Format extraction
+watchdog>=3.0.0             # Filesystem watcher for auto-indexing dropped documents
+
 # Advanced Features (Optional)
 python-dateutil>=2.8.2      # Better date/time parsing
 pytz>=2023.3                # Timezone support
@@ -33,9 +42,11 @@ pytz>=2023.3                # Timezone support
 pyperclip>=1.8.2            # Cross-platform clipboard access
 plyer>=2.1.0                # Desktop notifications
 
-# Volume Control - Windows Only (Optional)
-# pycaw>=20220416            # Windows audio control
-# comtypes>=1.2.0            # Required by pycaw
+# Volume Control - Windows Only (Recommended for set_volume tool)
+# Without these, set_volume falls back to a SendKeys-based PowerShell hack
+# that is slower and steps in 2% increments.
+pycaw>=20220416              # Windows audio control
+comtypes>=1.2.0              # Required by pycaw
 
 # Web Scraping (Optional - for web tools)
 beautifulsoup4>=4.12.0      # HTML parsing

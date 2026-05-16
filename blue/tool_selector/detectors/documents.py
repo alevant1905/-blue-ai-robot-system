@@ -25,7 +25,8 @@ class DocumentsDetector(BaseDetector):
     def _detect_search_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
         strong_signals = [
             'search my documents', 'search documents for', 'find in my documents',
-            'what do my documents say', 'according to my documents', 'search my files'
+            'what do my documents say', 'according to my documents', 'search my files',
+            'in my files', 'in my documents', 'look up in my',
         ]
 
         # List/count queries - user wants to see what documents exist
@@ -38,7 +39,29 @@ class DocumentsDetector(BaseDetector):
             'documents in', 'files in', 'which documents', 'which files'
         ]
 
-        doc_nouns = ['document', 'documents', 'file', 'files', 'pdf', 'contract']
+        # Re-read / closer-look signals: user is asking Blue to (re-)inspect a
+        # specific document. These need to route to search_documents because
+        # otherwise the model just claims to have "re-read" the file without
+        # actually fetching anything.
+        # Phrase signals fire on their own (no extra context needed).
+        re_read_signals = [
+            'second look at', 'another look at', 'fresh look at',
+            'closer look at', 'have a look at',
+            're-read', 'reread', 'read again', 'read it again',
+            'look back at', 'go back to the',
+            'pull up the', 'bring up the',
+        ]
+        # Verb signals that need a doc-noun nearby in the same message.
+        re_read_verbs = (
+            'review', 'go through', 'look through', 'look at',
+            'check', 'open', 'go back to', 'pull up', 'bring up',
+        )
+
+        doc_nouns = ['document', 'documents', 'file', 'files', 'pdf', 'contract',
+                     'syllabus', 'report', 'assignment', 'essay', 'paper', 'notes',
+                     'docx', 'doc', '.pdf', '.docx', '.txt', '.md',
+                     'script', 'cv', 'cover letter', 'dossier', 'invitation',
+                     'talk', 'lecture', 'manuscript', 'draft']
 
         confidence = 0.0
         reasons = []
@@ -50,7 +73,23 @@ class DocumentsDetector(BaseDetector):
             # User wants to list/count documents
             confidence = 0.90
             reasons.append("document list/count query")
-        elif any(v in msg_lower for v in ['search', 'find', 'look for']):
+        elif any(s in msg_lower for s in re_read_signals):
+            # User wants Blue to look at a specific document — this almost
+            # always implies search_documents. Boost slightly if a doc noun
+            # is also present (very strong signal).
+            if any(n in msg_lower for n in doc_nouns):
+                confidence = 0.92
+                reasons.append("re-read/look-at + document noun")
+            else:
+                confidence = 0.85
+                reasons.append("re-read / fresh-look phrasing")
+        elif any(v in msg_lower for v in re_read_verbs) and any(n in msg_lower for n in doc_nouns):
+            # Looser verb+noun match catches "review the job talk document",
+            # "go through the talk script", "open the docx file" — anything
+            # where words appear between the verb and the doc-noun.
+            confidence = 0.88
+            reasons.append("re-read verb + doc noun (proximity)")
+        elif any(v in msg_lower for v in ['search', 'find', 'look for', 'look up']):
             if any(n in msg_lower for n in doc_nouns):
                 if 'my' in msg_lower or 'our' in msg_lower:
                     confidence = 0.85
@@ -58,6 +97,9 @@ class DocumentsDetector(BaseDetector):
                 else:
                     confidence = 0.70
                     reasons.append("search + document")
+            elif 'my' in msg_lower:
+                confidence = 0.75
+                reasons.append("search + possessive (implicit docs)")
 
         # Questions about documents (what/how questions)
         if ('what' in msg_lower or 'how' in msg_lower) and any(n in msg_lower for n in doc_nouns):

@@ -4,7 +4,69 @@ Utility functions for tool selection.
 Provides fuzzy matching, string normalization, and helper functions.
 """
 
-from typing import List, Optional
+import re
+from functools import lru_cache
+from typing import List, Optional, Tuple
+
+
+@lru_cache(maxsize=512)
+def _compile_word_pattern(word: str) -> re.Pattern:
+    """Cache compiled regex patterns for word boundary matching."""
+    return re.compile(r'\b' + re.escape(word) + r'\b')
+
+
+def has_word(word: str, text: str) -> bool:
+    """
+    Check if a word appears as a whole word in text (not as a substring).
+
+    Uses word boundary matching to avoid false positives like
+    'light' matching 'highlight' or 'stop' matching 'nonstop'.
+
+    Args:
+        word: The word to search for (can be multi-word phrase)
+        text: The text to search in (should be lowercase)
+
+    Returns:
+        True if word appears as a whole word/phrase
+
+    Examples:
+        >>> has_word('light', 'turn on the light')
+        True
+        >>> has_word('light', 'highlight this text')
+        False
+        >>> has_word('stop', 'stop the music')
+        True
+        >>> has_word('stop', 'nonstop flight')
+        False
+    """
+    return bool(_compile_word_pattern(word).search(text))
+
+
+@lru_cache(maxsize=256)
+def _compile_multi_word_pattern(words: Tuple[str, ...]) -> re.Pattern:
+    """Cache compiled regex for matching any of multiple words."""
+    pattern = r'\b(?:' + '|'.join(re.escape(w) for w in words) + r')\b'
+    return re.compile(pattern)
+
+
+def has_any_word(words: List[str], text: str) -> bool:
+    """
+    Check if any of the words appear as whole words in text.
+
+    Args:
+        words: List of words/phrases to search for
+        text: The text to search in (should be lowercase)
+
+    Returns:
+        True if any word appears as a whole word/phrase
+
+    Examples:
+        >>> has_any_word(['light', 'lamp'], 'turn on the light')
+        True
+        >>> has_any_word(['light', 'lamp'], 'highlight this text')
+        False
+    """
+    return bool(_compile_multi_word_pattern(tuple(words)).search(text))
 
 
 def fuzzy_match(query: str, targets: List[str], threshold: float = 0.75) -> Optional[str]:
@@ -169,7 +231,6 @@ def extract_quoted_text(message: str) -> List[str]:
         >>> extract_quoted_text('Send email with subject "Meeting tomorrow"')
         ['Meeting tomorrow']
     """
-    import re
     # Match both single and double quotes
     patterns = [
         r'"([^"]+)"',  # Double quotes
@@ -230,7 +291,6 @@ def split_compound_request(message: str) -> List[str]:
     for conjunction in COMPOUND_CONJUNCTIONS:
         if conjunction in msg.lower():
             # Split on the conjunction (case-insensitive)
-            import re
             parts = re.split(re.escape(conjunction), msg, flags=re.IGNORECASE)
             return [part.strip() for part in parts if part.strip()]
 

@@ -153,6 +153,16 @@ def run_server():
     # Import bluetools and run its main function
     import bluetools
 
+    # Start the proactive heartbeat (reminder emails + alert queue).
+    # bluetools.py only starts this from inside its `if __name__ == "__main__":`
+    # block, which we bypass by importing rather than executing, so we have
+    # to kick it off explicitly here.
+    try:
+        import blue_proactive
+        blue_proactive.start()
+    except Exception as e:
+        print(f"   ⚠️  Proactive heartbeat failed to start: {e}")
+
     # Run the server if bluetools has a main guard
     if hasattr(bluetools, '__name__'):
         print("   Server starting on http://127.0.0.1:5000")
@@ -161,7 +171,9 @@ def run_server():
         # The Flask app.run() is inside bluetools' if __name__ == "__main__" block
         # We need to run it manually since we're importing, not executing
         if hasattr(bluetools, 'app'):
-            bluetools.app.run(host='127.0.0.1', port=5000, debug=False)
+            # threaded=True keeps the server responsive (and Ctrl+C working)
+            # even when a single request stalls — e.g. a slow ChromaDB call.
+            bluetools.app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
 
 def main():
     """Main entry point."""

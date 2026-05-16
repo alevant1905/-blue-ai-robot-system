@@ -24,6 +24,14 @@ class VisionDetector(BaseDetector):
         if recognition_intent:
             intents.append(recognition_intent)
 
+        remember_intent = self._detect_remember_person_intent(msg_lower, context)
+        if remember_intent:
+            intents.append(remember_intent)
+
+        recall_intent = self._detect_recall_intent(msg_lower, context)
+        if recall_intent:
+            intents.append(recall_intent)
+
         return intents
 
     def _detect_camera_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
@@ -48,7 +56,7 @@ class VisionDetector(BaseDetector):
             return None
 
         return ToolIntent(
-            tool_name='capture_camera_image',
+            tool_name='capture_camera',
             confidence=confidence,
             priority=ToolPriority.HIGH,
             reason=' | '.join(reasons),
@@ -100,24 +108,109 @@ class VisionDetector(BaseDetector):
 
         confidence = 0.0
         reasons = []
-        tool_name = None
 
         if any(s in msg_lower for s in face_signals):
-            confidence = 0.90
-            reasons.append("face recognition keywords")
-            tool_name = 'recognize_face'
+            confidence = 0.92
+            reasons.append("face recognition keywords - capturing camera")
         elif any(s in msg_lower for s in place_signals):
-            confidence = 0.90
-            reasons.append("place recognition keywords")
-            tool_name = 'recognize_place'
+            confidence = 0.92
+            reasons.append("place recognition keywords - capturing camera")
 
         if confidence <= 0:
             return None
 
+        # Recognition requires a camera capture first; the vision model
+        # handles identification from the captured image.
         return ToolIntent(
-            tool_name=tool_name,
+            tool_name='capture_camera',
             confidence=confidence,
-            priority=ToolPriority.MEDIUM,
+            priority=ToolPriority.HIGH,
             reason=' | '.join(reasons),
             extracted_params={}
         )
+
+    def _detect_remember_person_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
+        """Detect intent to store/update person information in visual memory."""
+        # Person-related context — must be present for any match
+        has_person_context = any(w in msg_lower for w in [
+            'glasses', 'beard', 'mustache', 'hair', 'tall', 'short',
+            'wears', 'looks like', 'appearance', 'face',
+        ])
+        # Names being explicitly taught
+        has_name_teaching = any(s in msg_lower for s in [
+            'his name is', 'her name is', 'their name is',
+            "that's not", 'wrong person', 'wrong name',
+            "you're confusing", 'mixed up',
+        ])
+
+        if not has_person_context and not has_name_teaching:
+            return None
+
+        # Remember/correction signals (only evaluated when person context exists)
+        remember_signals = [
+            'remember that', 'remember this', 'i want you to remember',
+            "don't forget", 'keep in mind',
+        ]
+        correction_signals = [
+            "doesn't have", "doesn't wear", 'only has',
+            'has glasses', 'has a beard', 'has a mustache',
+            'not felix', 'not alex',
+        ]
+
+        has_remember = any(s in msg_lower for s in remember_signals)
+        has_correction = any(s in msg_lower for s in correction_signals)
+
+        if has_name_teaching:
+            return ToolIntent(
+                tool_name='remember_person',
+                confidence=0.95,
+                priority=ToolPriority.HIGH,
+                reason='person identity correction',
+                extracted_params={}
+            )
+        elif has_person_context and (has_remember or has_correction):
+            return ToolIntent(
+                tool_name='remember_person',
+                confidence=0.93,
+                priority=ToolPriority.HIGH,
+                reason='person memory update/correction',
+                extracted_params={}
+            )
+        return None
+
+    def _detect_recall_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
+        # Strong signals - clearly about visual recall
+        strong_recall_signals = [
+            'what did you see', 'what have you seen', 'what did you notice',
+            'who was here', 'who did you see',
+            'visual memory', 'remember seeing', 'earlier you saw',
+            'visual timeline', 'what have you observed',
+            'what were you looking at', 'last time you looked',
+            'do you remember seeing', 'what did you observe'
+        ]
+
+        # Weak signals - only valid with camera context
+        weak_recall_signals = [
+            'what changed', "what's changed", "what's different",
+            'what was happening', 'what happened today'
+        ]
+
+        if any(s in msg_lower for s in strong_recall_signals):
+            return ToolIntent(
+                tool_name='recall_visual_memory',
+                confidence=0.90,
+                priority=ToolPriority.HIGH,
+                reason='visual memory recall keywords',
+                extracted_params={}
+            )
+        elif any(s in msg_lower for s in weak_recall_signals):
+            # Only trigger if there's camera/vision history
+            if context.get('has_camera_in_history'):
+                return ToolIntent(
+                    tool_name='recall_visual_memory',
+                    confidence=0.75,
+                    priority=ToolPriority.HIGH,
+                    reason='weak recall signal + camera context',
+                    extracted_params={}
+                )
+        return None

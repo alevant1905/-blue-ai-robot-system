@@ -1,5 +1,0 @@
-{
-  "app_id": "3021614168030116",
-  "app_secret": "590ab05348955d0f4cfb1732c19e42fe",
-  "redirect_uri": "http://localhost:5000/facebook/callback"
-}

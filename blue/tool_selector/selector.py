@@ -51,7 +51,6 @@ class ImprovedToolSelector:
         # High-priority detectors
         self.registry.register('music', MusicDetector(), enabled=True)
         self.registry.register('gmail', GmailDetector(), enabled=True)
-        self.registry.register('automation', AutomationDetector(), enabled=True)
 
         # Medium-priority detectors
         self.registry.register('lights', LightsDetector(), enabled=True)
@@ -63,13 +62,16 @@ class ImprovedToolSelector:
 
         # Supporting detectors
         self.registry.register('web', WebDetector(), enabled=True)
-        self.registry.register('contacts', ContactsDetector(), enabled=True)
-        self.registry.register('habits', HabitsDetector(), enabled=True)
         self.registry.register('notes', NotesDetector(), enabled=True)
         self.registry.register('system', SystemDetector(), enabled=True)
         self.registry.register('utilities', UtilitiesDetector(), enabled=True)
-        self.registry.register('media_library', MediaLibraryDetector(), enabled=True)
-        self.registry.register('locations', LocationsDetector(), enabled=True)
+
+        # Disabled: these detectors return tool names with no handler implemented
+        # self.registry.register('automation', AutomationDetector(), enabled=True)
+        # self.registry.register('contacts', ContactsDetector(), enabled=True)
+        # self.registry.register('habits', HabitsDetector(), enabled=True)
+        # self.registry.register('media_library', MediaLibraryDetector(), enabled=True)
+        # self.registry.register('locations', LocationsDetector(), enabled=True)
 
     def select_tool(
         self,

@@ -112,6 +112,15 @@ except ImportError:
     PROACTIVE_ASSISTANCE_AVAILABLE = False
     print("[WARN] Proactive assistance not available")
 
+# Proactive heartbeat queue (reminders → next inbound response)
+try:
+    import blue_proactive
+    PROACTIVE_QUEUE_AVAILABLE = True
+    print("[OK] Proactive queue loaded - Blue can surface reminders on next turn")
+except ImportError as e:
+    PROACTIVE_QUEUE_AVAILABLE = False
+    print(f"[WARN] Proactive queue not available: {e}")
+
 # Academic Research Assistant (if available)
 try:
     from blue_academic_assistant import (
@@ -320,8 +329,10 @@ def detect_camera_capture_intent(message: str) -> bool:
         'what do you see',
         'what can you see',
         'what are you seeing',
+        'what you see',
         "what's in front of you",
         'what is in front of you',
+        'in front of you',
         'take a photo',
         'take a picture',
         'capture image',
@@ -336,7 +347,11 @@ def detect_camera_capture_intent(message: str) -> bool:
         'use the camera',
         'use your camera',
         'camera photo',
-        'camera picture'
+        'camera picture',
+        'see right now',
+        'looking at right now',
+        'do you see anything',
+        'can you see anything',
     ]
 
     # Check for any trigger phrases
@@ -742,7 +757,6 @@ def validate_response_quality(response: str, query: str) -> Dict[str, Any]:
         score -= 20
 
     # Check for repeated phrases (3+ words)
-    import re
     words = response.lower().split()
     phrases_seen = set()
     repeated_phrases = []
@@ -801,7 +815,6 @@ def check_response_against_history(response: str, conversation_messages: List[Di
     Check if a response is too similar to recent assistant messages.
     Returns dict with 'is_duplicate' (bool) and 'similarity_score' (float).
     """
-    import re
     from difflib import SequenceMatcher
 
     # Get last 5 assistant messages
@@ -815,12 +828,14 @@ def check_response_against_history(response: str, conversation_messages: List[Di
     if not recent_responses:
         return {'is_duplicate': False, 'similarity_score': 0.0, 'issues': []}
 
-    # Normalize response for comparison
+    # Normalize response for comparison — truncate to 300 chars to keep SequenceMatcher fast
+    _normalize_re = re.compile(r'[^\w\s]')
+    _whitespace_re = re.compile(r'\s+')
+
     def normalize(text):
-        # Remove punctuation, lowercase, collapse whitespace
-        text = re.sub(r'[^\w\s]', '', text.lower())
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+        text = _normalize_re.sub('', text.lower())
+        text = _whitespace_re.sub(' ', text)
+        return text.strip()[:300]
 
     normalized_response = normalize(response)
     max_similarity = 0.0
@@ -829,19 +844,19 @@ def check_response_against_history(response: str, conversation_messages: List[Di
     for prev_response in recent_responses:
         normalized_prev = normalize(prev_response)
 
-        # Calculate similarity using SequenceMatcher
-        similarity = SequenceMatcher(None, normalized_response, normalized_prev).ratio()
-        max_similarity = max(max_similarity, similarity)
-
-        # Check for exact phrase matches
+        # Check for exact phrase matches first (fast)
         if len(normalized_response) > 20 and normalized_response in normalized_prev:
             issues.append("Exact duplicate of previous response")
             return {'is_duplicate': True, 'similarity_score': 1.0, 'issues': issues}
 
+        # Calculate similarity using SequenceMatcher (on truncated text)
+        similarity = SequenceMatcher(None, normalized_response, normalized_prev).ratio()
+        max_similarity = max(max_similarity, similarity)
+
         if similarity > 0.85:
             issues.append(f"Very similar to recent response (similarity: {similarity:.2f})")
 
-    is_duplicate = max_similarity > 0.85  # More permissive - only flag near-exact duplicates
+    is_duplicate = max_similarity > 0.85
 
     return {
         'is_duplicate': is_duplicate,
@@ -890,8 +905,10 @@ def extract_action_from_query(query: str) -> Dict[str, Any]:
 # ================================================================================
 
 # --- Document storage configuration ---
-DOCUMENTS_FOLDER = os.environ.get("DOCUMENTS_DIR", os.path.join(os.getcwd(), "uploaded_documents"))
+DOCUMENTS_FOLDER = os.environ.get("DOCUMENTS_DIR", os.path.join(os.getcwd(), "documents"))
+CAMERA_FOLDER = os.environ.get("CAMERA_DIR", os.path.join(os.getcwd(), "camera_captures"))
 os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
+os.makedirs(CAMERA_FOLDER, exist_ok=True)
 
 # CONFIG (single source)
 # ================================================================================
@@ -903,8 +920,8 @@ BLUE_FACTS: Dict[str, str] = {}
 # Model/API (left as env-driven to match your runtime)
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "4096"))
 
-# Conversation context (resolved the previous inconsistencies; default 20)
-MAX_CONTEXT_MESSAGES = int(os.environ.get("MAX_CONTEXT_MESSAGES", "20"))
+# Conversation context (resolved the previous inconsistencies; default 40)
+MAX_CONTEXT_MESSAGES = int(os.environ.get("MAX_CONTEXT_MESSAGES", "40"))
 
 # Files
 UPLOAD_FOLDER = Path(os.environ.get("UPLOAD_FOLDER", "uploads"))
@@ -939,11 +956,22 @@ except ImportError as e:
     print("[WARN] Using legacy memory system")
 
 
+_facts_cache = {"data": None, "timestamp": 0}
+_FACTS_CACHE_TTL = 30  # seconds - facts don't change that often
+
 def load_blue_facts(db_path: str = BLUE_FACTS_DB) -> Dict[str, str]:
-    """Load facts using improved memory system if available."""
+    """Load facts using improved memory system if available. Cached for speed."""
+    import time as _time
+    now = _time.time()
+    if _facts_cache["data"] is not None and (now - _facts_cache["timestamp"]) < _FACTS_CACHE_TTL:
+        return _facts_cache["data"]
+
     if ENHANCED_MEMORY_AVAILABLE and memory_system:
-        return memory_system.load_facts()
-    
+        result = memory_system.load_facts()
+        _facts_cache["data"] = result
+        _facts_cache["timestamp"] = now
+        return result
+
     # Fallback to legacy system
     facts: Dict[str, str] = {}
     try:
@@ -964,7 +992,15 @@ def load_blue_facts(db_path: str = BLUE_FACTS_DB) -> Dict[str, str]:
             pass
     if facts:
         log.info(f"[MEM] loaded {len(facts)} core facts from {db_path}")
+    _facts_cache["data"] = facts
+    _facts_cache["timestamp"] = now
     return facts
+
+
+def invalidate_facts_cache():
+    """Call after saving new facts to refresh cache on next load."""
+    _facts_cache["data"] = None
+    _facts_cache["timestamp"] = 0
 
 def _facts_block() -> str:
     items: List[str] = []
@@ -996,6 +1032,7 @@ def save_blue_facts(facts: Dict[str, str], db_path: str = None) -> bool:
     """Save facts using improved memory system if available."""
     global BLUE_FACTS
     BLUE_FACTS.update(facts)
+    invalidate_facts_cache()
     
     if ENHANCED_MEMORY_AVAILABLE and memory_system:
         return memory_system.save_facts(facts)
@@ -1641,14 +1678,14 @@ AUTO_DOCSEARCH_MODE = "opt_in"
 @dataclass
 class Settings:
     LOG_LEVEL: str = "INFO"
-    MAX_ITERATIONS: int = 10
+    MAX_ITERATIONS: int = 3
     TOOL_TIMEOUT_SECS: float = 15.0
     TOOL_RETRIES: int = 2
     # Conversation trimming: retain only the most recent N messages (plus system) when
     # sending context to the language model. This helps prevent the model from
     # confusing long conversation history or previous tool responses with the
     # user’s current intent. A value of 0 disables trimming.
-    MAX_CONTEXT_MESSAGES: int = 20  # Increased to preserve .ocf memories
+    MAX_CONTEXT_MESSAGES: int = 40  # Increased to preserve .ocf memories and cross-session recall
     AUTO_DOCSEARCH_MODE: str = AUTO_DOCSEARCH_MODE if "AUTO_DOCSEARCH_MODE" in globals() else "opt_in"
 
 _settings = Settings()
@@ -1665,11 +1702,82 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
 DOCUMENT_INDEX_FILE = "document_index.json"
 
 # Hue Configuration
+HUE_CONFIG_PATH = "hue_config.json"
 HUE_CONFIG = {}
+
+
+def _hue_bridge_alive(ip: str, timeout: float = 2.0) -> bool:
+    """Quick health probe — does this IP look like a Hue bridge right now?"""
+    if not ip:
+        return False
+    try:
+        # /api/0/config is unauthenticated and returns bridge metadata.
+        # Try HTTPS first (newer bridges enforce TLS), fall back to HTTP.
+        for proto in ("https", "http"):
+            try:
+                r = requests.get(f"{proto}://{ip}/api/0/config", timeout=timeout, verify=False)
+                if r.status_code == 200 and "bridgeid" in r.text.lower():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _discover_hue_bridge() -> str | None:
+    """Ask Philips' cloud discovery service for the bridge's current LAN IP.
+
+    Returns the bridge IP if discovery succeeds, else None. Cheap and reliable
+    — the bridge phones home periodically so the cloud always knows where it is
+    on the LAN. Avoids needing mDNS or manual rediscovery when DHCP shuffles."""
+    try:
+        # Suppress only the InsecureRequestWarning from urllib3 (we use
+        # verify=False because Hue bridges use self-signed certs).
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+        r = requests.get("https://discovery.meethue.com/", timeout=5)
+        if r.status_code != 200:
+            return None
+        bridges = r.json()
+        if not bridges:
+            return None
+        return bridges[0].get("internalipaddress") or None
+    except Exception as e:
+        print(f"[WARN]  Hue discovery failed: {e}")
+        return None
+
+
+def _save_hue_config(config: dict) -> None:
+    """Write the updated config back to disk so we don't re-discover next start."""
+    try:
+        with open(HUE_CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"[WARN]  Could not persist hue_config.json: {e}")
+
+
 try:
-    with open("hue_config.json", "r") as f:
+    with open(HUE_CONFIG_PATH, "r") as f:
         HUE_CONFIG = json.load(f)
-    print(f"[OK] Hue config loaded: Bridge at {HUE_CONFIG.get('bridge_ip')}")
+    saved_ip = HUE_CONFIG.get("bridge_ip", "")
+    if saved_ip and _hue_bridge_alive(saved_ip):
+        print(f"[OK] Hue config loaded: Bridge at {saved_ip}")
+    else:
+        # Saved IP doesn't respond — DHCP probably gave the bridge a new lease.
+        # Try the cloud discovery service to find the bridge's current IP.
+        if saved_ip:
+            print(f"[WARN] Hue bridge at {saved_ip} not responding — running auto-discovery")
+        new_ip = _discover_hue_bridge()
+        if new_ip and _hue_bridge_alive(new_ip):
+            print(f"[OK] Hue bridge auto-discovered at {new_ip} (was {saved_ip or 'unset'})")
+            HUE_CONFIG["bridge_ip"] = new_ip
+            _save_hue_config(HUE_CONFIG)
+        else:
+            print(f"[WARN] Auto-discovery couldn't reach a bridge — Hue features disabled this session")
 except FileNotFoundError:
     print("[WARN]  No hue_config.json found. Run setup_hue.py first!")
 except Exception as e:
@@ -2672,6 +2780,77 @@ class VisionImageQueue:
 
 _vision_queue = VisionImageQueue()
 
+# Track image paths from the last vision injection so we can save the LLM's description
+_last_vision_image_paths = []
+
+
+def _save_visual_observation(description: str):
+    """Save the LLM's image description as a visual memory observation."""
+    global _last_vision_image_paths
+    if not _last_vision_image_paths or not description or not VISUAL_MEMORY_AVAILABLE:
+        _last_vision_image_paths = []
+        return
+
+    try:
+        vm = get_visual_memory()
+        image_path = _last_vision_image_paths[0]
+
+        # Compute image hash
+        import hashlib
+        img_hash = None
+        try:
+            h = hashlib.md5()
+            with open(image_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    h.update(chunk)
+            img_hash = h.hexdigest()
+        except Exception:
+            pass
+
+        # Extract known people mentioned in the description
+        known_people = vm.get_all_people()
+        desc_lower = description.lower()
+        people_present = [p['name'] for p in known_people if p['name'].lower() in desc_lower]
+
+        # Extract location from description
+        location = None
+        known_places = vm.get_all_places()
+        for place in known_places:
+            if place['name'].lower() in desc_lower:
+                location = place['name']
+                break
+        # Fallback location keywords
+        if not location:
+            loc_keywords = {'office': 'Office', 'kitchen': 'Kitchen', 'living room': 'Living Room',
+                           'studio': 'Studio', 'bedroom': 'Bedroom', 'bathroom': 'Bathroom'}
+            for kw, name in loc_keywords.items():
+                if kw in desc_lower:
+                    location = name
+                    break
+
+        # Truncate description if very long (keep first 1000 chars)
+        scene_desc = description[:1000] if len(description) > 1000 else description
+
+        vm.log_observation(
+            scene_description=scene_desc,
+            people_present=people_present if people_present else None,
+            location=location,
+            image_path=image_path,
+            image_hash=img_hash
+        )
+
+        # Update "last seen" for detected people
+        for name in people_present:
+            vm.update_seen('person', name)
+        if location:
+            vm.update_seen('place', location)
+
+        print(f"[VISUAL-MEMORY] Saved observation: {len(people_present)} people, location={location}")
+    except Exception as e:
+        print(f"[VISUAL-MEMORY] Error saving observation: {e}")
+    finally:
+        _last_vision_image_paths = []
+
 
 def start_music_visualizer(duration_seconds: int = 300, style: str = "party") -> str:
     """
@@ -2793,14 +2972,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_reminder",
-            "description": "Create a reminder for a user with natural language time parsing (e.g., 'tomorrow at 3pm', 'in 2 hours', 'next Monday')",
+            "description": "Create a reminder or scheduled event. Supports natural-language times ('tomorrow at 3pm', 'in 2 hours', 'next Monday'), events with a duration (pass 'end'), and weekly repeating events (pass recurrence='weekly').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_name": {"type": "string", "description": "Who the reminder is for (Alex, Stella, Emmy, Athena, or Vilda)"},
                     "title": {"type": "string", "description": "Short reminder title"},
-                    "when": {"type": "string", "description": "When to remind - supports natural language like 'tomorrow at 3pm', 'in 2 hours', 'next Monday at 9am', 'tonight'"},
-                    "description": {"type": "string", "description": "Optional detailed description"}
+                    "when": {"type": "string", "description": "Start time - natural language like 'tomorrow at 3pm', 'in 2 hours', 'next Monday at 9am', 'tonight'. For a weekly event use the weekday, e.g. 'wednesday at 4pm'."},
+                    "description": {"type": "string", "description": "Optional detailed description"},
+                    "end": {"type": "string", "description": "Optional end time for an event that spans a range, e.g. '7pm' or 'wednesday at 7pm'. Provide this whenever the user gives both a start and end time so schedule conflicts can be detected."},
+                    "recurrence": {"type": "string", "description": "Set to 'weekly' for an event that repeats every week (e.g. a class every Wednesday, a standing practice). Omit for a one-time reminder."}
                 },
                 "required": ["user_name", "title", "when"]
             }
@@ -2832,6 +3013,21 @@ TOOLS = [
                     "reminder_id": {"type": "integer", "description": "ID of the reminder to complete"}
                 },
                 "required": ["reminder_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_reminder",
+            "description": "Cancel an upcoming reminder. Pass reminder_id if known, otherwise pass title_query (a few words from the reminder title) and we'll find it. Use this when the user says 'cancel', 'scratch that', 'never mind the X reminder', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reminder_id": {"type": "integer", "description": "Optional ID — only if you know it from a prior get_upcoming_reminders call"},
+                    "title_query": {"type": "string", "description": "Words from the reminder title to search for, e.g. 'dentist' or 'call mom'"},
+                    "user_name": {"type": "string", "description": "Optional — restrict the search to one user (Alex, Stella, Emmy, Athena, Vilda)"}
+                }
             }
         }
     },
@@ -3442,6 +3638,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "recall_visual_memory",
+            "description": "Recall what you have seen before. Use when user asks about past visual experiences like 'what did you see earlier?', 'who was here before?', 'what's changed?', 'what happened today?'. Returns your visual memory timeline.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query to filter memories (e.g., 'kitchen', 'Emmy', 'morning')"
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "How many hours back to look (default: 24)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "remember_person",
             "description": "Learn and remember information about a person you see. Use this when the user tells you who someone is or provides information about a person. This helps you recognize them in the future.",
             "parameters": {
@@ -3631,13 +3848,21 @@ if not ENHANCED_TOOLS_AVAILABLE:
 # ===== DOCUMENT MANAGEMENT FUNCTIONS =====
 
 def load_document_index() -> Dict:
-    """Load the document index from disk."""
+    """Load the document index from disk. Repairs corrupt files in place."""
     if os.path.exists(DOCUMENT_INDEX_FILE):
         try:
             with open(DOCUMENT_INDEX_FILE, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get('documents'), list):
+                return data
+            print(f"[INDEX] {DOCUMENT_INDEX_FILE} has unexpected shape; resetting.")
+        except Exception as e:
+            print(f"[INDEX] {DOCUMENT_INDEX_FILE} is corrupt ({e}); resetting to empty.")
+        try:
+            with open(DOCUMENT_INDEX_FILE, 'w') as f:
+                json.dump({"documents": []}, f, indent=2)
+        except Exception as e:
+            print(f"[INDEX] could not rewrite {DOCUMENT_INDEX_FILE}: {e}")
     return {"documents": []}
 
 
@@ -3699,6 +3924,331 @@ def get_file_hash(filepath):
     return hash_md5.hexdigest()
 
 
+def _is_camera_capture_filename(filename: str) -> bool:
+    """Camera frames use a fixed prefix; treat them as transient."""
+    return filename.startswith('camera_') or filename.startswith('camera_NEW_')
+
+
+def cleanup_document_index() -> dict:
+    """Remove stale and noisy entries from the document index.
+
+    Drops:
+      - entries flagged camera_capture (or whose filename matches the
+        camera_*/camera_NEW_* prefix); these should never have been indexed
+        as documents
+      - entries whose file no longer exists on disk
+      - duplicate entries that share an MD5 hash (keeps the first occurrence)
+
+    Returns a small report dict for logging.
+    """
+    index = load_document_index()
+    documents = index.get('documents', [])
+    seen_hashes = set()
+    kept, dropped_missing, dropped_camera, dropped_dup = [], 0, 0, 0
+
+    for doc in documents:
+        filename = doc.get('filename', '')
+        filepath = doc.get('filepath', '')
+        file_hash = doc.get('hash')
+
+        if doc.get('camera_capture') or _is_camera_capture_filename(filename):
+            dropped_camera += 1
+            continue
+        if filepath and not os.path.exists(filepath):
+            dropped_missing += 1
+            continue
+        if file_hash and file_hash in seen_hashes:
+            dropped_dup += 1
+            continue
+        if file_hash:
+            seen_hashes.add(file_hash)
+        kept.append(doc)
+
+    if dropped_missing or dropped_camera or dropped_dup:
+        index['documents'] = kept
+        save_document_index(index)
+
+    return {
+        'kept': len(kept),
+        'dropped_missing': dropped_missing,
+        'dropped_camera': dropped_camera,
+        'dropped_duplicate': dropped_dup,
+    }
+
+
+def rescan_documents_folder() -> dict:
+    """Add files present in DOCUMENTS_FOLDER but missing from the index.
+
+    Useful after a manual file drop or when the index has been wiped. Skips
+    camera-capture files and unsupported extensions. Files added here are
+    also pushed into the ChromaDB index when available.
+    """
+    import datetime as _dt
+
+    index = load_document_index()
+    documents = index.get('documents', [])
+    indexed_paths = {os.path.normcase(os.path.abspath(d.get('filepath', ''))) for d in documents}
+    indexed_hashes = {d.get('hash') for d in documents if d.get('hash')}
+
+    added = 0
+    skipped = 0
+    if not os.path.isdir(DOCUMENTS_FOLDER):
+        return {'added': 0, 'skipped': 0}
+
+    for entry in os.listdir(DOCUMENTS_FOLDER):
+        full = os.path.join(DOCUMENTS_FOLDER, entry)
+        if not os.path.isfile(full):
+            continue
+        if _is_camera_capture_filename(entry):
+            continue
+        if not allowed_file(entry):
+            skipped += 1
+            continue
+        if os.path.normcase(os.path.abspath(full)) in indexed_paths:
+            continue
+
+        try:
+            file_hash = get_file_hash(full)
+        except Exception:
+            skipped += 1
+            continue
+        if file_hash in indexed_hashes:
+            continue
+
+        size_mb = os.path.getsize(full) / (1024 * 1024)
+        print(f"   [INDEX] extracting text: {entry} ({size_mb:.1f} MB)", flush=True)
+        text_content = extract_text_from_file(full)
+        text_preview = text_content[:500] if not text_content.startswith('Error') else ''
+
+        # Best-effort push into ChromaDB so the new file is searchable.
+        try:
+            print(f"   [INDEX] embedding into ChromaDB: {entry}", flush=True)
+            from blue.tools.rag import index_document as _idx
+            _idx(full, entry, doc_id=file_hash, text=text_content)
+            print(f"   [INDEX] done: {entry}", flush=True)
+        except Exception as e:
+            print(f"   [INDEX] ChromaDB push failed for {entry}: {e}", flush=True)
+
+        documents.append({
+            'filename': entry,
+            'filepath': str(full),
+            'size': os.path.getsize(full),
+            'hash': file_hash,
+            'uploaded_at': _dt.datetime.fromtimestamp(os.path.getmtime(full)).strftime('%Y-%m-%d %H:%M'),
+            'text_preview': text_preview,
+            'indexed_in_rag': True,
+        })
+        indexed_hashes.add(file_hash)
+        added += 1
+
+    if added:
+        index['documents'] = documents
+        save_document_index(index)
+
+    return {'added': added, 'skipped': skipped}
+
+
+def register_uploaded_file(filepath: str, filename: str) -> dict:
+    """Common post-save bookkeeping for any upload endpoint.
+
+    - Hash-dedups against the existing index (deletes the new copy if a
+      duplicate is found and returns the existing filename).
+    - Extracts a text preview.
+    - Pushes the document into ChromaDB if available.
+    - Appends to document_index.json.
+    """
+    import datetime as _dt
+
+    file_hash = get_file_hash(filepath)
+    index = load_document_index()
+
+    for existing in index.get('documents', []):
+        if existing.get('hash') == file_hash:
+            try:
+                if os.path.abspath(existing.get('filepath', '')) != os.path.abspath(filepath):
+                    os.remove(filepath)
+            except OSError:
+                pass
+            return {
+                'filename': existing.get('filename'),
+                'duplicate': True,
+                'existing_filename': existing.get('filename'),
+            }
+
+    text_content = extract_text_from_file(filepath)
+    text_preview = text_content[:500] if not text_content.startswith('Error') else ''
+
+    indexed_in_rag = False
+    try:
+        from blue.tools.rag import index_document as _idx
+        result = _idx(filepath, filename, doc_id=file_hash)
+        indexed_in_rag = bool(result.get('success'))
+    except Exception:
+        pass
+
+    index.setdefault('documents', []).append({
+        'filename': filename,
+        'filepath': str(filepath),
+        'size': os.path.getsize(filepath),
+        'hash': file_hash,
+        'uploaded_at': _dt.datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'text_preview': text_preview,
+        'indexed_in_rag': indexed_in_rag,
+    })
+    save_document_index(index)
+    return {'filename': filename, 'duplicate': False, 'indexed_in_rag': indexed_in_rag}
+
+
+def remove_document_from_index(filepath: str) -> bool:
+    """Remove a deleted/moved file from the document index AND ChromaDB."""
+    try:
+        abs_path = os.path.abspath(filepath)
+    except Exception:
+        return False
+
+    index = load_document_index()
+    docs = index.get('documents', [])
+    keep, removed_hashes, removed_names = [], [], []
+    for d in docs:
+        try:
+            if os.path.abspath(d.get('filepath', '')) == abs_path:
+                if d.get('hash'):
+                    removed_hashes.append(d['hash'])
+                if d.get('filename'):
+                    removed_names.append(d['filename'])
+                continue
+        except Exception:
+            pass
+        keep.append(d)
+
+    if not removed_hashes and not removed_names:
+        return False
+
+    index['documents'] = keep
+    save_document_index(index)
+
+    # Remove the corresponding chunks from ChromaDB.
+    try:
+        from blue.tools.rag import remove_document
+        for h in removed_hashes:
+            remove_document(h)
+    except Exception:
+        pass
+
+    print(f"[WATCHER] Removed from index: {', '.join(removed_names)}")
+    return True
+
+
+# ---- Filesystem watcher for auto-indexing the documents folder ----
+_DOCUMENT_WATCHER = None
+
+
+def start_document_watcher():
+    """Watch DOCUMENTS_FOLDER and auto-index files as they appear.
+
+    Uses the `watchdog` library if available. Each create/move event triggers
+    a debounced indexer (sleeps briefly so the OS finishes writing the file
+    before we hash and chunk it). Deletes are reflected immediately by
+    removing the entry from document_index.json and ChromaDB.
+
+    Gracefully no-ops if watchdog isn't installed; the startup rescan is
+    still a fallback for users without it.
+    """
+    global _DOCUMENT_WATCHER
+    if _DOCUMENT_WATCHER is not None:
+        return _DOCUMENT_WATCHER
+
+    try:
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+    except ImportError:
+        print("[WATCHER] watchdog not installed — auto-indexing disabled.")
+        print("[WATCHER]   Install with: pip install watchdog")
+        return None
+
+    import threading
+    import time
+
+    def _index_after_settle(filepath: str, debounce_secs: float = 1.5):
+        # Wait for the file to be fully written (Windows file locks can hold
+        # past the on_created event by hundreds of ms).
+        time.sleep(debounce_secs)
+        try:
+            if not os.path.isfile(filepath):
+                return
+            filename = os.path.basename(filepath)
+            if _is_camera_capture_filename(filename):
+                return
+            if not allowed_file(filename):
+                return
+            # Wait until the file size stops changing (rough copy-completion
+            # check). Up to a few seconds for large PDFs.
+            last_size = -1
+            for _ in range(10):
+                try:
+                    cur = os.path.getsize(filepath)
+                except OSError:
+                    return
+                if cur == last_size and cur > 0:
+                    break
+                last_size = cur
+                time.sleep(0.4)
+            result = register_uploaded_file(filepath, filename)
+            if result.get('duplicate'):
+                print(f"[WATCHER] {filename}: duplicate, skipped")
+            else:
+                rag_marker = " (ChromaDB indexed)" if result.get('indexed_in_rag') else ""
+                print(f"[WATCHER] Auto-indexed: {filename}{rag_marker}")
+        except Exception as e:
+            print(f"[WATCHER] Error auto-indexing {filepath}: {e}")
+
+    class _DocChangeHandler(FileSystemEventHandler):
+        def on_created(self, event):
+            if event.is_directory:
+                return
+            threading.Thread(
+                target=_index_after_settle,
+                args=(event.src_path,),
+                daemon=True,
+            ).start()
+
+        def on_moved(self, event):
+            if event.is_directory:
+                return
+            # The destination is the new file location.
+            threading.Thread(
+                target=_index_after_settle,
+                args=(event.dest_path,),
+                daemon=True,
+            ).start()
+            # Also update the index for the old path if it was tracked.
+            try:
+                remove_document_from_index(event.src_path)
+            except Exception:
+                pass
+
+        def on_deleted(self, event):
+            if event.is_directory:
+                return
+            try:
+                remove_document_from_index(event.src_path)
+            except Exception:
+                pass
+
+    try:
+        os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
+        observer = Observer()
+        observer.schedule(_DocChangeHandler(), DOCUMENTS_FOLDER, recursive=False)
+        observer.daemon = True
+        observer.start()
+        _DOCUMENT_WATCHER = observer
+        print(f"[WATCHER] Watching {DOCUMENTS_FOLDER} — drop files there to auto-index")
+        return observer
+    except Exception as e:
+        print(f"[WATCHER] Failed to start: {e}")
+        return None
+
+
 def encode_image_to_base64(filepath: str) -> Optional[Dict[str, Any]]:
     """Encode an image file to base64 for vision model viewing.
 
@@ -3745,37 +4295,98 @@ def encode_image_to_base64(filepath: str) -> Optional[Dict[str, Any]]:
 
 def extract_text_from_file(filepath: str) -> str:
     """Extract text from various file types. For images, returns metadata since vision model will view them directly."""
-    ext = filepath.rsplit('.', 1)[1].lower()
+    ext = filepath.rsplit('.', 1)[1].lower() if '.' in filepath else ''
 
-    if ext == 'txt' or ext == 'md':
+    if ext in ('txt', 'md'):
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
 
     elif ext == 'pdf':
+        # Prefer pypdf (the maintained successor); fall back to PyPDF2.
         try:
-            import PyPDF2
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
             text = []
             with open(filepath, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                for page in pdf_reader.pages:
-                    text.append(page.extract_text())
+                for page in PdfReader(f).pages:
+                    text.append(page.extract_text() or '')
             return '\n'.join(text)
         except ImportError:
-            return "Error: PyPDF2 not installed. Install with: pip install PyPDF2"
+            return "Error: pypdf not installed. Install with: pip install pypdf"
         except Exception as e:
             return f"Error extracting PDF: {str(e)}"
 
-    elif ext in ['doc', 'docx']:
+    elif ext in ('doc', 'docx'):
         try:
             import docx
             doc = docx.Document(filepath)
-            return '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+            return '\n'.join(paragraph.text for paragraph in doc.paragraphs)
         except ImportError:
             return "Error: python-docx not installed. Install with: pip install python-docx"
         except Exception as e:
             return f"Error extracting Word doc: {str(e)}"
 
-    elif ext in ['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp']:
+    elif ext in ('csv', 'tsv'):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+
+    elif ext in ('json', 'xml', 'html', 'htm'):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            raw = f.read()
+        if ext in ('html', 'htm'):
+            try:
+                from bs4 import BeautifulSoup
+                return BeautifulSoup(raw, 'html.parser').get_text(separator='\n')
+            except ImportError:
+                return raw
+        return raw
+
+    elif ext == 'rtf':
+        try:
+            from striprtf.striprtf import rtf_to_text
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                return rtf_to_text(f.read())
+        except ImportError:
+            import re
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                raw = f.read()
+            return re.sub(r'\\[a-z]+\d* ?|[{}]', '', raw)
+
+    elif ext == 'xlsx':
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            lines = []
+            for ws in wb.worksheets:
+                lines.append(f"# Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True):
+                    cells = ['' if v is None else str(v) for v in row]
+                    if any(cells):
+                        lines.append('\t'.join(cells))
+            return '\n'.join(lines)
+        except ImportError:
+            return "Error: openpyxl not installed. Install with: pip install openpyxl"
+        except Exception as e:
+            return f"Error extracting xlsx: {str(e)}"
+
+    elif ext == 'pptx':
+        try:
+            from pptx import Presentation
+            lines = []
+            for i, slide in enumerate(Presentation(filepath).slides, 1):
+                lines.append(f"# Slide {i}")
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text') and shape.text:
+                        lines.append(shape.text)
+            return '\n'.join(lines)
+        except ImportError:
+            return "Error: python-pptx not installed. Install with: pip install python-pptx"
+        except Exception as e:
+            return f"Error extracting pptx: {str(e)}"
+
+    elif ext in ('png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp'):
         # Image file - store metadata for vision model to view directly
         try:
             from PIL import Image
@@ -3794,143 +4405,207 @@ def extract_text_from_file(filepath: str) -> str:
         except Exception as e:
             return f"[IMAGE FILE] {os.path.basename(filepath)} - Error reading: {str(e)}"
 
-    return "Unsupported file type"
+    return f"Unsupported file type: .{ext}"
 
 
 def add_document_to_rag(filepath: str, filename: str) -> bool:
-    """Add a document to LM Studio's RAG system."""
+    """Index a document into the local ChromaDB store used by search_documents_rag.
+
+    Previously this POSTed to a non-existent LM Studio /v1/rag endpoint and
+    succeeded only by virtue of falling through. We now go straight to the
+    real local ChromaDB indexer (blue.tools.rag.index_document) which chunks
+    and embeds the file for semantic search.
+    """
     try:
-        # Extract text from the file
+        from blue.tools.rag import index_document
+    except ImportError:
+        # ChromaDB not installed — extraction still ran, fine to index later.
         text_content = extract_text_from_file(filepath)
-
         if text_content.startswith("Error"):
-            print(f"   [ERROR] {text_content}")
+            print(f"   [WARN] {text_content}")
             return False
-
-        # Send to LM Studio RAG endpoint
-        payload = {
-            "file_path": str(filepath),
-            "content": text_content,
-            "metadata": {
-                "filename": filename,
-                "source": "blue_middleware"
-            }
-        }
-
-        response = requests.post(
-            f"{LM_STUDIO_RAG_URL}/documents",
-            json=payload,
-            timeout=30
-        )
-
-        if response.status_code in [200, 201]:
-            print(f"   [OK] Document indexed in RAG system")
-            return True
-        else:
-            print(f"   [WARN]  RAG indexing returned: {response.status_code}")
-            # Still return True to allow local indexing
-            return True
-
-    except requests.exceptions.RequestException as e:
-        print(f"   [WARN]  RAG system not available: {e}")
-        # Continue anyway - we'll store locally
         return True
+
+    try:
+        result = index_document(filepath, filename)
+        if result.get("success"):
+            print(f"   [OK] Indexed in ChromaDB: {result.get('chunks_indexed')} chunks")
+            return True
+        print(f"   [WARN] ChromaDB indexing failed: {result.get('error')}")
+        return False
     except Exception as e:
-        print(f"   [ERROR] Error adding to RAG: {e}")
+        print(f"   [ERROR] Error indexing document: {e}")
         return False
 
 
+def _is_full_document_request(query: str) -> bool:
+    """Check if the query is asking for a full document rather than a specific search."""
+    query_lower = query.lower()
+    # User is asking to read/see/look at a specific document, not searching for a topic
+    full_doc_signals = [
+        'whole', 'entire', 'full', 'complete', 'all of', 'read the',
+        'tell me the story', 'read it', 'tell the story',
+        'what is', 'what does', 'what it is', 'take a look', 'fresh look',
+        'look at', 'summarize', 'summary', 'overview', 'about this document',
+        'about that document', 'tell me about', 'describe',
+    ]
+    if any(phrase in query_lower for phrase in full_doc_signals):
+        return True
+    # If the query IS a filename (or very close to one), they want the full doc
+    if '.' in query and any(query_lower.endswith(ext) for ext in ['.pdf', '.txt', '.md', '.docx', '.doc']):
+        return True
+    return False
+
+
+def _is_expertise_query(query: str) -> bool:
+    """True for queries that ask Blue to draw on his corpus expertise.
+
+    Triggers multi-chunk retrieval (top-8 across multiple documents, up
+    to 3 per doc) instead of the default top-3 deduped-by-document mode.
+    Aimed at: 'what does the literature say about X', 'summarise the
+    research on Y', 'according to my notes / papers / docs ...' style
+    questions where richer cross-document coverage matters more than
+    surgical precision.
+    """
+    q = query.lower()
+    expertise_phrases = (
+        # explicit corpus-of-knowledge framings
+        "the literature", "research on", "research about", "papers on",
+        "papers about", "according to my", "according to the", "based on my",
+        "based on the", "my notes on", "my notes about", "my docs", "the docs",
+        "in my documents", "from my documents", "from the documents",
+        "the documents say", "what do my documents", "what does my research",
+        # synthesis-style framings
+        "what do we know about", "what do you know about", "everything you know about",
+        "everything about", "summarise everything", "summarize everything",
+        "what's known about", "whats known about",
+        "across my", "across all", "compare what",
+        # discipline / field hints — these almost always want corpus coverage
+        " literature ", " corpus ", "the field of",
+    )
+    return any(p in f" {q} " for p in expertise_phrases)
+
+
 def search_documents_rag(query: str, max_results: int = 3) -> str:
-    """Search documents using LM Studio's RAG system."""
+    """Search documents using local ChromaDB RAG first, then keyword fallback."""
     print(f"   [FIND] Searching documents for: '{query}'")
-    print(f"   [NET] RAG endpoint: {LM_STUDIO_RAG_URL}/search")
 
+    is_expertise = _is_expertise_query(query)
+
+    # Expertise queries (e.g. "what does the literature say…") want
+    # multi-chunk RAG, NOT a full-document dump. Check expertise *before*
+    # the full-doc heuristic, since the latter trips on generic phrases
+    # like "what does" / "tell me about" that legitimately appear in
+    # corpus-style questions.
+    if not is_expertise and _is_full_document_request(query):
+        print(f"   [FULL-DOC] Full document request detected, using local search for full text")
+        return search_documents_local(query, max_results)
+
+    # --- 1. Try local ChromaDB RAG first ---
     try:
-        # Try to use LM Studio's RAG search
-        payload = {
-            "query": query,
-            "max_results": max_results
-        }
-
-        print(f"   [OUT] Sending request to RAG...")
-        response = requests.post(
-            f"{LM_STUDIO_RAG_URL}/search",
-            json=payload,
-            timeout=10
+        from blue.tools.rag import (
+            search as rag_search,
+            search_expertise as rag_search_expertise,
+            get_stats,
         )
+        stats = get_stats()
+        if stats.get('available') and stats.get('total_chunks', 0) > 0:
+            if is_expertise:
+                # Pull up to 8 chunks across multiple documents, max 3 per doc
+                # — deeper coverage so Blue can synthesize across his corpus.
+                results = rag_search_expertise(query, max_chunks=8, max_per_doc=3)
+                print(f"   [EXPERTISE] Multi-chunk mode: {len(results)} chunk(s)")
+            else:
+                results = rag_search(query, max_results)
+            if results:
+                # In normal (non-expertise) mode, if all results come from one
+                # document, fall through to local search for full text.
+                unique_files = set(r['filename'] for r in results)
+                if not is_expertise and len(unique_files) == 1:
+                    print(f"   [SINGLE-DOC] All {len(results)} chunk(s) from same file, fetching full text")
+                    return search_documents_local(query, max_results)
 
-        print(f"   [IN] RAG response status: {response.status_code}")
-
-        if response.status_code == 200:
-            try:
-                results = response.json()
-                print(f"   [DATA] RAG response type: {type(results)}")
-                print(f"   [DATA] RAG response preview: {str(results)[:200]}")
-
-                # Handle different possible response structures
-                # Case 1: Response is a dict with 'results' key
-                if isinstance(results, dict):
-                    if 'results' in results:
-                        results = results['results']
-                    elif 'data' in results:
-                        results = results['data']
-                    elif 'documents' in results:
-                        results = results['documents']
-
-                # Case 2: Response is already a list
-                if isinstance(results, list) and len(results) > 0:
-                    print(f"   [DATA] RAG returned {len(results)} result(s)")
-                    formatted_results = []
-
-                    for i, result in enumerate(results[:max_results], 1):
-                        # Handle different result structures
-                        if isinstance(result, dict):
-                            filename = result.get('metadata', {}).get('filename', 'Unknown')
-                            if not filename or filename == 'Unknown':
-                                filename = result.get('filename', result.get('source', 'Unknown'))
-
-                            content = result.get('content', result.get('text', result.get('body', '')))
-                            score = result.get('score', result.get('relevance', result.get('similarity', 0)))
-
-                            # Safely truncate content
-                            if content:
-                                content_preview = str(content)[:500] if len(str(content)) > 500 else str(content)
-                            else:
-                                content_preview = "No content available"
-
-                            formatted_results.append(
-                                f"[{i}] From: {filename} (relevance: {score:.2f})\n{content_preview}"
-                            )
-                        elif isinstance(result, str):
-                            # Result is just a string
-                            formatted_results.append(f"[{i}] {result[:500]}")
-                        else:
-                            formatted_results.append(f"[{i}] {str(result)[:500]}")
-
-                    if formatted_results:
-                        print(f"   [OK] Formatted {len(formatted_results)} document results")
-                        return "Here's what I found in your documents:\n\n" + "\n\n".join(formatted_results)
-
-                # No valid results found
-                print(f"   [WARN]  No valid results from RAG, trying local search...")
-                return search_documents_local(query, max_results)
-
-            except (ValueError, KeyError, TypeError) as e:
-                print(f"   [WARN]  Error parsing RAG response: {e}")
-                print(f"   [ITER] Falling back to local search...")
-                return search_documents_local(query, max_results)
-        else:
-            print(f"   [WARN]  RAG returned non-200 status, trying local search...")
-            return search_documents_local(query, max_results)
-
-    except requests.exceptions.RequestException as e:
-        print(f"   [WARN]  RAG connection error: {e}")
-        print(f"   [ITER] Falling back to local search...")
-        return search_documents_local(query, max_results)
+                formatted = []
+                for i, r in enumerate(results, 1):
+                    score_pct = f"{r['score']:.0%}"
+                    chunk_idx = r.get('chunk_index')
+                    total_chunks = r.get('total_chunks')
+                    if chunk_idx is not None and total_chunks:
+                        loc = f" chunk {int(chunk_idx) + 1}/{total_chunks}"
+                    else:
+                        loc = ""
+                    content_preview = r['content'][:800]
+                    # Citation tag the model can copy inline. Putting the
+                    # filename in [brackets] near the start makes it easy
+                    # for the model to weave into prose.
+                    formatted.append(
+                        f"[{i}] [{r['filename']}]{loc} (relevance: {score_pct})\n"
+                        f"{content_preview}"
+                    )
+                header = (
+                    "Here are the most relevant passages from your corpus. "
+                    "Cite sources inline when you quote, like [filename.pdf]:"
+                    if is_expertise else
+                    "Here's what I found in your documents:"
+                )
+                print(f"   [OK] ChromaDB RAG returned {len(results)} result(s)")
+                return f"{header}\n\n" + "\n\n".join(formatted)
+            else:
+                print(f"   [WARN] ChromaDB returned no results, trying next...")
+    except ImportError:
+        print("   [WARN] ChromaDB not available, trying keyword search...")
     except Exception as e:
-        print(f"   [ERROR] Unexpected error: {e}")
-        print(f"   [ITER] Falling back to local search...")
-        return search_documents_local(query, max_results)
+        print(f"   [WARN] ChromaDB error: {e}")
+
+    # --- 2. Fall back to local keyword search ---
+    # The previous middle tier hit LM_STUDIO_RAG_URL/search, which no LM
+    # Studio build actually exposes — every call timed out for 10 seconds
+    # and fell through to keyword search anyway. Going straight to the
+    # keyword path skips that wait without losing any working behavior.
+    print(f"   [ITER] Falling back to local keyword search...")
+    return search_documents_local(query, max_results)
+
+
+def _search_documents_guarded(query: str, max_results: int = 3,
+                              timeout: float = 15.0) -> str:
+    """Run the RAG document search with a hard timeout.
+
+    ChromaDB can stall indefinitely — a corrupt HNSW index or lock
+    contention has no internal timeout — and with a single-threaded server
+    that one stalled call freezes Blue completely and even blocks Ctrl+C.
+    This runs the search on a worker thread; if it overruns, we abandon it
+    and fall back to the index-only keyword search (which never touches
+    ChromaDB), so a document query can never hang the assistant."""
+    box: Dict[str, object] = {}
+
+    def _run():
+        try:
+            box["result"] = search_documents_rag(query, max_results)
+        except Exception as e:  # noqa: BLE001 — surface as fallback, never crash
+            box["error"] = e
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        log.error(
+            f"[DOCS] document search exceeded {timeout:.0f}s (ChromaDB stalled) "
+            f"— falling back to index-only search. The RAG index likely needs a rebuild."
+        )
+        try:
+            return search_documents_local(query, max_results)
+        except Exception as e:
+            log.error(f"[DOCS] index-only fallback also failed: {e}")
+            return ("I can see your document library, but searching it is taking "
+                    "too long right now — the search index may need a rebuild.")
+    if "error" in box:
+        log.error(f"[DOCS] document search errored: {box['error']}")
+        try:
+            return search_documents_local(query, max_results)
+        except Exception:
+            return "I had trouble searching your documents just now."
+    return str(box.get("result", ""))
 
 
 def search_documents_local(query: str, max_results: int = 3) -> str:
@@ -3964,8 +4639,10 @@ def search_documents_local(query: str, max_results: int = 3) -> str:
     if is_list_query or generic_queries or ("all" in query_lower and ("document" in query_lower or "summarize" in query_lower or "image" in query_lower)):
         print(f"   [LIST] Query asks for document list/count, listing them...")
 
-        # Filter out camera images from document listings (they're temporary)
-        real_documents = [doc for doc in documents if not doc['filename'].startswith('camera_')]
+        # Filter out camera images from document listings
+        real_documents = [doc for doc in documents
+                          if doc.get('doc_type') != 'camera'
+                          and not doc['filename'].startswith('camera_')]
 
         doc_list = []
         for i, doc in enumerate(real_documents[:10], 1):
@@ -4264,10 +4941,10 @@ def capture_camera_image() -> str:
 
         # Generate UNIQUE filename with timestamp
         filename = f"camera_NEW_{timestamp}.jpg"
-        filepath = os.path.join(DOCUMENTS_FOLDER, filename)
+        filepath = os.path.join(CAMERA_FOLDER, filename)
 
         # Save with HIGH quality
-        os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
+        os.makedirs(CAMERA_FOLDER, exist_ok=True)
         success = cv2.imwrite(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
         if not success:
@@ -4286,24 +4963,9 @@ def capture_camera_image() -> str:
         # Get image dimensions
         height, width = frame.shape[:2]
 
-        # Add to document index
-        index = load_document_index()
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        index['documents'].append({
-            'filename': filename,
-            'filepath': str(filepath),
-            'size': file_size,
-            'hash': file_hash,
-            'uploaded_at': current_time,
-            'text_preview': f"[🎥 LIVE CAMERA - {width}x{height} - Captured at {datetime.datetime.now().strftime('%I:%M:%S %p')}]",
-            'indexed_in_rag': False,
-            'camera_capture': True,
-            'capture_timestamp': timestamp,
-            'is_current_view': True
-        })
-        save_document_index(index)
-
-        print(f"   [INDEX] Added NEW camera capture to document index")
+        # Camera frames live in CAMERA_FOLDER and are short-lived: each new
+        # capture replaces the vision queue. Keeping them out of the document
+        # index prevents them from drowning real uploads in search results.
 
         # CRITICAL: Clear queue and add ONLY this new image
         _vision_queue.clear()
@@ -4357,8 +5019,8 @@ def create_document_file(filename: str, content: str, file_type: str = "txt") ->
             if ext != file_type:
                 filename = f"{filename.rsplit('.', 1)[0]}.{file_type}"
 
-        # Create full path
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        # Create full path (documents go in DOCUMENTS_FOLDER)
+        filepath = os.path.join(DOCUMENTS_FOLDER, filename)
 
         # Check if file already exists
         if os.path.exists(filepath):
@@ -4367,7 +5029,7 @@ def create_document_file(filename: str, content: str, file_type: str = "txt") ->
             name_part = filename.rsplit('.', 1)[0]
             ext_part = filename.rsplit('.', 1)[1]
             filename = f"{name_part}_{timestamp}.{ext_part}"
-            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            filepath = os.path.join(DOCUMENTS_FOLDER, filename)
 
         # Write content to file
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -4392,11 +5054,22 @@ def create_document_file(filename: str, content: str, file_type: str = "txt") ->
             'hash': file_hash,
             'uploaded_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
             'text_preview': content[:500] if len(content) > 500 else content,
-            'indexed_in_rag': False,  # Created files are not automatically indexed in RAG
+            'indexed_in_rag': False,
             'created_by_blue': True  # Mark as created by Blue
         })
 
         save_document_index(index)
+
+        # Index in local ChromaDB RAG
+        try:
+            from blue.tools.rag import index_document as rag_index
+            rag_result = rag_index(filepath, filename, doc_id=file_hash)
+            if rag_result.get('success'):
+                index['documents'][-1]['indexed_in_rag'] = True
+                save_document_index(index)
+                print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks")
+        except Exception as e:
+            print(f"   [WARN] RAG indexing skipped: {e}")
 
         print(f"   [INDEX] Added to document index")
 
@@ -4650,6 +5323,19 @@ def execute_web_search(query: str) -> str:
 
     q = query.strip()
 
+    # Cap absurdly long queries — LLMs sometimes dump every keyword they know
+    MAX_QUERY_LEN = 120
+    if len(q) > MAX_QUERY_LEN:
+        # Keep only the first few meaningful words
+        words = q.split()
+        truncated = []
+        for w in words:
+            truncated.append(w)
+            if len(' '.join(truncated)) >= MAX_QUERY_LEN:
+                break
+        q = ' '.join(truncated)
+        print(f"   [SEARCH] Truncated long query to {len(q)} chars")
+
     with _SEARCH_LOCK:
         cached = _get_cached(q)
         if cached is not None:
@@ -4684,7 +5370,8 @@ def execute_web_search(query: str) -> str:
                     })
         if not results:
             used_provider = None
-    except Exception:
+    except Exception as e:
+        print(f"   [WARN] ddgs search failed: {e.__class__.__name__}: {e}")
         used_provider = None
 
     # Fallback HTML endpoint (no JS)
@@ -4819,7 +5506,7 @@ def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15,
         raise ValueError("url must be a string")
     u = url.strip()
     if not u.startswith(("http://","https://")):
-        raise ValueError("Only http/https URLs are allowed")
+        u = "https://" + u
     parts = _urlparse3.urlsplit(u)
     if not parts.netloc:
         raise ValueError("URL must be absolute")
@@ -5418,7 +6105,7 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
         global _vision_queue
         query = tool_args.get("query", "")
         max_results = tool_args.get("max_results", 3)
-        result = search_documents_rag(query, max_results)
+        result = _search_documents_guarded(query, max_results)
         print(f"   [OK] Document search completed")
 
         # Check if result contains images (special JSON format)
@@ -5465,6 +6152,59 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
         result = capture_camera_image()
         print(f"   [OK] Camera capture completed")
         return result
+
+    elif tool_name == "recall_visual_memory":
+        if not VISUAL_MEMORY_AVAILABLE:
+            return json.dumps({"error": "Visual memory not available"})
+        try:
+            vm = get_visual_memory()
+            query = tool_args.get("query")
+            hours = tool_args.get("hours", 24)
+
+            if query:
+                observations = vm.search_observations(query, limit=10)
+                search_type = f"search for '{query}'"
+            else:
+                observations = vm.get_visual_timeline(hours)
+                search_type = f"timeline (last {hours}h)"
+
+            if not observations:
+                return json.dumps({
+                    "success": True,
+                    "search_type": search_type,
+                    "message": "No visual memories found for that query.",
+                    "observations": []
+                })
+
+            # Format observations for the LLM
+            formatted = []
+            for obs in observations:
+                entry = {
+                    "timestamp": obs.get("timestamp", ""),
+                    "description": obs.get("scene_description", ""),
+                    "location": obs.get("location"),
+                    "people": obs.get("people_present"),
+                    "objects": obs.get("notable_objects"),
+                    "has_image": bool(obs.get("image_path"))
+                }
+                formatted.append(entry)
+
+            # Also get scene change info
+            changes = vm.detect_scene_changes("")
+            result = {
+                "success": True,
+                "search_type": search_type,
+                "total_memories": len(formatted),
+                "observations": formatted,
+                "_instruction": "Summarize these visual memories naturally. Tell the user what you remember seeing, when, and where. If they asked about changes, compare observations."
+            }
+            if changes.get("has_previous"):
+                result["last_seen_ago"] = changes["time_since"]
+            print(f"   [OK] Visual memory recall: {len(formatted)} observations ({search_type})")
+            return json.dumps(result)
+        except Exception as e:
+            print(f"   [ERROR] Visual memory recall failed: {e}")
+            return json.dumps({"error": str(e)})
 
     elif tool_name == "get_weather":
         result = get_weather_data(tool_args.get("location", ""))
@@ -5561,6 +6301,11 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
     elif tool_name == "complete_reminder" and ENHANCED_TOOLS_AVAILABLE:
         result = CalendarManager.complete_reminder(**tool_args)
         print(f"   [OK] Reminder completed")
+        return json.dumps(result)
+
+    elif tool_name == "cancel_reminder" and ENHANCED_TOOLS_AVAILABLE:
+        result = CalendarManager.cancel_reminder(**tool_args)
+        print(f"   [OK] Reminder cancel attempt: success={result.get('success')}")
         return json.dumps(result)
 
     elif tool_name == "create_task" and ENHANCED_TOOLS_AVAILABLE:
@@ -5821,6 +6566,17 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
                 "error": f"Failed to check suggestions: {str(e)}"
             })
 
+    # Fallback: get_local_time works without enhanced tools
+    if tool_name == "get_local_time":
+        from datetime import datetime
+        now = datetime.now()
+        return json.dumps({
+            "success": True,
+            "time": now.strftime("%I:%M %p"),
+            "date": now.strftime("%A, %B %d, %Y"),
+            "iso": now.isoformat()
+        })
+
     return f"Unknown tool: {tool_name}"
 
 
@@ -5857,12 +6613,167 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
 # ================================================================================
 
 
+def _get_text_content(msg):
+    """Extract text content cheaply, skipping base64 image data."""
+    content = msg.get('content', '')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get('type') == 'text':
+                parts.append(part.get('text', ''))
+        return ' '.join(parts)
+    return ''
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough chars/4 token heuristic — no deps, good enough for budgeting."""
+    return len(text) // 4 if text else 0
+
+
+def _estimate_payload_tokens(messages, tools) -> int:
+    """Estimate total prompt tokens for a chat completion payload."""
+    total = 0
+    for m in messages:
+        # ~5 tokens of role + chat-template overhead per message.
+        total += 5 + _estimate_tokens(_get_text_content(m))
+    if tools:
+        try:
+            import json as _json
+            total += _estimate_tokens(_json.dumps(tools))
+        except Exception:
+            total += 200 * len(tools)
+    return total + 64  # final chat-template wrap pad
+
+
+def _trim_messages_for_budget(messages, tools, budget_tokens: int):
+    """Drop oldest non-system messages until estimated tokens fit the budget.
+
+    Always preserves leading system message(s) and the final user message.
+    Returns (trimmed_messages, dropped_count).
+    """
+    if not messages:
+        return messages, 0
+
+    sys_end = 0
+    while sys_end < len(messages) and messages[sys_end].get('role') == 'system':
+        sys_end += 1
+
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') == 'user':
+            last_user_idx = i
+            break
+    if last_user_idx is None or last_user_idx < sys_end:
+        return messages, 0
+
+    head = messages[:sys_end]
+    middle = list(messages[sys_end:last_user_idx])
+    tail = messages[last_user_idx:]
+
+    dropped = 0
+    while True:
+        candidate = head + middle + tail
+        if _estimate_payload_tokens(candidate, tools) <= budget_tokens:
+            return candidate, dropped
+        if not middle:
+            return candidate, dropped  # already minimal — give up gracefully
+        middle.pop(0)
+        dropped += 1
+
+
+# Shared constants
+_VISION_PHRASES = ('i see', 'cozy living room', 'soft lighting', 'warm vibe',
+                   'in his office', 'in her office', 'wearing', 'holding a mug',
+                   'sitting at', 'glasses and', 'giving a thumbs', 'the monitor shows',
+                   'behind him', 'behind her', 'the kitchen', 'the living room')
+
 # Validation helper functions
+_HALLUCINATION_RE = re.compile(
+    r'i searched|according to (?:my|the) search|i found (?:that|the following)',
+    re.IGNORECASE
+)
+
 def detect_hallucinated_search(response: str) -> bool:
     """Detect if LLM is hallucinating a web search that didn't happen."""
-    import re
-    patterns = [r'i searched', r'according to (?:my|the) search', r'i found (?:that|the following)']
-    return any(re.search(pattern, response.lower()) for pattern in patterns)
+    return bool(_HALLUCINATION_RE.search(response))
+
+
+# Patterns that mean "I performed action X" — keyed by the tool that should
+# have been called. If the assistant claims one of these but tool_calls is
+# empty, the response is a hallucination and we need to force-retry.
+_ACTION_CLAIM_PATTERNS = {
+    "send_gmail": re.compile(
+        r"\b(?:"
+        # Past tense: "I sent", "I've sent", "I've emailed", "I just sent"
+        r"i(?:'ve| have)?\s+(?:just\s+)?sent|"
+        r"i(?:'ll)?\s+sent|i(?:'ve| have)?\s+emailed|"
+        r"i\s+just\s+emailed|"
+        # Status: "email has been/is/was sent", "email was delivered"
+        r"email\s+(?:has been|is|was)\s+sent|"
+        r"email (?:was )?delivered|email\s+sent|"
+        r"sent (?:the|that|an?) email|"
+        # "sent to you at <email>", "sent to <name>", "sent it", "sent that",
+        # "sent over". Fires whenever 'sent' is followed by a delivery target.
+        r"sent\s+(?:to\b|it\b|that\b|over\b|you\b)|"
+        # "sent the headlines to <name>" / "sent the summary to <email>"
+        r"sent\s+(?:the|a|that)\s+\w+(?:\s+\w+)?\s+to\b|"
+        r"message\s+(?:has been|is|was)\s+sent|"
+        # Present continuous (the model often says "Sending...!" as if it's happening now):
+        r"(?:i'?m\s+|^|\s)(?:sending|emailing|delivering|firing\s+off)\s+(?:the|that|an?|it|you|over|to)|"
+        r"sending\s+(?:the|that|an?|it|over|now|you)|"
+        r"emailing\s+(?:you|it|that|the|now)"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    "control_lights": re.compile(
+        r"\b(?:"
+        r"i(?:'ve| have)?\s+(?:turned|set|changed|adjusted|switched)\s+(?:the\s+)?lights?|"
+        r"lights?\s+(?:are|have been)\s+(?:turned|set|changed|adjusted|switched)|"
+        # Present continuous
+        r"(?:i'?m\s+)?(?:switching|turning|setting|changing|adjusting)\s+(?:the\s+)?lights?"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    "play_music": re.compile(
+        r"\b(?:i(?:'ve| have)?\s+(?:started|begun|put on|queued)\s+(?:the\s+|some\s+)?(?:music|song|track|playlist)|"
+        r"(?:music|song|track|playlist)\s+(?:is|has been)\s+(?:playing|started|queued))\b",
+        re.IGNORECASE,
+    ),
+    "create_document": re.compile(
+        r"\b(?:i(?:'ve| have)?\s+(?:created|saved|written)\s+(?:the\s+|a\s+|that\s+)?(?:document|file|note|list)|"
+        r"document\s+(?:has been|is|was)\s+(?:created|saved))\b",
+        re.IGNORECASE,
+    ),
+    # Claims to have read/reviewed a specific document. Without this, the
+    # model can confidently say "I've re-read Job_Talk_Script7.docx" with
+    # zero tool calls — pure hallucination.
+    "search_documents": re.compile(
+        r"\b(?:"
+        r"i(?:'ve| have)?\s+(?:re-?read|reread|reviewed|gone through|looked through|"
+        r"checked|opened|pulled up|brought up)\s+(?:the\s+|that\s+|your\s+|my\s+)?"
+        r"(?:document|file|pdf|docx?|script|paper|notes|cv|dossier|"
+        r"[A-Z][\w_-]*\.(?:pdf|docx?|txt|md))"
+        r"|"
+        r"i(?:'ve| have)?\s+(?:taken|had)\s+(?:another|a\s+(?:second|fresh|closer))\s+look\s+at"
+        r")\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def detect_hallucinated_action(response: str) -> str | None:
+    """If the response claims to have performed a tool-required action but no
+    tool was called, return the name of the tool that *should* have been
+    called. Otherwise return None.
+    """
+    if not response or not isinstance(response, str):
+        return None
+    for tool_name, pattern in _ACTION_CLAIM_PATTERNS.items():
+        if pattern.search(response):
+            return tool_name
+    return None
 
 
 # Email helper functions (still used by send_gmail tool execution)
@@ -5909,31 +6820,25 @@ def extract_email_subject_and_body(message: str) -> tuple:
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1) -> Dict:
     global _vision_queue
 
+    # NOTE: tool_choice="required" with a single-tool filter already guarantees
+    # the model will call the right tool. We only add text hints for tools where
+    # the model needs guidance on PARAMETERS (like gmail workflows).
     if force_tool:
         messages = messages.copy()
         last_msg = messages[-1]
         if last_msg.get("role") == "user":
             original = last_msg["content"]
+            # Only inject hints for tools that need parameter guidance
             instructions = {
-                "web_search": "[You MUST use the web_search tool to answer this.]",
-                "get_weather": "[You MUST use the get_weather tool to answer this.]",
-                "control_lights": "[You MUST use the control_lights tool to do this.]",
-                "search_documents": "[You MUST use the search_documents tool to answer this.]",
-                "view_image": "[Use the view_image tool now to see the image. You can view and analyze images - the image will be shown to you after calling this tool.]",
-                "capture_camera": "[Use the capture_camera tool now to look at what's in front of you. Your camera allows you to see your physical surroundings, so you can naturally discuss what's there.]",
-                "play_music": "[You MUST use the play_music tool to do this.]",
-                "control_music": "[You MUST use the control_music tool to do this.]",
-                "music_visualizer": "[You MUST use the music_visualizer tool to do this.]",
-                "create_document": "[You MUST use the create_document tool to create and save this file.]",
-                "browse_website": "[You MUST use the browse_website tool to fetch and read this URL.]",
-                "read_gmail": "[CRITICAL: You MUST use the read_gmail tool RIGHT NOW to check the email inbox. DO NOT say you can't access email - you CAN and you MUST use the tool! Call read_gmail immediately!]",
-                "send_gmail": "[CRITICAL: You MUST use the send_gmail tool RIGHT NOW to send this email. Extract the recipient email address and message content from the user's request. After sending, CONFIRM to the user: 'I sent the email to [address]'. DO NOT say you can't send email - you CAN and you MUST use the tool! Call send_gmail immediately!]",
-                "reply_gmail": "[CRITICAL: You MUST use the reply_gmail tool RIGHT NOW to reply to these emails. DO NOT say you can't reply - you CAN and you MUST use the tool! Call reply_gmail immediately!]"
+                "read_gmail": "[Use read_gmail to check the email inbox.]",
+                "send_gmail": "[Use send_gmail. Extract the recipient email address and message content from the request.]",
+                "reply_gmail": "[Use reply_gmail to reply to these emails.]",
+                "capture_camera": "[Use capture_camera to see what's in front of you.]",
             }
 
             # Special handling for fanmail read-first workflow
             if force_tool == "read_gmail" and 'fanmail' in original.lower() and 'reply' in original.lower():
-                instructions["read_gmail"] = "[CRITICAL FANMAIL WORKFLOW: You MUST use the read_gmail tool FIRST to see what the fanmail says before you can write a reply! Use query 'subject:Fanmail' with include_body=true. After you READ the email content, THEN you can reply with specific details from their message. DO NOT reply without reading first!]"
+                instructions["read_gmail"] = "[FANMAIL: Use read_gmail with query 'subject:Fanmail' and include_body=true. After reading, reply with specific details from their message.]"
 
             if force_tool in instructions:
                 messages[-1] = {"role": "user", "content": f"{original}\n\n{instructions[force_tool]}"}
@@ -5962,26 +6867,32 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                     print(f"[VISUAL-MEMORY] Error loading context: {e}")
                     known_people = []
 
-            # Build comprehensive vision prompt
+            # Build vision prompt (concise to reduce token overhead)
             vision_prompt_parts = [
-                "[CRITICAL: You are receiving a REAL camera image RIGHT NOW. You MUST describe what you ACTUALLY SEE in this specific image. "
-                "DO NOT describe from memory or imagination. DO NOT use generic descriptions. "
-                "Look at the ACTUAL image provided and describe EXACTLY what is visible in it.]",
-                "",
-                "Describe what you ACTUALLY see in this image:",
-                "• WHO is in the image? Describe their appearance, clothing, position",
-                "• WHAT are they doing? Specific activities visible",
-                "• WHERE are they? Describe the room, furniture, background details",
-                "• WHAT objects are visible? Be specific about items you can see",
-                "• Colors, lighting, and atmosphere you observe",
-                "",
-                "IMPORTANT: Base your response ONLY on what you can actually see in the image provided below. "
-                "Do not guess or use prior knowledge."
+                "[CAMERA IMAGE: Describe what you ACTUALLY see. Who, what, where, objects, lighting. "
+                "Be specific and accurate — describe only what's visible.]"
             ]
 
             # Add recognition context
             if recognition_context:
                 vision_prompt_parts.append(recognition_context)
+
+            # Add recent visual history for scene change awareness
+            if VISUAL_MEMORY_AVAILABLE:
+                try:
+                    history_context = vm.get_visual_history_context(limit=3)
+                    if history_context:
+                        vision_prompt_parts.append("")
+                        vision_prompt_parts.append(history_context)
+                        # Add scene change detection hint
+                        changes = vm.detect_scene_changes("")
+                        if changes.get("has_previous"):
+                            vision_prompt_parts.append(
+                                f"\n[SCENE CONTEXT: Your last observation was {changes['time_since']} ago. "
+                                f"Compare what you see NOW with what you saw before and note any changes.]"
+                            )
+                except Exception as e:
+                    print(f"[VISUAL-MEMORY] Error loading visual history context: {e}")
 
             # Add context awareness if available
             if CONTEXT_AWARENESS_AVAILABLE and known_people:
@@ -6020,20 +6931,25 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             else:
                 print(f"   [VISION-ERROR] Failed to encode image: {img_info.filename}")
 
-        # Add natural prompt for camera
-        if any(img.is_camera_capture for img in _vision_queue.pending_images):
-            image_parts.append({
-                "type": "text",
-                "text": "\n[The image above shows your CURRENT view RIGHT NOW. Describe what you ACTUALLY see in THIS specific image. "
-                "Be conversational but accurate - talk about what's really there, not what you remember or expect to see.]"
-            })
+        # (vision prompt already added above — no need for duplicate reminder)
 
         # CRITICAL: Inject as USER message (not assistant)
         messages.append({"role": "user", "content": image_parts})
 
         print(f"   [VISION] Images injected as user message")
+        # Save image paths before clearing so we can link the LLM's response to the image
+        global _last_vision_image_paths
+        _last_vision_image_paths = [img.filepath for img in _vision_queue.pending_images]
         _vision_queue.mark_as_viewed()
         _vision_queue.clear()
+
+    # Final-pass normalization for strict chat templates (Qwen et al.).
+    # Ensures: leading systems, alternating user/assistant, starts with user
+    # after system, no consecutive same-role turns. The sanitizer drops
+    # stale assistant turns and can leave consecutive user turns or an
+    # orphan leading assistant — those make Qwen 400 with "No user query
+    # found in messages" before any inference even runs.
+    messages = _normalize_message_alternation(messages)
 
     payload = {
         "messages": messages,
@@ -6052,7 +6968,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             blocked_tools = {
                 'create_note', 'create_document', 'remember_person', 'remember_place',
                 'set_timer', 'create_task', 'get_tasks', 'complete_task',
-                'who_do_i_know', 'view_image', 'capture_camera'
+                'who_do_i_know', 'view_image', 'capture_camera', 'recall_visual_memory'
             }
             tools_to_use = [
                 tool for tool in TOOLS
@@ -6060,15 +6976,131 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             ]
             print(f"   [FILTER] Iteration {iteration}: Blocked {len(TOOLS) - len(tools_to_use)} overused tools")
 
-        payload["tools"] = tools_to_use
-        payload["tool_choice"] = "required" if force_tool else "auto"
+        if force_tool:
+            # Filter tools to ONLY the forced tool so "required" has no other choice
+            forced_tools = [t for t in TOOLS if t['function']['name'] == force_tool]
+            if forced_tools:
+                payload["tools"] = forced_tools
+                payload["tool_choice"] = "required"
+                print(f"   [FORCE-TOOLS] Filtered to only: {force_tool}")
+            else:
+                print(f"   [FORCE-TOOLS] WARNING: {force_tool} not found in TOOLS, falling back to auto")
+                payload["tools"] = tools_to_use
+                payload["tool_choice"] = "auto"
+        else:
+            payload["tools"] = tools_to_use
+            payload["tool_choice"] = "auto"
+
+    # Token-budget guard: trim oldest non-system history if the request would
+    # overflow LM Studio's context. Default sized for an 8192-ctx model with
+    # headroom for the response; override via BLUE_LM_INPUT_BUDGET_TOKENS.
+    try:
+        _budget = int(os.environ.get('BLUE_LM_INPUT_BUDGET_TOKENS', '6500'))
+    except ValueError:
+        _budget = 6500
+    _trimmed, _dropped = _trim_messages_for_budget(
+        payload['messages'], payload.get('tools'), _budget,
+    )
+    if _dropped:
+        _before = len(payload['messages'])
+        payload['messages'] = _trimmed
+        _approx = _estimate_payload_tokens(_trimmed, payload.get('tools'))
+        print(
+            f"   [TRIM] Dropped {_dropped} oldest msg(s) to fit budget "
+            f"({_budget}t budget, ~{_approx}t after; {_before}->{len(_trimmed)} msgs)",
+            flush=True,
+        )
 
     try:
-        response = requests.post(LM_STUDIO_URL, json=payload, timeout=360)
+        response = requests.post(LM_STUDIO_URL, json=payload, timeout=120)
         response.raise_for_status()
         return response.json()
     except Exception as e:
+        # Self-heal on n_ctx overflow: LM Studio's error body looks like
+        # `n_keep: 5188 >= n_ctx: 4096`. Parse the actual context size, retrim
+        # the payload to fit, and retry once. Avoids depending on the user's
+        # LM Studio context-length setting matching our default budget.
+        body = getattr(getattr(e, 'response', None), 'text', '') or ''
+        _ctx_match = re.search(r'n_ctx:\s*(\d+)', body)
+        if _ctx_match:
+            _n_ctx = int(_ctx_match.group(1))
+            _retry_budget = max(256, int(_n_ctx * 0.7))
+            _retrimmed, _dropped_now = _trim_messages_for_budget(
+                payload['messages'], payload.get('tools'), _retry_budget,
+            )
+
+            # Last resort: if even the minimal-message payload still overflows
+            # n_ctx, drop tools entirely. The model loses tool-calling on this
+            # one request but at least returns a real reply instead of failing
+            # — and the selector usually already decided no tool was needed.
+            _tools_dropped = False
+            if (_estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx
+                    and payload.get('tools')):
+                payload.pop('tools', None)
+                payload.pop('tool_choice', None)
+                _tools_dropped = True
+                _retrimmed, _dropped_now = _trim_messages_for_budget(
+                    payload['messages'], None, _retry_budget,
+                )
+
+            if len(_retrimmed) < len(payload['messages']) or _tools_dropped:
+                _est = _estimate_payload_tokens(_retrimmed, payload.get('tools'))
+                _extra = " + dropped tools" if _tools_dropped else ""
+                print(
+                    f"   [TRIM] LM Studio n_ctx={_n_ctx}; retrying with "
+                    f"budget {_retry_budget}t (dropped {_dropped_now} msg(s)"
+                    f"{_extra}, ~{_est}t after)",
+                    flush=True,
+                )
+                payload['messages'] = _retrimmed
+                try:
+                    response = requests.post(LM_STUDIO_URL, json=payload, timeout=120)
+                    response.raise_for_status()
+                    return response.json()
+                except Exception as e2:
+                    print(f"[ERROR] Retry after n_ctx trim also failed: {e2}")
+                    e = e2
+                    body = getattr(getattr(e2, 'response', None), 'text', '') or body
+            else:
+                print(
+                    f"   [TRIM] LM Studio n_ctx={_n_ctx} but already minimal "
+                    f"(system+last user, no tools). Cannot retry.",
+                    flush=True,
+                )
+
         print(f"[ERROR] Error calling LM Studio: {e}")
+        # On 400, dump the offending payload + LM Studio's error body so we can
+        # see what was wrong. Strips base64 image data to keep the dump small.
+        try:
+            import datetime as _dt
+            stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+            dump_path = f"lm_studio_400_dump_{stamp}.json"
+            slim_messages = []
+            for m in payload.get('messages', []):
+                slim = dict(m)
+                c = slim.get('content')
+                if isinstance(c, list):
+                    slim['content'] = [
+                        {**p, 'image_url': {'url': '<base64-stripped>'}} if isinstance(p, dict) and p.get('type') == 'image_url' else p
+                        for p in c
+                    ]
+                slim_messages.append(slim)
+            slim_payload = {**payload, 'messages': slim_messages}
+            import json as _json
+            with open(dump_path, 'w', encoding='utf-8') as f:
+                _json.dump({
+                    'lm_studio_error_body': body[:4000],
+                    'request_payload': slim_payload,
+                    'message_count': len(payload.get('messages', [])),
+                    'message_roles': [m.get('role') for m in payload.get('messages', [])],
+                    'system_message_lengths': [
+                        len(m.get('content', '')) if isinstance(m.get('content'), str) else 'list'
+                        for m in payload.get('messages', []) if m.get('role') == 'system'
+                    ],
+                }, f, indent=2, default=str)
+            print(f"[DEBUG] Dumped failing request to: {dump_path}")
+        except Exception as dump_err:
+            print(f"[DEBUG] Could not write dump: {dump_err}")
         return None
 
 
@@ -6112,98 +7144,254 @@ def purge_old_camera_images(messages: List[Dict]) -> List[Dict]:
     return messages
 
 
-def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str) -> Dict:
-    """Build system message with anti-repetition context from conversation history."""
-    import random
+def _build_expertise_block() -> str:
+    """List the documents Blue currently has indexed, so he knows the
+    topics he can speak to authoritatively.
 
-    # Natural conversational guidance - NO templates or preset phrases
-    # Let the LLM be creative and spontaneous, not follow a script
-    conversational_guidance = (
-        "=== BE NATURAL AND SPONTANEOUS ===\n"
-        "• Speak like a real person having a genuine conversation\n"
-        "• Vary your vocabulary, phrasing, and sentence structure naturally\n"
-        "• When introducing yourself, be creative - find fresh, organic ways to share who you are\n"
-        "• Avoid robotic patterns like 'I'm Blue, I was created by...' - mix it up!\n"
-        "• Sometimes be casual, sometimes direct, sometimes playful - let context guide you\n"
-        "• Don't overthink it - just talk naturally\n"
+    Without this block Blue only finds documents when search_documents is
+    explicitly called — and only when the model thinks to call it. With
+    this block, every prompt names the corpus, so Blue knows he has
+    expertise on these topics and can reach for the search tool naturally.
+    """
+    try:
+        index = load_document_index()
+    except Exception:
+        return ""
+    docs = index.get("documents", [])
+    real_docs = [
+        d for d in docs
+        if d.get("filename")
+        and not d.get("camera_capture")
+        and not (d.get("filename") or "").startswith("camera_")
+    ]
+    if not real_docs:
+        return ""
+
+    # Sort by upload date desc so newer uploads bubble up if we hit the cap.
+    real_docs.sort(key=lambda d: d.get("uploaded_at", ""), reverse=True)
+    cap = 25
+    shown = real_docs[:cap]
+
+    lines = []
+    for d in shown:
+        fn = d.get("filename", "?")
+        preview = (d.get("text_preview") or "").strip()
+        # Strip newlines and image-metadata markers from the preview snippet
+        # so it reads as a one-line topic hint.
+        preview = re.sub(r"\s+", " ", preview)
+        if preview.startswith("[IMAGE FILE"):
+            preview = ""
+        snippet = preview[:90].rstrip(" .,") + "…" if len(preview) > 90 else preview
+        if snippet:
+            lines.append(f"- {fn} — {snippet}")
+        else:
+            lines.append(f"- {fn}")
+
+    overflow = len(real_docs) - len(shown)
+    if overflow > 0:
+        lines.append(f"- ...and {overflow} more")
+
+    return (
+        "<expertise>\n"
+        f"You have direct access to these {len(real_docs)} document(s) in the user's "
+        "library — they are indexed and semantically searchable. When the user "
+        "asks about any topic these documents cover, treat yourself as an "
+        "expert: use the search_documents tool to retrieve specifics and quote "
+        "from them naturally. Do not claim ignorance about a topic that is "
+        "obviously covered below.\n\n"
+        "When you draw on a document in your reply, cite the source inline "
+        "like [filename.pdf] right after the claim it supports — short and "
+        "natural, e.g. 'as I noted in my talk script [Job_Talk_Script7.docx], …'.\n"
+        + "\n".join(lines) +
+        "\n</expertise>"
     )
 
-    # Build anti-repetition context from recent assistant messages
-    # EXCLUDE vision-related responses to prevent contamination when describing new photos
-    vision_description_phrases = ['i see', 'cozy living room', 'soft lighting', 'warm vibe',
-                                   'in his office', 'in her office', 'wearing', 'holding a mug',
-                                   'sitting at', 'glasses and', 'giving a thumbs', 'the monitor shows',
-                                   'behind him', 'behind her', 'the kitchen', 'the living room']
 
+def _build_now_block() -> str:
+    """Render the current local date/time + explicit relative-day resolutions.
+
+    Without this, the LLM has no anchor for 'now' and treats relative phrases
+    in chat history (e.g. yesterday's "tomorrow at 3pm") as if they were said
+    today, so meetings drift forward each session. The resolutions below give
+    it absolute dates to rewrite against.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    tz = now.astimezone().tzname() or "local"
+    today_d = now.date()
+    date_str = f"{today_d.strftime('%A, %B')} {today_d.day}, {today_d.year}"
+    time_str = now.strftime("%I:%M %p").lstrip("0")
+    return (
+        "<now>\n"
+        f"Current date: {date_str}\n"
+        f"Current time: {time_str} ({tz})\n"
+        f"When the user says \"today\" they mean {today_d.isoformat()}, "
+        f"\"tomorrow\" means {(today_d + timedelta(days=1)).isoformat()}, "
+        f"\"yesterday\" was {(today_d - timedelta(days=1)).isoformat()}. "
+        "Resolve any relative time phrase in chat history against THIS date, "
+        "not the date the message was originally said.\n"
+        "</now>"
+    )
+
+
+def _build_upcoming_schedule_block(hours_ahead: int = 24) -> str:
+    """List unfinished reminders due in the next `hours_ahead` hours.
+
+    Injected on every turn so Blue can answer "what's on my schedule?" /
+    "anything coming up?" without a tool round-trip and so he naturally
+    anchors statements ("you have X in 20 min") against real data. If the
+    enhanced reminders module isn't loaded or the DB read fails, return an
+    empty string — silent degradation, never break the system prompt.
+    """
+    if not globals().get("ENHANCED_TOOLS_AVAILABLE", False):
+        return ""
+    try:
+        from datetime import datetime, timedelta
+        from blue_tools_enhanced import occurrences_in_window
+        now = datetime.now()
+        cutoff = now + timedelta(hours=hours_ahead)
+        # occurrences_in_window expands weekly recurring events and carries
+        # end times, so a standing class shows up with its full time range.
+        occs = occurrences_in_window(now, cutoff)[:20]
+    except Exception as e:
+        log.warning(f"[SCHEDULE] block build failed: {e}")
+        return ""
+
+    if not occs:
+        return (
+            "<upcoming_schedule>\n"
+            f"No reminders in the next {hours_ahead} hours.\n"
+            "</upcoming_schedule>"
+        )
+
+    today_d = now.date()
+    lines = []
+    for o in occs:
+        when = o["start"]
+        delta = when - now
+        mins = int(delta.total_seconds() // 60)
+        if mins < 60:
+            rel = f"in {mins} min" if mins > 0 else "now"
+        elif mins < 60 * 24:
+            hrs = mins / 60
+            rel = f"in {hrs:.1f} hrs"
+        else:
+            rel = f"in {mins // (60*24)}d {(mins % (60*24)) // 60}h"
+        day_label = (
+            "today" if when.date() == today_d
+            else "tomorrow" if when.date() == today_d + timedelta(days=1)
+            else when.strftime("%a %b ") + str(when.day)
+        )
+        clock = when.strftime("%I:%M %p").lstrip("0")
+        if o["end"]:
+            clock += "-" + o["end"].strftime("%I:%M %p").lstrip("0")
+        tag = " (weekly)" if o["recurring"] else ""
+        lines.append(
+            f"- {day_label} at {clock} ({rel}) — {o['user_name']}: "
+            f"{o['title']}{tag}"
+        )
+
+    # Flag overlapping / close-together events so Blue can mention a clash
+    # when the user asks about their schedule.
+    conflict_note = ""
+    try:
+        if globals().get("PROACTIVE_QUEUE_AVAILABLE", False):
+            pairs = blue_proactive.detect_conflicts(occs)
+            if pairs:
+                joined = "; ".join(
+                    f'"{a["title"]}" and "{b["title"]}" {phrase}'
+                    for a, b, phrase in pairs
+                )
+                conflict_note = f"\nPossible conflicts — {joined}."
+    except Exception as e:
+        log.warning(f"[SCHEDULE] conflict check failed: {e}")
+
+    return (
+        "<upcoming_schedule>\n"
+        f"Reminders in the next {hours_ahead} hours "
+        f"(use this when the user asks about schedule, calendar, "
+        f"reminders, or what's coming up — do not call a tool, just answer "
+        f"from this list):\n"
+        + "\n".join(lines)
+        + conflict_note
+        + "\n</upcoming_schedule>"
+    )
+
+
+def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str) -> Dict:
+    """Build system message with anti-repetition context from conversation history."""
+    conversational_guidance = "Be natural, concise, and conversational. Vary your phrasing.\n"
+
+    # Build anti-repetition context (skip vision descriptions and refusals).
+    # Refusals like "I don't have that yet" must NEVER appear here even with a
+    # "don't repeat" framing — the model still anchors on names/strings inside
+    # them. Letting a wrong response (e.g. "Annie" instead of "Athena") through
+    # here surfaces the wrong name in the system prompt every turn.
+    _REFUSAL_MARKERS = (
+        "i don't have", "i do not have", "i dont have",
+        "i don't know", "i do not know", "i dont know",
+        "i only have", "i only know",
+        "i haven't been told", "i havent been told",
+        "you haven't told me", "you havent told me",
+        "not in my memory", "not saved yet",
+        "i'm not sure", "im not sure",
+        "blank slate", "just woke up", "haven't met", "havent met",
+        "memory is blank", "no information stored", "im new here", "i'm new here",
+    )
     recent_assistant_responses = []
-    for msg in reversed(conversation_messages):
+    _scan_slice = conversation_messages[-10:] if len(conversation_messages) > 10 else conversation_messages
+    for msg in reversed(_scan_slice):
         if msg.get('role') == 'assistant' and msg.get('content'):
             response_text = msg['content']
-            response_lower = response_text.lower()
+            response_lower = response_text[:200].lower()
+            is_vision_response = any(phrase in response_lower for phrase in _VISION_PHRASES)
+            is_refusal = any(marker in response_lower for marker in _REFUSAL_MARKERS)
 
-            # Skip vision-related responses to prevent photo description contamination
-            is_vision_response = any(phrase in response_lower for phrase in vision_description_phrases)
-
-            if len(response_text) > 50 and not is_vision_response:  # Only include substantial non-vision responses
-                recent_assistant_responses.append(response_text[:150])  # First 150 chars
+            if len(response_text) > 50 and not is_vision_response and not is_refusal:
+                recent_assistant_responses.append(response_text[:150])
                 if len(recent_assistant_responses) >= 3:
                     break
 
     anti_repetition_context = ""
     if recent_assistant_responses:
-        responses_list = "\n".join([f"  {i+1}. \"{resp}...\"" for i, resp in enumerate(recent_assistant_responses)])
+        responses_list = "\n".join([f"  - \"{resp}...\"" for resp in recent_assistant_responses])
         anti_repetition_context = (
-            f"\n=== YOUR RECENT RESPONSES (DON'T REPEAT THESE!) ===\n"
-            f"{responses_list}\n\n"
-            f"Make your NEXT response completely different:\n"
-            f"• Use entirely different words and phrasing\n"
-            f"• Pick a new angle or perspective to share information\n"
-            f"• Vary your sentence structure and rhythm\n"
-            f"• Be creative - say things in a way you haven't said them before\n"
-            f"• Trust your instinct to be conversational and unique\n\n"
+            f"\nDon't repeat these recent responses:\n{responses_list}\n"
         )
+
+    expertise_block = _build_expertise_block()
+    expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
+
+    now_block = _build_now_block()
+    schedule_block = _build_upcoming_schedule_block()
+    schedule_section = f"{schedule_block}\n\n" if schedule_block else ""
 
     system_msg = {
         "role": "system",
         "content": (
             f"{facts_preamble}\n\n"
-            "You are Blue, a friendly home assistant. Keep responses brief and natural.\n\n"
+            f"{now_block}\n\n"
+            f"{schedule_section}"
+            "You are Blue, a friendly home assistant. Keep responses brief and natural.\n"
+            f"{conversational_guidance}"
             f"{anti_repetition_context}"
-            f"{conversational_guidance}\n"
-            "• Each response should feel fresh and spontaneous\n"
-            "• Avoid formulaic introductions - be creative about how you present yourself\n"
-            "• Let the conversation flow naturally - don't force a structure\n"
-            "• Be concise but genuine - quality over quantity\n\n"
-            "=== TOOL SELECTION RULES ===\n\n"
-            "CAMERA (highest priority):\n"
-            "• 'What do you see?' → capture_camera\n"
-            "• 'Look around' → capture_camera\n\n"
-            "EMAIL (match carefully):\n"
-            "• Check/read/show inbox → read_gmail\n"
-            "• Send to [email address] → send_gmail (extract address!)\n"
-            "• Reply/respond to email → reply_gmail\n"
-            "• FANMAIL: First read_gmail, THEN reply_gmail\n\n"
-            "MUSIC:\n"
-            "• 'Play [song]' → play_music\n"
-            "• Pause/skip/volume → control_music\n"
-            "• 'Light show' → music_visualizer\n\n"
-            "SEARCH (critical distinction!):\n"
-            "• MY documents/files/contract → search_documents\n"
-            "• Internet/news/google → web_search\n\n"
-            "LIGHTS:\n"
-            "• Turn on/off, color, mood → control_lights\n"
-            "• Light show/dance → music_visualizer\n\n"
-            "OTHER:\n"
-            "• Weather → get_weather\n"
-            "• Create file/list → create_document\n"
-            "• Visit URL → browse_website\n"
-            "• Run code → run_javascript\n\n"
-            "NO TOOL NEEDED:\n"
-            "• Greetings, jokes, general knowledge\n\n"
-            "=== AFTER TOOL RUNS ===\n"
-            "• Tool results are REAL - use them immediately\n"
-            "• Don't say 'working on it' - it's already done\n"
-            "• Don't claim you can't access - the tool worked\n\n"
+            f"{expertise_section}"
+            "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
+            "light show → music_visualizer; tool results are REAL, use them immediately.\n"
+            "NO FAKE ACTIONS: Never say you've set a reminder, added an event, "
+            "saved a note, sent an email, started a timer, or changed any "
+            "system state unless you actually called the matching tool THIS "
+            "turn and saw a successful tool result. If the user asks for one "
+            "of those things, call the tool — do not describe doing it. If "
+            "you cannot call the tool, say so plainly instead of pretending.\n"
+            "REMINDER TIME RULES: When the user gives a clock time with no "
+            "day ('at 10am', 'at 3pm'), DO NOT silently assume a date. If "
+            "the time has already passed today, ASK 'today or tomorrow?' "
+            "before calling create_reminder. When you do create a reminder, "
+            "ALWAYS state the full day and date in your reply (e.g. "
+            "'set for tomorrow, Tuesday May 13 at 10am') — do not drop the "
+            "date, even if it feels redundant. The user needs the date "
+            "back so they can catch a wrong assumption.\n"
             "Moods: moonlight, sunset, ocean, forest, romance, party, focus, relax, energize, movie, fireplace"
         )
     }
@@ -6211,23 +7399,45 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict]) -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
     """Process conversation with tool support."""
     conversation_messages = messages.copy()
 
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
-    # Extract facts from .ocf conversations first
-    ocf_facts = extract_ocf_facts(conversation_messages)
+    # Extract facts from .ocf conversations first (only if conversation has .ocf content)
     facts_preamble = build_system_preamble()
-    if ocf_facts:
-        facts_preamble += ocf_facts
-        log.info("[MEMORY] Injected extracted .ocf facts into system message")
+    # OPTIMIZATION: Only run OCF extraction if there are likely .ocf messages (check first few)
+    _has_ocf = any('.ocf' in str(m.get('content', ''))[:200] for m in conversation_messages[:5])
+    if _has_ocf:
+        ocf_facts = extract_ocf_facts(conversation_messages)
+        if ocf_facts:
+            facts_preamble += ocf_facts
+            log.info("[MEMORY] Injected extracted .ocf facts into system message")
 
-    # Build initial system message
+    # Build initial system message. If chat_completions already merged the
+    # enhanced-memory facts into messages[0] (look for our injected markers),
+    # preserve that content and APPEND the dynamic system message rather
+    # than replacing it. Replacing would discard the canonical user facts
+    # (daughter names, employer, etc.) that we just spent effort merging in.
     system_msg = build_dynamic_system_message(conversation_messages, facts_preamble)
+    _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
+    existing0 = conversation_messages[0] if conversation_messages else None
+    has_injected = (
+        existing0
+        and existing0.get("role") == "system"
+        and isinstance(existing0.get("content"), str)
+        and any(marker in existing0["content"] for marker in _injected_markers)
+    )
 
     if not conversation_messages or conversation_messages[0].get("role") != "system":
         conversation_messages.insert(0, system_msg)
+    elif has_injected:
+        # Combine: dynamic content first (identity + anti-loop), then the
+        # already-merged enhanced-memory blocks. Both live in one message.
+        conversation_messages[0] = {
+            "role": "system",
+            "content": f"{system_msg['content'].rstrip()}\n\n{existing0['content']}",
+        }
     else:
         conversation_messages[0] = system_msg
 
@@ -6248,83 +7458,99 @@ def process_with_tools(messages: List[Dict]) -> Dict:
 
 
     # Purge old camera images from conversation to prevent confusion
-    conversation_messages = purge_old_camera_images(conversation_messages)
-
-    # CRITICAL FIX: Remove old photo descriptions to prevent confusion with new photos
+    # OPTIMIZATION: Quick scan using only string content (skip base64 image data in lists)
     last_user_message = messages[-1].get("content", "") if messages else ""
-    vision_keywords = ['see', 'look', 'watch', 'view', 'show', 'picture', 'photo', 'image', 'camera', 'visual']
-    asks_about_vision = any(keyword in last_user_message.lower() for keyword in vision_keywords)
 
-    # ALWAYS remove old photo descriptions from history (both when asking about vision and when not)
-    # This prevents Blue from confusing old photo descriptions with new photos
-    vision_description_phrases = ['i see', 'in his office', 'in her office', 'wearing', 'holding a mug',
-                                 'sitting at', 'glasses and', 'giving a thumbs', 'the monitor shows',
-                                 'behind him', 'behind her', 'the kitchen', 'the living room',
-                                 'cozy living room', 'soft lighting', 'warm vibe']
+    # Fast check: scan text content only (no str() on entire messages with base64)
+    _has_camera_content = False
+    for msg in conversation_messages:
+        text = _get_text_content(msg)
+        if 'CAMERA' in text or 'camera_NEW_' in text or 'camera_capture_' in text:
+            _has_camera_content = True
+            break
 
-    # Track consecutive user/assistant pairs where user asked about vision and assistant described it
-    messages_to_remove = []
-    for i in range(len(conversation_messages) - 1):
-        current_msg = conversation_messages[i]
-        next_msg = conversation_messages[i + 1] if i + 1 < len(conversation_messages) else None
+    if _has_camera_content:
+        conversation_messages = purge_old_camera_images(conversation_messages)
 
-        # Check if this is a user message asking about vision
-        if current_msg.get('role') == 'user':
-            user_content = str(current_msg.get('content', '')).lower()
-            asks_vision_in_msg = any(kw in user_content for kw in ['see', 'look', 'watch', 'show', 'picture', 'photo'])
+        vision_keywords = ['see', 'look', 'watch', 'view', 'show', 'picture', 'photo', 'image', 'camera', 'visual']
+        _msg_lower = last_user_message.lower() if isinstance(last_user_message, str) else ''
+        asks_about_vision = any(keyword in _msg_lower for keyword in vision_keywords)
 
-            # If next message is assistant and contains photo description phrases, mark both for removal
-            if asks_vision_in_msg and next_msg and next_msg.get('role') == 'assistant':
-                assistant_content = str(next_msg.get('content', '')).lower()
-                if any(phrase in assistant_content for phrase in vision_description_phrases):
-                    messages_to_remove.extend([i, i + 1])
+        messages_to_remove = set()
+        for i in range(len(conversation_messages) - 1):
+            current_msg = conversation_messages[i]
+            if current_msg.get('role') != 'user':
+                continue
+            user_content = _get_text_content(current_msg).lower()
+            if not any(kw in user_content for kw in ('see', 'look', 'watch', 'show', 'picture', 'photo')):
+                continue
+            next_msg = conversation_messages[i + 1] if i + 1 < len(conversation_messages) else None
+            if next_msg and next_msg.get('role') == 'assistant':
+                assistant_content = _get_text_content(next_msg).lower()
+                if any(phrase in assistant_content for phrase in _VISION_PHRASES):
+                    messages_to_remove.add(i)
+                    messages_to_remove.add(i + 1)
 
-    description_count = len(set(messages_to_remove))  # unique indices
+        description_count = len(messages_to_remove)
 
-    if not asks_about_vision:
-        # User is NOT asking about vision - remove ALL camera images too
-        camera_count_before = sum(1 for msg in conversation_messages
-                                  if isinstance(msg.get('content'), (str, list)) and
-                                  ('camera_NEW_' in str(msg.get('content', '')) or 'CAMERA' in str(msg.get('content', ''))))
+        if not asks_about_vision:
+            # Count camera messages using cheap text extraction
+            camera_indices = set()
+            for idx, msg in enumerate(conversation_messages):
+                text = _get_text_content(msg)
+                if 'camera_NEW_' in text or 'CAMERA' in text:
+                    camera_indices.add(idx)
 
-        if camera_count_before > 0 or description_count > 0:
-            # Filter out camera images AND photo description pairs
-            conversation_messages = [
-                msg for idx, msg in enumerate(conversation_messages)
-                if not (
-                    # Remove camera image messages
-                    (isinstance(msg.get('content'), (str, list)) and
-                     ('camera_NEW_' in str(msg.get('content', '')) or 'CAMERA' in str(msg.get('content', '')))) or
-                    # Remove photo description messages
-                    idx in messages_to_remove
-                )
-            ]
-            total_removed = camera_count_before + description_count
-            print(f"   [VISION-PURGE] Removed {total_removed} vision-related message(s) ({camera_count_before} images, {description_count} descriptions) - not relevant to current query")
-    else:
-        # User IS asking about vision - only remove old photo DESCRIPTIONS (not the current camera image)
-        # This prevents confusion between old descriptions and the new photo being taken
-        if description_count > 0:
-            conversation_messages = [
-                msg for idx, msg in enumerate(conversation_messages)
-                if idx not in messages_to_remove
-            ]
-            print(f"   [VISION-PURGE] Removed {description_count} old photo description(s) to focus on current vision query")
+            if camera_indices or description_count > 0:
+                remove_set = camera_indices | messages_to_remove
+                conversation_messages = [
+                    msg for idx, msg in enumerate(conversation_messages)
+                    if idx not in remove_set
+                ]
+                print(f"   [VISION-PURGE] Removed {len(remove_set)} vision-related message(s) ({len(camera_indices)} images, {description_count} descriptions) - not relevant to current query")
+        else:
+            if description_count > 0:
+                conversation_messages = [
+                    msg for idx, msg in enumerate(conversation_messages)
+                    if idx not in messages_to_remove
+                ]
+                print(f"   [VISION-PURGE] Removed {description_count} old photo description(s) to focus on current vision query")
 
     max_iterations = _settings.MAX_ITERATIONS
     iteration = 0
+    # When the hallucination detector fires it sets `pending_force_tool` to
+    # the tool the model claimed it called. The next iteration must (a) use
+    # that tool, and (b) NOT be silenced by the no-tools-after-iter-1 cap.
+    # Without this carryover, the force_tool gets reset at the top of the
+    # loop and the cap disables tools — leaving Blue saying "email sent"
+    # with nothing actually sent.
+    pending_force_tool: Optional[str] = None
+
+    # ================================================================================
+    # FAST PATH: Simple greetings and short conversational messages
+    # Skip ALL pre-processing (compound detection, corrections, tool selection)
+    # and go straight to LLM for a quick response
+    # ================================================================================
+    _greeting_patterns = ['hello', 'hi ', 'hi!', 'hey', 'good morning', 'good afternoon',
+                          'good evening', 'how are you', "how's it going", "what's up",
+                          'sup', 'greetings', 'nice to see you', 'good to see you',
+                          'thank you', 'thanks', 'bye', 'goodbye', 'good night', 'goodnight']
+    _msg_lower = last_user_message.lower().strip()
+    _is_simple_greeting = (
+        len(last_user_message.split()) <= 8 and
+        any(_msg_lower.startswith(p) or _msg_lower == p.strip() for p in _greeting_patterns)
+    )
+    if _is_simple_greeting:
+        print(f"   [FAST] Simple greeting detected - skipping tool selection")
+        response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+        if response:
+            return response
+        return {"choices": [{"message": {"role": "assistant", "content": "Hey there!"}}]}
 
     # ================================================================================
     # v8 ENHANCEMENT: Check for compound requests and follow-up corrections
     # ================================================================================
-    
-    # Check for compound requests ("play jazz and turn on romantic lights")
-    compound_actions = parse_compound_request(last_user_message)
-    if compound_actions:
-        print(f"   [COMPOUND] Detected {len(compound_actions)} actions in request:")
-        for action in compound_actions:
-            print(f"      → {action['action']}: {action['query'][:50]}")
-    
+
     # Check for follow-up corrections ("no, make it blue")
     state = get_conversation_state()
     correction = detect_follow_up_correction(last_user_message, {
@@ -6333,10 +7559,6 @@ def process_with_tools(messages: List[Dict]) -> Dict:
     })
     if correction and correction['is_correction']:
         print(f"   [CORRECTION] Detected correction for {correction['correction_type']}: {correction['new_value']}")
-    
-    # Check query complexity
-    complexity = estimate_query_complexity(last_user_message)
-    print(f"   [COMPLEXITY] Query complexity: {complexity}")
 
     # IMPROVED INTENT DETECTION with specialized functions
 
@@ -6354,23 +7576,7 @@ def process_with_tools(messages: List[Dict]) -> Dict:
         improved_tool_args = {}
 
         # Skip tool selector and go straight to execution
-        # Set flags for compatibility
         is_greeting = False
-        wants_music_play = False
-        wants_music_control = False
-        wants_visualizer = False
-        wants_javascript = False
-        wants_weather = False
-        wants_lights = False
-        wants_create_document = False
-        wants_browse = False
-        wants_gmail_read = False
-        wants_gmail_send = False
-        wants_gmail_reply = False
-        wants_fanmail_reply = False
-        wants_document_retrieval = False
-        wants_document_search = False
-        wants_web_search = False
 
         print(f"   [CAMERA-DETECT] Tool forced: capture_camera (will execute in iteration 1)")
     else:
@@ -6402,24 +7608,27 @@ def process_with_tools(messages: List[Dict]) -> Dict:
     if not improved_force_tool:
         print(f"   [SELECTOR] Running modular confidence-based tool selection")
 
-        # Get recent history for context (last 5 messages)
-        recent_history = conversation_messages[-5:] if len(conversation_messages) > 5 else conversation_messages
-
-        # Run the tool selector
-        selection_result = TOOL_SELECTOR.select_tool(last_user_message, recent_history)
+        # Reuse pre-selection from endpoint if available (avoids running selector twice)
+        if _pre_selection is not None:
+            selection_result = _pre_selection
+            print(f"   [SELECTOR] Reusing pre-selection result")
+        else:
+            recent_history = conversation_messages[-5:] if len(conversation_messages) > 5 else conversation_messages
+            selection_result = TOOL_SELECTOR.select_tool(last_user_message, recent_history)
 
         # Check if disambiguation is needed
         if selection_result.needs_disambiguation:
             print(f"   [SELECTOR] Low confidence - asking user for clarification")
-            # Return disambiguation prompt to user
-            conversation_messages.append({
-                'role': 'assistant',
-                'content': selection_result.disambiguation_prompt
-            })
-            return {
-                'response': selection_result.disambiguation_prompt,
-                'needs_clarification': True
-            }
+            # The clarifying question IS Blue's reply this turn — return it in
+            # the standard choices shape so chat_completions can read it like
+            # any other response. (A bare {'response':...} dict here used to
+            # KeyError on response['choices'] and 500 the whole request.)
+            clarify = (selection_result.disambiguation_prompt
+                       or "Could you tell me a bit more about what you'd like?")
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": clarify,
+            }}]}
 
         # Set variables for compatibility with rest of code
         if selection_result.primary_tool:
@@ -6446,23 +7655,7 @@ def process_with_tools(messages: List[Dict]) -> Dict:
             if selection_result.compound_request:
                 print(f"   [SELECTOR] WARNING: Compound request (multiple tools needed)")
 
-            # Initialize legacy detection variables to False (not used with improved selector)
             is_greeting = False
-            wants_music_play = False
-            wants_music_control = False
-            wants_visualizer = False
-            wants_javascript = False
-            wants_weather = False
-            wants_lights = False
-            wants_create_document = False
-            wants_browse = False
-            wants_gmail_read = False
-            wants_gmail_send = False
-            wants_gmail_reply = False
-            wants_fanmail_reply = False
-            wants_document_retrieval = False
-            wants_document_search = False
-            wants_web_search = False
         else:
             # No tool needed - conversational response (but only if no priority tool set)
             if not improved_force_tool:
@@ -6472,39 +7665,200 @@ def process_with_tools(messages: List[Dict]) -> Dict:
             else:
                 print(f"   [SELECTOR] Keeping priority tool: {improved_force_tool}")
 
-            # Initialize detection variables
             # Detect if it's a greeting/conversational message
             greeting_patterns = ['hello', 'hi ', 'hey', 'good morning', 'good afternoon', 'good evening',
                                 'how are you', 'how\'s it going', 'what\'s up', 'sup', 'greetings',
                                 'nice to see you', 'good to see you']
             is_greeting = any(pattern in last_user_message.lower() for pattern in greeting_patterns)
 
-            wants_music_play = False
-            wants_music_control = False
-            wants_visualizer = False
-            wants_javascript = False
-            wants_weather = False
-            wants_lights = False
-            wants_create_document = False
-            wants_browse = False
-            wants_gmail_read = False
-            wants_gmail_send = False
-            wants_gmail_reply = False
-            wants_fanmail_reply = False
-            wants_document_retrieval = False
-            wants_document_search = False
-            wants_web_search = False
+    # ===== TOOL NAME NORMALIZATION =====
+    # Safety net: map any legacy/incorrect tool names to correct ones.
+    # This catches mismatches between what detectors return and what
+    # execute_tool / TOOLS array actually support.
+    _TOOL_NAME_MAP = {
+        'capture_camera_image': 'capture_camera',
+        'recognize_face': 'capture_camera',
+        'recognize_place': 'capture_camera',
+        'create_event': 'create_reminder',
+        'list_events': 'get_upcoming_reminders',
+        'set_reminder': 'create_reminder',
+        'list_notes': 'search_notes',
+        'calculate': 'run_javascript',
+        'get_date_time': 'get_local_time',
+        'visual_memory': 'recall_visual_memory',
+        'recall_vision': 'recall_visual_memory',
+    }
+    if improved_force_tool and improved_force_tool in _TOOL_NAME_MAP:
+        old_name = improved_force_tool
+        improved_force_tool = _TOOL_NAME_MAP[improved_force_tool]
+        print(f"   [NORMALIZE] Mapped tool name: {old_name} -> {improved_force_tool}")
 
-    # Track if fanmail has been read in this conversation (always needed)
-    fanmail_has_been_read = False
-    for msg in conversation_messages:
-        if msg.get("role") == "tool" and "Fanmail" in msg.get("content", ""):
-            fanmail_has_been_read = True
-            break
+    # ================================================================================
+    # ZERO-LLM PATH: For simple tools, execute and return a templated response
+    # without any LLM call at all. This is the fastest possible path.
+    # ================================================================================
+    _ZERO_LLM_TOOLS = {
+        'control_music', 'control_lights', 'get_local_time',
+        'set_timer', 'music_visualizer', 'play_music',
+    }
 
-    # Check for questions that need information
-    question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', 'tell me', 'explain', 'show me']
-    is_question = any(word in last_user_message.lower() for word in question_words)
+    def _template_response(tool_name, tool_args, tool_result):
+        """Build a quick natural response from tool result without LLM."""
+        try:
+            data = json.loads(tool_result) if isinstance(tool_result, str) else tool_result
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+
+        success = data.get('success', True) if isinstance(data, dict) else True
+
+        if not success:
+            error = data.get('error', 'Something went wrong') if isinstance(data, dict) else tool_result
+            return f"Sorry, that didn't work: {error}"
+
+        if tool_name == 'control_music':
+            action = tool_args.get('action', '')
+            action_words = {
+                'pause': 'Paused the music.',
+                'resume': 'Resumed playback.',
+                'next': 'Skipping to next track.',
+                'previous': 'Going back to previous track.',
+                'volume_up': 'Turned the volume up.',
+                'volume_down': 'Turned the volume down.',
+                'mute': 'Muted.',
+            }
+            return action_words.get(action, f"Done — {action}.")
+
+        if tool_name == 'play_music':
+            query = tool_args.get('query', 'music')
+            msg = data.get('message', '') if isinstance(data, dict) else ''
+            if msg:
+                return msg
+            return f"Playing {query} for you."
+
+        if tool_name == 'control_lights':
+            action = tool_args.get('action', '')
+            mood = tool_args.get('mood', '')
+            color = tool_args.get('color', '')
+            if mood:
+                return f"Set the lights to {mood} mood."
+            if color:
+                return f"Changed the lights to {color}."
+            if action == 'on':
+                return "Lights are on."
+            if action == 'off':
+                return "Lights are off."
+            msg = data.get('message', '') if isinstance(data, dict) else ''
+            return msg or "Lights updated."
+
+        if tool_name == 'get_local_time':
+            if isinstance(data, dict):
+                time_str = data.get('time', data.get('local_time', ''))
+                date_str = data.get('date', '')
+                action = tool_args.get('action', 'get_time')
+                if action == 'get_date' and date_str:
+                    return f"Today is {date_str}."
+                elif action == 'get_date_time' and date_str and time_str:
+                    return f"It's {time_str} on {date_str}."
+                elif time_str:
+                    return f"It's {time_str}."
+            return f"The time is {tool_result}." if tool_result else "Here's the time."
+
+        if tool_name == 'set_timer':
+            msg = data.get('message', '') if isinstance(data, dict) else ''
+            return msg or "Timer set."
+
+        if tool_name == 'music_visualizer':
+            return "Light show started! The lights are syncing with the music."
+
+        # Fallback
+        return None
+
+    if (improved_force_tool and improved_force_tool in _ZERO_LLM_TOOLS
+            and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
+        print(f"\n[ZERO-LLM] Direct execution (no LLM call): {improved_force_tool} with {improved_tool_args}")
+        tool_result = execute_tool(improved_force_tool, improved_tool_args)
+        print(f"   [OK] {improved_force_tool} completed")
+
+        templated = _template_response(improved_force_tool, improved_tool_args, tool_result)
+        if templated:
+            print(f"   [ZERO-LLM] Returning templated response (0 LLM calls)")
+            return {"choices": [{"message": {"role": "assistant", "content": templated}}]}
+
+    # ================================================================================
+    # FAST EXECUTION: Execute tool directly, then ONE LLM call to format response.
+    # Used for tools that need richer/contextual responses (weather, email, search).
+    # ================================================================================
+    _DIRECT_EXEC_TOOLS = {
+        'get_weather', 'capture_camera', 'web_search', 'read_gmail',
+        'search_documents', 'browse_website',
+    }
+    if (improved_force_tool and improved_force_tool in _DIRECT_EXEC_TOOLS
+            and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
+        print(f"\n[FAST-EXEC] Direct tool execution: {improved_force_tool} with {improved_tool_args}")
+        tool_result = execute_tool(improved_force_tool, improved_tool_args)
+        print(f"   [OK] {improved_force_tool} completed")
+
+        # Add tool call + result to conversation so LLM can format the response
+        conversation_messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "direct_exec", "type": "function",
+                           "function": {"name": improved_force_tool,
+                                       "arguments": json.dumps(improved_tool_args)}}]
+        })
+        conversation_messages.append({
+            "role": "tool",
+            "tool_call_id": "direct_exec",
+            "name": improved_force_tool,
+            "content": tool_result
+        })
+        conversation_messages.append({
+            "role": "user",
+            "content": "[Answer naturally using the tool results above. No more tools.]"
+        })
+        # Single LLM call just to format the response
+        response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+        if response:
+            content = response["choices"][0]["message"].get("content", "")
+
+            # COMPOUND-REQUEST HALLUCINATION GUARD:
+            # Fast-exec ran ONE tool (e.g. browse_website). If the user's
+            # original request was compound ("browse + email"), the model
+            # often confabulates the second action ("…sent to you at X")
+            # since no second tool was called. Catch that here so the email
+            # actually goes out, not just the words "email sent". Falls
+            # through to the iteration loop with the right pending tool.
+            hallucinated_tool = detect_hallucinated_action(content)
+            if hallucinated_tool and hallucinated_tool != improved_force_tool:
+                print(f"   [WARN] Fast-exec model claimed to {hallucinated_tool} after {improved_force_tool} — running it for real")
+                # Drop the synthetic "[Answer naturally...]" guard turn so
+                # the loop's next call doesn't see it as the latest user msg.
+                while conversation_messages and (
+                    conversation_messages[-1].get("role") == "user"
+                    and "[Answer naturally" in (conversation_messages[-1].get("content") or "")
+                ):
+                    conversation_messages.pop()
+                conversation_messages.append({
+                    "role": "assistant",
+                    "content": content,
+                })
+                conversation_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"You said you performed that action, but you didn't "
+                        f"actually call any tool. Use the {hallucinated_tool} "
+                        f"tool now to actually do it — extract the recipient, "
+                        f"subject, and body from this conversation."
+                    ),
+                })
+                pending_force_tool = hallucinated_tool
+                # Fall through to the iteration loop; do NOT return.
+            else:
+                if _last_vision_image_paths and content:
+                    _save_visual_observation(content)
+                return response
+        else:
+            return {"choices": [{"message": {"role": "assistant", "content": "Done!"}}]}
 
     while iteration < max_iterations:
         iteration += 1
@@ -6514,125 +7868,35 @@ def process_with_tools(messages: List[Dict]) -> Dict:
 
         # ITERATION 1: Force correct tool based on clear intent
         if iteration == 1:
-            # Check if priority detection (camera, etc.) already set a tool
-            # This works regardless of which selector is being used
             if improved_force_tool:
                 force_tool = improved_force_tool
                 print(f"   [FORCE] Using tool from priority detection: {force_tool}")
-                # Skip to tool execution
             elif is_greeting:
                 print("   [SKIP] Greeting detected - no tool needed")
-                force_tool = None  # Let model respond naturally
-
-            # PRIORITY 1: Music and visualizer (very specific keywords)
-            elif wants_visualizer:
-                force_tool = "music_visualizer"
-                print("   [FORCE] Forcing music_visualizer")
-            elif wants_music_play:
-                force_tool = "play_music"
-                print("   [FORCE] Forcing play_music")
-            elif wants_music_control:
-                force_tool = "control_music"
-                print("   [FORCE] Forcing control_music")
-
-            # PRIORITY 2: JavaScript/code execution (explicit tool mention)
-            elif wants_javascript:
-                force_tool = "run_javascript"
-                print("   [FORCE] Forcing run_javascript")
-
-            # PRIORITY 3A: Document RETRIEVAL (reading a specific document)
-            elif wants_document_retrieval:
-                force_tool = "search_documents"
-                print("   [FORCE] Forcing search_documents (retrieval mode - user wants to read specific document)")
-
-            # PRIORITY 3B: Document SEARCH (searching within documents)
-            elif wants_document_search:
-                force_tool = "search_documents"
-                print("   [FORCE] Forcing search_documents (search mode - user wants to find info in documents)")
-
-            # PRIORITY 3C: Document creation (user wants to create/save files)
-            elif wants_create_document:
-                force_tool = "create_document"
-                print("   [FORCE] Forcing create_document")
-
-            # PRIORITY 3D: Gmail READ (user wants to check/read email)
-            elif wants_gmail_read:
-                force_tool = "read_gmail"
-                print("   [FORCE] Forcing read_gmail (check email inbox)")
-
-            # PRIORITY 3E: Gmail SEND (user wants to send email)
-            elif wants_gmail_send:
-                force_tool = "send_gmail"
-                print("   [FORCE] Forcing send_gmail (send email)")
-
-            # PRIORITY 3F: Gmail REPLY (user wants to reply to emails)
-            elif wants_gmail_reply:
-                # SPECIAL FANMAIL WORKFLOW: Force read first if this is a fanmail reply and they haven't read it yet
-                if wants_fanmail_reply and not fanmail_has_been_read:
-                    force_tool = "read_gmail"
-                    print("   [FORCE] Forcing read_gmail FIRST (must read fanmail before replying!)")
-                    print("   [INFO] Fanmail reply detected - enforcing two-step workflow")
-                else:
-                    force_tool = "reply_gmail"
-                    print("   [FORCE] Forcing reply_gmail (reply to emails)")
-
-            # PRIORITY 4: Browse website (explicit URL navigation) - AFTER documents
-            elif wants_browse:
-                force_tool = "browse_website"
-                print("   [FORCE] Forcing browse_website")
-
-            # PRIORITY 5: Light control
-            elif wants_lights:
-                force_tool = "control_lights"
-                print("   [FORCE] Forcing control_lights")
-
-            # PRIORITY 6: Weather (specific and clear)
-            elif wants_weather and not wants_web_search:
-                force_tool = "get_weather"
-                print("   [FORCE] Forcing get_weather")
-
-            # PRIORITY 7: Web search (explicit search requests, but not if other tools requested)
-            elif wants_web_search and not wants_document_search and not wants_document_retrieval and not wants_javascript:
-                force_tool = "web_search"
-                print("   [FORCE] Forcing web_search")
-
-            # PRIORITY 8: Questions that likely need current info
-            elif is_question and not is_greeting:
-                # Check if it's about user's documents (must be specific, not just "my friend" etc)
-                doc_phrases = [
-                    'my document', 'my file', 'my contract', 'my pdf', 'my upload',
-                    'our document', 'our file', 'our contract',
-                    'in the document', 'in my document', 'in the file',
-                    'according to my', 'what does my contract', 'what does my file'
-                ]
-                if any(phrase in last_user_message.lower() for phrase in doc_phrases):
-                    force_tool = "search_documents"  # Force when asking about user content
-                    print("   [FORCE] Question about user content - forcing search_documents")
-                # Check if it's asking about current events/news (more specific patterns)
-                # Avoid triggering on casual greetings like "how are you today"
-                elif (
-                    ('latest' in last_user_message.lower() and ('news' in last_user_message.lower() or 'update' in last_user_message.lower())) or
-                    ('what happened' in last_user_message.lower() and not 'dream' in last_user_message.lower()) or
-                    ('who won' in last_user_message.lower()) or
-                    ('current events' in last_user_message.lower()) or
-                    ('breaking news' in last_user_message.lower()) or
-                    ('recent news' in last_user_message.lower())
-                ):
-                    force_tool = "web_search"
-                    print("   [FORCE] Current info question - forcing web_search")
-                # General knowledge questions and greetings don't need tools
-                else:
-                    print("   [ALLOW] General knowledge/conversational - no tool forced")
+                force_tool = None
             else:
                 print("   [ALLOW] No clear tool intent - letting model decide")
 
-        # CRITICAL FIX: After iteration 2, add a system override to FORCE a text response
-        if iteration > 2:
-            print(f"   [LIMIT] Iteration {iteration} - forcing final response without tools")
+        # Carry over a force_tool set by the previous iteration's hallucination
+        # detector — this MUST run with tools enabled, otherwise the retry is
+        # pointless. Bypasses the no-tools cap below.
+        if pending_force_tool:
+            force_tool = pending_force_tool
+            pending_force_tool = None
+            print(f"   [HALLUCINATION-RETRY] Forcing {force_tool} with tools enabled")
+        # After iteration 1, force text-only responses (no tools) to avoid
+        # extra LLM round-trips — UNLESS we're retrying a hallucinated action,
+        # in which case the whole point is to actually call the tool.
+        elif iteration >= 2:
+            print(f"   [LIMIT] Iteration {iteration} - forcing response without tools")
             conversation_messages.append({
                 "role": "user",
-                "content": "[SYSTEM OVERRIDE: You MUST respond with plain text now. NO more tool calls. Answer the user's question directly based on the information you already have. If you don't have enough information, just say so. Stop calling tools immediately.]"
+                "content": "[Respond now using the tool results above. No more tool calls.]"
             })
+            response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration)
+            if not response:
+                return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
+            return response
 
         response = call_lm_studio(conversation_messages, include_tools=True, force_tool=force_tool, iteration=iteration)
 
@@ -6646,289 +7910,20 @@ def process_with_tools(messages: List[Dict]) -> Dict:
             content = assistant_message.get("content", "")
 
             # Check if model should have used a tool but didn't
-            if iteration == 1:
-                should_have_used_tool = False
-                correct_tool = None
+            if iteration == 1 and improved_force_tool:
+                correct_tool = improved_force_tool
+                print(f"   [ERROR] Model answered without using {correct_tool} tool!")
 
-                # Music requests should ALWAYS use tools
-                if wants_music_play and 'play_music' not in content.lower():
-                    should_have_used_tool = True
-                    correct_tool = "play_music"
-                    print(f"   [ERROR] Model answered music request without play_music tool!")
-
-                elif wants_music_control and 'control_music' not in content.lower():
-                    should_have_used_tool = True
-                    correct_tool = "control_music"
-                    print(f"   [ERROR] Model answered music control without control_music tool!")
-
-                # Visualizer requests should ALWAYS use tools
-                elif wants_visualizer:
-                    should_have_used_tool = True
-                    correct_tool = "music_visualizer"
-                    print(f"   [ERROR] Model answered visualizer request without music_visualizer tool!")
-
-                # Explicit search requests should ALWAYS search
-                elif 'search for' in last_user_message.lower() or 'google' in last_user_message.lower():
-                    should_have_used_tool = True
-                    correct_tool = "web_search"
-                    print(f"   [ERROR] Model answered explicit search without web_search tool!")
-
-                # Document questions: force tool when explicitly asked
-                elif wants_document_retrieval or wants_document_search:
-                    should_have_used_tool = True
-                    correct_tool = "search_documents"
-                    if wants_document_retrieval:
-                        print(f"   [INFO] Document retrieval request -> forcing search_documents")
-                    else:
-                        print(f"   [INFO] Document search request -> forcing search_documents")
-                # Weather requests should use weather tool
-                elif wants_weather and not wants_web_search:
-                    should_have_used_tool = True
-                    correct_tool = "get_weather"
-                    print(f"   [ERROR] Model answered weather without get_weather tool!")
-
-                # Light control should use light tool
-                elif wants_lights and not wants_visualizer:
-                    should_have_used_tool = True
-                    correct_tool = "control_lights"
-                    print(f"   [ERROR] Model answered light control without control_lights tool!")
-
-                # Document creation requests should use create_document tool
-                elif wants_create_document:
-                    should_have_used_tool = True
-                    correct_tool = "create_document"
-                    print(f"   [ERROR] Model answered document creation without create_document tool!")
-
-                # Gmail READ requests should ALWAYS use read_gmail
-                elif wants_gmail_read:
-                    should_have_used_tool = True
-                    correct_tool = "read_gmail"
-                    print(f"   [ERROR] Model answered email check without read_gmail tool!")
-
-                # Gmail SEND requests should ALWAYS use send_gmail
-                elif wants_gmail_send:
-                    should_have_used_tool = True
-                    correct_tool = "send_gmail"
-                    print(f"   [ERROR] Model answered email send without send_gmail tool!")
-
-                # Gmail REPLY requests should ALWAYS use reply_gmail
-                elif wants_gmail_reply:
-                    should_have_used_tool = True
-                    correct_tool = "reply_gmail"
-                    print(f"   [ERROR] Model answered email reply without reply_gmail tool!")
-
-                # Browse requests should use browse_website tool
-                elif wants_browse:
-                    should_have_used_tool = True
-                    correct_tool = "browse_website"
-                    print(f"   [ERROR] Model answered browse request without browse_website tool!")
-
-                # Force the correct tool if model skipped it
-                if should_have_used_tool and correct_tool:
-                    print(f"   [RETRY] Forcing {correct_tool} and retrying...")
-                    # Create a tool call manually
-                    tool_args = {}
-                    if correct_tool == "play_music":
-                        # Extract what to play from the message
-                        tool_args = {"query": last_user_message.replace("play", "").strip()[:100]}
-                    elif correct_tool == "control_music":
-                        # Detect the action
-                        msg_lower = last_user_message.lower()
-                        if 'pause' in msg_lower or 'stop' in msg_lower:
-                            tool_args = {"action": "pause"}
-                        elif 'resume' in msg_lower or 'unpause' in msg_lower:
-                            tool_args = {"action": "resume"}
-                        elif 'next' in msg_lower or 'skip' in msg_lower:
-                            tool_args = {"action": "next"}
-                        elif 'previous' in msg_lower or 'back' in msg_lower:
-                            tool_args = {"action": "previous"}
-                        elif 'volume up' in msg_lower or 'louder' in msg_lower or 'turn up' in msg_lower:
-                            tool_args = {"action": "volume_up"}
-                        elif 'volume down' in msg_lower or 'quieter' in msg_lower or 'turn down' in msg_lower:
-                            tool_args = {"action": "volume_down"}
-                        elif 'mute' in msg_lower:
-                            tool_args = {"action": "mute"}
-                        else:
-                            tool_args = {"action": "pause"}  # default
-                    elif correct_tool == "music_visualizer":
-                        tool_args = {"action": "start", "duration": 300, "style": "party"}
-                    elif correct_tool == "web_search":
-                        query = last_user_message.replace("search for", "").replace("google", "").strip()
-                        tool_args = {"query": query[:100]}
-                    elif correct_tool == "search_documents":
-                        if AUTO_DOCSEARCH_MODE == "aggressive":
-                            tool_args = {"query": last_user_message[:100]}
-                        else:
-                            tool_args = None  # do not auto-search in opt-in mode
-                    elif correct_tool == "get_weather":
-                        # Extract location
-                        words = last_user_message.split()
-                        location = next((w for w in words if w[0].isupper() and len(w) > 2), "Toronto")
-                        tool_args = {"location": location}
-                    elif correct_tool == "control_lights":
-                        # Try to detect action
-                        msg_lower = last_user_message.lower()
-                        if 'on' in msg_lower and 'turn' in msg_lower:
-                            tool_args = {"action": "on"}
-                        elif 'off' in msg_lower and 'turn' in msg_lower:
-                            tool_args = {"action": "off"}
-                        elif any(mood in msg_lower for mood in MOOD_PRESETS.keys()):
-                            mood = next(m for m in MOOD_PRESETS.keys() if m in msg_lower)
-                            tool_args = {"action": "mood", "mood": mood}
-                        else:
-                            tool_args = {"action": "status"}
-                    elif correct_tool == "create_document":
-                        # Create filename and placeholder content
-                        msg_lower = last_user_message.lower()
-                        # Try to extract a filename or type
-                        if 'shopping' in msg_lower:
-                            filename = "shopping_list.txt"
-                            content = "Shopping List:\n\n[Items will be added here]"
-                        elif 'todo' in msg_lower or 'to-do' in msg_lower or 'to do' in msg_lower:
-                            filename = "todo_list.txt"
-                            content = "To-Do List:\n\n[Tasks will be added here]"
-                        elif 'recipe' in msg_lower:
-                            filename = "recipe.txt"
-                            content = "Recipe:\n\n[Recipe details will be added here]"
-                        elif 'notes' in msg_lower or 'note' in msg_lower:
-                            filename = "notes.txt"
-                            content = "Notes:\n\n[Content will be added here]"
-                        else:
-                            filename = "document.txt"
-                            content = "[Document content]"
-
-                        file_type = "txt"
-                        if '.md' in msg_lower or 'markdown' in msg_lower:
-                            file_type = "md"
-                            filename = filename.replace('.txt', '.md')
-
-                        tool_args = {"filename": filename, "content": content, "file_type": file_type}
-                    elif correct_tool == "browse_website":
-                        # Extract URL from message
-                        import re
-                        url_match = re.search(r'https?://\S+', last_user_message)
-                        if url_match:
-                            url = url_match.group(0)
-                        else:
-                            # Look for www.domain.com pattern
-                            www_match = re.search(r'www\.\S+', last_user_message)
-                            if www_match:
-                                url = "https://" + www_match.group(0)
-                            else:
-                                # Look for domain.com pattern
-                                domain_match = re.search(r'\b(\w+\.(com|org|net|edu|gov|io|co))\b', last_user_message.lower())
-                                if domain_match:
-                                    url = "https://" + domain_match.group(0)
-                                else:
-                                    url = "https://example.com"  # fallback
-
-                        tool_args = {"url": url, "extract": "text", "include_links": True}
-
-                    elif correct_tool == "read_gmail":
-                        # Extract query parameters from message
-                        query = ""
-                        max_results = 10
-                        include_body = False
-
-                        msg_lower = last_user_message.lower()
-
-                        # Check for specific search terms
-                        if "unread" in msg_lower:
-                            query = "is:unread"
-                        elif "from" in msg_lower:
-                            # Try to extract sender
-                            import re
-                            from_match = re.search(r'from\s+([^\s,]+)', msg_lower)
-                            if from_match:
-                                query = f"from:{from_match.group(1)}"
-                        elif "about" in msg_lower or "subject" in msg_lower:
-                            # Try to extract subject
-                            subject_match = re.search(r'(?:about|subject)\s+([^\s,]+)', msg_lower)
-                            if subject_match:
-                                query = f"subject:{subject_match.group(1)}"
-
-                        # Check if they want full content
-                        if any(word in msg_lower for word in ["full", "entire", "complete", "content", "body"]):
-                            include_body = True
-
-                        tool_args = {"query": query, "max_results": max_results, "include_body": include_body}
-
-                    elif correct_tool == "send_gmail":
-                        # Extract email components from message
-                        to_address = extract_email_address(last_user_message)
-                        subject, body = extract_email_subject_and_body(last_user_message)
-
-                        if not to_address:
-                            # If no email found, try to get it from the message context
-                            # Default to a placeholder that will show error
-                            to_address = "MISSING_ADDRESS@example.com"
-
-                        tool_args = {
-                            "to": to_address,
-                            "subject": subject,
-                            "body": body
-                        }
-                        print(f"   [EMAIL] Extracted: to={to_address}, subject={subject}")
-
-                    elif correct_tool == "reply_gmail":
-                        # Extract query and reply body
-                        query = ""
-                        reply_body = ""
-
-                        msg_lower = last_user_message.lower()
-
-                        # Look for what to reply to
-                        if "fanmail" in msg_lower:
-                            query = "subject:Fanmail"
-                        elif "unread" in msg_lower:
-                            query = "is:unread"
-                        elif "from" in msg_lower:
-                            import re
-                            from_match = re.search(r'from\s+([^\s,]+)', msg_lower)
-                            if from_match:
-                                query = f"from:{from_match.group(1)}"
-
-                        # Extract reply message
-                        reply_patterns = [
-                            r'(?:reply|respond|say|write|tell them)[:\s]+(.+)',
-                            r'(?:saying|message)[:\s]+(.+)',
-                        ]
-                        import re
-                        for pattern in reply_patterns:
-                            reply_match = re.search(pattern, last_user_message, re.IGNORECASE)
-                            if reply_match:
-                                reply_body = reply_match.group(1).strip().strip('"\'')
-                                break
-
-                        if not reply_body:
-                            reply_body = "Thank you for your message!"
-
-                        tool_args = {
-                            "query": query,
-                            "reply_body": reply_body,
-                            "reply_all": False
-                        }
-                        print(f"   [EMAIL] Reply: query={query}, body={reply_body[:50]}...")
-
-                    if tool_args is not None:
-                        # Execute the tool
-                        tool_result = execute_tool(correct_tool, tool_args)
-                        conversation_messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [{"id": "forced", "type": "function", "function": {"name": correct_tool, "arguments": json.dumps(tool_args)}}]
-                        })
-                        conversation_messages.append({
-                            "role": "tool",
-                            "tool_call_id": "forced",
-                            "name": correct_tool,
-                            "content": tool_result
-                        })
-                        continue
+                # Use selector's extracted params if available, otherwise let LLM retry
+                tool_args = improved_tool_args if improved_tool_args is not None else {}
+                if tool_args is not None:
+                    print(f"   [RETRY] Direct-executing {correct_tool} with extracted params")
+                    tool_result = execute_tool(correct_tool, tool_args)
                     conversation_messages.append({
                         "role": "assistant",
                         "content": "",
-                        "tool_calls": [{"id": "forced", "type": "function", "function": {"name": correct_tool, "arguments": json.dumps(tool_args)}}]
+                        "tool_calls": [{"id": "forced", "type": "function",
+                                       "function": {"name": correct_tool, "arguments": json.dumps(tool_args)}}]
                     })
                     conversation_messages.append({
                         "role": "tool",
@@ -6951,60 +7946,40 @@ def process_with_tools(messages: List[Dict]) -> Dict:
                 conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
                 continue
 
-            # CRITICAL FIX: Detect if model is denying tool capabilities after successfully using them
-            if iteration > 1:  # Only check after first iteration (after tools have been used)
-                denial_phrases = [
-                    "can't access", "cannot access", "don't have access", "no access to",
-                    "unable to access", "not able to access", "can't browse", "cannot browse",
-                    "can't visit", "cannot visit", "no links", "no pages", "can't reach",
-                    "unable to browse", "unable to visit", "don't have the ability to",
-                    "i'm here with you", "just us"
-                ]
+            # Check if model is claiming to have performed an action it
+            # didn't actually call a tool for ("I sent the email", "I turned
+            # off the lights", etc.). Stops the worst class of confabulation:
+            # user thinks an email was sent when nothing happened.
+            hallucinated_tool = detect_hallucinated_action(content)
+            if hallucinated_tool and not force_tool:
+                print(f"   [WARN] AI claimed to {hallucinated_tool} but no tool called — forcing retry")
+                # Replace the lying response with a marker that tells the
+                # next iteration "you said you did this, now actually do it"
+                # via a forced tool call. The carryover variable survives the
+                # loop's `force_tool = None` reset AND the no-tools cap.
+                conversation_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Wait — you said you performed that action, but you "
+                        f"didn't actually call any tool. Use the {hallucinated_tool} "
+                        f"tool now to actually do it. Get the recipient, subject, "
+                        f"and body from the recent conversation."
+                    ),
+                })
+                pending_force_tool = hallucinated_tool
+                continue
 
-                # ADDED: Filler phrases - model acknowledges tool but doesn't use results
-                filler_phrases = [
-                    "working on", "just a moment", "let me", "i'll", "i will",
-                    "give me a moment", "one moment", "accessing now", "trying to",
-                    "attempting to", "in progress", "loading"
-                ]
-
-                # ADDED: Hallucinated error phrases - model claims failure when tool succeeded
-                hallucinated_error_phrases = [
-                    "browser initialization failed", "initialization failed", "could not be accessed",
-                    "access failed", "connection failed", "unable to reach", "failed to connect",
-                    "error accessing", "error connecting", "access denied", "request failed"
-                ]
-
+            # Detect if model is denying tool capabilities after tools succeeded
+            if iteration > 1:
                 content_lower = content.lower()
+                denial_phrases = [
+                    "can't access", "cannot access", "don't have access",
+                    "unable to access", "can't browse", "cannot browse",
+                ]
                 is_denial = any(phrase in content_lower for phrase in denial_phrases)
-                is_filler = any(phrase in content_lower for phrase in filler_phrases)
-                is_hallucinated_error = any(phrase in content_lower for phrase in hallucinated_error_phrases)
 
-                # Check if response is too short to contain actual results
-                is_too_short = len(content.strip()) < 100
-
-                # Check if the tool actually succeeded by looking at the last tool result
-                tool_actually_succeeded = False
-                if is_hallucinated_error:
-                    # Check the last tool result to see if it actually succeeded
-                    for msg in reversed(conversation_messages):
-                        if msg.get("role") == "tool":
-                            try:
-                                result_obj = json.loads(msg.get("content", "{}"))
-                                tool_actually_succeeded = result_obj.get("success", False)
-                            except Exception:
-                                pass
-                            break
-
-                if is_denial or (is_filler and is_too_short) or (is_hallucinated_error and tool_actually_succeeded):
-                    if is_hallucinated_error and tool_actually_succeeded:
-                        reason = "hallucinating an error when the tool actually succeeded"
-                    elif is_denial:
-                        reason = "denying tool capabilities"
-                    else:
-                        reason = "giving filler response instead of using tool results"
-                    print(f"   [FIX] Model is {reason} - FORCING ACKNOWLEDGMENT")
-
+                if is_denial:
+                    print(f"   [FIX] Model denying tool capabilities - forcing acknowledgment")
                     # Find the most recent tool result
                     last_tool_result = None
                     last_tool_name = None
@@ -7015,76 +7990,21 @@ def process_with_tools(messages: List[Dict]) -> Dict:
                             break
 
                     if last_tool_result and last_tool_name:
-                        # Parse the tool result to give better feedback
-                        tool_succeeded = False
-                        tool_summary = ""
-
-                        try:
-                            result_obj = json.loads(last_tool_result)
-                            # FIXED: Default to True if success field is missing (backwards compatible)
-                            tool_succeeded = result_obj.get("success", True)
-
-                            # FIXED: Even if success is False, check if there's actual content
-                            # This handles tools that don't set success field properly
-                            if not tool_succeeded and (result_obj.get("text") or result_obj.get("results")):
-                                tool_succeeded = True
-
-                            if tool_succeeded:
-                                if last_tool_name == "browse_website":
-                                    text_content = result_obj.get("text", "")[:500]
-                                    url = result_obj.get("url", "")
-                                    tool_summary = f"Successfully fetched {url}. Content preview:\n{text_content}"
-                                elif last_tool_name == "web_search":
-                                    # FIXED: Handle new JSON format properly
-                                    results = result_obj.get("results", [])
-                                    if results:
-                                        tool_summary = f"Search completed. Found {len(results)} results:\n"
-                                        for i, res in enumerate(results[:3], 1):
-                                            tool_summary += f"{i}. {res.get('title', 'Untitled')}\n   {res.get('snippet', '')[:100]}\n"
-                                    else:
-                                        tool_summary = last_tool_result[:500]
-                                else:
-                                    tool_summary = last_tool_result[:500]
-                            else:
-                                error_msg = result_obj.get("error", "Unknown error")
-                                tool_summary = f"Tool failed with error: {error_msg}"
-                        except json.JSONDecodeError:
-                            # FIXED: If it's not JSON, assume it's successful text output
-                            tool_succeeded = True if last_tool_result.strip() else False
-                            tool_summary = last_tool_result[:500]
-
-                        # Add a STRONG instruction message forcing the model to use the results
-                        if tool_succeeded:
-                            correction_msg = (
-                                f"STOP. The {last_tool_name} tool ALREADY FINISHED executing and was SUCCESSFUL. "
-                                f"DO NOT say 'I'm working on it' or 'just a moment' - the tool ALREADY completed!\n\n"
-                                f"Here are the actual results:\n\n{tool_summary}\n\n"
-                                f"Now, IMMEDIATELY use this information to answer the question. "
-                                f"Do NOT say you're 'trying to access' or 'working on accessing' - you ALREADY accessed it successfully! "
-                                f"Just tell me what you found in the results above."
-                            )
-                        else:
-                            correction_msg = (
-                                f"The {last_tool_name} tool executed but encountered an error:\n\n{tool_summary}\n\n"
-                                f"Tell the user about this error clearly and honestly. "
-                                f"Do NOT make up fake error messages like 'browser initialization failed' - use the ACTUAL error message above."
-                            )
-
                         conversation_messages.append({
                             "role": "user",
-                            "content": correction_msg
+                            "content": (
+                                f"The {last_tool_name} tool already completed successfully. "
+                                f"Results: {last_tool_result[:500]}\n\n"
+                                f"Use these results to answer. Do not say you can't access anything."
+                            )
                         })
-                        print(f"   [RETRY] Added correction message to force model to use {last_tool_name} results")
-                        continue  # Loop back to get a new response
+                        print(f"   [RETRY] Added correction for {last_tool_name}")
+                        continue
 
-            # Check for repetition against conversation history (just log it, don't retry)
+            # Auto-save visual observation if this response was about an image
             content = assistant_message.get("content", "")
-            if content:
-                dedup_check = check_response_against_history(content, conversation_messages)
-                if dedup_check['is_duplicate']:
-                    print(f"   [INFO] Response similarity: {dedup_check['similarity_score']:.2f} (high but accepting for speed)")
-                elif dedup_check['similarity_score'] > 0.5:
-                    print(f"   [INFO] Response similarity: {dedup_check['similarity_score']:.2f} (acceptable)")
+            if _last_vision_image_paths and content:
+                _save_visual_observation(content)
 
             print("[OK] Response complete (no tool calls)")
             return response
@@ -7109,84 +8029,29 @@ def process_with_tools(messages: List[Dict]) -> Dict:
                 "content": tool_result
             })
 
-            # CRITICAL FIX (Oct 2024): Add operation-specific reminders for Gmail operations
-            # This prevents Blue from confusing READ with REPLY operations
-            if function_name == "read_gmail":
+            # Gmail operation reminders (prevents confusing read/reply/send)
+            _gmail_reminders = {
+                "read_gmail": "[You just READ emails. Summarize what you found. Don't say you replied or sent.]",
+                "reply_gmail": "[You just REPLIED to emails. Confirm what you did.]",
+                "send_gmail": "[You just SENT an email. Confirm what you did.]",
+            }
+            if function_name in _gmail_reminders:
                 try:
                     result_data = json.loads(tool_result)
                     if result_data.get("success"):
-                        reminder = (
-                            "[OPERATION COMPLETE: You just READ/CHECKED emails. "
-                            "The user asked you to READ or CHECK their inbox, NOT to reply or send. "
-                            "Now summarize what emails you found. "
-                            "Do NOT say you 'replied' or 'sent' anything - you only READ the emails!]"
-                        )
-                        conversation_messages.append({
-                            "role": "user",
-                            "content": reminder
-                        })
-                        print("   [INFO] Added READ operation reminder to prevent confusion")
+                        reminder = _gmail_reminders[function_name]
+                        # Fanmail: add personalized reply hint
+                        if function_name == "read_gmail" and "fanmail" in str(function_args).lower() and result_data.get("emails"):
+                            reminder += " Compose a personalized reply referencing specific details from their message."
+                        conversation_messages.append({"role": "user", "content": reminder})
                 except Exception:
                     pass
 
-            elif function_name == "reply_gmail":
-                try:
-                    result_data = json.loads(tool_result)
-                    if result_data.get("success"):
-                        reminder = (
-                            "[OPERATION COMPLETE: You just REPLIED to emails. "
-                            "The user asked you to REPLY or RESPOND, and you successfully did so. "
-                            "Now confirm what you did. "
-                            "Do NOT say you only 'read' or 'checked' - you actually REPLIED to the emails!]"
-                        )
-                        conversation_messages.append({
-                            "role": "user",
-                            "content": reminder
-                        })
-                        print("   [INFO] Added REPLY operation reminder")
-                except Exception:
-                    pass
-
-            elif function_name == "send_gmail":
-                try:
-                    result_data = json.loads(tool_result)
-                    if result_data.get("success"):
-                        reminder = (
-                            "[OPERATION COMPLETE: You just SENT a new email. "
-                            "The user asked you to SEND an email, and you successfully did so. "
-                            "Now confirm what you did.]"
-                        )
-                        conversation_messages.append({
-                            "role": "user",
-                            "content": reminder
-                        })
-                        print("   [INFO] Added SEND operation reminder")
-                except Exception:
-                    pass
-
-            # Special handling: If this was read_gmail for fanmail, add a reminder to reply with specific content
-            if function_name == "read_gmail" and "fanmail" in str(function_args).lower():
-                try:
-                    result_data = json.loads(tool_result)
-                    if result_data.get("success") and result_data.get("emails"):
-                        # Add a system reminder about replying to the specific content
-                        conversation_messages.append({
-                            "role": "user",
-                            "content": "[SYSTEM REMINDER: You just read the fanmail content above. Now compose a personalized reply that SPECIFICALLY addresses what the sender wrote. Reference details from their message in your reply. Do NOT send a generic 'thank you' - make it personal and contextual!]"
-                        })
-                        print("   [INFO] Added fanmail reply reminder to conversation")
-                except Exception:
-                    pass
-
-        # CRITICAL FIX: After executing all tools, add a STRONG reminder to respond and loop back
-        # This prevents the model from calling more unnecessary tools
         if iteration == 1:
-            # After first tool execution, FORCE model to respond with the information
             conversation_messages.append({
                 "role": "user",
-                "content": "[CRITICAL INSTRUCTION: STOP calling tools. The tool above has provided all the information you need. Your ONLY job now is to answer the user's original question in a natural, conversational way using the tool results above. DO NOT call create_note, create_document, remember_person, set_timer, or ANY other tool. Just respond naturally to the user.]"
+                "content": "[Answer the user naturally using the tool results above. Do not call more tools.]"
             })
-            print(f"   [REMIND] Added STRONG response reminder after iteration 1 tool execution")
 
         # CRITICAL FIX: After executing all tools, loop back to get the model's response to the tool results
         # Without this continue, the code falls through to the error return statement below
@@ -7546,9 +8411,13 @@ def manage_documents():
                 message_type = "error"
             else:
                 try:
-                    # Secure the filename
+                    # Secure the filename and route by file type
                     filename = secure_filename(file.filename)
-                    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+                    if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html', 'pptx', 'xlsx'):
+                        filepath = os.path.join(DOCUMENTS_FOLDER, filename)
+                    else:
+                        filepath = os.path.join(str(UPLOAD_FOLDER), filename)
 
                     # Save the file
                     file.save(filepath)
@@ -7578,6 +8447,21 @@ def manage_documents():
                             break
 
                     if not duplicate:
+                        # Index in local ChromaDB RAG
+                        local_rag_success = False
+                        try:
+                            from blue.tools.rag import index_document as rag_index
+                            ext_check = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+                            if ext_check in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html'):
+                                rag_result = rag_index(filepath, filename, doc_id=file_hash)
+                                local_rag_success = rag_result.get('success', False)
+                                if local_rag_success:
+                                    print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks for {filename}")
+                        except ImportError:
+                            print("   [WARN] ChromaDB not installed, skipping local RAG index")
+                        except Exception as e:
+                            print(f"   [WARN] Local RAG indexing error: {e}")
+
                         index['documents'].append({
                             'filename': filename,
                             'filepath': str(filepath),
@@ -7585,7 +8469,7 @@ def manage_documents():
                             'hash': file_hash,
                             'uploaded_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
                             'text_preview': text_preview,
-                            'indexed_in_rag': rag_success
+                            'indexed_in_rag': rag_success or local_rag_success
                         })
                         save_document_index(index)
 
@@ -7598,7 +8482,7 @@ def manage_documents():
 
     # Load documents for display
     index = load_document_index()
-    documents = index.get('documents', [])
+    documents = [doc for doc in index.get('documents', []) if not doc.get('camera_capture', False)]
 
     # Calculate stats
     total_size_bytes = sum(doc.get('size', 0) for doc in documents)
@@ -7641,6 +8525,12 @@ def delete_document(filename):
                 filepath = doc['filepath']
                 if os.path.exists(filepath):
                     os.remove(filepath)
+                # Remove from ChromaDB RAG
+                try:
+                    from blue.tools.rag import remove_document
+                    remove_document(doc.get('hash', ''))
+                except Exception:
+                    pass
                 deleted = True
             else:
                 updated_documents.append(doc)
@@ -7666,9 +8556,15 @@ def download_document(filename):
 
         # Security: Make sure filename is safe
         filename = secure_filename(filename)
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        # Check all folders for the file
+        filepath = None
+        for folder in [str(UPLOAD_FOLDER), DOCUMENTS_FOLDER, CAMERA_FOLDER]:
+            candidate = os.path.join(folder, filename)
+            if os.path.exists(candidate):
+                filepath = candidate
+                break
 
-        if not os.path.exists(filepath):
+        if not filepath:
             return "File not found", 404
 
         return send_file(
@@ -7684,20 +8580,284 @@ def download_document(filename):
 
 # ===== Conversation Persistence Functions =====
 
+def _normalize_message_alternation(messages: list) -> list:
+    """Normalize the message list to satisfy strict chat templates.
+
+    Qwen and several other models render prompts via Jinja templates that
+    require:
+      1. All system messages at the start, in order.
+      2. After system, conversation begins with a user turn.
+      3. user/assistant strictly alternate (no consecutive user-user or
+         assistant-assistant pairs).
+      4. The last message is typically user (so the model has a query).
+
+    Our sanitizer drops stale assistant turns, which can produce orphan
+    leading assistants ("first non-system is assistant") or consecutive
+    user turns ("user, user, user"). Both make Qwen return 400 with
+    "No user query found in messages".
+
+    Strategy:
+      - Keep all system messages at the front, content order preserved.
+      - Drop any leading assistant turns before the first user.
+      - Merge consecutive same-role turns into a single message
+        (concatenate content with a blank-line separator).
+    """
+    if not messages:
+        return messages
+
+    # Partition: leading system messages stay; everything else gets normalized.
+    sys_block, rest = [], []
+    for m in messages:
+        if m.get("role") == "system" and not rest:
+            sys_block.append(m)
+        else:
+            rest.append(m)
+
+    # Drop any assistant messages before the first user turn — they're
+    # orphans with no preceding user query.
+    first_user_idx = next(
+        (i for i, m in enumerate(rest) if m.get("role") == "user"), -1
+    )
+    if first_user_idx == -1:
+        # No user message at all. Add a placeholder so the template doesn't
+        # blow up; better than 400.
+        return sys_block + [{"role": "user", "content": "(continue)"}]
+    rest = rest[first_user_idx:]
+
+    # Merge consecutive same-role turns. For text content we concatenate;
+    # for list content (vision payloads) we just keep the latest one to
+    # avoid reordering image placeholders.
+    merged: list = []
+    for m in rest:
+        if not merged or merged[-1].get("role") != m.get("role"):
+            merged.append(dict(m))
+            continue
+        # Same role as previous — merge.
+        prev = merged[-1]
+        prev_content = prev.get("content")
+        cur_content = m.get("content")
+        if isinstance(prev_content, str) and isinstance(cur_content, str):
+            prev["content"] = (prev_content.rstrip() + "\n\n" + cur_content.lstrip()).strip()
+        else:
+            # If either side is a list (vision payload), prefer the newer
+            # message intact rather than mangling structure.
+            merged[-1] = dict(m)
+
+    return sys_block + merged
+
+
+def _splice_context_after_system(messages: list, context: list) -> list:
+    """Merge injected context into the leading system message.
+
+    Earlier versions inserted each context item as its own system message.
+    That worked on permissive endpoints, but stricter chat templates
+    (notably the 35B Qwen and several other recent models) reject prompts
+    with multiple consecutive system messages and return 400 — taking down
+    the whole memory pipeline.
+
+    The fix: keep the structure simple — one leading system message with
+    everything concatenated. The text content of the injected blocks is
+    preserved verbatim (still wrapped in <known_facts>, <long_term_notes>,
+    etc.) so the model still sees the structured cues; only the message
+    boundaries collapse.
+    """
+    if not context:
+        return messages
+    if not messages:
+        # No existing system message — just emit a single system message
+        # built from the context, then the original (empty) tail.
+        merged = "\n\n".join(
+            (m.get("content") or "") for m in context if isinstance(m.get("content"), str)
+        ).strip()
+        return [{"role": "system", "content": merged}] if merged else messages
+
+    if messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+        existing_system = messages[0]
+        injected_text = "\n\n".join(
+            (m.get("content") or "") for m in context if isinstance(m.get("content"), str)
+        ).strip()
+        if not injected_text:
+            return messages
+        merged_content = f"{existing_system['content'].rstrip()}\n\n{injected_text}"
+        new_system = {"role": "system", "content": merged_content}
+        return [new_system] + messages[1:]
+
+    # No leading system message — prepend one built from the context.
+    injected_text = "\n\n".join(
+        (m.get("content") or "") for m in context if isinstance(m.get("content"), str)
+    ).strip()
+    if not injected_text:
+        return messages
+    return [{"role": "system", "content": injected_text}] + messages
+
+
+# Words a model often emits when admitting it doesn't know something.
+# Past assistant turns with these phrases are toxic to keep in the prompt:
+# the next-turn model sees them and confidently repeats the same wrong answer.
+_ASSISTANT_REFUSAL_MARKERS = (
+    "i don't have", "i do not have", "i dont have",
+    "i don't know", "i do not know", "i dont know",
+    "i only have", "i only know",
+    "i haven't been told", "i havent been told",
+    "you haven't told me", "you havent told me",
+    "not in my memory", "not saved yet", "not yet recorded",
+    "i'm not sure", "im not sure",
+    # Self-deprecating "I have no memory" framings. These are especially
+    # toxic — they cause the next turn to claim ignorance even when the
+    # facts block has the answer.
+    "blank slate", "just woke up", "i just woke",
+    "haven't met", "havent met", "have not met",
+    "no information stored", "no information saved",
+    "memory is blank", "memory is currently blank",
+    "no details about", "no details on",
+    "haven't stored", "havent stored", "have not stored",
+    "my records are empty", "no records",
+    "i'm new here", "im new here",
+    "introduce yourself and",  # "Introduce yourself and the crew, and I'll remember"
+    "help me out? introduce", "please tell me",
+)
+
+
+def _sanitize_inbound_messages(messages: list) -> list:
+    """Strip past assistant turns that would mislead the model.
+
+    Two classes of toxic turns are removed:
+
+    1. **Refusals.** When Blue answered "I don't have that yet", that line
+       in the conversation history acts as authority — the next turn just
+       repeats it even when the canonical facts now contain the answer.
+
+    2. **Stale daughter names.** The Ohbot client sends the full session
+       history, including responses Blue gave before the facts table was
+       cleaned. If a past response said "Annie is your daughter", the model
+       reuses that name on the next turn — a strong AUTHORITATIVE system
+       instruction is not enough to override neighbouring text. We pull the
+       canonical names live from the `daughter_name` fact and drop any
+       assistant turn that mentions a *different* name in a daughter
+       relation.
+
+    The corresponding user turn is left alone, so the conversation flow
+    still reads naturally — the model just doesn't get to anchor on Blue's
+    earlier wrong answer.
+    """
+    if not messages:
+        return messages
+
+    canonical_daughter_names: set = set()
+    try:
+        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+            facts = memory_system.load_facts() or {}
+            raw = facts.get("daughter_name") or facts.get("daughter_names") or ""
+            for piece in re.split(r"[,|;]|\sand\s", raw):
+                piece = piece.strip()
+                if piece:
+                    canonical_daughter_names.add(piece.lower())
+    except Exception:
+        canonical_daughter_names = set()
+
+    # Strategy: split into sentences; for any sentence that mentions
+    # "daughter"/"daughters", look at the capitalized words in that sentence
+    # — those are likely names being asserted as daughters. If any of those
+    # names isn't canonical (and isn't a known non-name like "Got" or place
+    # names), the whole assistant turn is stale.
+    _sent_split = re.compile(r"(?<=[.!?])\s+")
+    _name_re = re.compile(r"\b([A-Z][a-z]{2,14})\b")
+    # Capitalized words that aren't names. Sentence-starters, days/months,
+    # places, and the user's known non-daughter family.
+    _safe_capitalized = {
+        "your", "you", "the", "this", "that", "they", "their", "them",
+        "blue", "stella", "alex", "nori", "mommy", "mom", "mama", "daddy",
+        "papa", "ohbot", "kitchener", "boston", "wilfrid", "laurier",
+        "doctor", "kci", "google", "gmail", "monday", "tuesday", "wednesday",
+        "thursday", "friday", "saturday", "sunday", "january", "february",
+        "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december",
+        # Common sentence starters and filler words that pass [A-Z][a-z]+
+        "got", "yes", "no", "ok", "okay", "sure", "thanks", "thank",
+        "here", "right", "well", "let", "so", "now", "still", "also",
+        "and", "but", "or", "for", "from", "with", "about", "what",
+        "who", "where", "when", "which", "how", "why",
+        "i", "i'm", "im", "ill",
+        "based", "currently", "earlier", "since", "if", "as",
+        "understood", "noted", "got", "great", "perfect",
+        "these", "those", "such", "any", "some", "only", "just",
+        # Typical visual-description words that look like names
+        "she", "he", "his", "hers", "her", "its",
+    }
+
+    out, dropped_refusal, dropped_wrong_name = [], 0, 0
+    for m in messages:
+        if m.get("role") != "assistant":
+            out.append(m)
+            continue
+        content = m.get("content", "")
+        if not isinstance(content, str) or not content.strip():
+            out.append(m)
+            continue
+
+        content_lower = content.lower()
+
+        # 1) Refusal pattern.
+        if any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS):
+            dropped_refusal += 1
+            continue
+
+        # 2) Stale daughter name: any sentence that contains "daughter"
+        # AND a non-canonical capitalized word makes the turn stale.
+        if canonical_daughter_names:
+            stale = False
+            for sentence in _sent_split.split(content):
+                if "daughter" not in sentence.lower():
+                    continue
+                names = {
+                    h.group(1).lower() for h in _name_re.finditer(sentence)
+                } - _safe_capitalized
+                wrong = names - canonical_daughter_names
+                if wrong:
+                    stale = True
+                    break
+            if stale:
+                dropped_wrong_name += 1
+                continue
+
+        out.append(m)
+
+    if dropped_refusal or dropped_wrong_name:
+        print(
+            f"   [SANITIZE] Dropped {dropped_refusal} refusal + "
+            f"{dropped_wrong_name} stale-name assistant turn(s) from inbound history"
+        )
+    return out
+
+
 def save_conversation_to_db(user_name: str, role: str, content: str,
                             session_id: str = None, tool_used: str = None):
     """Save a conversation message to the database for long-term memory"""
+    # Determine importance based on length and content
+    importance = 5  # Default
+    if len(content) > 500:
+        importance = 7  # Longer messages are more important
+    if any(keyword in content.lower() for keyword in ['remember', 'important', 'don\'t forget']):
+        importance = 8  # User explicitly wants to remember
+
+    # Save to enhanced memory system (primary)
+    if ENHANCED_MEMORY_AVAILABLE and memory_system:
+        try:
+            memory_system.log_conversation(
+                user_name=user_name,
+                role=role,
+                content=content,
+                session_id=session_id,
+                importance=importance,
+            )
+        except Exception as e:
+            log.warning(f"Enhanced memory log failed: {e}")
+
+    # Also save to legacy DB if available (backward compat)
     if not CONVERSATION_DB_AVAILABLE or not db:
         return
 
     try:
-        # Determine importance based on length and content
-        importance = 5  # Default
-        if len(content) > 500:
-            importance = 7  # Longer messages are more important
-        if any(keyword in content.lower() for keyword in ['remember', 'important', 'don\'t forget']):
-            importance = 8  # User explicitly wants to remember
-
         db.save_conversation(
             user_name=user_name,
             role=role,
@@ -7783,24 +8943,34 @@ def extract_ocf_facts(messages: list) -> str:
 
 
 def should_include_history(messages) -> bool:
-    """Determine if we should inject historical context"""
-    # Don't inject if already have a lot of context
-    if len(messages) > 10:
-        return False
+    """Determine if we should inject historical context.
 
-    # Inject if this is a new conversation (only 1-2 messages)
-    if len(messages) <= 2:
+    Old behaviour refused injection on long sessions (>10 messages), which
+    starved Blue of recall in exactly the conversations that needed it most.
+    New rule: inject unless the client already supplied a healthy in-flight
+    transcript AND the user isn't explicitly invoking past context."""
+    if not messages:
         return True
 
-    # Check if user is asking about past conversations
-    if messages:
-        last_msg = messages[-1].get('content', '').lower()
-        past_indicators = [
-            'remember', 'recall', 'what did', 'we discussed', 'talked about',
-            'mentioned', 'said before', 'last time', 'previously', 'earlier'
-        ]
-        if any(indicator in last_msg for indicator in past_indicators):
-            return True
+    non_system = [m for m in messages if m.get('role') != 'system']
+
+    # Always inject for fresh conversations (client only sent the latest turn).
+    if len(non_system) <= 4:
+        return True
+
+    # Always inject when the user is explicitly asking about prior context.
+    last_msg = (messages[-1].get('content', '') or '').lower()
+    past_indicators = (
+        'remember', 'recall', 'what did', 'we discussed', 'talked about',
+        'mentioned', 'said before', 'last time', 'previously', 'earlier',
+        'yesterday', 'the other day',
+    )
+    if any(indicator in last_msg for indicator in past_indicators):
+        return True
+
+    # Mid-length conversations: still inject, but the caller will trim.
+    if len(non_system) <= 12:
+        return True
 
     return False
 
@@ -7836,54 +9006,96 @@ def chat_completions():
 
             print(f"   [SPEAK]  User asked: {last_user_msg[:150]}..." if len(last_user_msg) > 150 else f"   [SPEAK]  User asked: {last_user_msg}")
 
-            # SAVE USER MESSAGE TO DATABASE
-            save_conversation_to_db(
-                user_name=user_name,
-                role="user",
-                content=last_user_msg,
-                session_id=None
-            )
+            # Save user message in background (don't block response)
+            import threading
+            threading.Thread(
+                target=save_conversation_to_db,
+                args=(user_name, "user", last_user_msg, None),
+                daemon=True
+            ).start()
 
-        # INJECT HISTORICAL CONTEXT IF NEEDED (IMPROVED)
-        if CONVERSATION_DB_AVAILABLE:
-            # Use enhanced memory system if available
-            if ENHANCED_MEMORY_AVAILABLE and memory_system:
-                should_inject = memory_system.should_inject_context(messages)
-                if should_inject:
-                    historical_context = memory_system.build_context(messages, user_name=user_name)
+        # QUICK PRE-CHECK: Will this be a zero-LLM tool call?
+        # If so, skip the expensive history injection and go straight to processing.
+        _ZERO_LLM_QUICK = {'control_music', 'control_lights', 'get_local_time',
+                           'set_timer', 'music_visualizer', 'play_music'}
+        _quick_result = TOOL_SELECTOR.select_tool(last_user_msg) if last_user_msg else None
+        _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
+        _quick_params = _quick_result.primary_tool.extracted_params if (_quick_result and _quick_result.primary_tool) else {}
+        _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params))
+
+        if not _is_zero_llm:
+            # SANITIZE inbound history before anything else. Ohbot ships the
+            # full conversation back each turn; if Blue ever answered a daughter
+            # question wrongly (e.g. "Annie") or admitted ignorance, that text
+            # is now in the prompt every turn and overrides the facts block by
+            # sheer proximity.
+            messages = _sanitize_inbound_messages(messages)
+
+            # INJECT HISTORICAL CONTEXT (only for LLM-bound requests)
+            _needs_history = len(last_user_msg.split()) > 3 if last_user_msg else False
+            if _needs_history:
+                # Enhanced memory has its own SQLite store and ChromaDB — it
+                # does NOT depend on the legacy `blue_database` module. Don't
+                # gate it on CONVERSATION_DB_AVAILABLE; that flag only covers
+                # the legacy fallback path below.
+                if ENHANCED_MEMORY_AVAILABLE and memory_system:
+                    should_inject = memory_system.should_inject_context(messages)
+                    if should_inject:
+                        historical_context = memory_system.build_context(messages, user_name=user_name)
+                        if historical_context:
+                            print(f"   [MEMORY] ✓ Injecting {len(historical_context)} messages (semantic + recent)")
+                            messages = _splice_context_after_system(messages, historical_context)
+                elif CONVERSATION_DB_AVAILABLE and should_include_history(messages):
+                    historical_context = load_recent_context(user_name=user_name, limit=6)
                     if historical_context:
-                        print(f"   [MEMORY] ✓ Injecting {len(historical_context)} messages (semantic + recent)")
-                        messages = messages[:-1] + historical_context + [messages[-1]]
-            # Fallback to legacy system
-            elif should_include_history(messages):
-                historical_context = load_recent_context(user_name=user_name, limit=6)
-                if historical_context:
-                    print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
-                    messages = messages[:-1] + historical_context[-6:] + [messages[-1]]
+                        print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
+                        messages = _splice_context_after_system(messages, historical_context[-6:])
 
-        # INJECT SYSTEM MESSAGE WITH FACTS (ALWAYS FRESH)
-        # Load fresh facts from database (critical for memory persistence!)
-        fresh_facts = load_blue_facts()  # ← This is the key fix!
-        
-        if fresh_facts:
-            fact_summary = []
-            for key, value in fresh_facts.items():
-                fact_summary.append(f"{key.replace('_', ' ').title()}: {value}")
-            
-            if fact_summary:
-                memory_text = "\\n".join(fact_summary[:20])  # Increased from 15 to 20
-                system_with_memory = build_system_preamble() + f"\\n\\n<known_facts>\\n{memory_text}\\n</known_facts>"
-                
-                # Insert system message at the beginning
-                messages.insert(0, {"role": "system", "content": system_with_memory})
-                log.info(f"[MEM] ✓ Injected {len(fact_summary)} FRESH facts into system message")
-
-        # Process with tools
-        response = process_with_tools(messages)
+        # Process with tools (pre-check result passed to avoid double selector run)
+        response = process_with_tools(messages, _pre_selection=_quick_result)
 
         # SAVE ASSISTANT RESPONSE TO DATABASE
         if response:
-            final_content = response["choices"][0]["message"].get("content", "")
+            # Defensive: process_with_tools should always return the standard
+            # {"choices":[{"message":...}]} shape, but a malformed return must
+            # NEVER 500 the request — that just makes Ohbot say "I'm having
+            # trouble connecting". Salvage what we can and carry on.
+            try:
+                final_content = response["choices"][0]["message"].get("content", "")
+            except (KeyError, IndexError, TypeError):
+                log.error(f"[RESPONSE] Malformed response from process_with_tools: "
+                          f"{str(response)[:200]}")
+                final_content = (
+                    (isinstance(response, dict) and response.get("response"))
+                    or "Sorry, something went wrong on my end — could you say that again?"
+                )
+                response = {"choices": [{"message": {
+                    "role": "assistant", "content": final_content,
+                }}]}
+
+            # Prepend proactive content: the once-a-day schedule briefing,
+            # then any reminder alerts queued by the heartbeat thread. Done
+            # literally rather than via system-prompt instruction so delivery
+            # doesn't depend on LLM compliance — earlier turns showed Blue can
+            # hallucinate having mentioned things he didn't. Both are built
+            # from real reminder rows, never from the model's guesses.
+            if PROACTIVE_QUEUE_AVAILABLE:
+                _proactive_parts = []
+                try:
+                    _briefing = blue_proactive.daily_briefing_if_due()
+                    if _briefing:
+                        _proactive_parts.append(_briefing)
+                except Exception as e:
+                    log.warning(f"[PROACTIVE] daily briefing failed: {e}")
+                _alerts = blue_proactive.drain_for_response()
+                if _alerts:
+                    _proactive_parts.append(_alerts)
+                if _proactive_parts:
+                    _prefix = " ".join(_proactive_parts)
+                    final_content = f"{_prefix} {final_content}".strip()
+                    response["choices"][0]["message"]["content"] = final_content
+                    print(f"[PROACTIVE] Prepended {len(_prefix)} chars (briefing/alerts)")
+
             if final_content:
                 print(f"[OUT] Sending response: {final_content[:100]}..." if len(final_content) > 100 else f"[OUT] Sending response: {final_content}")
 
@@ -7894,19 +9106,37 @@ def chat_completions():
                     session_id=None
                 )
                 
-                # AUTO-SAVE LEARNED FACTS & CONSOLIDATE
-                try:
-                    # Add assistant response to messages for fact extraction
-                    full_conversation = messages + [{"role": "assistant", "content": final_content}]
-                    if extract_and_save_facts(full_conversation):
-                        log.info("[MEM] ✓ Auto-saved learned facts")
-                    
-                    # Run memory consolidation if needed
-                    if ENHANCED_MEMORY_AVAILABLE and memory_system:
-                        memory_system.consolidate_if_needed(user_name=user_name)
-                        
-                except Exception as e:
-                    log.warning(f"[MEM] Auto-save failed: {e}")
+                # AUTO-SAVE LEARNED FACTS & CONSOLIDATE (background thread to avoid blocking response)
+                import threading
+                def _background_fact_extraction(msgs, uname):
+                    try:
+                        if extract_and_save_facts(msgs):
+                            log.info("[MEM] ✓ Auto-saved learned facts (background)")
+                        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+                            memory_system.consolidate_if_needed(user_name=uname)
+                            # Backfill one past-day recap per turn so Blue has
+                            # cross-day continuity ("yesterday we discussed X").
+                            memory_system.summarize_previous_sessions()
+                            # Recompute behavioural rhythms (rate-limited
+                            # internally — a cheap no-op most turns).
+                            memory_system.update_rhythms_if_due()
+                    except Exception as e:
+                        log.warning(f"[MEM] Background auto-save failed: {e}")
+
+                # Pass the last few turns (not the whole transcript) so the
+                # extractor can use Q-A context. Example: assistant asks
+                # "what's your favorite food?", user says "pizza" — without
+                # the prior assistant turn, "pizza" looks like noise. Four
+                # turns is enough context, small enough to stay cheap.
+                non_system = [m for m in messages if m.get("role") != "system"]
+                latest_context = non_system[-4:] if non_system else []
+                latest_context.append({"role": "assistant", "content": final_content})
+
+                threading.Thread(
+                    target=_background_fact_extraction,
+                    args=(latest_context, user_name),
+                    daemon=True
+                ).start()
 
         return jsonify(response)
     except Exception as e:
@@ -8272,6 +9502,32 @@ def index():
     return html
 
 
+# --- RAG API Endpoints ---
+@app.route("/api/rag/reindex", methods=["POST"])
+def api_rag_reindex():
+    """Re-index all documents in the documents folder into ChromaDB."""
+    try:
+        from blue.tools.rag import index_all_documents
+        results = index_all_documents(DOCUMENTS_FOLDER)
+        return jsonify(results)
+    except ImportError:
+        return jsonify({"error": "ChromaDB not installed. Run: pip install chromadb"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rag/stats", methods=["GET"])
+def api_rag_stats():
+    """Get RAG index statistics."""
+    try:
+        from blue.tools.rag import get_stats
+        return jsonify(get_stats())
+    except ImportError:
+        return jsonify({"available": False, "error": "ChromaDB not installed"})
+    except Exception as e:
+        return jsonify({"available": False, "error": str(e)})
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("🎵💡 Blue Robot Middleware - WITH MUSIC-LIGHT SYNC!")
@@ -8279,7 +9535,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"[NET] Listening on: http://127.0.0.1:{PROXY_PORT}")
     print(f"[TARGET] Forwarding to LM Studio: {LM_STUDIO_URL}")
-    print(f"[DOC] RAG endpoint: {LM_STUDIO_RAG_URL}")
+    print(f"[DOC] Document storage: {DOCUMENTS_FOLDER}")
     print(f"[TOOL] Tools: {len(TOOLS)}")
     print("   • play_music (YouTube Music & Amazon Music) 🎵")
     print("     → AUTOMATICALLY syncs lights to match music vibe! 💡")
@@ -8314,13 +9570,45 @@ if __name__ == "__main__":
     else:
         print("\n⚠️ Hue not configured. Run setup_hue.py!")
 
-    # Check document status
+    # Document index housekeeping runs in the background so Flask can start
+    # immediately. First-time PDF extraction + ChromaDB embedding can take
+    # 30-90s and used to silently block server startup.
     index = load_document_index()
     doc_count = len(index.get('documents', []))
     print(f"\n📄 Document Manager:")
-    print(f"   • {doc_count} document(s) indexed")
+    print(f"   • {doc_count} document(s) indexed (rescan running in background)")
     print(f"   • Web interface: http://127.0.0.1:{PROXY_PORT}/documents")
-    print(f"   • Storage: {UPLOAD_FOLDER}/")
+    print(f"   • Storage: {DOCUMENTS_FOLDER}/")
+
+    def _bg_index_housekeeping():
+        try:
+            cleanup_report = cleanup_document_index()
+            rescan_report = rescan_documents_folder()
+            new_count = len(load_document_index().get('documents', []))
+            if (cleanup_report['dropped_camera'] or cleanup_report['dropped_missing']
+                    or cleanup_report['dropped_duplicate'] or rescan_report['added']):
+                print(
+                    f"   [INDEX] housekeeping done: {new_count} indexed | "
+                    f"+{rescan_report['added']} added, "
+                    f"-{cleanup_report['dropped_camera']} camera, "
+                    f"-{cleanup_report['dropped_missing']} missing, "
+                    f"-{cleanup_report['dropped_duplicate']} dup",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"   [INDEX] background housekeeping failed: {e}", flush=True)
+
+    import threading as _threading
+    _threading.Thread(target=_bg_index_housekeeping, daemon=True, name="doc-index-rescan").start()
+
+    # Start filesystem watcher so files dropped into DOCUMENTS_FOLDER while
+    # the server runs are auto-indexed within ~1-2 seconds.
+    start_document_watcher()
+
+    # Start proactive heartbeat: scans the reminders DB every minute and
+    # queues alerts for delivery on the next inbound turn from Ohbot.
+    if PROACTIVE_QUEUE_AVAILABLE:
+        blue_proactive.start()
 
     # Check Gmail status
     if globals().get("GMAIL_AVAILABLE", False):
@@ -8365,8 +9653,11 @@ if __name__ == "__main__":
     print("   • No longer requires YouTube Music window to be active!")
     print("   • You can control music while using Ohbot app! ✅\n")
 
-    # Start the Flask server
-    app.run(host='127.0.0.1', port=PROXY_PORT, debug=False)
+    # Start the Flask server. threaded=True so one slow/stuck request runs
+    # on its own (daemon) thread instead of blocking the main thread — that
+    # keeps the server responsive to other requests and, crucially, keeps
+    # Ctrl+C working even if a request hangs.
+    app.run(host='127.0.0.1', port=PROXY_PORT, debug=False, threaded=True)
 
 
 # --- Image Upload Endpoints ---
@@ -8445,22 +9736,34 @@ def documents_upload():
         if "file" not in request.files and "files" not in request.files:
             return Response("No file part in the request.", status=400)
         files = request.files.getlist("file") or request.files.getlist("files")
-        saved = []
+        saved, duplicates = [], []
         for f in files:
             if not f or f.filename == "":
                 continue
             if not allowed_file(f.filename):
                 continue
-            path = ensure_unique_path(DOCUMENTS_FOLDER, f.filename)
+            # Route by file type: text/docs to documents/, images to uploads/
+            ext = f.filename.rsplit('.', 1)[1].lower() if '.' in f.filename else ''
+            if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html', 'pptx', 'xlsx', 'json', 'xml'):
+                target_folder = str(DOCUMENTS_FOLDER)
+            else:
+                target_folder = str(UPLOAD_FOLDER)
+            path = ensure_unique_path(target_folder, f.filename)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             f.save(path)
-            saved.append(os.path.basename(path))
-        if not saved:
+            result = register_uploaded_file(path, os.path.basename(path))
+            if result.get('duplicate'):
+                duplicates.append(result.get('existing_filename') or f.filename)
+            else:
+                saved.append(os.path.basename(path))
+        if not saved and not duplicates:
             return Response("No valid files were uploaded.", status=400)
         try:
             return redirect(url_for("documents"))
         except Exception:
             body = "<h3>Uploaded:</h3><ul>" + "".join(f"<li>{x}</li>" for x in saved) + "</ul>"
+            if duplicates:
+                body += "<h3>Skipped (duplicates):</h3><ul>" + "".join(f"<li>{x}</li>" for x in duplicates) + "</ul>"
             return Response(body, mimetype="text/html")
 
     # GET -> HTML form
@@ -8472,7 +9775,8 @@ def documents_upload():
   <input type="file" name="file" multiple>
   <button type="submit">Upload</button>
 </form>
-<p>Saved under: <code>{DOCUMENTS_FOLDER}</code></p>
+<p>Documents saved under: <code>{DOCUMENTS_FOLDER}</code></p>
+<p>Images saved under: <code>{UPLOAD_FOLDER}</code></p>
 <p>Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}</p>
 """
     return Response(html, mimetype="text/html")
@@ -8485,7 +9789,7 @@ def api_documents_upload():
     if "file" not in request.files and "files" not in request.files:
         return jsonify({"error": "No file(s) in request. Use 'file' or 'files' field."}), 400
     files = request.files.getlist("file") or request.files.getlist("files")
-    saved, rejected = [], []
+    saved, rejected, duplicates = [], [], []
     for f in files:
         if not f or f.filename == "":
             rejected.append({"filename": "", "reason": "empty filename"})
@@ -8493,16 +9797,40 @@ def api_documents_upload():
         if not allowed_file(f.filename):
             rejected.append({"filename": f.filename, "reason": "unsupported extension"})
             continue
-        path = ensure_unique_path(DOCUMENTS_FOLDER, f.filename)
+        # Route by file type
+        ext = f.filename.rsplit('.', 1)[1].lower() if '.' in f.filename else ''
+        if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html', 'pptx', 'xlsx', 'json', 'xml'):
+            target_folder = str(DOCUMENTS_FOLDER)
+        else:
+            target_folder = str(UPLOAD_FOLDER)
+        path = ensure_unique_path(target_folder, f.filename)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         f.save(path)
-        saved.append({"filename": os.path.basename(path), "path": path})
-    return jsonify({"saved": saved, "rejected": rejected, "documents_folder": DOCUMENTS_FOLDER})
+        result = register_uploaded_file(path, os.path.basename(path))
+        if result.get('duplicate'):
+            duplicates.append({"filename": f.filename, "existing": result.get('existing_filename')})
+        else:
+            saved.append({
+                "filename": os.path.basename(path),
+                "path": path,
+                "indexed_in_rag": result.get('indexed_in_rag', False),
+            })
+    return jsonify({
+        "saved": saved,
+        "rejected": rejected,
+        "duplicates": duplicates,
+        "documents_folder": DOCUMENTS_FOLDER,
+    })
 
 
 @app.route("/documents/file/<path:filename>")
 def serve_document_file(filename):
-    return send_from_directory(DOCUMENTS_FOLDER, filename, as_attachment=False)
+    # Check all folders for the file
+    for folder in [DOCUMENTS_FOLDER, str(UPLOAD_FOLDER), CAMERA_FOLDER]:
+        candidate = os.path.join(folder, filename)
+        if os.path.exists(candidate):
+            return send_from_directory(folder, filename, as_attachment=False)
+    return "File not found", 404
 
 
 # ===== Facebook OAuth Callback =====

@@ -43,12 +43,14 @@ class WeatherDetector(BaseDetector):
         if confidence <= 0:
             return None
 
-        # Extract location if present (simplified)
+        # Extract location if present, default to local
         params = {}
         if ' in ' in msg_lower:
             parts = msg_lower.split(' in ')
             if len(parts) > 1:
                 params['location'] = parts[1].split()[0]
+        if not params:
+            params = {"location": "local"}
 
         return ToolIntent(
             tool_name='get_weather',

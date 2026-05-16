@@ -11,6 +11,7 @@ import re
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_word, has_any_word
 
 
 class LightsDetector(BaseDetector):
@@ -84,10 +85,10 @@ class LightsDetector(BaseDetector):
     ) -> Optional[ToolIntent]:
         """Detect light control intent."""
 
-        has_light = any(noun in msg_lower for noun in self.NOUNS)
+        has_light = has_any_word(self.NOUNS, msg_lower)
         has_action = any(action in msg_lower for action in self.ACTIONS)
-        has_color = any(color in msg_lower for color in self.COLORS)
-        has_mood = any(mood in msg_lower for mood in self.MOODS)
+        has_color = has_any_word(self.COLORS, msg_lower)
+        has_mood = has_any_word(self.MOODS, msg_lower)
 
         confidence = 0.0
         reasons = []

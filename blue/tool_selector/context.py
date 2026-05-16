@@ -5,6 +5,7 @@ Extracts contextual information from recent messages to improve
 intent detection accuracy.
 """
 
+import re
 from typing import Dict, List
 from .constants import MAX_CONTEXT_MESSAGES
 
@@ -43,7 +44,7 @@ def extract_context(conversation_history: List[Dict]) -> Dict:
         'music': ['play_music', 'control_music', 'music', 'song', 'artist'],
         'email': ['read_gmail', 'send_gmail', 'reply_gmail', 'email', 'inbox'],
         'lights': ['control_lights', 'light', 'lights', 'mood', 'brightness'],
-        'camera': ['capture_camera_image', 'view_image', 'camera', 'picture'],
+        'camera': ['capture_camera', 'view_image', 'camera', 'picture'],
         'document': ['search_documents', 'create_document', 'document', 'file'],
         'weather': ['get_weather', 'weather', 'forecast'],
     }
@@ -79,33 +80,113 @@ def extract_context(conversation_history: List[Dict]) -> Dict:
 
 
 def _is_greeting(message: str) -> bool:
-    """Check if message is a greeting."""
+    """Check if message is PURELY a greeting/casual phrase (not a greeting + command).
+
+    IMPORTANT: Only returns True when the ENTIRE message is conversational.
+    "okay play music" should NOT be treated as a greeting — it's a command.
+    "yeah turn on the lights" should NOT be skipped — it's an instruction.
+    """
     from .constants import GREETING_PATTERNS, CASUAL_PATTERNS
 
     msg_lower = message.lower().strip()
+    # Remove trailing punctuation for matching
+    msg_clean = re.sub(r'[.!?,;]+$', '', msg_lower).strip()
+    word_count = len(msg_clean.split())
 
-    # Exact greetings
-    if msg_lower in ['hi', 'hello', 'hey', 'yo']:
+    # Exact short greetings (1-2 words)
+    if msg_clean in ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy',
+                     'hi there', 'hey there', 'hello there', 'good morning',
+                     'good afternoon', 'good evening', 'good night',
+                     'thanks', 'thank you', 'thx', 'ty', 'bye', 'goodbye',
+                     'see you', 'see ya', 'later', 'cya', 'cool', 'nice',
+                     'great', 'awesome', 'perfect', 'ok', 'okay', 'sure',
+                     'yep', 'yeah', 'alright', 'sounds good', 'got it',
+                     'understood', 'no problem', 'np']:
         return True
 
-    # Greeting patterns
-    if any(pattern in msg_lower for pattern in GREETING_PATTERNS):
-        return True
-
-    # Casual patterns (thanks, bye, etc.)
-    if any(pattern in msg_lower for pattern in CASUAL_PATTERNS):
-        return True
+    # Short messages (≤6 words) that START with a greeting/casual pattern
+    # These are things like "hey how are you" or "thanks for that"
+    if word_count <= 6:
+        greeting_starters = GREETING_PATTERNS + CASUAL_PATTERNS
+        if any(msg_lower.startswith(p.strip()) for p in greeting_starters):
+            # But NOT if it also contains an action verb/tool trigger
+            action_words = [
+                'play', 'turn', 'set', 'search', 'find', 'send', 'read',
+                'check', 'open', 'close', 'start', 'stop', 'pause', 'skip',
+                'show', 'tell me about', 'what', 'when', 'where', 'who',
+                'how do', 'how to', 'can you', 'please', 'remind', 'timer',
+                'email', 'light', 'music', 'weather', 'document', 'camera',
+                'browse', 'volume', 'mute',
+            ]
+            if not any(word in msg_lower for word in action_words):
+                return True
 
     return False
+
+
+def _is_content_correction(message: str) -> bool:
+    """Check if the message is a user correcting prior assistant content.
+
+    Corrections are feedback, not commands. They should not trigger a tool
+    call even if they contain trigger keywords (e.g. "the first class is
+    not scheduled for today" contains "scheduled" + "today" but is a
+    factual correction, not a calendar request). Returns False if the
+    message also contains a clear action verb, since "no, play music
+    instead" IS a new command.
+    """
+    msg_lower = message.lower().strip()
+
+    correction_starters = (
+        "that's all correct", "thats all correct",
+        "all that is correct", "all of that is correct",
+        "that's correct except", "thats correct except",
+        "that's mostly correct", "thats mostly correct",
+        "you're wrong", "youre wrong",
+        "that's wrong", "thats wrong",
+        "that's incorrect", "thats incorrect",
+        "that's not right", "thats not right",
+        "that's not correct", "thats not correct",
+        "no, that's", "no thats", "no, that is",
+        "no, it's not", "no its not", "no, it is not",
+        "actually, that's not", "actually thats not",
+        "actually, it's not", "actually its not",
+        "actually no",
+        "i never said", "i didn't say", "i did not say",
+        "you got that wrong", "you got it wrong",
+        "you misunderstood", "you misheard",
+    )
+
+    if not msg_lower.startswith(correction_starters):
+        return False
+
+    action_words = (
+        'play ', 'turn ', 'search ', 'find ', 'send ', 'read ',
+        'open ', 'close ', 'start ', 'stop ', 'pause ', 'skip ',
+        'show ', 'remind ', 'create ', 'add ', 'delete ',
+        'remove ', 'browse ', 'mute ',
+    )
+    if any(w in msg_lower for w in action_words):
+        return False
+
+    return True
 
 
 def should_skip_tool_selection(message: str) -> bool:
     """
     Determine if tool selection should be skipped for this message.
 
-    Returns True for greetings, casual chat, acknowledgments, etc.
+    Returns True for greetings, casual chat, acknowledgments, and
+    content corrections (e.g. "that's all correct except..."). Only
+    skips when the ENTIRE message is conversational — not when a
+    greeting/correction phrase appears alongside a real command.
     """
     if not message or len(message.strip()) < 2:
         return True
 
-    return _is_greeting(message)
+    if _is_greeting(message):
+        return True
+
+    if _is_content_correction(message):
+        return True
+
+    return False

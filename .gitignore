@@ -168,3 +168,21 @@ desktop.ini
 *.bak
 *.backup
 *~
+
+# === Personal data & runtime artifacts — keep OFF GitHub (added 2026-05-16) ===
+# Entire data dir: SQLite DBs, ChromaDB vector store, backups, runtime state,
+# and data/facebook_config.json (contains an app secret).
+data/
+# Local Claude Code tooling, settings, and git worktrees — never commit these.
+.claude/
+# Debug dumps of LM Studio requests — contain raw conversation content.
+lm_studio_400_dump_*.json
+# The user's document corpus, uploads, camera captures, and the doc index.
+documents/
+uploaded_documents/
+uploads/
+camera_captures/
+document_index.json
+document_index.json.before-cleanup
+# Ohbot conversation files.
+*.ocf

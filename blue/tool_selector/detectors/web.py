@@ -30,6 +30,12 @@ class WebDetector(BaseDetector):
         ]
         medium_signals = ['search for', 'look up', 'find out about']
         temporal = ['latest', 'recent', 'current', 'today', 'this week']
+        news_topics = ['news', 'headlines', 'price', 'score', 'weather',
+                       'results', 'standings', 'stock', 'market']
+        # Named news sources strongly imply web search
+        news_sources = ['guardian', 'bbc', 'cnn', 'reuters', 'nyt',
+                        'new york times', 'washington post', 'times',
+                        'al jazeera', 'associated press', 'sky news']
 
         confidence = 0.0
         reasons = []
@@ -41,9 +47,15 @@ class WebDetector(BaseDetector):
             confidence = 0.75
             reasons.append("generic search")
         elif any(t in msg_lower for t in temporal):
-            if any(topic in msg_lower for topic in ['news', 'price', 'score', 'weather']):
+            if any(topic in msg_lower for topic in news_topics):
                 confidence = 0.85
                 reasons.append("temporal + news/price")
+        # "headlines from the guardian" — news topic + named source
+        if any(topic in msg_lower for topic in news_topics) and \
+           any(src in msg_lower for src in news_sources):
+            confidence = max(confidence, 0.90)
+            if "news source + topic" not in reasons:
+                reasons.append("news source + topic")
 
         # Reduce for document search
         doc_signals = ['my document', 'my file', 'my contract', 'my pdf']
@@ -53,13 +65,49 @@ class WebDetector(BaseDetector):
         if confidence <= 0:
             return None
 
+        # Extract the actual search topic, stripping conversational filler
+        query = self._extract_search_query(msg_lower)
+
         return ToolIntent(
             tool_name='web_search',
             confidence=confidence,
             priority=ToolPriority.LOW,
             reason=' | '.join(reasons),
-            extracted_params={'query': msg_lower}
+            extracted_params={'query': query}
         )
+
+    @staticmethod
+    def _extract_search_query(msg: str) -> str:
+        """Strip conversational preamble to extract the actual search topic."""
+        # Try explicit "search for X" / "google X" / "look up X" patterns
+        patterns = [
+            r'(?:search|google|look up|find)\s+(?:the web |the internet |the net |online )?(?:for |about |on )?(.+)',
+            r'(?:i want you to |can you |please )?(?:do a |run a )?(?:google |web |internet )?search\s+(?:for |about |on )?(.+)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, msg)
+            if m:
+                q = m.group(1).strip().rstrip('.!?')
+                if q:
+                    return q
+        # Fallback: strip common prefixes
+        filler = [
+            'try again ', 'again ', 'once more ',
+            'i want you to ', 'can you ', 'please ', 'could you ',
+            'do a ', 'run a ', 'search for ', 'search ', 'google ',
+            'look up ', 'find out about ', 'find ', 'summarize ',
+            'give me ', 'show me ', 'tell me ', 'get me ',
+            'what are ', "what's ", 'what is ',
+        ]
+        q = msg
+        changed = True
+        while changed:
+            changed = False
+            for f in filler:
+                if q.startswith(f):
+                    q = q[len(f):]
+                    changed = True
+        return q.strip().rstrip('.!?') or msg
 
     def _detect_browse_intent(self, msg_lower: str) -> Optional[ToolIntent]:
         browse_verbs = ['browse', 'open', 'visit', 'go to', 'navigate to', 'load', 'fetch']

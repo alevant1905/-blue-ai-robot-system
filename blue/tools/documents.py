@@ -21,7 +21,8 @@ from werkzeug.utils import secure_filename
 # ================================================================================
 
 UPLOAD_FOLDER = Path(os.environ.get("UPLOAD_FOLDER", "uploads"))
-DOCUMENTS_FOLDER = Path(os.environ.get("DOCUMENTS_FOLDER", "uploaded_documents"))
+DOCUMENTS_FOLDER = Path(os.environ.get("DOCUMENTS_FOLDER", "documents"))
+CAMERA_FOLDER = Path(os.environ.get("CAMERA_DIR", "camera_captures"))
 MAX_FILE_SIZE = 16 * 1024 * 1024  # 16MB
 ALLOWED_EXTENSIONS = {
     'bmp', 'csv', 'doc', 'docx', 'gif', 'html', 'jpeg', 'jpg',
@@ -136,37 +137,97 @@ def encode_image_to_base64(filepath: str) -> Optional[Dict[str, Any]]:
 
 def extract_text_from_file(filepath: str) -> str:
     """Extract text from various file types."""
-    ext = filepath.rsplit('.', 1)[1].lower()
+    ext = filepath.rsplit('.', 1)[1].lower() if '.' in filepath else ''
 
-    if ext == 'txt' or ext == 'md':
+    if ext in ('txt', 'md'):
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
 
     elif ext == 'pdf':
         try:
-            import PyPDF2
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
             text = []
             with open(filepath, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                for page in pdf_reader.pages:
-                    text.append(page.extract_text())
+                for page in PdfReader(f).pages:
+                    text.append(page.extract_text() or '')
             return '\n'.join(text)
         except ImportError:
-            return "Error: PyPDF2 not installed. Install with: pip install PyPDF2"
+            return "Error: pypdf not installed. Install with: pip install pypdf"
         except Exception as e:
             return f"Error extracting PDF: {str(e)}"
 
-    elif ext in ['doc', 'docx']:
+    elif ext in ('doc', 'docx'):
         try:
             import docx
             doc = docx.Document(filepath)
-            return '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+            return '\n'.join(paragraph.text for paragraph in doc.paragraphs)
         except ImportError:
             return "Error: python-docx not installed. Install with: pip install python-docx"
         except Exception as e:
             return f"Error extracting Word doc: {str(e)}"
 
-    elif ext in ['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp']:
+    elif ext in ('csv', 'tsv'):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+
+    elif ext in ('json', 'xml', 'html', 'htm'):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            raw = f.read()
+        if ext in ('html', 'htm'):
+            try:
+                from bs4 import BeautifulSoup
+                return BeautifulSoup(raw, 'html.parser').get_text(separator='\n')
+            except ImportError:
+                return raw
+        return raw
+
+    elif ext == 'rtf':
+        try:
+            from striprtf.striprtf import rtf_to_text
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                return rtf_to_text(f.read())
+        except ImportError:
+            import re
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                raw = f.read()
+            return re.sub(r'\\[a-z]+\d* ?|[{}]', '', raw)
+
+    elif ext == 'xlsx':
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            lines = []
+            for ws in wb.worksheets:
+                lines.append(f"# Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True):
+                    cells = ['' if v is None else str(v) for v in row]
+                    if any(cells):
+                        lines.append('\t'.join(cells))
+            return '\n'.join(lines)
+        except ImportError:
+            return "Error: openpyxl not installed. Install with: pip install openpyxl"
+        except Exception as e:
+            return f"Error extracting xlsx: {str(e)}"
+
+    elif ext == 'pptx':
+        try:
+            from pptx import Presentation
+            lines = []
+            for i, slide in enumerate(Presentation(filepath).slides, 1):
+                lines.append(f"# Slide {i}")
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text') and shape.text:
+                        lines.append(shape.text)
+            return '\n'.join(lines)
+        except ImportError:
+            return "Error: python-pptx not installed. Install with: pip install python-pptx"
+        except Exception as e:
+            return f"Error extracting pptx: {str(e)}"
+
+    elif ext in ('png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp'):
         try:
             from PIL import Image
             image = Image.open(filepath)
@@ -184,7 +245,7 @@ def extract_text_from_file(filepath: str) -> str:
         except Exception as e:
             return f"[IMAGE FILE] {os.path.basename(filepath)} - Error reading: {str(e)}"
 
-    return "Unsupported file type"
+    return f"Unsupported file type: .{ext}"
 
 
 # ================================================================================

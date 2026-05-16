@@ -25,6 +25,10 @@ class GmailDetector(BaseDetector):
         context: Dict
     ) -> List[ToolIntent]:
         """Detect Gmail intents."""
+        # Normalize "e-mail" / "e mail" -> "email" so detection isn't fooled
+        # by a hyphen. Real-world transcriptions vary wildly here.
+        msg_lower = msg_lower.replace("e-mail", "email").replace("e mail", "email")
+
         intents = []
 
         # Detect read intent
@@ -116,6 +120,17 @@ class GmailDetector(BaseDetector):
             'medium': ['send', 'compose', 'draft']
         }
 
+        # Follow-up imperatives — "go ahead", "send it now", "do it again", etc.
+        # On their own these don't mention email. They only fire when the
+        # recent conversation already established a send_gmail intent that
+        # didn't complete.
+        followup_imperatives = (
+            "go ahead", "send it", "send that", "send it now", "send it again",
+            "do it", "do it now", "try it now", "try again", "retry",
+            "send again", "resend", "go on then",
+        )
+        is_followup_imperative = any(p in msg_lower for p in followup_imperatives)
+
         confidence = 0.0
         reasons = []
 
@@ -128,10 +143,21 @@ class GmailDetector(BaseDetector):
                 confidence = min(1.0, confidence + 0.05)
                 reasons.append("email address found")
 
-        elif any(verb in msg_lower for verb in send_signals['medium']):
-            if 'email' in msg_lower or 'message' in msg_lower:
-                confidence = 0.75
-                reasons.append("send verb + email context")
+        elif any(verb in msg_lower for verb in send_signals['medium']) and (
+            'email' in msg_lower or 'message' in msg_lower
+        ):
+            confidence = 0.75
+            reasons.append("send verb + email context")
+
+        # Follow-up imperative: "go ahead", "send it now", "send it again" with
+        # recent email context. Runs regardless of whether 'send' appeared
+        # alone (a bare 'send' didn't pass the email-noun check above).
+        if confidence == 0.0 and is_followup_imperative:
+            recent_tools = context.get("recent_tools") or []
+            recent_email_tool = bool(recent_tools) and recent_tools[0] in ("send_gmail", "reply_gmail")
+            if context.get("has_email_in_history") or recent_email_tool:
+                confidence = 0.80
+                reasons.append("follow-up imperative + recent email context")
 
         # Exclude if reading
         if any(word in msg_lower for word in ['check', 'read', 'show my']):

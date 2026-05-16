@@ -89,7 +89,14 @@ class VisualMemory:
                 context TEXT
             )
         """)
-        
+
+        # Migration: add image_path and image_hash columns if missing
+        for col, col_type in [("image_path", "TEXT"), ("image_hash", "TEXT")]:
+            try:
+                cursor.execute(f"ALTER TABLE observations ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
         conn.commit()
         conn.close()
     
@@ -176,29 +183,221 @@ class VisualMemory:
     
     def log_observation(self, scene_description: str, people_present: List[str] = None,
                        location: str = None, notable_objects: List[str] = None,
-                       context: str = None):
-        """Log what Blue observes."""
+                       context: str = None, image_path: str = None,
+                       image_hash: str = None):
+        """Log what Blue observes, optionally linked to an image file."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
+
             cursor.execute("""
-                INSERT INTO observations 
-                (scene_description, people_present, location, notable_objects, context)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO observations
+                (scene_description, people_present, location, notable_objects, context, image_path, image_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 scene_description,
                 json.dumps(people_present) if people_present else None,
                 location,
                 json.dumps(notable_objects) if notable_objects else None,
-                context
+                context,
+                image_path,
+                image_hash
             ))
-            
+
             conn.commit()
             conn.close()
+            print(f"[VISUAL-MEMORY] Saved observation{' with image' if image_path else ''}")
         except Exception as e:
             print(f"[VISUAL-MEMORY] Error logging observation: {e}")
     
+    # ==================== Visual Memory Retrieval ====================
+
+    def get_recent_observations(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get the N most recent observations."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                "SELECT * FROM observations ORDER BY timestamp DESC LIMIT ?", (limit,)
+            ).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[VISUAL-MEMORY] Error fetching recent observations: {e}")
+            return []
+
+    def search_observations(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search observations by keyword across description, people, location, objects."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            pattern = f"%{query}%"
+            rows = cursor.execute("""
+                SELECT * FROM observations
+                WHERE scene_description LIKE ?
+                   OR people_present LIKE ?
+                   OR location LIKE ?
+                   OR notable_objects LIKE ?
+                ORDER BY timestamp DESC LIMIT ?
+            """, (pattern, pattern, pattern, pattern, limit)).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[VISUAL-MEMORY] Error searching observations: {e}")
+            return []
+
+    def get_last_camera_observation(self) -> Optional[Dict[str, Any]]:
+        """Get the most recent observation linked to a camera image."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT * FROM observations WHERE image_path IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception as e:
+            print(f"[VISUAL-MEMORY] Error fetching last camera observation: {e}")
+            return None
+
+    def get_visual_timeline(self, hours: int = 24) -> List[Dict[str, Any]]:
+        """Get all observations from the last N hours, chronologically."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            rows = cursor.execute("""
+                SELECT * FROM observations
+                WHERE timestamp >= datetime('now', ? || ' hours')
+                ORDER BY timestamp ASC
+            """, (f"-{hours}",)).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[VISUAL-MEMORY] Error fetching visual timeline: {e}")
+            return []
+
+    def get_visual_history_context(self, limit: int = 3) -> str:
+        """Format recent observations as text context for LLM injection."""
+        observations = self.get_recent_observations(limit)
+        if not observations:
+            return ""
+
+        lines = ["=== RECENT VISUAL MEMORY ==="]
+        for obs in observations:
+            # Calculate relative time
+            try:
+                ts = datetime.fromisoformat(obs['timestamp'])
+                delta = datetime.now() - ts
+                minutes = int(delta.total_seconds() / 60)
+                if minutes < 1:
+                    ago = "just now"
+                elif minutes < 60:
+                    ago = f"{minutes} min ago"
+                else:
+                    hours = minutes // 60
+                    ago = f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
+            except (ValueError, TypeError):
+                ago = "unknown time"
+
+            location = obs.get('location') or 'Unknown location'
+            desc = obs.get('scene_description', '')
+            # Truncate long descriptions for context injection
+            if len(desc) > 200:
+                desc = desc[:200] + "..."
+
+            people = ""
+            if obs.get('people_present'):
+                try:
+                    names = json.loads(obs['people_present'])
+                    if names:
+                        people = f" People: {', '.join(names)}."
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            objects_str = ""
+            if obs.get('notable_objects'):
+                try:
+                    objs = json.loads(obs['notable_objects'])
+                    if objs:
+                        objects_str = f" Objects: {', '.join(objs[:5])}."
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            lines.append(f"[{ago}] {location} - {desc}{people}{objects_str}")
+
+        return "\n".join(lines)
+
+    def detect_scene_changes(self, current_description: str = "") -> Dict[str, Any]:
+        """Compare current scene to the last camera observation to detect changes."""
+        last_obs = self.get_last_camera_observation()
+        if not last_obs:
+            return {"has_previous": False}
+
+        # Time since last observation
+        try:
+            ts = datetime.fromisoformat(last_obs['timestamp'])
+            delta = datetime.now() - ts
+            minutes = int(delta.total_seconds() / 60)
+            if minutes < 60:
+                time_since = f"{minutes} minutes"
+            else:
+                hours = minutes // 60
+                time_since = f"{hours} hour{'s' if hours != 1 else ''}"
+        except (ValueError, TypeError):
+            time_since = "unknown time"
+
+        # Extract people from previous observation
+        prev_people = set()
+        if last_obs.get('people_present'):
+            try:
+                prev_people = set(json.loads(last_obs['people_present']))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Extract people mentioned in current description using known people names
+        known_people = self.get_all_people()
+        known_names = {p['name'].lower(): p['name'] for p in known_people}
+        current_people = set()
+        current_lower = current_description.lower()
+        for name_lower, name in known_names.items():
+            if name_lower in current_lower:
+                current_people.add(name)
+
+        people_changed = prev_people != current_people
+
+        # Location comparison
+        prev_location = (last_obs.get('location') or '').lower()
+        location_keywords = ['office', 'kitchen', 'living room', 'studio', 'bedroom', 'bathroom', 'outside', 'garden']
+        prev_loc = next((kw for kw in location_keywords if kw in prev_location), '')
+        curr_loc = next((kw for kw in location_keywords if kw in current_lower), '')
+        location_changed = bool(prev_loc and curr_loc and prev_loc != curr_loc)
+
+        # Build changes summary
+        changes = []
+        if people_changed:
+            arrived = current_people - prev_people
+            left = prev_people - current_people
+            if arrived:
+                changes.append(f"{', '.join(arrived)} appeared")
+            if left:
+                changes.append(f"{', '.join(left)} left")
+        if location_changed:
+            changes.append(f"location changed from {prev_loc} to {curr_loc}")
+
+        return {
+            "has_previous": True,
+            "previous_description": last_obs.get('scene_description', '')[:300],
+            "previous_location": last_obs.get('location'),
+            "time_since": time_since,
+            "people_changed": people_changed,
+            "location_changed": location_changed,
+            "changes_summary": "; ".join(changes) if changes else "no major changes detected"
+        }
+
     def get_all_people(self) -> List[Dict[str, Any]]:
         """Get all people Blue knows."""
         conn = sqlite3.connect(self.db_path)

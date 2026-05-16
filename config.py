@@ -13,7 +13,8 @@ BASE_DIR = Path(__file__).parent.resolve()
 # Data directories
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = BASE_DIR / "uploads"
-DOCUMENTS_DIR = BASE_DIR / "uploaded_documents"
+DOCUMENTS_DIR = BASE_DIR / "documents"
+CAMERA_DIR = BASE_DIR / "camera_captures"
 
 # Database paths
 DATABASE_PATH = DATA_DIR / "blue.db"
@@ -23,6 +24,7 @@ VISUAL_MEMORY_DB_PATH = DATA_DIR / "visual_memory.db"
 DATA_DIR.mkdir(exist_ok=True)
 UPLOADS_DIR.mkdir(exist_ok=True)
 DOCUMENTS_DIR.mkdir(exist_ok=True)
+CAMERA_DIR.mkdir(exist_ok=True)
 
 # API Keys (from environment variables)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")

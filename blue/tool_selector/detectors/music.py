@@ -9,6 +9,7 @@ Detects:
 ENHANCED v7: Better false positive filtering for non-music "play" contexts
 """
 
+import re
 from typing import Dict, List, Optional
 
 from .base import BaseDetector
@@ -25,6 +26,16 @@ from ..data.music_data import (
     VISUALIZER_SIGNALS,
     INFO_REQUEST_WORDS,
     NON_MUSIC_CONTEXT_WORDS,
+)
+
+# Pre-compiled regex for non-music usage of ambiguous control words
+_NON_MUSIC_FOLLOW_RE = re.compile(
+    r'\bstop\s+(?:using|doing|saying|being|making|asking|telling|showing|giving|that)'
+    r'|\bnext\s+(?:question|topic|time|step|one|page|slide|chapter|item|thing)'
+    r'|\bskip\s+(?:this|that|the\s+(?!song|track))'
+    r'|\bpause\s+(?:the\s+(?:game|video|movie|show)|for|that)'
+    r'|\bback\s+(?:to|up|off|away|home)'
+    r'|\bmute\s+(?:the\s+(?!music|song|audio)|your|his|her|my)'
 )
 
 
@@ -244,6 +255,39 @@ class MusicDetector(BaseDetector):
 
         if not any(signal in msg_lower for signal in CONTROL_SIGNALS):
             return None
+
+        # Ambiguous single-word signals that commonly appear in non-music sentences
+        # These need music context or music-specific phrasing to trigger
+        ambiguous_signals = {'stop', 'pause', 'back', 'next', 'skip', 'mute', 'resume'}
+        # Multi-word signals that can appear as substrings of non-music phrases
+        # e.g., "skip this part" matches "skip this" but isn't about music
+        ambiguous_multi = {'skip this', 'go back'}
+        matched_signals = [s for s in CONTROL_SIGNALS if s in msg_lower]
+
+        # Check if ONLY ambiguous signals matched (no definitive music phrases)
+        all_ambiguous = all(s in ambiguous_signals or s in ambiguous_multi for s in matched_signals)
+
+        if all_ambiguous:
+            # For ambiguous words, require either:
+            # 1. Very short standalone command (e.g. "stop", "pause", "stop it"), OR
+            # 2. Music-related words nearby (song, music, track, etc.)
+            # "stop using emojis" and "next question" are NOT music commands
+            has_music_words = any(w in msg_lower for w in [
+                'music', 'song', 'track', 'playlist', 'album', 'playing',
+                'audio', 'spotify', 'radio', 'the music', 'it'
+            ])
+
+            # Check if the ambiguous word is followed by a non-music object
+            # e.g., "stop using", "next question", "skip this part", "pause the game"
+            is_non_music_usage = bool(_NON_MUSIC_FOLLOW_RE.search(msg_lower))
+
+            if is_non_music_usage:
+                return None
+
+            # For standalone usage without music words, only allow very short (≤2 words)
+            is_standalone_command = len(msg_lower.split()) <= 2
+            if not (is_standalone_command or has_music_words):
+                return None
 
         confidence = 0.95
         reasons = ["explicit control keyword"]
