@@ -52,9 +52,9 @@ RECENT_HISTORY_HOURS = 48            # Only inject conversation history from the
 
 # Session continuity: each calendar day is one "session". Past days get a
 # short recap stored in session_summaries; the most recent few are injected
-# so Blue has a thread of memory across days ("yesterday we discussed X").
-SESSION_HISTORY_DAYS = 7             # How far back to summarize / keep recaps for
-SESSION_HISTORY_INJECT = 3           # How many recent day-recaps to put in the prompt
+# by date, and any older day can still resurface by semantic relevance.
+SESSION_HISTORY_DAYS = 90            # How far back the backfill keeps writing recaps
+SESSION_HISTORY_INJECT = 3           # How many recent day-recaps to put in the prompt by date
 
 # Rhythm learning: mine conversation_log for behavioural patterns (which kinds
 # of request cluster at which time of day). Pure counting — never LLM-guessed.
@@ -68,6 +68,9 @@ CONNECTION_WINDOW_DAYS = 7           # How far ahead to scan the schedule
 CONNECTION_RECENT_DAYS = 6           # How far back "recent conversation" reaches
 CONNECTION_AMBIENT_MAX = 10          # A keyword appearing more often than this in
                                      # recent text is ambient noise, not a real link
+CONNECTION_DOC_WINDOW_DAYS = 2       # Document<->event links fire only when the
+                                     # event is this close, so a standing class
+                                     # doesn't surface its syllabus every day
 
 # LLM-assisted extraction. Re-enabled but gated to avoid blocking LM Studio.
 LLM_EXTRACTION_ENABLED = os.environ.get("BLUE_LLM_EXTRACTION", "true").lower() != "false"
@@ -157,6 +160,7 @@ class EnhancedMemorySystem:
         self._turn_counter = 0
         self._last_consolidation = 0
         self._last_rhythm_update = 0.0
+        self._session_mem_backfilled = False
         self._ensure_db()
         self._migrate_legacy_data()
         self._self_heal_index()
@@ -1443,8 +1447,11 @@ class EnhancedMemorySystem:
                     try:
                         ts = datetime.fromisoformat(m["last_accessed"])
                         days_old = max(0.0, (now - ts).total_seconds() / 86400.0)
-                        # Linear decay over 90 days
-                        recency_boost = max(0.0, 1.0 - days_old / 90.0)
+                        # Gentle recency: fresh memories get the full boost, but
+                        # the decay floors at 0.5 and stretches over a year, so
+                        # an old-but-relevant memory still competes instead of
+                        # being buried. Memory should be durable, not fade out.
+                        recency_boost = max(0.5, 1.0 - days_old / 365.0)
                     except Exception:
                         pass
                 ac = m["access_count"] or 0
@@ -1537,6 +1544,10 @@ class EnhancedMemorySystem:
             for mem in relevant:
                 content_lower = (mem.get("content") or "").lower()
                 subject_lower = (mem.get("subject") or "").lower()
+                # Day-recaps surface through their own <remembered_days> block,
+                # not here — keep them out of the generic relevance list.
+                if mem.get("type") == "session":
+                    continue
                 if content_lower[:40] and content_lower[:40] in facts_text:
                     continue
                 # Use memory-specific junk filter (much more conservative
@@ -1591,6 +1602,16 @@ class EnhancedMemorySystem:
                 "content": session_block,
             })
 
+        # 2b-ii) Long-term recall — an older day-recap pulled back by semantic
+        #     relevance to the current message, reaching past the by-date window.
+        if user_msg:
+            recalled_block = self._build_recalled_days_block(user_msg)
+            if recalled_block:
+                context_parts.append({
+                    "role": "system",
+                    "content": recalled_block,
+                })
+
         # 2c) Daily rhythms — mined behavioural patterns for this part of day,
         #     so Blue can anticipate rather than only react.
         rhythms_block = self._build_rhythms_block()
@@ -1600,9 +1621,10 @@ class EnhancedMemorySystem:
                 "content": rhythms_block,
             })
 
-        # 2d) Cross-context connections — links between the upcoming schedule
-        #     and recent conversation, so Blue can join the dots unprompted.
-        connections_block = self._build_connections_block()
+        # 2d) Cross-context connections — links between the upcoming schedule,
+        #     recent conversation, and the document library, so Blue can join
+        #     the dots unprompted (and notice when the user needs a hand).
+        connections_block = self._build_connections_block(user_msg=user_msg)
         if connections_block:
             context_parts.append({
                 "role": "system",
@@ -2458,25 +2480,35 @@ class EnhancedMemorySystem:
             print(f"   [MEM-MERGE] Merged {merged} duplicate memories")
 
     def _prune_low_value_memories(self):
-        """Remove very old, low-importance, never-accessed memories."""
+        """Sweep genuine junk only — never real episodic memories.
+
+        Blue asked for durable, long-term memory: an old, low-importance,
+        never-accessed memory ("Emmy was nervous about her recital") is
+        exactly the kind of thing that builds a richer picture of the family,
+        so it must NOT be deleted just for being old and quiet. This used to
+        hard-delete on age + low importance, which was the structural cause
+        of memory "fading". Now it only removes entries the junk heuristic
+        flags (legacy extractor noise — echoes, stored questions)."""
         conn = self._conn()
-        cutoff = (datetime.now() - timedelta(days=90)).isoformat()
 
-        # Get IDs to delete
-        rows = conn.execute("""
-            SELECT id FROM memories
-            WHERE importance < 0.3
-              AND access_count = 0
-              AND decay_score < 0.3
-              AND created_at < ?
-              AND type NOT IN ('person', 'fact')
-        """, (cutoff,)).fetchall()
+        rows = conn.execute(
+            "SELECT id, subject, content, type FROM memories "
+            "WHERE type NOT IN ('person', 'fact')"
+        ).fetchall()
 
-        if rows:
-            ids = [r["id"] for r in rows]
+        junk_ids = [
+            r["id"] for r in rows
+            if self._is_junk_memory(
+                (r["subject"] or "").lower(),
+                (r["content"] or "").lower(),
+                r["type"] or "",
+            )
+        ]
+
+        if junk_ids:
             conn.execute(
-                f"DELETE FROM memories WHERE id IN ({','.join('?' * len(ids))})",
-                ids,
+                f"DELETE FROM memories WHERE id IN ({','.join('?' * len(junk_ids))})",
+                junk_ids,
             )
             conn.commit()
 
@@ -2484,11 +2516,12 @@ class EnhancedMemorySystem:
             collection = _get_memory_collection()
             if collection:
                 try:
-                    collection.delete(ids=ids)
+                    collection.delete(ids=junk_ids)
                 except Exception:
                     pass
 
-            print(f"   [MEM-PRUNE] Removed {len(ids)} low-value memories")
+            print(f"   [MEM-PRUNE] Removed {len(junk_ids)} junk memories "
+                  f"(real memories kept — recall is durable)")
 
         conn.close()
 
@@ -2625,9 +2658,61 @@ class EnhancedMemorySystem:
             conn.close()
         except Exception:
             return False
+        # Index the recap as a semantically-searchable memory so this day can
+        # resurface by relevance long after it scrolls out of the by-date window.
         if summary:
+            self._index_session_memory(session_date, summary, topics)
             print(f"   [MEM-SESSION] Summarized {session_date}: {summary[:60]}")
         return True
+
+    def _index_session_memory(self, session_date: str, summary: str,
+                              topics: str) -> None:
+        """Store one day's recap as a 'session'-type memory so semantic
+        search can surface it long after it scrolls past the by-date window.
+        Idempotent — _store_memory upserts by content hash."""
+        if not summary or not summary.strip():
+            return
+        content = summary.strip()
+        if topics and topics.strip():
+            content = f"{content} (topics: {topics.strip()})"
+        try:
+            self._store_memory(
+                mem_type="session",
+                subject=f"conversation on {session_date}",
+                content=content,
+                source="session_summary",
+                importance=0.6,
+                created_at=f"{session_date}T12:00:00",
+            )
+        except Exception as e:
+            print(f"   [MEM-SESSION] index failed for {session_date}: {e}")
+
+    def backfill_session_memories(self) -> int:
+        """One-shot: index every existing day-recap as a 'session' memory.
+
+        Catches up day-recaps written before recaps were made semantically
+        searchable. Runs once per process (flag-guarded); _store_memory
+        upserts, so a re-run would be harmless anyway. Cheap no-op after the
+        first call — safe to call every turn from the background thread."""
+        if self._session_mem_backfilled:
+            return 0
+        self._session_mem_backfilled = True
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT session_id, summary, topics FROM session_summaries "
+                "WHERE summary IS NOT NULL AND summary != ''"
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return 0
+        for r in rows:
+            self._index_session_memory(
+                r["session_id"], r["summary"], r["topics"] or "")
+        if rows:
+            print(f"   [MEM-SESSION] Backfilled {len(rows)} day-recaps into "
+                  f"semantic memory")
+        return len(rows)
 
     def _unsummarized_session_date(self) -> Optional[str]:
         """Most recent past day (within SESSION_HISTORY_DAYS) that has
@@ -2710,6 +2795,55 @@ class EnhancedMemorySystem:
             "(topics discussed, not verified facts; don't recite these):\n"
             + "\n".join(lines) +
             "\n</earlier_sessions>"
+        )
+
+    def _build_recalled_days_block(self, user_msg: str) -> str:
+        """Surface an older day-recap that is topically relevant to what the
+        user just said.
+
+        <earlier_sessions> only shows the last few days by date; this reaches
+        further back by semantic relevance, so a conversation from weeks or
+        months ago can resurface when its topic comes up again. This is the
+        durable, long-term recall Blue asked for. Empty string when nothing
+        old enough matches."""
+        if not user_msg or len(user_msg.strip()) < 5:
+            return ""
+        try:
+            hits = self.search_memories(user_msg, top_k=2, mem_type="session")
+        except Exception:
+            return ""
+        if not hits:
+            return ""
+        # Skip days already shown by date in <earlier_sessions> so the two
+        # blocks don't echo each other — this block is for older context only.
+        recent_floor = (datetime.now().date()
+                        - timedelta(days=SESSION_HISTORY_INJECT)).isoformat()
+        lines: List[str] = []
+        seen: set = set()
+        for h in hits:
+            subj = h.get("subject") or ""
+            m = re.search(r"(\d{4}-\d{2}-\d{2})", subj)
+            if not m:
+                continue
+            day = m.group(1)
+            if day >= recent_floor or day in seen:
+                continue
+            seen.add(day)
+            content = (h.get("content") or "").strip()
+            prefix = f"{subj}:"
+            if content.startswith(prefix):
+                content = content[len(prefix):].strip()
+            lines.append(f"- {self._friendly_day_label(day)}: {content[:280]}")
+        if not lines:
+            return ""
+        return (
+            "<remembered_days>\n"
+            "From further back — a past day's recap that resurfaced because it "
+            "relates to what the user just said. Rough context for continuity, "
+            "not a verified fact; weave it in naturally only if it genuinely "
+            "helps, and don't recite it:\n"
+            + "\n".join(lines) +
+            "\n</remembered_days>"
         )
 
     # ------------------------------------------------------------------ Rhythm learning
@@ -2882,9 +3016,12 @@ class EnhancedMemorySystem:
     # ------------------------------------------------------------------ Cross-context connections
 
     # The "connect the dots" layer. It correlates the upcoming schedule with
-    # what's been discussed recently — deterministically, by date and keyword
-    # matching over real reminder rows and real session recaps. The LLM only
-    # phrases a connection a rule found; it never decides one exists.
+    # what's been discussed recently, how the user has been feeling, and the
+    # document library — deterministically, by date and keyword matching over
+    # real reminder rows, real session recaps, and real files. The LLM only
+    # phrases a connection a rule found; it never decides one exists. When a
+    # connection carries a suggested action (dim the lights, focus music),
+    # Blue offers it and waits for a yes — it never acts unprompted.
 
     # Generic scheduling words and titles that carry no topic signal —
     # skipped when pulling keywords out of an event title.
@@ -2893,6 +3030,18 @@ class EnhancedMemorySystem:
         "appointment appt reminder call practice class session event "
         "time day today tomorrow morning evening afternoon night get set "
         "schedule doctor dr drs professor prof mr mrs ms sir madam".split()
+    )
+
+    # Words/phrases that signal the user is stressed, anxious, or dreading
+    # something — used to spot when an upcoming event is weighing on them so
+    # Blue can gently offer a calming hand. Deterministic, not LLM-judged.
+    _CONCERN_RE = re.compile(
+        r"\b(stress(?:ed|ful|ing)?|anxious|anxiety|nervous|worried|worrying|"
+        r"worry|overwhelmed|swamped|dread(?:ing|ed)?|freaking out|on edge|"
+        r"can'?t stop thinking|losing sleep|can'?t sleep|under pressure|"
+        r"so much pressure|panic(?:king|ked)?|scared about|tense about|"
+        r"not looking forward|stressing about)\b",
+        re.IGNORECASE,
     )
 
     @classmethod
@@ -2938,13 +3087,73 @@ class EnhancedMemorySystem:
             return ""
         return " ".join(parts).lower()
 
-    def find_connections(self, now: Optional[datetime] = None) -> List[str]:
-        """Correlate the upcoming schedule with recent conversation.
+    def _recent_user_messages(self, now: datetime) -> List[str]:
+        """Recent user messages, newest first — for spotting how the user has
+        been feeling, not just what topics came up."""
+        out: List[str] = []
+        try:
+            conn = self._conn()
+            ts_floor = (now - timedelta(days=CONNECTION_RECENT_DAYS)).isoformat()
+            for r in conn.execute(
+                "SELECT content FROM conversation_log "
+                "WHERE role = 'user' AND timestamp >= ? "
+                "ORDER BY id DESC LIMIT 80",
+                (ts_floor,),
+            ).fetchall():
+                c = (r["content"] or "").strip()
+                if c:
+                    out.append(c)
+            conn.close()
+        except Exception:
+            return []
+        return out
 
-        Two deterministic rules: a day with several events ("looks full"),
-        and an upcoming event whose topic has come up in conversation
-        recently. Returns short connection strings — never fabricated, only
-        real overlaps between real reminders and real recaps."""
+    def _library_documents(self) -> List[str]:
+        """Filenames in the user's real document library, camera frames and
+        bare images filtered out (those pollute the index and never relate to
+        a calendar event). Used to link a stored document to an upcoming
+        event — 'you have the syllabus for that class'."""
+        try:
+            from config import DATA_DIR
+            index_path = Path(DATA_DIR).parent / "document_index.json"
+        except Exception:
+            index_path = Path("document_index.json")
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            return []
+        docs = data.get("documents") if isinstance(data, dict) else None
+        if not isinstance(docs, list):
+            return []
+        out: List[str] = []
+        for entry in docs:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("filename") or "").strip()
+            path = (entry.get("filepath") or "").lower()
+            if not name:
+                continue
+            if "camera" in path or "uploaded_documents" in path:
+                continue
+            if name.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".gif", ".bmp")
+            ):
+                continue
+            out.append(name)
+        return out
+
+    def find_connections(self, now: Optional[datetime] = None,
+                         current_user_msg: str = "") -> List[str]:
+        """Correlate the upcoming schedule with recent conversation, the
+        user's mood, and the document library.
+
+        Four deterministic rules: a day with several events ("looks full");
+        an upcoming event whose topic echoes recent conversation; an event
+        the user has sounded stressed about (Blue offers a calming hand); and
+        an event with a related document on file. Returns short connection
+        strings — never fabricated, only real overlaps between real
+        reminders, recaps, files, and the user's own words."""
         now = now or datetime.now()
         try:
             from blue_tools_enhanced import occurrences_in_window
@@ -2971,6 +3180,44 @@ class EnhancedMemorySystem:
                     f"— {len(evs)} things on the calendar: {titles}."
                 )
 
+        # One event links at most once across the topic/concern rules.
+        matched: set = set()
+
+        # Rule 3 runs BEFORE the plain topic rule: a concern connection
+        # carries an actionable, caring offer, so it should win the event if
+        # both rules would fire. The user has sounded stressed about something
+        # that matches a ONE-OFF upcoming event — the "notice what you need
+        # before you say it" case. Blue gently OFFERS a calming hand (dim the
+        # lights, focus music) and never acts on its own. Detection is
+        # deterministic: a concern word in the same message as an event
+        # keyword. The current message is included so it works the same turn.
+        concern_msgs = [
+            m for m in self._recent_user_messages(now)
+            if self._CONCERN_RE.search(m)
+        ]
+        if current_user_msg and self._CONCERN_RE.search(current_user_msg):
+            concern_msgs.append(current_user_msg)
+        if concern_msgs:
+            concern_blob = " ".join(concern_msgs).lower()
+            for e in events:
+                if e.get("recurring") or e["title"] in matched:
+                    continue
+                for kw in self._event_keywords(e["title"]):
+                    if re.search(r"\b" + re.escape(kw.lower()) + r"\b",
+                                 concern_blob):
+                        day = self._friendly_day_label(
+                            e["start"].date().isoformat())
+                        connections.append(
+                            f"The user has sounded stressed about something "
+                            f"tied to \"{e['title']}\" — it's coming up ({day}). "
+                            f"If it fits the moment, gently offer to help them "
+                            f"unwind: dimming the lights, or putting on some "
+                            f"focus music. Offer first and wait for a yes — "
+                            f"don't change anything on your own."
+                        )
+                        matched.add(e["title"])
+                        break
+
         # Rule 2: a ONE-OFF upcoming event whose topic echoes recent
         # conversation. Recurring fixtures (a weekly class) are skipped — they
         # aren't news. A keyword counts only if it appears in recent text but
@@ -2979,7 +3226,6 @@ class EnhancedMemorySystem:
         # among equals the rarer (more specific) one wins.
         recent = self._recent_context_text(now)
         if recent:
-            matched: set = set()
             for e in events:
                 if e.get("recurring") or e["title"] in matched:
                     continue
@@ -3000,23 +3246,62 @@ class EnhancedMemorySystem:
                     )
                     matched.add(e["title"])
 
+        # Rule 4: an imminent event (within CONNECTION_DOC_WINDOW_DAYS) that
+        # matches a document in the library, so Blue can offer to pull it up
+        # beforehand. Filenames concatenate words, so this is a substring
+        # match; event keywords are already filtered to distinctive ones.
+        docs = self._library_documents()
+        if docs:
+            doc_norms = [
+                (d, re.sub(r"[^a-z0-9]", "", d.lower())) for d in docs
+            ]
+            doc_cutoff = now.date() + timedelta(days=CONNECTION_DOC_WINDOW_DAYS)
+            doc_matched: set = set()
+            for e in events:
+                if e["start"].date() > doc_cutoff:
+                    continue
+                hit = None
+                for kw in self._event_keywords(e["title"]):
+                    kwn = re.sub(r"[^a-z0-9]", "", kw.lower())
+                    if len(kwn) < 4:
+                        continue
+                    for fname, fnorm in doc_norms:
+                        if fname not in doc_matched and kwn in fnorm:
+                            hit = fname
+                            break
+                    if hit:
+                        break
+                if hit:
+                    day = self._friendly_day_label(
+                        e["start"].date().isoformat())
+                    connections.append(
+                        f"\"{e['title']}\" is coming up ({day}) and there's a "
+                        f"document on file that looks related — \"{hit}\". You "
+                        f"could offer to pull it up or summarise it beforehand."
+                    )
+                    doc_matched.add(hit)
+
         # Dedupe, keep order, cap.
         seen: set = set()
         unique = [c for c in connections if not (c in seen or seen.add(c))]
         return unique[:4]
 
-    def _build_connections_block(self, now: Optional[datetime] = None) -> str:
+    def _build_connections_block(self, now: Optional[datetime] = None,
+                                 user_msg: str = "") -> str:
         """Surface cross-context connections so Blue can join the dots
         naturally. Empty string when there are none."""
-        connections = self.find_connections(now)
+        connections = self.find_connections(now, current_user_msg=user_msg)
         if not connections:
             return ""
         return (
             "<connections>\n"
-            "Links the system spotted between the user's upcoming schedule "
-            "and recent conversations — derived from real reminders and "
-            "recaps, not guesses. Raise one naturally if it genuinely helps "
-            "(\"by the way, ...\"); ignore any that don't fit the moment, and "
+            "Links the system spotted across the user's upcoming schedule, "
+            "recent conversations, how they've been feeling, and their "
+            "document library — derived from real reminders, recaps, files, "
+            "and the user's own words, not guesses. Raise one naturally if it "
+            "genuinely helps (\"by the way, ...\"). Some include a gentle "
+            "action you could offer — always ask first and wait for a yes, "
+            "never act unprompted. Ignore any that don't fit the moment, and "
             "never present a connection as more certain than it is:\n"
             + "\n".join(f"- {c}" for c in connections) +
             "\n</connections>"

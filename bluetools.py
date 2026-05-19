@@ -9117,6 +9117,10 @@ def chat_completions():
                             # Backfill one past-day recap per turn so Blue has
                             # cross-day continuity ("yesterday we discussed X").
                             memory_system.summarize_previous_sessions()
+                            # Index existing day-recaps for semantic recall so
+                            # an old conversation can resurface by relevance
+                            # (one-shot, cheap no-op after the first call).
+                            memory_system.backfill_session_memories()
                             # Recompute behavioural rhythms (rate-limited
                             # internally — a cheap no-op most turns).
                             memory_system.update_rhythms_if_due()
