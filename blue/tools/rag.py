@@ -7,6 +7,7 @@ Uses ChromaDB's built-in embedding model (all-MiniLM-L6-v2 via onnxruntime).
 
 import hashlib
 import os
+import threading
 from typing import Dict, List
 
 CHROMA_DB_PATH = os.environ.get(
@@ -20,6 +21,11 @@ CHUNK_OVERLAP = 200  # overlap between chunks
 _chroma_client = None
 _collection = None
 
+# Serializes every ChromaDB write. ChromaDB's SQLite writer lock has no
+# timeout, so two threads indexing at once (the web upload handler and the
+# documents-folder watcher) deadlock and hang the upload request forever.
+_write_lock = threading.RLock()
+
 
 def _get_collection():
     """Lazy-init ChromaDB client and collection."""
@@ -27,26 +33,29 @@ def _get_collection():
     if _collection is not None:
         return _collection
 
-    try:
-        import chromadb
-        from chromadb.config import Settings
+    with _write_lock:
+        if _collection is not None:
+            return _collection
+        try:
+            import chromadb
+            from chromadb.config import Settings
 
-        os.makedirs(CHROMA_DB_PATH, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(
-            path=CHROMA_DB_PATH,
-            settings=Settings(anonymized_telemetry=False),
-        )
-        _collection = _chroma_client.get_or_create_collection(
-            name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
-        )
-        print(f"   [RAG] ChromaDB initialized ({_collection.count()} chunks indexed)")
-        return _collection
-    except ImportError:
-        print("   [RAG] ChromaDB not installed. Run: pip install chromadb")
-        return None
-    except Exception as e:
-        print(f"   [RAG] Error initializing ChromaDB: {e}")
-        return None
+            os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+            _chroma_client = chromadb.PersistentClient(
+                path=CHROMA_DB_PATH,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            _collection = _chroma_client.get_or_create_collection(
+                name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+            )
+            print(f"   [RAG] ChromaDB initialized ({_collection.count()} chunks indexed)")
+            return _collection
+        except ImportError:
+            print("   [RAG] ChromaDB not installed. Run: pip install chromadb")
+            return None
+        except Exception as e:
+            print(f"   [RAG] Error initializing ChromaDB: {e}")
+            return None
 
 
 def chunk_text(
@@ -141,21 +150,11 @@ def index_document(filepath: str, filename: str, doc_id: str = None, text: str =
     if not doc_id:
         doc_id = _get_file_hash(filepath)
 
-    # Remove existing chunks for this document (handles re-indexing)
-    try:
-        existing = collection.get(where={"doc_id": doc_id})
-        if existing and existing["ids"]:
-            collection.delete(ids=existing["ids"])
-            print(f"   [RAG] Removed {len(existing['ids'])} old chunks for {filename}")
-    except Exception:
-        pass
-
-    # Chunk the text
+    # Chunk the text (CPU-only, no DB access — kept outside the write lock).
     chunks = chunk_text(text)
     if not chunks:
         return {"success": False, "error": "No chunks generated from text"}
 
-    # Add chunks to ChromaDB
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
     metadatas = [
         {
@@ -168,18 +167,30 @@ def index_document(filepath: str, filename: str, doc_id: str = None, text: str =
         for i in range(len(chunks))
     ]
 
-    # Batch the add() so huge documents emit progress instead of looking hung.
-    batch_size = 128
-    total = len(chunks)
-    for i in range(0, total, batch_size):
-        end = min(i + batch_size, total)
-        collection.add(
-            documents=chunks[i:end],
-            ids=ids[i:end],
-            metadatas=metadatas[i:end],
-        )
-        if total > batch_size:
-            print(f"   [RAG] embedded {end}/{total} chunks of {filename}", flush=True)
+    # Serialize the actual ChromaDB writes so a concurrent indexer (the
+    # folder watcher) can't deadlock against this one on the SQLite lock.
+    with _write_lock:
+        # Remove existing chunks for this document (handles re-indexing).
+        try:
+            existing = collection.get(where={"doc_id": doc_id})
+            if existing and existing["ids"]:
+                collection.delete(ids=existing["ids"])
+                print(f"   [RAG] Removed {len(existing['ids'])} old chunks for {filename}")
+        except Exception:
+            pass
+
+        # Batch the add() so huge documents emit progress instead of looking hung.
+        batch_size = 128
+        total = len(chunks)
+        for i in range(0, total, batch_size):
+            end = min(i + batch_size, total)
+            collection.add(
+                documents=chunks[i:end],
+                ids=ids[i:end],
+                metadatas=metadatas[i:end],
+            )
+            if total > batch_size:
+                print(f"   [RAG] embedded {end}/{total} chunks of {filename}", flush=True)
 
     print(f"   [RAG] Indexed {len(chunks)} chunks for {filename}")
     return {
@@ -196,10 +207,11 @@ def remove_document(doc_id: str) -> bool:
     if collection is None:
         return False
     try:
-        existing = collection.get(where={"doc_id": doc_id})
-        if existing and existing["ids"]:
-            collection.delete(ids=existing["ids"])
-            print(f"   [RAG] Removed {len(existing['ids'])} chunks for doc {doc_id}")
+        with _write_lock:
+            existing = collection.get(where={"doc_id": doc_id})
+            if existing and existing["ids"]:
+                collection.delete(ids=existing["ids"])
+                print(f"   [RAG] Removed {len(existing['ids'])} chunks for doc {doc_id}")
         return True
     except Exception as e:
         print(f"   [RAG] Error removing document: {e}")

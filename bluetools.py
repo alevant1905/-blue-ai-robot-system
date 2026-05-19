@@ -4408,36 +4408,6 @@ def extract_text_from_file(filepath: str) -> str:
     return f"Unsupported file type: .{ext}"
 
 
-def add_document_to_rag(filepath: str, filename: str) -> bool:
-    """Index a document into the local ChromaDB store used by search_documents_rag.
-
-    Previously this POSTed to a non-existent LM Studio /v1/rag endpoint and
-    succeeded only by virtue of falling through. We now go straight to the
-    real local ChromaDB indexer (blue.tools.rag.index_document) which chunks
-    and embeds the file for semantic search.
-    """
-    try:
-        from blue.tools.rag import index_document
-    except ImportError:
-        # ChromaDB not installed — extraction still ran, fine to index later.
-        text_content = extract_text_from_file(filepath)
-        if text_content.startswith("Error"):
-            print(f"   [WARN] {text_content}")
-            return False
-        return True
-
-    try:
-        result = index_document(filepath, filename)
-        if result.get("success"):
-            print(f"   [OK] Indexed in ChromaDB: {result.get('chunks_indexed')} chunks")
-            return True
-        print(f"   [WARN] ChromaDB indexing failed: {result.get('error')}")
-        return False
-    except Exception as e:
-        print(f"   [ERROR] Error indexing document: {e}")
-        return False
-
-
 def _is_full_document_request(query: str) -> bool:
     """Check if the query is asking for a full document rather than a specific search."""
     query_lower = query.lower()
@@ -8426,51 +8396,57 @@ def manage_documents():
                     file_size = os.path.getsize(filepath)
                     file_hash = get_file_hash(filepath)
 
-                    # Extract text preview
-                    text_content = extract_text_from_file(filepath)
-                    text_preview = text_content[:500] if not text_content.startswith("Error") else ""
-
-                    # Add to RAG system
-                    rag_success = add_document_to_rag(filepath, filename)
-
-                    # Update index
+                    # Check for duplicates before doing any indexing work.
                     index = load_document_index()
+                    duplicate = any(
+                        doc.get('hash') == file_hash for doc in index['documents']
+                    )
 
-                    # Check for duplicates
-                    duplicate = False
-                    for doc in index['documents']:
-                        if doc.get('hash') == file_hash:
-                            duplicate = True
-                            message = f"Document '{filename}' already exists (duplicate detected)"
-                            message_type = "error"
-                            os.remove(filepath)
-                            break
+                    if duplicate:
+                        message = f"Document '{filename}' already exists (duplicate detected)"
+                        message_type = "error"
+                        os.remove(filepath)
+                    else:
+                        # Extract text once and reuse it for the preview and
+                        # the RAG index — no second PyPDF2 pass.
+                        text_content = extract_text_from_file(filepath)
+                        text_preview = text_content[:500] if not text_content.startswith("Error") else ""
 
-                    if not duplicate:
-                        # Index in local ChromaDB RAG
-                        local_rag_success = False
-                        try:
-                            from blue.tools.rag import index_document as rag_index
-                            ext_check = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-                            if ext_check in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html'):
-                                rag_result = rag_index(filepath, filename, doc_id=file_hash)
-                                local_rag_success = rag_result.get('success', False)
-                                if local_rag_success:
-                                    print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks for {filename}")
-                        except ImportError:
-                            print("   [WARN] ChromaDB not installed, skipping local RAG index")
-                        except Exception as e:
-                            print(f"   [WARN] Local RAG indexing error: {e}")
-
-                        index['documents'].append({
+                        # Register the document in the index *before* indexing
+                        # so the documents-folder watcher's hash dedup skips
+                        # this file instead of racing in to index it again.
+                        doc_entry = {
                             'filename': filename,
                             'filepath': str(filepath),
                             'size': file_size,
                             'hash': file_hash,
                             'uploaded_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
                             'text_preview': text_preview,
-                            'indexed_in_rag': rag_success or local_rag_success
-                        })
+                            'indexed_in_rag': False,
+                        }
+                        index['documents'].append(doc_entry)
+                        save_document_index(index)
+
+                        # Index into the local ChromaDB RAG store exactly
+                        # once. rag.index_document serializes its writes, so
+                        # this can no longer deadlock the upload request.
+                        try:
+                            from blue.tools.rag import index_document as rag_index
+                            if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html'):
+                                rag_result = rag_index(
+                                    filepath, filename,
+                                    doc_id=file_hash, text=text_content,
+                                )
+                                doc_entry['indexed_in_rag'] = rag_result.get('success', False)
+                                if doc_entry['indexed_in_rag']:
+                                    print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks for {filename}")
+                                else:
+                                    print(f"   [RAG] indexing skipped: {rag_result.get('error')}")
+                        except ImportError:
+                            print("   [WARN] ChromaDB not installed, skipping local RAG index")
+                        except Exception as e:
+                            print(f"   [WARN] Local RAG indexing error: {e}")
+
                         save_document_index(index)
 
                         message = f"✅ Successfully uploaded and indexed '{filename}'!"
