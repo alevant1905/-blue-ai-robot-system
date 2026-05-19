@@ -8084,6 +8084,11 @@ DOCUMENT_MANAGER_HTML = """
             border-color: #764ba2;
             background: #f0f1f5;
         }
+        .upload-section.dragover {
+            border-color: #28a745;
+            background: #e8f5e9;
+            transform: scale(1.01);
+        }
         .upload-section h2 {
             color: #667eea;
             margin-bottom: 20px;
@@ -8284,9 +8289,10 @@ DOCUMENT_MANAGER_HTML = """
                 </div>
             </div>
 
-            <div class="upload-section">
+            <div class="upload-section" id="dropZone">
                 <h2>📤 Upload New Document</h2>
                 <p style="color: #666; margin-bottom: 20px;">
+                    <strong>Drag &amp; drop a file into this box</strong> — or use the button below.<br>
                     Supported: PDF, Word (.doc, .docx), Text (.txt, .md)
                 </p>
                 <form method="POST" enctype="multipart/form-data" id="uploadForm">
@@ -8344,15 +8350,67 @@ DOCUMENT_MANAGER_HTML = """
     </div>
 
     <script>
-        document.getElementById('fileInput').addEventListener('change', function(e) {
-            const fileName = e.target.files[0] ? e.target.files[0].name : 'No file chosen';
-            document.getElementById('fileName').textContent = fileName;
+        const fileInput = document.getElementById('fileInput');
+        const fileNameEl = document.getElementById('fileName');
+        const dropZone = document.getElementById('dropZone');
+        const uploadForm = document.getElementById('uploadForm');
+        const ALLOWED = ['pdf', 'doc', 'docx', 'txt', 'md'];
+
+        fileInput.addEventListener('change', function(e) {
+            fileNameEl.style.color = '#666';
+            fileNameEl.textContent = e.target.files[0] ? e.target.files[0].name : 'No file chosen';
         });
 
-        document.getElementById('uploadForm').addEventListener('submit', function() {
-            document.getElementById('uploadBtn').disabled = true;
-            document.getElementById('uploadBtn').textContent = 'Uploading...';
+        uploadForm.addEventListener('submit', function() {
+            const btn = document.getElementById('uploadBtn');
+            btn.disabled = true;
+            btn.textContent = 'Uploading...';
         });
+
+        // Drag-and-drop: drop a file straight from Explorer without ever
+        // opening the native "Choose File" dialog.
+        function assignDroppedFile(file) {
+            const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+            if (ALLOWED.indexOf(ext) === -1) {
+                fileNameEl.style.color = '#dc3545';
+                fileNameEl.textContent = 'Unsupported file type: .' + ext;
+                return;
+            }
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            fileInput.files = dt.files;
+            fileNameEl.style.color = '#28a745';
+            fileNameEl.textContent = file.name + ' — ready, click "Upload & Index"';
+        }
+
+        function highlight(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('dragover');
+        }
+        dropZone.addEventListener('dragenter', highlight);
+        dropZone.addEventListener('dragover', highlight);
+        dropZone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!dropZone.contains(e.relatedTarget)) {
+                dropZone.classList.remove('dragover');
+            }
+        });
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length) {
+                assignDroppedFile(files[0]);
+            }
+        });
+
+        // A file dropped outside the box would otherwise make the browser
+        // navigate away from this page — swallow those stray drops.
+        window.addEventListener('dragover', function(e) { e.preventDefault(); });
+        window.addEventListener('drop', function(e) { e.preventDefault(); });
     </script>
 </body>
 </html>
