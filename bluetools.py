@@ -3605,6 +3605,33 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "auto_reply_emails",
+            "description": "AUTONOMOUSLY scan the inbox for emails written to Blue by name (greetings like 'Hi Blue', 'Dear Blue', 'Blue, can you...'), draft a reply to each using Blue's voice, and send it. Every reply is automatically BCC'd to the user. Use this when the user says things like 'check my email and reply', 'answer the emails written to you', 'see if anyone wrote to you', 'handle your messages', 'reply to anyone who messaged you'. DO NOT use this for: sending a brand-new email (use send_gmail), replying to one specific known email by query (use reply_gmail), or just reading the inbox (use read_gmail).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lookback_hours": {
+                        "type": "integer",
+                        "description": "How far back to scan, in hours (default 24, max 168).",
+                        "default": 24
+                    },
+                    "max_replies": {
+                        "type": "integer",
+                        "description": "Maximum number of replies to send this run (default 5, max 20).",
+                        "default": 5
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, list which emails would be replied to and preview the drafts without sending. Default false.",
+                        "default": False
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "view_image",
             "description": "View and analyze a SPECIFIC image file when user EXPLICITLY asks to see/view/look at it. ONLY use this when user directly requests to view an image (e.g., 'show me photo.jpg', 'look at the screenshot', 'what's in this image'). DO NOT use this just because an image filename appears in a document list - only use when user specifically wants to view the image content itself.",
             "parameters": {
@@ -5645,6 +5672,30 @@ def _execute_read_gmail(args: Dict[str, Any]) -> str:
         })
 
 
+# ================================================================================
+# AUTO-REPLY CONSTANTS & HELPERS
+# ================================================================================
+
+# Every email Blue writes is BCC'd here so the user has an audit copy in
+# their inbox of everything that went out under their name.
+BLUE_BCC_EMAIL = "alevant1905@gmail.com"
+
+# Gmail label applied to inbound messages after Blue has answered them, so
+# the auto-reply loop never replies to the same email twice.
+BLUE_REPLIED_LABEL = "BlueReplied"
+
+_BLUE_BCC_RE = re.compile(r"\balevant1905@gmail\.com\b", re.IGNORECASE)
+
+
+def _ensure_blue_bcc(bcc: str) -> str:
+    """Combine a user-supplied BCC list with the always-BCC address (deduped)."""
+    if not bcc:
+        return BLUE_BCC_EMAIL
+    if _BLUE_BCC_RE.search(bcc):
+        return bcc
+    return bcc.rstrip(", ").rstrip() + ", " + BLUE_BCC_EMAIL
+
+
 def _execute_send_gmail(args: Dict[str, Any]) -> str:
     """Send an email via Gmail with optional attachments"""
     if not GMAIL_AVAILABLE:
@@ -5660,7 +5711,8 @@ def _execute_send_gmail(args: Dict[str, Any]) -> str:
         subject = args.get("subject", "")
         body = args.get("body", "")
         cc = args.get("cc", "")
-        bcc = args.get("bcc", "")
+        # Always BCC the user so they keep a copy of everything Blue sends.
+        bcc = _ensure_blue_bcc(args.get("bcc", ""))
         attachments = args.get("attachments", [])  # NEW: List of file paths
 
         if not to or not subject:
@@ -5879,6 +5931,7 @@ def _execute_reply_gmail(args: Dict[str, Any]) -> str:
                 reply_message = MIMEMultipart()
                 reply_message['To'] = reply_to
                 reply_message['Subject'] = reply_subject
+                reply_message['Bcc'] = _ensure_blue_bcc(args.get("bcc", ""))
                 reply_message['In-Reply-To'] = message_id_header
                 reply_message['References'] = message_id_header
 
@@ -5928,6 +5981,351 @@ def _execute_reply_gmail(args: Dict[str, Any]) -> str:
             "error": f"Failed to reply to emails: {str(e)}",
             "success": False
         })
+# ================================================================================
+# AUTO-REPLY: emails written to Blue by name
+# ================================================================================
+#
+# Detector: greeting-style or sentence-initial vocative use of "Blue".
+# Deliberately narrow so phrases like "blue jeans" or "Blue Cross Blue
+# Shield" don't trip it. We require the addressee to follow a greeting word
+# OR appear at the start of a line followed by punctuation (",", ":", "!").
+
+_BLUE_TO_BLUE_RE = re.compile(
+    r"(?:^|\n)\s*"
+    r"(?:hi|hey|hello|dear|yo|greetings|good\s+(?:morning|afternoon|evening))"
+    r"[\s,]+blue\b[\s,.!?:\-]",
+    re.IGNORECASE,
+)
+_BLUE_VOCATIVE_RE = re.compile(r"(?:^|\n)\s*blue\s*[,:!?]", re.IGNORECASE)
+_BLUE_SUBJECT_VOCATIVE_RE = re.compile(r"^\s*blue\s*[,:!?]", re.IGNORECASE)
+_BLUE_SKIP_SENDER_RE = re.compile(
+    r"(?:no[-_.]?reply|do[-_.]?not[-_.]?reply|noreply|postmaster|"
+    r"mailer[-_.]?daemon|notifications?@|alerts?@|newsletter@|news@|"
+    r"marketing@|updates?@)",
+    re.IGNORECASE,
+)
+
+
+def _is_email_to_blue(subject: str, body: str, snippet: str = "") -> bool:
+    """Return True if this email is addressed to Blue by name."""
+    text = (body or "")[:1500]
+    # Strip HTML so the line-anchored regexes work on multipart/html bodies.
+    if '<' in text and '>' in text:
+        text = re.sub(r"<[^>]+>", "\n", text)
+        text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = (text + "\n" + (snippet or ""))[:1800]
+
+    if _BLUE_TO_BLUE_RE.search(text):
+        return True
+    if _BLUE_VOCATIVE_RE.search(text):
+        return True
+    if _BLUE_SUBJECT_VOCATIVE_RE.search(subject or ""):
+        return True
+    return False
+
+
+def _should_skip_sender(sender: str, headers: List[Dict[str, str]] = None) -> bool:
+    """Skip automated mail, marketing lists, and no-reply senders."""
+    if not sender:
+        return True
+    if _BLUE_SKIP_SENDER_RE.search(sender):
+        return True
+    if headers:
+        for h in headers:
+            name = h.get('name', '').lower()
+            if name in ('list-unsubscribe', 'list-id', 'precedence', 'auto-submitted'):
+                return True
+    return False
+
+
+def _get_or_create_blue_label(service) -> Optional[str]:
+    """Return the Gmail label ID for BLUE_REPLIED_LABEL, creating it if needed."""
+    try:
+        labels = service.users().labels().list(userId='me').execute().get('labels', [])
+        for lbl in labels:
+            if lbl.get('name') == BLUE_REPLIED_LABEL:
+                return lbl.get('id')
+        created = service.users().labels().create(
+            userId='me',
+            body={
+                'name': BLUE_REPLIED_LABEL,
+                'labelListVisibility': 'labelShow',
+                'messageListVisibility': 'show',
+            },
+        ).execute()
+        return created.get('id')
+    except Exception as e:
+        print(f"   [AUTO-REPLY] could not get/create label: {e}")
+        return None
+
+
+def _generate_reply_for_email(original: Dict[str, Any]) -> str:
+    """Draft a reply body via the local LM Studio model. Returns plain text."""
+    sender = original.get('from', 'someone')
+    subject = original.get('subject', '(no subject)')
+    body = (original.get('body') or original.get('snippet') or '')[:2000]
+
+    system_prompt = (
+        "You are Blue, Alevant's friendly robot assistant. You're replying to an "
+        "email that was written to you personally. Keep it short (under 150 words), "
+        "warm, and personal. Sign as 'Blue'. If the email asks you to do something "
+        "you can't verify or commit to on your own, say you'll check with Alevant "
+        "and get back to them. Don't invent facts."
+    )
+    user_prompt = (
+        f"Email from {sender}\n"
+        f"Subject: {subject}\n"
+        f"---\n"
+        f"{body}\n"
+        f"---\n"
+        f"Write a short reply directly to the sender. Output only the reply body — "
+        f"no subject line, no headers, no quoted original."
+    )
+
+    try:
+        result = call_llm(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            include_tools=False,
+            temperature=0.7,
+            max_tokens=400,
+        )
+        choices = (result or {}).get('choices') or []
+        if not choices:
+            return ""
+        content = ((choices[0].get('message') or {}).get('content') or "").strip()
+        return content
+    except Exception as e:
+        print(f"   [AUTO-REPLY] LLM error generating reply: {e}")
+        return ""
+
+
+def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
+    """Scan recent inbox, find emails written to Blue, and reply to each.
+
+    Args (all optional):
+        lookback_hours: how far back to scan (default 24, max 168)
+        max_replies: cap on how many to send this run (default 5, max 20)
+        dry_run: report what *would* be sent without sending
+    """
+    if not GMAIL_AVAILABLE:
+        return json.dumps({"success": False, "error": "Gmail libraries not installed."})
+
+    try:
+        lookback = max(1, min(int(args.get('lookback_hours', 24) or 24), 168))
+    except (TypeError, ValueError):
+        lookback = 24
+    try:
+        max_replies = max(1, min(int(args.get('max_replies', 5) or 5), 20))
+    except (TypeError, ValueError):
+        max_replies = 5
+    dry_run = bool(args.get('dry_run', False))
+
+    try:
+        service = get_gmail_service()
+        label_id = _get_or_create_blue_label(service)
+
+        query = (
+            f"in:inbox newer_than:{lookback}h "
+            f"-category:promotions -category:social -category:updates -category:forums "
+            f"-label:{BLUE_REPLIED_LABEL}"
+        )
+
+        list_resp = service.users().messages().list(
+            userId='me', q=query, maxResults=50,
+        ).execute()
+        message_refs = list_resp.get('messages', [])
+
+        scanned = 0
+        candidates = []
+        for ref in message_refs:
+            msg_data = service.users().messages().get(
+                userId='me', id=ref['id'], format='full',
+            ).execute()
+            scanned += 1
+            headers = msg_data['payload']['headers']
+            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
+            if _should_skip_sender(sender, headers):
+                continue
+
+            body_text = ""
+            payload = msg_data['payload']
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    if part.get('mimeType') == 'text/plain' and 'data' in part.get('body', {}):
+                        body_text = base64.urlsafe_b64decode(
+                            part['body']['data']
+                        ).decode('utf-8', errors='replace')
+                        break
+            elif 'body' in payload and 'data' in payload['body']:
+                body_text = base64.urlsafe_b64decode(
+                    payload['body']['data']
+                ).decode('utf-8', errors='replace')
+
+            snippet = msg_data.get('snippet', '')
+            if not _is_email_to_blue(subject, body_text, snippet):
+                continue
+
+            candidates.append({
+                'id': ref['id'],
+                'thread_id': msg_data.get('threadId'),
+                'headers': headers,
+                'from': sender,
+                'subject': subject,
+                'body': body_text,
+                'snippet': snippet,
+            })
+            if len(candidates) >= max_replies:
+                break
+
+        sent = []
+        skipped = []
+        errors = []
+
+        for cand in candidates:
+            try:
+                reply_body = _generate_reply_for_email(cand)
+                if not reply_body:
+                    skipped.append({'id': cand['id'], 'reason': 'LLM produced no reply'})
+                    continue
+
+                headers = cand['headers']
+                message_id_header = next(
+                    (h['value'] for h in headers if h['name'].lower() == 'message-id'),
+                    '',
+                )
+                m = re.search(r'<(.+?)>', cand['from'])
+                reply_to = m.group(1) if m else cand['from']
+                reply_subject = (
+                    cand['subject'] if cand['subject'].lower().startswith('re:')
+                    else f"Re: {cand['subject']}"
+                )
+
+                if dry_run:
+                    sent.append({
+                        'dry_run': True,
+                        'to': reply_to,
+                        'subject': reply_subject,
+                        'reply_preview': reply_body[:300],
+                    })
+                    continue
+
+                reply_message = MIMEMultipart()
+                reply_message['To'] = reply_to
+                reply_message['Subject'] = reply_subject
+                reply_message['Bcc'] = BLUE_BCC_EMAIL
+                if message_id_header:
+                    reply_message['In-Reply-To'] = message_id_header
+                    reply_message['References'] = message_id_header
+                reply_message.attach(MIMEText(reply_body, 'plain', 'utf-8'))
+
+                raw = base64.urlsafe_b64encode(reply_message.as_bytes()).decode('utf-8')
+                sent_msg = service.users().messages().send(
+                    userId='me',
+                    body={'raw': raw, 'threadId': cand['thread_id']},
+                ).execute()
+
+                # Mark the original as read + tag it so we never reply twice.
+                modify_body = {'removeLabelIds': ['UNREAD']}
+                if label_id:
+                    modify_body['addLabelIds'] = [label_id]
+                try:
+                    service.users().messages().modify(
+                        userId='me', id=cand['id'], body=modify_body,
+                    ).execute()
+                except Exception as e:
+                    print(f"   [AUTO-REPLY] label/unread update failed for {cand['id']}: {e}")
+
+                sent.append({
+                    'to': reply_to,
+                    'subject': reply_subject,
+                    'reply_id': sent_msg['id'],
+                    'thread_id': cand['thread_id'],
+                    'reply_preview': reply_body[:300],
+                })
+                print(f"   [AUTO-REPLY] replied to {reply_to}: {reply_subject}")
+
+            except Exception as e:
+                errors.append({'id': cand['id'], 'error': str(e)})
+                print(f"   [AUTO-REPLY] error replying to {cand['id']}: {e}")
+
+        return json.dumps({
+            'success': True,
+            'scanned': scanned,
+            'candidates_found': len(candidates),
+            'replies_sent': len(sent),
+            'dry_run': dry_run,
+            'sent': sent,
+            'skipped': skipped,
+            'errors': errors if errors else None,
+            'lookback_hours': lookback,
+            'note': (
+                f"AUTO-REPLY DRY RUN — {len(sent)} email(s) would be sent."
+                if dry_run else
+                f"AUTO-REPLY DONE — {len(sent)} email(s) sent, each BCC'd to {BLUE_BCC_EMAIL}."
+            ),
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({'success': False, 'error': str(e)})
+
+
+_EMAIL_AUTOREPLY_THREAD = None
+
+
+def _start_email_autoreply_loop():
+    """Idempotent: start the background thread that periodically auto-replies
+    to mail written to Blue. Interval is set by env var
+    BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN (default 30, min 5)."""
+    global _EMAIL_AUTOREPLY_THREAD
+    if _EMAIL_AUTOREPLY_THREAD is not None:
+        return
+    try:
+        interval_min = max(5, int(os.environ.get("BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN", "30")))
+    except ValueError:
+        interval_min = 30
+    interval_sec = interval_min * 60
+    lookback_h = max(1, (interval_min * 2 + 59) // 60)
+
+    def _loop():
+        import time as _t
+        # Brief startup delay so the first scan doesn't fight server boot.
+        _t.sleep(60)
+        while True:
+            try:
+                result = _execute_auto_reply_inbox({
+                    'lookback_hours': lookback_h,
+                    'max_replies': 5,
+                })
+                try:
+                    obj = json.loads(result)
+                    if obj.get('replies_sent'):
+                        print(
+                            f"[AUTO-REPLY] sent {obj['replies_sent']} reply/replies "
+                            f"(scanned {obj.get('scanned', 0)})",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[AUTO-REPLY] loop error: {e}", flush=True)
+            _t.sleep(interval_sec)
+
+    import threading as _th
+    _EMAIL_AUTOREPLY_THREAD = _th.Thread(
+        target=_loop, daemon=True, name="email-autoreply",
+    )
+    _EMAIL_AUTOREPLY_THREAD.start()
+    print(
+        f"[OK] Email auto-reply loop started "
+        f"(every {interval_min} min, BCC -> {BLUE_BCC_EMAIL})",
+        flush=True,
+    )
+
+
 # ===== END GMAIL TOOLS =====
 
 
@@ -6254,6 +6652,22 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
         except Exception:
             pass
         print(f"   [OK] Gmail REPLY completed")
+        return result
+
+    elif tool_name == "auto_reply_emails":
+        result = _execute_auto_reply_inbox(tool_args)
+        try:
+            result_obj = json.loads(result)
+            result_obj["_operation_type"] = "AUTO_REPLY_EMAILS"
+            result_obj["_instruction"] = (
+                "You just scanned the inbox for emails addressed to Blue and "
+                "answered them. Summarise to the user how many replies were "
+                "sent and to whom; mention each reply is BCC'd to them."
+            )
+            result = json.dumps(result_obj)
+        except Exception:
+            pass
+        print(f"   [OK] Gmail AUTO-REPLY completed")
         return result
 
 
@@ -9647,6 +10061,15 @@ if __name__ == "__main__":
     # queues alerts for delivery on the next inbound turn from Ohbot.
     if PROACTIVE_QUEUE_AVAILABLE:
         blue_proactive.start()
+
+    # Start the email auto-reply loop. Scans Blue's inbox for messages
+    # addressed to him by name and answers them on his own, BCC'ing the
+    # user on every reply. Disable with BLUE_EMAIL_AUTOREPLY_DISABLED=1.
+    if globals().get("GMAIL_AVAILABLE", False) and os.environ.get("BLUE_EMAIL_AUTOREPLY_DISABLED") != "1":
+        try:
+            _start_email_autoreply_loop()
+        except Exception as e:
+            print(f"[AUTO-REPLY] could not start loop: {e}")
 
     # Check Gmail status
     if globals().get("GMAIL_AVAILABLE", False):
