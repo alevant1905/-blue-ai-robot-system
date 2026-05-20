@@ -10666,6 +10666,18 @@ _SCORERS["send_gmail"] = _score_send_gmail
 
 print("[TOD] Browse tool ready", flush=True)
 print("[TOD] Gmail tools ready", flush=True)
+
+# Start the email auto-reply loop at MODULE-LOAD time. The same call
+# also exists inside `if __name__ == "__main__":` further up, but the
+# external launcher imports bluetools rather than running it directly,
+# so that block is skipped. _start_email_autoreply_loop() is idempotent
+# (guards on _EMAIL_AUTOREPLY_THREAD), so the duplicate call when
+# bluetools IS run directly is a no-op.
+try:
+    if GMAIL_AVAILABLE and os.environ.get("BLUE_EMAIL_AUTOREPLY_DISABLED") != "1":
+        _start_email_autoreply_loop()
+except Exception as _autoreply_err:
+    print(f"[AUTO-REPLY] could not start loop: {_autoreply_err}", flush=True)
 # ================== END: Browse Website Tool + PRIORITY-EXPLICIT (with browse) ==================
 
 
