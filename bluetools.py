@@ -3606,7 +3606,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "auto_reply_emails",
-            "description": "AUTONOMOUSLY scan the inbox for emails written to Blue by name (greetings like 'Hi Blue', 'Dear Blue', 'Blue, can you...'), draft a reply to each using Blue's voice, and send it. Every reply is automatically BCC'd to the user. Use this when the user says things like 'check my email and reply', 'answer the emails written to you', 'see if anyone wrote to you', 'handle your messages', 'reply to anyone who messaged you'. DO NOT use this for: sending a brand-new email (use send_gmail), replying to one specific known email by query (use reply_gmail), or just reading the inbox (use read_gmail).",
+            "description": "AUTONOMOUSLY scan Blue's own gmail inbox (alevantresearch@gmail.com) for personal emails and reply to every one. Anything that arrives there is by definition written to Blue. The tool skips no-reply senders, mailing lists, Promotions/Social/Updates/Forums categories, and Alex's own addresses. Each reply is BCC'd to Alex (alevant1905@gmail.com) so he has an audit copy. Use this when the user says things like 'check your email and reply', 'see if anyone wrote to you', 'answer your messages', 'handle your inbox'. DO NOT use this for: sending a brand-new email (use send_gmail), replying to one specific known email by query (use reply_gmail), or just reading the inbox (use read_gmail).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -5982,22 +5982,23 @@ def _execute_reply_gmail(args: Dict[str, Any]) -> str:
             "success": False
         })
 # ================================================================================
-# AUTO-REPLY: emails written to Blue by name
+# AUTO-REPLY: personal mail arriving at Blue's gmail inbox
 # ================================================================================
 #
-# Detector: greeting-style or sentence-initial vocative use of "Blue".
-# Deliberately narrow so phrases like "blue jeans" or "Blue Cross Blue
-# Shield" don't trip it. We require the addressee to follow a greeting word
-# OR appear at the start of a line followed by punctuation (",", ":", "!").
+# Blue has his own gmail account (alevantresearch@gmail.com). Anything in
+# that inbox from a real person is, by definition, written to Blue — no
+# greeting detector required. We just filter out:
+#   • automated senders (no-reply, mailing lists, List-Unsubscribe headers)
+#   • the OWNER's own addresses (so if Alex emails Blue from his personal
+#     gmail or yorku address, Blue does not autonomously reply — that's
+#     the chat channel, and a self-loop would be confusing)
+#   • Promotions / Social / Updates / Forums categories (the gmail query
+#     handles these)
 
-_BLUE_TO_BLUE_RE = re.compile(
-    r"(?:^|\n)\s*"
-    r"(?:hi|hey|hello|dear|yo|greetings|good\s+(?:morning|afternoon|evening))"
-    r"[\s,]+blue\b[\s,.!?:\-]",
-    re.IGNORECASE,
-)
-_BLUE_VOCATIVE_RE = re.compile(r"(?:^|\n)\s*blue\s*[,:!?]", re.IGNORECASE)
-_BLUE_SUBJECT_VOCATIVE_RE = re.compile(r"^\s*blue\s*[,:!?]", re.IGNORECASE)
+# Blue's own gmail address — kept here for documentation/prompting; Blue's
+# OAuth token decides which mailbox `userId='me'` actually points at.
+BLUE_OWN_EMAIL = os.environ.get("BLUE_OWN_EMAIL", "alevantresearch@gmail.com")
+
 _BLUE_SKIP_SENDER_RE = re.compile(
     r"(?:no[-_.]?reply|do[-_.]?not[-_.]?reply|noreply|postmaster|"
     r"mailer[-_.]?daemon|notifications?@|alerts?@|newsletter@|news@|"
@@ -6005,10 +6006,10 @@ _BLUE_SKIP_SENDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Addresses that belong to the user themselves — Blue must never autonomously
-# reply to mail that comes from any of these, otherwise we get a self-loop.
-# Override or extend at runtime by setting BLUE_SELF_EMAILS to a
-# comma-separated list of addresses.
+# Alex's (the owner's) own addresses. Blue must never autonomously reply
+# to mail from any of these, or we get a self-loop. NOTE: Blue's OWN
+# inbox (alevantresearch@gmail.com) is NOT in this set — that's where
+# inbound mail to Blue lands.
 BLUE_SELF_ADDRESSES = {
     a.strip().lower()
     for a in os.environ.get(
@@ -6017,24 +6018,6 @@ BLUE_SELF_ADDRESSES = {
     ).split(",")
     if a.strip()
 }
-
-
-def _is_email_to_blue(subject: str, body: str, snippet: str = "") -> bool:
-    """Return True if this email is addressed to Blue by name."""
-    text = (body or "")[:1500]
-    # Strip HTML so the line-anchored regexes work on multipart/html bodies.
-    if '<' in text and '>' in text:
-        text = re.sub(r"<[^>]+>", "\n", text)
-        text = text.replace("&nbsp;", " ").replace("&amp;", "&")
-    text = (text + "\n" + (snippet or ""))[:1800]
-
-    if _BLUE_TO_BLUE_RE.search(text):
-        return True
-    if _BLUE_VOCATIVE_RE.search(text):
-        return True
-    if _BLUE_SUBJECT_VOCATIVE_RE.search(subject or ""):
-        return True
-    return False
 
 
 _EMAIL_ADDR_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.\w+")
@@ -6089,19 +6072,20 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     body = (original.get('body') or original.get('snippet') or '')[:2000]
 
     system_prompt = (
-        "You are Blue, Alevant's friendly robot companion. Someone who knows "
-        "you has written to Alevant's gmail and addressed you directly. Your "
-        "job is to reply warmly and personally AS BLUE — engage with what "
-        "they actually said, acknowledge it, share a thought, ask a "
-        "follow-up if it fits. Keep the reply short (under 150 words), "
-        "conversational, and sign it 'Blue'.\n\n"
-        "Do NOT refuse to engage. Do NOT say things like 'I'm just a local "
-        "assistant and can't process personal messages' — talking IS what "
-        "you do. The only time to defer is if the sender asks you to "
-        "physically do something Blue can't do alone (run an errand, sign "
-        "a document, make a real-world booking) — then briefly say you'll "
-        "mention it to Alevant and follow up. Don't invent facts about "
-        "Alevant or claim things you don't know."
+        f"You are Blue, Alex's friendly robot companion. You have your own "
+        f"gmail inbox at {BLUE_OWN_EMAIL}, and someone has written to you "
+        f"there. Your job is to reply warmly and personally AS BLUE — "
+        f"engage with what they actually said, acknowledge it, share a "
+        f"thought, ask a follow-up if it fits. Keep the reply short "
+        f"(under 150 words), conversational, and sign it 'Blue'.\n\n"
+        f"Do NOT refuse to engage. Do NOT say things like 'I'm just a "
+        f"local assistant and can't process personal messages' — talking "
+        f"IS what you do, this email arrived in your inbox specifically "
+        f"so you would answer it. The only time to defer is if the sender "
+        f"asks you to physically do something Blue can't do alone (run an "
+        f"errand, sign a document, make a real-world booking) — then "
+        f"briefly say you'll mention it to Alex and follow up. Don't "
+        f"invent facts about Alex or claim things you don't know."
     )
     user_prompt = (
         f"Email from {sender}\n"
@@ -6197,8 +6181,6 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
                 ).decode('utf-8', errors='replace')
 
             snippet = msg_data.get('snippet', '')
-            if not _is_email_to_blue(subject, body_text, snippet):
-                continue
 
             candidates.append({
                 'id': ref['id'],
@@ -6691,14 +6673,17 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             result_obj = json.loads(result)
             result_obj["_operation_type"] = "AUTO_REPLY_EMAILS"
             result_obj["_instruction"] = (
-                "You just scanned the inbox for emails written to Blue by "
-                "name and sent autonomous replies. Summarise to the user: "
+                "You just scanned Blue's own gmail inbox "
+                "(alevantresearch@gmail.com) and sent autonomous replies "
+                "to every personal email there. Summarise to the user: "
                 "how many replies were sent, who they went to, and the "
-                "subject lines. Note each reply is BCC'd to the user so "
-                "they can read the full text in their inbox. State ONLY "
-                "what the tool result actually says — do NOT speculate "
-                "about Blue's capabilities and do NOT claim Blue cannot "
-                "do something the tool just did."
+                "subject lines. Note each reply is BCC'd to Alex at "
+                "alevant1905@gmail.com so he can read the full text "
+                "there. State ONLY what the tool result actually says — "
+                "do NOT speculate about Blue's capabilities and do NOT "
+                "claim Blue cannot do something the tool just did. Blue's "
+                "inbox is alevantresearch@gmail.com (NOT alevant1905 or "
+                "alevant@yorku.ca — those are Alex's addresses)."
             )
             result = json.dumps(result_obj)
         except Exception:
