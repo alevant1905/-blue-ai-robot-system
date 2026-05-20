@@ -6171,8 +6171,10 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
             userId='me', q=query, maxResults=50,
         ).execute()
         message_refs = list_resp.get('messages', [])
+        print(f"   [AUTO-REPLY] query={query!r} → {len(message_refs)} message(s)")
 
         scanned = 0
+        skipped_filter = []
         candidates = []
         for ref in message_refs:
             msg_data = service.users().messages().get(
@@ -6183,6 +6185,13 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
             sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
             subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
             if _should_skip_sender(sender, headers):
+                # Be explicit about WHY so silent-skip cases are debuggable.
+                reason = "self-address" if any(
+                    a.lower() in BLUE_SELF_ADDRESSES
+                    for a in _EMAIL_ADDR_RE.findall(sender)
+                ) else "automated/list/no-reply"
+                print(f"   [AUTO-REPLY] skip {ref['id']} from {sender!r}: {reason}")
+                skipped_filter.append({'id': ref['id'], 'from': sender, 'reason': reason})
                 continue
 
             body_text = ""
@@ -6292,6 +6301,7 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
             'dry_run': dry_run,
             'sent': sent,
             'skipped': skipped,
+            'skipped_by_filter': skipped_filter,
             'errors': errors if errors else None,
             'lookback_hours': lookback,
             'note': (
@@ -6326,6 +6336,21 @@ def _start_email_autoreply_loop():
         import time as _t
         # Brief startup delay so the first scan doesn't fight server boot.
         _t.sleep(60)
+        # On first run, print which gmail account the OAuth token actually
+        # points at — surfaces token-misconfigured-against-wrong-inbox bugs.
+        try:
+            svc = get_gmail_service()
+            profile = svc.users().getProfile(userId='me').execute()
+            actual = profile.get('emailAddress', '?')
+            tag = "OK" if actual.lower() == BLUE_OWN_EMAIL.lower() else "WRONG ACCOUNT"
+            print(
+                f"[AUTO-REPLY] scanning inbox of {actual} "
+                f"(expected {BLUE_OWN_EMAIL}) — {tag}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[AUTO-REPLY] could not look up auth profile: {e}", flush=True)
+
         while True:
             try:
                 result = _execute_auto_reply_inbox({
@@ -6334,12 +6359,16 @@ def _start_email_autoreply_loop():
                 })
                 try:
                     obj = json.loads(result)
-                    if obj.get('replies_sent'):
-                        print(
-                            f"[AUTO-REPLY] sent {obj['replies_sent']} reply/replies "
-                            f"(scanned {obj.get('scanned', 0)})",
-                            flush=True,
-                        )
+                    # One line per poll so it's obvious the loop is alive
+                    # even when no replies were sent.
+                    print(
+                        f"[AUTO-REPLY] poll: scanned={obj.get('scanned', 0)}, "
+                        f"candidates={obj.get('candidates_found', 0)}, "
+                        f"sent={obj.get('replies_sent', 0)}, "
+                        f"skipped={len(obj.get('skipped_by_filter') or [])}, "
+                        f"errors={len(obj.get('errors') or [])}",
+                        flush=True,
+                    )
                 except Exception:
                     pass
             except Exception as e:
