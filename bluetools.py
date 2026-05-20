@@ -6024,16 +6024,17 @@ _BLUE_SKIP_SENDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Alex's (the owner's) own addresses. Blue must never autonomously reply
-# to mail from any of these, or we get a self-loop. NOTE: Blue's OWN
-# inbox (alevantresearch@gmail.com) is NOT in this set — that's where
-# inbound mail to Blue lands.
+# Addresses that should never trigger an autonomous reply. Empty by
+# default: now that Blue has his own inbox (alevantresearch@gmail.com),
+# mail from Alex's other accounts (alevant1905, yorku) to that inbox is
+# legitimate cross-account communication — that's the channel Alex uses
+# to write to Blue. The BlueReplied label dedups so there's no infinite
+# loop risk either way. Re-add specific addresses via the env var if a
+# particular account starts forwarding receipts / noise that shouldn't
+# get a reply.
 BLUE_SELF_ADDRESSES = {
     a.strip().lower()
-    for a in os.environ.get(
-        "BLUE_SELF_EMAILS",
-        "alevant1905@gmail.com,alevant@yorku.ca",
-    ).split(",")
+    for a in os.environ.get("BLUE_SELF_EMAILS", "").split(",")
     if a.strip()
 }
 
