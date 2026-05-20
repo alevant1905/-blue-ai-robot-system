@@ -6005,6 +6005,19 @@ _BLUE_SKIP_SENDER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Addresses that belong to the user themselves — Blue must never autonomously
+# reply to mail that comes from any of these, otherwise we get a self-loop.
+# Override or extend at runtime by setting BLUE_SELF_EMAILS to a
+# comma-separated list of addresses.
+BLUE_SELF_ADDRESSES = {
+    a.strip().lower()
+    for a in os.environ.get(
+        "BLUE_SELF_EMAILS",
+        "alevant1905@gmail.com,alevant@yorku.ca",
+    ).split(",")
+    if a.strip()
+}
+
 
 def _is_email_to_blue(subject: str, body: str, snippet: str = "") -> bool:
     """Return True if this email is addressed to Blue by name."""
@@ -6024,10 +6037,20 @@ def _is_email_to_blue(subject: str, body: str, snippet: str = "") -> bool:
     return False
 
 
+_EMAIL_ADDR_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.\w+")
+
+
 def _should_skip_sender(sender: str, headers: List[Dict[str, str]] = None) -> bool:
-    """Skip automated mail, marketing lists, and no-reply senders."""
+    """Skip automated mail, marketing lists, no-reply senders, and the
+    user's own addresses (any address in BLUE_SELF_ADDRESSES) so Blue
+    never replies to mail he sent himself."""
     if not sender:
         return True
+    # Exact-match each address found in the From field against the
+    # self-address set so substrings like "not-alevant@..." don't trip it.
+    for found in _EMAIL_ADDR_RE.findall(sender):
+        if found.lower() in BLUE_SELF_ADDRESSES:
+            return True
     if _BLUE_SKIP_SENDER_RE.search(sender):
         return True
     if headers:
@@ -6066,11 +6089,19 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     body = (original.get('body') or original.get('snippet') or '')[:2000]
 
     system_prompt = (
-        "You are Blue, Alevant's friendly robot assistant. You're replying to an "
-        "email that was written to you personally. Keep it short (under 150 words), "
-        "warm, and personal. Sign as 'Blue'. If the email asks you to do something "
-        "you can't verify or commit to on your own, say you'll check with Alevant "
-        "and get back to them. Don't invent facts."
+        "You are Blue, Alevant's friendly robot companion. Someone who knows "
+        "you has written to Alevant's gmail and addressed you directly. Your "
+        "job is to reply warmly and personally AS BLUE — engage with what "
+        "they actually said, acknowledge it, share a thought, ask a "
+        "follow-up if it fits. Keep the reply short (under 150 words), "
+        "conversational, and sign it 'Blue'.\n\n"
+        "Do NOT refuse to engage. Do NOT say things like 'I'm just a local "
+        "assistant and can't process personal messages' — talking IS what "
+        "you do. The only time to defer is if the sender asks you to "
+        "physically do something Blue can't do alone (run an errand, sign "
+        "a document, make a real-world booking) — then briefly say you'll "
+        "mention it to Alevant and follow up. Don't invent facts about "
+        "Alevant or claim things you don't know."
     )
     user_prompt = (
         f"Email from {sender}\n"
@@ -6660,9 +6691,14 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             result_obj = json.loads(result)
             result_obj["_operation_type"] = "AUTO_REPLY_EMAILS"
             result_obj["_instruction"] = (
-                "You just scanned the inbox for emails addressed to Blue and "
-                "answered them. Summarise to the user how many replies were "
-                "sent and to whom; mention each reply is BCC'd to them."
+                "You just scanned the inbox for emails written to Blue by "
+                "name and sent autonomous replies. Summarise to the user: "
+                "how many replies were sent, who they went to, and the "
+                "subject lines. Note each reply is BCC'd to the user so "
+                "they can read the full text in their inbox. State ONLY "
+                "what the tool result actually says — do NOT speculate "
+                "about Blue's capabilities and do NOT claim Blue cannot "
+                "do something the tool just did."
             )
             result = json.dumps(result_obj)
         except Exception:
