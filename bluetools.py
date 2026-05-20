@@ -1374,8 +1374,15 @@ def extract_and_save_facts(messages: list) -> bool:
 
 def build_system_preamble() -> str:
     core = _facts_block()
-    return ("You are Blue. Use these ground-truth facts as identity context. "
-            "Do not contradict them. " + core) if core else "You are Blue."
+    # Hardcoded user pronouns — Alex uses he/him, and the model has been
+    # caught defaulting to "she" otherwise.
+    pronouns = "Alex uses he/him pronouns — always refer to Alex as he/him, never as she/her."
+    if core:
+        return (
+            "You are Blue. Use these ground-truth facts as identity context. "
+            "Do not contradict them. " + core + " | " + pronouns
+        )
+    return "You are Blue. " + pronouns
 
 # Load facts at import time (only if enhanced memory not available)
 try:
@@ -5949,6 +5956,17 @@ def _execute_reply_gmail(args: Dict[str, Any]) -> str:
                     }
                 ).execute()
 
+                # Once Blue has responded, mark the original as read so it
+                # stops showing as a new email in the inbox.
+                try:
+                    service.users().messages().modify(
+                        userId='me',
+                        id=msg['id'],
+                        body={'removeLabelIds': ['UNREAD']},
+                    ).execute()
+                except Exception as e:
+                    print(f"   [WARN] could not mark {msg['id']} as read: {e}")
+
                 replies_sent.append({
                     "original_subject": original_subject,
                     "original_body": email_body[:500] + "..." if len(email_body) > 500 else email_body,  # Include truncated body
@@ -6072,9 +6090,10 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     body = (original.get('body') or original.get('snippet') or '')[:2000]
 
     system_prompt = (
-        f"You are Blue, Alex's friendly robot companion. You have your own "
-        f"gmail inbox at {BLUE_OWN_EMAIL}, and someone has written to you "
-        f"there. Your job is to reply warmly and personally AS BLUE — "
+        f"You are Blue, Alex's friendly robot companion. Alex uses he/him "
+        f"pronouns — refer to him as he/him, never she/her. You have your "
+        f"own gmail inbox at {BLUE_OWN_EMAIL}, and someone has written to "
+        f"you there. Your job is to reply warmly and personally AS BLUE — "
         f"engage with what they actually said, acknowledge it, share a "
         f"thought, ask a follow-up if it fits. Keep the reply short "
         f"(under 150 words), conversational, and sign it 'Blue'.\n\n"
@@ -6292,14 +6311,14 @@ _EMAIL_AUTOREPLY_THREAD = None
 def _start_email_autoreply_loop():
     """Idempotent: start the background thread that periodically auto-replies
     to mail written to Blue. Interval is set by env var
-    BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN (default 30, min 5)."""
+    BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN (default 2, min 1)."""
     global _EMAIL_AUTOREPLY_THREAD
     if _EMAIL_AUTOREPLY_THREAD is not None:
         return
     try:
-        interval_min = max(5, int(os.environ.get("BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN", "30")))
+        interval_min = max(1, int(os.environ.get("BLUE_EMAIL_AUTOREPLY_INTERVAL_MIN", "2")))
     except ValueError:
-        interval_min = 30
+        interval_min = 2
     interval_sec = interval_min * 60
     lookback_h = max(1, (interval_min * 2 + 59) // 60)
 
