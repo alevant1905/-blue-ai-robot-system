@@ -8235,6 +8235,32 @@ def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
             # through to the iteration loop with the right pending tool.
             hallucinated_tool = detect_hallucinated_action(content)
             if hallucinated_tool and hallucinated_tool != improved_force_tool:
+                # The retry is meant for COMPOUND requests ("browse + email"):
+                # one tool runs, the model narrates the second action without
+                # calling its tool, and we force it through. Narrow false-
+                # positive guard: after read_gmail, the model often
+                # references PAST send/reply activity from earlier turns
+                # ("I sent a standard response...") without the user having
+                # asked for any send. Suppress the retry in that specific
+                # case unless the user message itself contains a write verb.
+                if improved_force_tool == "read_gmail" and hallucinated_tool in ("send_gmail", "reply_gmail", "auto_reply_emails"):
+                    _user_text = (last_user_message or "").lower()
+                    _write_intent_words = (
+                        "send", "email ", "emailing", "reply", "respond",
+                        "tell ", "write ", "message ", " text ", "forward",
+                        "compose", "shoot ", "ping ", "answer",
+                    )
+                    if not any(w in _user_text for w in _write_intent_words):
+                        print(
+                            f"   [SKIP-RETRY] response sounds like "
+                            f"{hallucinated_tool} but user only asked to "
+                            f"read (\"{(last_user_message or '')[:60]}\") "
+                            f"— treating it as narration about past mail."
+                        )
+                        if _last_vision_image_paths and content:
+                            _save_visual_observation(content)
+                        return response
+
                 print(f"   [WARN] Fast-exec model claimed to {hallucinated_tool} after {improved_force_tool} — running it for real")
                 # Drop the synthetic "[Answer naturally...]" guard turn so
                 # the loop's next call doesn't see it as the latest user msg.
