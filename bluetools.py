@@ -6224,10 +6224,23 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         f"no subject line, no headers, no quoted original."
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Inject Blue's long-term memory (family names + ages, location,
+    # preferences, relevant past notes) so the email Blue answers from the
+    # SAME knowledge as the chat Blue. Without this the model invents facts
+    # — e.g. wrong daughter ages — because the bespoke email prompt never
+    # carried the facts block the chat path splices in.
+    try:
+        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+            mem_anchor = [{"role": "user", "content": f"{subject}\n{body}"}]
+            for ctx in (memory_system.build_context(mem_anchor, user_name="Alex") or []):
+                messages.append(ctx)
+            print("   [AUTO-REPLY] injected long-term memory context")
+    except Exception as e:
+        print(f"   [AUTO-REPLY] memory context error: {e}")
+
+    messages.append({"role": "user", "content": user_prompt})
 
     def _final_text() -> str:
         result = call_llm(
@@ -6250,13 +6263,26 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
 
     executed = set()
     forced = 0
+    force_next = None   # when set, restrict the next turn to this one tool
     try:
         # Up to a few tool round-trips (browse → read → act → confirm),
         # then a plain text reply.
         for _ in range(5):
+            if force_next:
+                # Narrow the tool set to just the claimed tool so the local
+                # model can't dodge calling it again — its only option is
+                # that tool or plain text, and the instruction demands the call.
+                turn_tools = [
+                    t for t in (tools_payload or [])
+                    if (t.get('function', {}) or {}).get('name') == force_next
+                ]
+            else:
+                turn_tools = tools_payload
+            force_next = None
+
             result = call_llm(
                 messages,
-                tools_override=tools_payload,
+                tools_override=turn_tools,
                 tool_choice="auto",
                 temperature=0.7,
                 max_tokens=600,
@@ -6282,6 +6308,7 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 if (claimed and claimed not in executed and _permitted(claimed)
                         and tool_exists and forced < 2):
                     forced += 1
+                    force_next = claimed
                     print(f"   [AUTO-REPLY] reply claims '{claimed}' but no tool ran — forcing the real call")
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
