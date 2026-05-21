@@ -6264,6 +6264,44 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     executed = set()
     forced = 0
     force_next = None   # when set, restrict the next turn to this one tool
+
+    # DETERMINISTIC PRE-EXECUTION (mirrors the chat path). The local model
+    # is unreliable at self-calling tools inside the email loop — it tends
+    # to narrate "done!" without ever emitting the call (this is why
+    # "set the lights to galaxy" worked in chat but not by email). So run
+    # the SAME tool selector chat trusts; if it confidently picks a
+    # concrete action tool the sender is allowed to trigger, execute it up
+    # front with its extracted params, then tell the model it's already
+    # done so it just confirms. Browse/search/email tools stay model-driven
+    # (their params come from the message, not the selector).
+    _PREEXEC_SKIP = {
+        "read_gmail", "send_gmail", "reply_gmail", "auto_reply_emails",
+        "search_documents", "browse_website", "web_search",
+    }
+    try:
+        sel = TOOL_SELECTOR.select_tool(f"{subject}. {body}") if "TOOL_SELECTOR" in globals() else None
+        prim = getattr(sel, "primary_tool", None) if sel else None
+        if prim and getattr(prim, "tool_name", None):
+            tname = prim.tool_name
+            tconf = float(getattr(prim, "confidence", 0.0) or 0.0)
+            tparams = getattr(prim, "extracted_params", {}) or {}
+            if tconf >= 0.8 and tname not in _PREEXEC_SKIP and _permitted(tname):
+                print(f"   [AUTO-REPLY] selector pre-exec {tname}({tparams}) conf={tconf:.2f}")
+                tresult = execute_tool(tname, tparams)
+                executed.add(tname)
+                _rs = tresult if isinstance(tresult, str) else json.dumps(tresult)
+                print(f"   [AUTO-REPLY] pre-exec result: {_rs[:200]}")
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[You ALREADY handled this request by running {tname}. "
+                        f"Result: {_rs[:400]}. Do NOT call it again — just confirm "
+                        f"the outcome naturally in your reply, based on that result.]"
+                    ),
+                })
+    except Exception as e:
+        print(f"   [AUTO-REPLY] selector pre-exec error: {e}")
+
     try:
         # Up to a few tool round-trips (browse → read → act → confirm),
         # then a plain text reply.
