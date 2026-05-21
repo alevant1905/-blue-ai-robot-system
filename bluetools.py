@@ -6241,10 +6241,19 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
             return ""
         return ((choices[0].get('message') or {}).get('content') or "").strip()
 
+    def _permitted(tool_name: str) -> bool:
+        # Owner mail: anything except the recursion-risk tools. Everyone
+        # else: only the read-only whitelist.
+        if is_owner:
+            return tool_name not in _EMAIL_OWNER_EXCLUDE
+        return tool_name in _EMAIL_SAFE_TOOL_NAMES
+
+    executed = set()
+    forced = 0
     try:
-        # Up to a few tool round-trips (browse → read → maybe browse again),
+        # Up to a few tool round-trips (browse → read → act → confirm),
         # then a plain text reply.
-        for _ in range(4):
+        for _ in range(5):
             result = call_llm(
                 messages,
                 tools_override=tools_payload,
@@ -6257,8 +6266,35 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 return ""
             msg = choices[0].get('message') or {}
             tool_calls = msg.get('tool_calls') or []
+
             if not tool_calls:
-                return (msg.get('content') or "").strip()
+                content = (msg.get('content') or "").strip()
+                # HALLUCINATION GUARD: the model often writes "Done! lights
+                # set to galaxy" as plain text without ever calling the
+                # tool. If the reply claims an action whose tool is
+                # permitted for this sender and was never actually run,
+                # force the real call instead of sending a lie.
+                claimed = detect_hallucinated_action(content)
+                tool_exists = any(
+                    (t.get('function', {}) or {}).get('name') == claimed
+                    for t in (tools_payload or [])
+                )
+                if (claimed and claimed not in executed and _permitted(claimed)
+                        and tool_exists and forced < 2):
+                    forced += 1
+                    print(f"   [AUTO-REPLY] reply claims '{claimed}' but no tool ran — forcing the real call")
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"You said you did that, but you never actually "
+                            f"called a tool, so nothing happened. Call the "
+                            f"{claimed} tool now to really do it, then confirm "
+                            f"in one short sentence."
+                        ),
+                    })
+                    continue
+                return content
 
             messages.append({
                 "role": "assistant",
@@ -6272,15 +6308,10 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                     targs = json.loads(fn.get('arguments') or '{}')
                 except Exception:
                     targs = {}
-                # Owner mail: anything except the recursion-risk tools.
-                # Everyone else: only the read-only whitelist.
-                if is_owner:
-                    permitted = name not in _EMAIL_OWNER_EXCLUDE
-                else:
-                    permitted = name in _EMAIL_SAFE_TOOL_NAMES
-                if permitted:
+                if _permitted(name):
                     print(f"   [AUTO-REPLY] tool {name}({targs})")
                     tool_result = execute_tool(name, targs)
+                    executed.add(name)
                 else:
                     tool_result = json.dumps({
                         "error": f"{name} is not permitted in autonomous email replies."
@@ -7345,10 +7376,14 @@ _ACTION_CLAIM_PATTERNS = {
     ),
     "control_lights": re.compile(
         r"\b(?:"
-        r"i(?:'ve| have)?\s+(?:turned|set|changed|adjusted|switched)\s+(?:the\s+)?lights?|"
-        r"lights?\s+(?:are|have been)\s+(?:turned|set|changed|adjusted|switched)|"
+        r"i(?:'ve| have)?\s+(?:just\s+)?(?:turned|set|changed|adjusted|switched|put)\s+(?:the\s+)?lights?|"
+        # "lights are (now) set/on/off..." — allow an adverb (now/all) to sit
+        # between the verb-to-be and the action verb.
+        r"lights?\s+(?:are|were|have been|'re)\s+(?:\w+\s+){0,2}(?:turned|set|changed|adjusted|switched|on|off)|"
         # Present continuous
-        r"(?:i'?m\s+)?(?:switching|turning|setting|changing|adjusting)\s+(?:the\s+)?lights?"
+        r"(?:i'?m\s+)?(?:switching|turning|setting|changing|adjusting)\s+(?:the\s+)?lights?|"
+        # Mood/scene-centric: "the galaxy mood is now active/on/set"
+        r"(?:mood|scene)\s+(?:is|has been|'s)\s+(?:now\s+)?(?:on|set|active|applied|enabled)"
         r")\b",
         re.IGNORECASE,
     ),
