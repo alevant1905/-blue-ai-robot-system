@@ -6321,6 +6321,9 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                         ),
                     })
                     continue
+                if not executed:
+                    print(f"   [AUTO-REPLY] model returned text with NO tool call "
+                          f"(claim-detected={claimed!r}); reply: {content[:120]!r}")
                 return content
 
             messages.append({
@@ -6339,6 +6342,8 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                     print(f"   [AUTO-REPLY] tool {name}({targs})")
                     tool_result = execute_tool(name, targs)
                     executed.add(name)
+                    _rstr = tool_result if isinstance(tool_result, str) else json.dumps(tool_result)
+                    print(f"   [AUTO-REPLY] tool {name} result: {_rstr[:200]}")
                 else:
                     tool_result = json.dumps({
                         "error": f"{name} is not permitted in autonomous email replies."
