@@ -6047,8 +6047,41 @@ BLUE_SELF_ADDRESSES = {
     if a.strip()
 }
 
+# Fully-TRUSTED owner addresses. When a verified email comes from one of
+# these, Blue gets the SAME full tool access he has in chat (send mail,
+# control lights, set reminders, search the document library, …) instead
+# of the read-only public-info whitelist used for everyone else. Default
+# is Alex's personal gmail; extend via BLUE_OWNER_EMAILS.
+BLUE_OWNER_ADDRESSES = {
+    a.strip().lower()
+    for a in os.environ.get("BLUE_OWNER_EMAILS", "alevant1905@gmail.com").split(",")
+    if a.strip()
+}
+
 
 _EMAIL_ADDR_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.\w+")
+
+
+def _email_sender_is_owner(headers: List[Dict[str, str]], sender: str) -> bool:
+    """True only if the email is from a trusted owner address AND passes a
+    basic anti-spoof check. From headers are forgeable, so before granting
+    the elevated (full-tool) trust level we require Gmail's own
+    Authentication-Results stamp to show a dkim/dmarc pass with no fail.
+    Gmail adds this header on every inbound message; a spoofed From for a
+    gmail.com address won't carry a valid DKIM signature."""
+    addrs = {a.lower() for a in _EMAIL_ADDR_RE.findall(sender or "")}
+    if not (addrs & BLUE_OWNER_ADDRESSES):
+        return False
+    auth = ""
+    for h in headers or []:
+        if h.get('name', '').lower() == 'authentication-results':
+            auth += " " + (h.get('value') or "").lower()
+    if not auth:
+        # No auth stamp at all — be conservative, don't elevate.
+        return False
+    if 'dkim=fail' in auth or 'dmarc=fail' in auth:
+        return False
+    return ('dkim=pass' in auth) or ('dmarc=pass' in auth)
 
 
 def _should_skip_sender(sender: str, headers: List[Dict[str, str]] = None) -> bool:
@@ -6103,12 +6136,27 @@ _EMAIL_SAFE_TOOL_NAMES = {
     "browse_website", "web_search", "get_weather", "get_local_time",
 }
 
+# Even a fully-trusted owner email shouldn't be able to make Blue kick off
+# another inbox sweep from inside one — avoids recursion.
+_EMAIL_OWNER_EXCLUDE = {"auto_reply_emails"}
+
 
 def _email_safe_tools() -> List[Dict[str, Any]]:
     try:
         return [
             t for t in TOOLS  # noqa: F821
             if (t.get("function", {}) or {}).get("name") in _EMAIL_SAFE_TOOL_NAMES
+        ]
+    except Exception:
+        return []
+
+
+def _email_owner_tools() -> List[Dict[str, Any]]:
+    """Full tool set (minus recursion-risk tools) for verified owner mail."""
+    try:
+        return [
+            t for t in TOOLS  # noqa: F821
+            if (t.get("function", {}) or {}).get("name") not in _EMAIL_OWNER_EXCLUDE
         ]
     except Exception:
         return []
@@ -6124,6 +6172,32 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     sender = original.get('from', 'someone')
     subject = original.get('subject', '(no subject)')
     body = (original.get('body') or original.get('snippet') or '')[:2000]
+    headers = original.get('headers') or []
+
+    # Trusted owner mail (verified) gets full tool access; everyone else
+    # gets the read-only public-info whitelist.
+    is_owner = _email_sender_is_owner(headers, sender)
+    if is_owner:
+        tools_payload = _email_owner_tools()
+        print(f"   [AUTO-REPLY] owner-verified sender {sender!r} → full tool access")
+        capability_note = (
+            "This email is from Alex himself (verified sender). You may take "
+            "ANY action he asks — browse, search, send emails on his behalf, "
+            "control the lights, set reminders, manage the house — exactly "
+            "as you would in a normal in-person conversation. Use whatever "
+            "tools the request needs."
+        )
+    else:
+        tools_payload = _email_safe_tools()
+        capability_note = (
+            "You CAN browse the web and look things up: if the email asks you "
+            "to visit a website, summarise a page, or look something up, use "
+            "the browse_website or web_search tool and answer from what you "
+            "found. Never claim you can't browse the internet — you can. But "
+            "you must NOT send emails, control the house, set reminders, or "
+            "open Alex's private files for this sender — if they ask for "
+            "something like that, say you'll pass it along to Alex."
+        )
 
     system_prompt = (
         f"You are Blue, Alex's friendly robot companion. Alex uses he/him "
@@ -6133,18 +6207,12 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         f"engage with what they actually said, acknowledge it, share a "
         f"thought, ask a follow-up if it fits. Keep the reply short "
         f"(under 150 words), conversational, and sign it 'Blue'.\n\n"
-        f"You CAN browse the web and look things up: if the email asks you "
-        f"to visit a website, summarise a page, or look something up, use "
-        f"the browse_website or web_search tool and then answer from what "
-        f"you found. Never claim you can't browse the internet — you can.\n\n"
+        f"{capability_note}\n\n"
         f"Do NOT refuse to engage. Do NOT say things like 'I'm just a "
         f"local assistant and can't process personal messages' — talking "
         f"IS what you do, this email arrived in your inbox specifically "
-        f"so you would answer it. The only time to defer is if the sender "
-        f"asks you to physically do something Blue can't do alone (run an "
-        f"errand, sign a document, make a real-world booking) — then "
-        f"briefly say you'll mention it to Alex and follow up. Don't "
-        f"invent facts about Alex or claim things you don't know."
+        f"so you would answer it. Don't invent facts about Alex or claim "
+        f"things you don't know."
     )
     user_prompt = (
         f"Email from {sender}\n"
@@ -6160,7 +6228,6 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    safe_tools = _email_safe_tools()
 
     def _final_text() -> str:
         result = call_llm(
@@ -6180,7 +6247,7 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         for _ in range(4):
             result = call_llm(
                 messages,
-                tools_override=safe_tools,
+                tools_override=tools_payload,
                 tool_choice="auto",
                 temperature=0.7,
                 max_tokens=600,
@@ -6205,15 +6272,20 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                     targs = json.loads(fn.get('arguments') or '{}')
                 except Exception:
                     targs = {}
-                if name in _EMAIL_SAFE_TOOL_NAMES:
+                # Owner mail: anything except the recursion-risk tools.
+                # Everyone else: only the read-only whitelist.
+                if is_owner:
+                    permitted = name not in _EMAIL_OWNER_EXCLUDE
+                else:
+                    permitted = name in _EMAIL_SAFE_TOOL_NAMES
+                if permitted:
                     print(f"   [AUTO-REPLY] tool {name}({targs})")
                     tool_result = execute_tool(name, targs)
                 else:
-                    # Refuse anything outside the read-only whitelist.
                     tool_result = json.dumps({
                         "error": f"{name} is not permitted in autonomous email replies."
                     })
-                    print(f"   [AUTO-REPLY] blocked non-whitelisted tool {name}")
+                    print(f"   [AUTO-REPLY] blocked tool {name} (sender not owner-verified)")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get('id', ''),
