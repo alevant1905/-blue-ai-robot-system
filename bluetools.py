@@ -1639,9 +1639,15 @@ def call_llm(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     extra: Optional[Dict[str, Any]] = None,
+    tools_override: Optional[List[Dict[str, Any]]] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
-    """Unified LLM entrypoint: always uses local LM Studio."""
+    """Unified LLM entrypoint: always uses local LM Studio.
+
+    tools_override: when provided, this exact tool list is sent instead of
+    the global TOOLS array (used by the email auto-reply to expose only a
+    restricted, read-only subset). Takes precedence over include_tools.
+    """
     # Nudge if a specific tool is required
     if force_tool:
         messages = list(messages)
@@ -1653,11 +1659,14 @@ def call_llm(
 
 
             )
-    tools_payload = None
-    try:
-        tools_payload = TOOLS if include_tools and "TOOLS" in globals() else None  # noqa: F821
-    except Exception:
+    if tools_override is not None:
+        tools_payload = tools_override
+    else:
         tools_payload = None
+        try:
+            tools_payload = TOOLS if include_tools and "TOOLS" in globals() else None  # noqa: F821
+        except Exception:
+            tools_payload = None
 
     if _LM is None:
         return {"error": "LM Studio client not available"}
@@ -6084,8 +6093,34 @@ def _get_or_create_blue_label(service) -> Optional[str]:
         return None
 
 
+# Tools Blue may use while drafting an autonomous email reply. Strictly
+# read-only / public-info: enough to browse a link or look something up,
+# but NOTHING outbound (send/reply email), physical (lights, music,
+# camera), private (the document library), or state-changing — anyone can
+# email Blue, so an email must never be able to make Blue act on the house
+# or on Alex's private data.
+_EMAIL_SAFE_TOOL_NAMES = {
+    "browse_website", "web_search", "get_weather", "get_local_time",
+}
+
+
+def _email_safe_tools() -> List[Dict[str, Any]]:
+    try:
+        return [
+            t for t in TOOLS  # noqa: F821
+            if (t.get("function", {}) or {}).get("name") in _EMAIL_SAFE_TOOL_NAMES
+        ]
+    except Exception:
+        return []
+
+
 def _generate_reply_for_email(original: Dict[str, Any]) -> str:
-    """Draft a reply body via the local LM Studio model. Returns plain text."""
+    """Draft a reply body via the local LM Studio model. Returns plain text.
+
+    Runs a small tool loop so Blue can actually browse a link or search
+    the web when an email asks him to — but only with the read-only tools
+    in _EMAIL_SAFE_TOOL_NAMES, never anything outbound or state-changing.
+    """
     sender = original.get('from', 'someone')
     subject = original.get('subject', '(no subject)')
     body = (original.get('body') or original.get('snippet') or '')[:2000]
@@ -6098,6 +6133,10 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         f"engage with what they actually said, acknowledge it, share a "
         f"thought, ask a follow-up if it fits. Keep the reply short "
         f"(under 150 words), conversational, and sign it 'Blue'.\n\n"
+        f"You CAN browse the web and look things up: if the email asks you "
+        f"to visit a website, summarise a page, or look something up, use "
+        f"the browse_website or web_search tool and then answer from what "
+        f"you found. Never claim you can't browse the internet — you can.\n\n"
         f"Do NOT refuse to engage. Do NOT say things like 'I'm just a "
         f"local assistant and can't process personal messages' — talking "
         f"IS what you do, this email arrived in your inbox specifically "
@@ -6117,12 +6156,15 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         f"no subject line, no headers, no quoted original."
     )
 
-    try:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    safe_tools = _email_safe_tools()
+
+    def _final_text() -> str:
         result = call_llm(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages + [{"role": "user", "content": "[Write the final reply now. No more tools.]"}],
             include_tools=False,
             temperature=0.7,
             max_tokens=400,
@@ -6130,8 +6172,56 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         choices = (result or {}).get('choices') or []
         if not choices:
             return ""
-        content = ((choices[0].get('message') or {}).get('content') or "").strip()
-        return content
+        return ((choices[0].get('message') or {}).get('content') or "").strip()
+
+    try:
+        # Up to a few tool round-trips (browse → read → maybe browse again),
+        # then a plain text reply.
+        for _ in range(4):
+            result = call_llm(
+                messages,
+                tools_override=safe_tools,
+                tool_choice="auto",
+                temperature=0.7,
+                max_tokens=600,
+            )
+            choices = (result or {}).get('choices') or []
+            if not choices:
+                return ""
+            msg = choices[0].get('message') or {}
+            tool_calls = msg.get('tool_calls') or []
+            if not tool_calls:
+                return (msg.get('content') or "").strip()
+
+            messages.append({
+                "role": "assistant",
+                "content": msg.get('content') or "",
+                "tool_calls": tool_calls,
+            })
+            for tc in tool_calls:
+                fn = tc.get('function') or {}
+                name = fn.get('name', '')
+                try:
+                    targs = json.loads(fn.get('arguments') or '{}')
+                except Exception:
+                    targs = {}
+                if name in _EMAIL_SAFE_TOOL_NAMES:
+                    print(f"   [AUTO-REPLY] tool {name}({targs})")
+                    tool_result = execute_tool(name, targs)
+                else:
+                    # Refuse anything outside the read-only whitelist.
+                    tool_result = json.dumps({
+                        "error": f"{name} is not permitted in autonomous email replies."
+                    })
+                    print(f"   [AUTO-REPLY] blocked non-whitelisted tool {name}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get('id', ''),
+                    "name": name,
+                    "content": tool_result if isinstance(tool_result, str) else json.dumps(tool_result),
+                })
+        # Used up the tool budget — force a final text answer.
+        return _final_text()
     except Exception as e:
         print(f"   [AUTO-REPLY] LLM error generating reply: {e}")
         return ""
