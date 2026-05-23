@@ -6162,6 +6162,48 @@ def _email_owner_tools() -> List[Dict[str, Any]]:
         return []
 
 
+def _inject_pending_vision(messages: List[Dict[str, Any]]) -> bool:
+    """If a tool (e.g. capture_camera) queued an image, splice it into the
+    email conversation as a base64 user message so the model can actually
+    SEE it — mirrors what call_lm_studio does for the chat path. The email
+    loop talks to call_llm/_LM.chat, which never touches _vision_queue, so
+    without this Blue captures a photo by email but is shown nothing and
+    invents a description. Returns True if an image was injected."""
+    global _vision_queue
+    try:
+        if not _vision_queue.has_images():
+            return False
+        is_camera = any(img.is_camera_capture for img in _vision_queue.pending_images)
+        parts: List[Dict[str, Any]] = []
+        if is_camera:
+            parts.append({
+                "type": "text",
+                "text": (
+                    "[CAMERA IMAGE: Describe what you ACTUALLY see — who, what, "
+                    "where, objects, lighting. Be specific and accurate, describe "
+                    "only what's visible, then answer the sender's question.]"
+                ),
+            })
+        else:
+            parts.append({"type": "text", "text": "[Images to analyze:]"})
+        for img in _vision_queue.pending_images:
+            label = "[Your current view:]" if img.is_camera_capture else f"Image: {img.filename}"
+            parts.append({"type": "text", "text": f"\n{label}"})
+            encoded = encode_image_to_base64(img.filepath)
+            if encoded:
+                parts.append(encoded)
+            else:
+                print(f"   [AUTO-REPLY] vision: failed to encode {img.filename}")
+        messages.append({"role": "user", "content": parts})
+        print(f"   [AUTO-REPLY] injected {len(_vision_queue.pending_images)} vision image(s)")
+        _vision_queue.mark_as_viewed()
+        _vision_queue.clear()
+        return True
+    except Exception as e:
+        print(f"   [AUTO-REPLY] vision injection error: {e}")
+        return False
+
+
 def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     """Draft a reply body via the local LM Studio model. Returns plain text.
 
@@ -6274,9 +6316,14 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     # front with its extracted params, then tell the model it's already
     # done so it just confirms. Browse/search/email tools stay model-driven
     # (their params come from the message, not the selector).
+    # Tools whose params come from the message text (not the selector), so
+    # they stay model-driven. search_documents is NOT here: the selector
+    # extracts the query, so library lookups pre-execute deterministically
+    # exactly like the chat path — the local model is unreliable at
+    # self-calling it inside the email loop.
     _PREEXEC_SKIP = {
         "read_gmail", "send_gmail", "reply_gmail", "auto_reply_emails",
-        "search_documents", "browse_website", "web_search",
+        "browse_website", "web_search",
     }
     try:
         sel = TOOL_SELECTOR.select_tool(f"{subject}. {body}") if "TOOL_SELECTOR" in globals() else None
@@ -6301,6 +6348,10 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 })
     except Exception as e:
         print(f"   [AUTO-REPLY] selector pre-exec error: {e}")
+
+    # A deterministic capture_camera (above) queued an image — show it to
+    # the model before it drafts, so the reply is grounded in what Blue saw.
+    _inject_pending_vision(messages)
 
     try:
         # Up to a few tool round-trips (browse → read → act → confirm),
@@ -6393,6 +6444,9 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                     "name": name,
                     "content": tool_result if isinstance(tool_result, str) else json.dumps(tool_result),
                 })
+            # If any tool in this batch (e.g. capture_camera) queued an
+            # image, inject it so the next turn can describe what Blue saw.
+            _inject_pending_vision(messages)
         # Used up the tool budget — force a final text answer.
         return _final_text()
     except Exception as e:
@@ -7479,6 +7533,24 @@ _ACTION_CLAIM_PATTERNS = {
         r"|"
         r"i(?:'ve| have)?\s+(?:taken|had)\s+(?:another|a\s+(?:second|fresh|closer))\s+look\s+at"
         r")\b",
+        re.IGNORECASE,
+    ),
+    # Claims to be seeing through the camera right now. Without an actual
+    # capture_camera call the model will happily narrate "I can see you're
+    # in the kitchen" from nothing — by email there's no live feed, so any
+    # such claim must be backed by a real capture.
+    "capture_camera": re.compile(
+        r"(?:"
+        # "I can see <concrete scene>" but NOT the figurative "I can see why/
+        # how/what you mean / that you feel / your point".
+        r"\bi\s+can\s+see\s+(?!why\b|how\b|what\b|that\s+you|your\s+point|where\s+you)"
+        r"(?:you|your|a\s|an\s|the\s|two\b|three\b|some\b|someone|people)|"
+        # Explicitly camera/view anchored — unambiguous.
+        r"(?:in|through)\s+(?:my|the)\s+(?:camera|view|frame)|"
+        r"\blooking\s+(?:in|at)\s+(?:my|the)\s+camera|"
+        r"(?:i(?:'ve| have)?\s+)?(?:just\s+)?(?:took|taken|captured|snapped)\s+(?:a\s+)?(?:photo|picture|snapshot)|"
+        r"\bin\s+front\s+of\s+me\s+(?:is|are|i\s+(?:can\s+)?see)\b"
+        r")",
         re.IGNORECASE,
     ),
 }
