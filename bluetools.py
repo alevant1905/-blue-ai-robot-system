@@ -3890,13 +3890,138 @@ if not ENHANCED_TOOLS_AVAILABLE:
 
 # ===== DOCUMENT MANAGEMENT FUNCTIONS =====
 
+# ================================================================================
+# LIBRARY FOLDERS — hierarchical organization under DOCUMENTS_FOLDER
+# ================================================================================
+# Documents live in a folder tree (e.g. "Publications", "Courses/CS240",
+# "Academic Texts/Sohn-Rethel"). A document's `folder` is its POSIX-style
+# path relative to DOCUMENTS_FOLDER; "" means the library root. These helpers
+# keep folder handling safe (no traversal outside DOCUMENTS_FOLDER) and in
+# one place so the index, RAG, and GUI all agree on what a folder is.
+
+
+def _safe_folder_segment(seg: str) -> str:
+    """Sanitize a single folder name: drop path/illegal chars and leading or
+    trailing dots (which would enable traversal), keep spaces and normal
+    punctuation so 'Academic Texts' or 'Sohn-Rethel' survive intact."""
+    seg = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', (seg or '')).strip().strip('.')
+    return seg.strip()
+
+
+def _safe_rel_folder(folder: str) -> str:
+    """Normalize a (possibly user-supplied) relative folder path to a safe
+    POSIX-style rel path under DOCUMENTS_FOLDER. Returns '' for the root and
+    silently drops any '.'/'..' segments."""
+    if not folder:
+        return ""
+    raw = str(folder).replace("\\", "/").strip().strip("/")
+    parts = []
+    for seg in raw.split("/"):
+        s = _safe_folder_segment(seg)
+        if s and s not in (".", ".."):
+            parts.append(s)
+    return "/".join(parts)
+
+
+def _abs_library_path(rel_folder: str) -> str:
+    """Absolute path for a library folder, guaranteed to stay under
+    DOCUMENTS_FOLDER (defense in depth against traversal)."""
+    base = os.path.abspath(DOCUMENTS_FOLDER)
+    rel = _safe_rel_folder(rel_folder)
+    full = os.path.abspath(os.path.join(base, *rel.split("/"))) if rel else base
+    try:
+        if os.path.commonpath([base, full]) != base:
+            return base
+    except ValueError:
+        return base
+    return full
+
+
+def _folder_of_filepath(filepath: str) -> str:
+    """The library folder (POSIX rel path, '' for root) a file sits in. Files
+    outside DOCUMENTS_FOLDER (e.g. image uploads in UPLOAD_FOLDER) report ''."""
+    try:
+        base = os.path.abspath(DOCUMENTS_FOLDER)
+        ap = os.path.abspath(filepath)
+        if os.path.commonpath([base, ap]) != base:
+            return ""
+        rel = os.path.relpath(os.path.dirname(ap), base)
+        if rel in (".", ""):
+            return ""
+        return rel.replace("\\", "/")
+    except Exception:
+        return ""
+
+
+def list_library_folders() -> List[str]:
+    """Every folder under DOCUMENTS_FOLDER as sorted POSIX rel paths (excludes
+    the root ''). Hidden dirs are skipped."""
+    base = os.path.abspath(DOCUMENTS_FOLDER)
+    out: List[str] = []
+    if not os.path.isdir(base):
+        return out
+    for root, dirs, _files in os.walk(base):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for d in dirs:
+            rel = os.path.relpath(os.path.join(root, d), base).replace("\\", "/")
+            out.append(rel)
+    return sorted(out)
+
+
+def list_subfolders(rel_folder: str) -> List[str]:
+    """Immediate child folder names of the given library folder."""
+    full = _abs_library_path(rel_folder)
+    if not os.path.isdir(full):
+        return []
+    try:
+        return sorted(
+            d for d in os.listdir(full)
+            if os.path.isdir(os.path.join(full, d)) and not d.startswith('.')
+        )
+    except Exception:
+        return []
+
+
+def create_library_folder(rel_folder: str) -> dict:
+    """Create a folder (and any missing parents) under DOCUMENTS_FOLDER."""
+    rel = _safe_rel_folder(rel_folder)
+    if not rel:
+        return {"success": False, "error": "Invalid or empty folder name."}
+    try:
+        os.makedirs(_abs_library_path(rel), exist_ok=True)
+        return {"success": True, "folder": rel}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _folders_under(prefix: str) -> List[str]:
+    """A folder plus all its descendants (POSIX rel paths). Used to scope a
+    search to an expertise area and everything filed beneath it."""
+    pfx = _safe_rel_folder(prefix)
+    if not pfx:
+        return []
+    result = [pfx]
+    needle = pfx + "/"
+    for f in list_library_folders():
+        if f.startswith(needle):
+            result.append(f)
+    return result
+
+
 def load_document_index() -> Dict:
-    """Load the document index from disk. Repairs corrupt files in place."""
+    """Load the document index from disk. Repairs corrupt files in place.
+
+    Backfills a `folder` field (computed from each file's location) on any
+    entry that predates folder support, so the GUI and search always see one.
+    """
     if os.path.exists(DOCUMENT_INDEX_FILE):
         try:
             with open(DOCUMENT_INDEX_FILE, 'r') as f:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get('documents'), list):
+                for d in data['documents']:
+                    if isinstance(d, dict) and 'folder' not in d:
+                        d['folder'] = _folder_of_filepath(d.get('filepath', ''))
                 return data
             print(f"[INDEX] {DOCUMENT_INDEX_FILE} has unexpected shape; resetting.")
         except Exception as e:
@@ -4038,51 +4163,57 @@ def rescan_documents_folder() -> dict:
     if not os.path.isdir(DOCUMENTS_FOLDER):
         return {'added': 0, 'skipped': 0}
 
-    for entry in os.listdir(DOCUMENTS_FOLDER):
-        full = os.path.join(DOCUMENTS_FOLDER, entry)
-        if not os.path.isfile(full):
-            continue
-        if _is_camera_capture_filename(entry):
-            continue
-        if not allowed_file(entry):
-            skipped += 1
-            continue
-        if os.path.normcase(os.path.abspath(full)) in indexed_paths:
-            continue
+    # Walk the whole folder tree so files in subfolders (Publications/,
+    # Courses/CS240/, …) get picked up, each tagged with its folder.
+    for root, dirs, files in os.walk(DOCUMENTS_FOLDER):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for entry in files:
+            full = os.path.join(root, entry)
+            if not os.path.isfile(full):
+                continue
+            if _is_camera_capture_filename(entry):
+                continue
+            if not allowed_file(entry):
+                skipped += 1
+                continue
+            if os.path.normcase(os.path.abspath(full)) in indexed_paths:
+                continue
 
-        try:
-            file_hash = get_file_hash(full)
-        except Exception:
-            skipped += 1
-            continue
-        if file_hash in indexed_hashes:
-            continue
+            try:
+                file_hash = get_file_hash(full)
+            except Exception:
+                skipped += 1
+                continue
+            if file_hash in indexed_hashes:
+                continue
 
-        size_mb = os.path.getsize(full) / (1024 * 1024)
-        print(f"   [INDEX] extracting text: {entry} ({size_mb:.1f} MB)", flush=True)
-        text_content = extract_text_from_file(full)
-        text_preview = text_content[:500] if not text_content.startswith('Error') else ''
+            folder = _folder_of_filepath(full)
+            size_mb = os.path.getsize(full) / (1024 * 1024)
+            print(f"   [INDEX] extracting text: {entry} ({size_mb:.1f} MB) [{folder or 'root'}]", flush=True)
+            text_content = extract_text_from_file(full)
+            text_preview = text_content[:500] if not text_content.startswith('Error') else ''
 
-        # Best-effort push into ChromaDB so the new file is searchable.
-        try:
-            print(f"   [INDEX] embedding into ChromaDB: {entry}", flush=True)
-            from blue.tools.rag import index_document as _idx
-            _idx(full, entry, doc_id=file_hash, text=text_content)
-            print(f"   [INDEX] done: {entry}", flush=True)
-        except Exception as e:
-            print(f"   [INDEX] ChromaDB push failed for {entry}: {e}", flush=True)
+            # Best-effort push into ChromaDB so the new file is searchable.
+            try:
+                print(f"   [INDEX] embedding into ChromaDB: {entry}", flush=True)
+                from blue.tools.rag import index_document as _idx
+                _idx(full, entry, doc_id=file_hash, text=text_content, folder=folder)
+                print(f"   [INDEX] done: {entry}", flush=True)
+            except Exception as e:
+                print(f"   [INDEX] ChromaDB push failed for {entry}: {e}", flush=True)
 
-        documents.append({
-            'filename': entry,
-            'filepath': str(full),
-            'size': os.path.getsize(full),
-            'hash': file_hash,
-            'uploaded_at': _dt.datetime.fromtimestamp(os.path.getmtime(full)).strftime('%Y-%m-%d %H:%M'),
-            'text_preview': text_preview,
-            'indexed_in_rag': True,
-        })
-        indexed_hashes.add(file_hash)
-        added += 1
+            documents.append({
+                'filename': entry,
+                'filepath': str(full),
+                'folder': folder,
+                'size': os.path.getsize(full),
+                'hash': file_hash,
+                'uploaded_at': _dt.datetime.fromtimestamp(os.path.getmtime(full)).strftime('%Y-%m-%d %H:%M'),
+                'text_preview': text_preview,
+                'indexed_in_rag': True,
+            })
+            indexed_hashes.add(file_hash)
+            added += 1
 
     if added:
         index['documents'] = documents
@@ -4097,12 +4228,13 @@ def register_uploaded_file(filepath: str, filename: str) -> dict:
     - Hash-dedups against the existing index (deletes the new copy if a
       duplicate is found and returns the existing filename).
     - Extracts a text preview.
-    - Pushes the document into ChromaDB if available.
-    - Appends to document_index.json.
+    - Pushes the document into ChromaDB if available (tagged with its folder).
+    - Appends to document_index.json with the folder it lives in.
     """
     import datetime as _dt
 
     file_hash = get_file_hash(filepath)
+    folder = _folder_of_filepath(filepath)
     index = load_document_index()
 
     for existing in index.get('documents', []):
@@ -4124,7 +4256,7 @@ def register_uploaded_file(filepath: str, filename: str) -> dict:
     indexed_in_rag = False
     try:
         from blue.tools.rag import index_document as _idx
-        result = _idx(filepath, filename, doc_id=file_hash)
+        result = _idx(filepath, filename, doc_id=file_hash, folder=folder)
         indexed_in_rag = bool(result.get('success'))
     except Exception:
         pass
@@ -4132,6 +4264,7 @@ def register_uploaded_file(filepath: str, filename: str) -> dict:
     index.setdefault('documents', []).append({
         'filename': filename,
         'filepath': str(filepath),
+        'folder': folder,
         'size': os.path.getsize(filepath),
         'hash': file_hash,
         'uploaded_at': _dt.datetime.now().strftime('%Y-%m-%d %H:%M'),
@@ -4139,7 +4272,7 @@ def register_uploaded_file(filepath: str, filename: str) -> dict:
         'indexed_in_rag': indexed_in_rag,
     })
     save_document_index(index)
-    return {'filename': filename, 'duplicate': False, 'indexed_in_rag': indexed_in_rag}
+    return {'filename': filename, 'duplicate': False, 'indexed_in_rag': indexed_in_rag, 'folder': folder}
 
 
 def remove_document_from_index(filepath: str) -> bool:
@@ -4281,7 +4414,7 @@ def start_document_watcher():
     try:
         os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
         observer = Observer()
-        observer.schedule(_DocChangeHandler(), DOCUMENTS_FOLDER, recursive=False)
+        observer.schedule(_DocChangeHandler(), DOCUMENTS_FOLDER, recursive=True)
         observer.daemon = True
         observer.start()
         _DOCUMENT_WATCHER = observer
@@ -5108,9 +5241,10 @@ def create_document_file(filename: str, content: str, file_type: str = "txt") ->
         save_document_index(index)
 
         # Index in local ChromaDB RAG
+        _doc_folder = _folder_of_filepath(filepath)
         try:
             from blue.tools.rag import index_document as rag_index
-            rag_result = rag_index(filepath, filename, doc_id=file_hash)
+            rag_result = rag_index(filepath, filename, doc_id=file_hash, folder=_doc_folder)
             if rag_result.get('success'):
                 index['documents'][-1]['indexed_in_rag'] = True
                 save_document_index(index)
@@ -5120,7 +5254,11 @@ def create_document_file(filename: str, content: str, file_type: str = "txt") ->
 
         print(f"   [INDEX] Added to document index")
 
-        download_url = f"http://127.0.0.1:5000/documents/download/{filename}"
+        from urllib.parse import quote as _quote
+        download_url = (
+            "http://127.0.0.1:5000/documents/download?"
+            f"folder={_quote(_doc_folder)}&filename={_quote(filename)}"
+        )
 
         return (
             f"✅ Document created successfully!\n\n"
@@ -9456,6 +9594,136 @@ DOCUMENT_MANAGER_HTML = """
             font-size: 4em;
             margin-bottom: 20px;
         }
+        .breadcrumb {
+            background: #f0f1f5;
+            border-radius: 10px;
+            padding: 12px 18px;
+            margin-bottom: 25px;
+            font-size: 0.98em;
+            color: #555;
+        }
+        .breadcrumb a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .breadcrumb a:hover { text-decoration: underline; }
+        .breadcrumb .sep { color: #aaa; margin: 0 6px; }
+        .layout {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            gap: 28px;
+            align-items: start;
+        }
+        @media (max-width: 760px) {
+            .layout { grid-template-columns: 1fr; }
+        }
+        .sidebar {
+            background: #f8f9fa;
+            border-radius: 14px;
+            padding: 18px;
+        }
+        .sidebar h3 {
+            color: #667eea;
+            font-size: 1em;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .tree { list-style: none; }
+        .tree li { margin: 2px 0; }
+        .tree a {
+            display: block;
+            padding: 6px 10px;
+            border-radius: 8px;
+            color: #444;
+            text-decoration: none;
+            font-size: 0.95em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tree a:hover { background: #e8e9f5; }
+        .tree a.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-weight: 600;
+        }
+        .folder-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 14px;
+            margin-bottom: 30px;
+        }
+        .folder-card {
+            background: #f8f9fa;
+            border: 1px solid #e7e8f0;
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .folder-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102,126,234,0.18);
+        }
+        .folder-card a {
+            color: #4b3b8f;
+            font-weight: 600;
+            text-decoration: none;
+            font-size: 1.02em;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .folder-card .folder-del {
+            background: none;
+            border: none;
+            color: #c0392b;
+            cursor: pointer;
+            font-size: 1.1em;
+            padding: 2px 6px;
+            border-radius: 6px;
+        }
+        .folder-card .folder-del:hover { background: #fdecea; }
+        .newfolder-form {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 35px;
+            flex-wrap: wrap;
+        }
+        .newfolder-form input[type=text] {
+            flex: 1;
+            min-width: 200px;
+            padding: 12px 16px;
+            border: 2px solid #d8d9e6;
+            border-radius: 10px;
+            font-size: 1em;
+        }
+        .newfolder-form input[type=text]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .newfolder-form button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .section-title {
+            color: #333;
+            font-size: 1.25em;
+            margin: 0 0 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
     </style>
 </head>
 <body>
@@ -9478,65 +9746,122 @@ DOCUMENT_MANAGER_HTML = """
                     <div class="stat-label">Documents</div>
                 </div>
                 <div class="stat-card">
+                    <div class="stat-number">{{ folder_count }}</div>
+                    <div class="stat-label">Folders</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-number">{{ total_size }}</div>
                     <div class="stat-label">Total Size</div>
                 </div>
             </div>
 
-            <div class="upload-section" id="dropZone">
-                <h2>📤 Upload New Document</h2>
-                <p style="color: #666; margin-bottom: 20px;">
-                    <strong>Drag &amp; drop a file into this box</strong> — or use the button below.<br>
-                    Supported: PDF, Word (.doc, .docx), Text (.txt, .md)
-                </p>
-                <form method="POST" enctype="multipart/form-data" id="uploadForm">
-                    <div class="file-input-wrapper">
-                        <input type="file" name="file" id="fileInput" accept=".pdf,.doc,.docx,.txt,.md" required>
-                        <label for="fileInput" class="file-input-label">
-                            Choose File
-                        </label>
-                    </div>
-                    <div class="file-name" id="fileName">No file chosen</div>
-                    <br>
-                    <button type="submit" class="upload-btn" id="uploadBtn">
-                        Upload & Index
-                    </button>
-                </form>
+            <div class="breadcrumb">
+                <a href="/documents?folder=">📚 Library</a>
+                {% for crumb in breadcrumb %}
+                    <span class="sep">/</span>
+                    <a href="/documents?folder={{ crumb.path|urlencode }}">{{ crumb.name }}</a>
+                {% endfor %}
             </div>
 
-            <div class="documents-list">
-                <h2>📚 Your Documents</h2>
-                {% if documents %}
-                    {% for doc in documents %}
-                    <div class="document-item">
-                        <div class="document-info">
-                            <div class="document-name">{{ doc.filename }}</div>
-                            <div class="document-meta">
-                                Uploaded: {{ doc.uploaded_at }} | Size: {{ doc.size }}
-                                {% if doc.created_by_blue %}
-                                <span style="color: #667eea; font-weight: 600;"> • Created by Blue</span>
-                                {% endif %}
-                            </div>
-                        </div>
-                        <div style="display: flex; gap: 10px;">
-                            <a href="/documents/download/{{ doc.filename }}" class="download-btn">
-                                Download
-                            </a>
-                            <form method="POST" action="/documents/delete/{{ doc.filename }}" style="display: inline; margin: 0;">
-                                <button type="submit" class="delete-btn" onclick="return confirm('Delete this document?')">
-                                    Delete
-                                </button>
+            <div class="layout">
+                <div class="sidebar">
+                    <h3>Folders</h3>
+                    <ul class="tree">
+                        <li><a href="/documents?folder=" class="{{ 'active' if not current_folder else '' }}">📚 Library</a></li>
+                        {% for node in folder_tree %}
+                        <li>
+                            <a href="/documents?folder={{ node.path|urlencode }}"
+                               class="{{ 'active' if node.path == current_folder else '' }}"
+                               style="padding-left: {{ 10 + node.depth * 14 }}px;"
+                               title="{{ node.path }}">📁 {{ node.name }}</a>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+
+                <div class="main">
+                    <h2 class="section-title">🗂️ Folders in this area</h2>
+                    {% if subfolders %}
+                    <div class="folder-grid">
+                        {% for sub in subfolders %}
+                        <div class="folder-card">
+                            <a href="/documents?folder={{ sub.path|urlencode }}">📁 {{ sub.name }}</a>
+                            <form method="POST" action="/documents/folder/delete" style="margin:0;"
+                                  onsubmit="return confirm('Delete folder {{ sub.name }}? It must be empty.');">
+                                <input type="hidden" name="folder" value="{{ sub.path }}">
+                                <input type="hidden" name="back" value="{{ current_folder }}">
+                                <button type="submit" class="folder-del" title="Delete folder">✕</button>
                             </form>
                         </div>
+                        {% endfor %}
                     </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="empty-state">
-                        <div class="empty-state-icon">🔭</div>
-                        <h3>No documents yet</h3>
-                        <p>Upload your first document to get started!</p>
+                    {% else %}
+                    <p style="color:#999; margin-bottom: 25px;">No subfolders here yet.</p>
+                    {% endif %}
+
+                    <form method="POST" action="/documents" class="newfolder-form">
+                        <input type="hidden" name="action" value="create_folder">
+                        <input type="hidden" name="parent" value="{{ current_folder }}">
+                        <input type="text" name="name" placeholder="New folder name (e.g. Publications)" required>
+                        <button type="submit">+ Add Folder</button>
+                    </form>
+
+                    <div class="upload-section" id="dropZone">
+                        <h2>📤 Upload to {{ current_folder if current_folder else 'Library root' }}</h2>
+                        <p style="color: #666; margin-bottom: 20px;">
+                            <strong>Drag &amp; drop a file here</strong> — or use the button below.<br>
+                            Supported: PDF, Word (.doc, .docx), Text (.txt, .md)
+                        </p>
+                        <form method="POST" enctype="multipart/form-data" id="uploadForm">
+                            <input type="hidden" name="action" value="upload">
+                            <input type="hidden" name="folder" value="{{ current_folder }}">
+                            <div class="file-input-wrapper">
+                                <input type="file" name="file" id="fileInput" accept=".pdf,.doc,.docx,.txt,.md" required>
+                                <label for="fileInput" class="file-input-label">Choose File</label>
+                            </div>
+                            <div class="file-name" id="fileName">No file chosen</div>
+                            <br>
+                            <button type="submit" class="upload-btn" id="uploadBtn">Upload & Index</button>
+                        </form>
                     </div>
-                {% endif %}
+
+                    <div class="documents-list">
+                        <h2 class="section-title">📄 Documents in this folder</h2>
+                        {% if documents %}
+                            {% for doc in documents %}
+                            <div class="document-item">
+                                <div class="document-info">
+                                    <div class="document-name">{{ doc.filename }}</div>
+                                    <div class="document-meta">
+                                        Uploaded: {{ doc.uploaded_at }} | Size: {{ doc.size }}
+                                        {% if doc.created_by_blue %}
+                                        <span style="color: #667eea; font-weight: 600;"> • Created by Blue</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div style="display: flex; gap: 10px;">
+                                    <a href="/documents/download?folder={{ current_folder|urlencode }}&filename={{ doc.filename|urlencode }}" class="download-btn">
+                                        Download
+                                    </a>
+                                    <form method="POST" action="/documents/delete" style="display: inline; margin: 0;">
+                                        <input type="hidden" name="folder" value="{{ current_folder }}">
+                                        <input type="hidden" name="filename" value="{{ doc.filename }}">
+                                        <button type="submit" class="delete-btn" onclick="return confirm('Delete this document?')">
+                                            Delete
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="empty-state">
+                                <div class="empty-state-icon">🔭</div>
+                                <h3>No documents in this folder</h3>
+                                <p>Upload one above, or pick another folder.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
             </div>
 
             <a href="/" class="back-link">← Back to main page</a>
@@ -9610,66 +9935,122 @@ DOCUMENT_MANAGER_HTML = """
 </html>
 """
 
+def _library_view_context(current_folder: str, message=None, message_type=None) -> dict:
+    """Assemble everything the document-manager template needs for one folder
+    view: the folder tree, breadcrumb, immediate subfolders, and the documents
+    that live in the current folder."""
+    current_folder = _safe_rel_folder(current_folder)
+
+    index = load_document_index()
+    all_docs = [d for d in index.get('documents', []) if not d.get('camera_capture', False)]
+
+    # Total size first — before we replace any size with a formatted string.
+    total_size_bytes = sum((d.get('size', 0) or 0) for d in all_docs)
+    total_size = f"{total_size_bytes / 1024 / 1024:.1f} MB" if total_size_bytes > 0 else "0 MB"
+
+    # Documents in THIS folder only (format sizes for display).
+    documents = [d for d in all_docs if _safe_rel_folder(d.get('folder', '')) == current_folder]
+    for doc in documents:
+        size_bytes = doc.get('size', 0) or 0
+        if isinstance(size_bytes, (int, float)):
+            doc['size'] = (f"{size_bytes / 1024 / 1024:.1f} MB" if size_bytes > 1024 * 1024
+                           else f"{size_bytes / 1024:.1f} KB")
+
+    all_folders = list_library_folders()
+    folder_tree = [
+        {'path': f, 'name': f.split('/')[-1], 'depth': f.count('/')}
+        for f in all_folders
+    ]
+    subfolders = [
+        {'path': (f"{current_folder}/{name}" if current_folder else name), 'name': name}
+        for name in list_subfolders(current_folder)
+    ]
+
+    # Breadcrumb segments with cumulative paths.
+    breadcrumb, acc = [], []
+    if current_folder:
+        for seg in current_folder.split('/'):
+            acc.append(seg)
+            breadcrumb.append({'name': seg, 'path': '/'.join(acc)})
+
+    return dict(
+        documents=documents,
+        document_count=len(all_docs),
+        folder_count=len(all_folders),
+        total_size=total_size,
+        current_folder=current_folder,
+        folder_tree=folder_tree,
+        subfolders=subfolders,
+        breadcrumb=breadcrumb,
+        message=message,
+        message_type=message_type,
+    )
+
+
 @app.route('/documents', methods=['GET', 'POST'])
-
-
 def manage_documents():
-    """Web interface for document management."""
+    """Folder-aware web interface for the document library."""
     message = None
     message_type = None
+    current_folder = _safe_rel_folder(request.values.get('folder', '') or request.values.get('parent', ''))
 
     if request.method == 'POST':
-        if 'file' not in request.files:
-            message = "No file provided"
-            message_type = "error"
+        action = request.form.get('action', 'upload')
+
+        if action == 'create_folder':
+            parent = _safe_rel_folder(request.form.get('parent', ''))
+            name = _safe_folder_segment(request.form.get('name', ''))
+            current_folder = parent
+            if not name:
+                message, message_type = "Please enter a valid folder name.", "error"
+            else:
+                rel = f"{parent}/{name}" if parent else name
+                res = create_library_folder(rel)
+                if res.get('success'):
+                    message, message_type = f"📁 Created folder '{name}'.", "success"
+                else:
+                    message, message_type = f"Couldn't create folder: {res.get('error')}", "error"
+
+        elif 'file' not in request.files or request.files['file'].filename == '':
+            message, message_type = "No file selected", "error"
         else:
             file = request.files['file']
-
-            if file.filename == '':
-                message = "No file selected"
-                message_type = "error"
-            elif not allowed_file(file.filename):
+            if not allowed_file(file.filename):
                 message = f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
                 message_type = "error"
             else:
                 try:
-                    # Secure the filename and route by file type
                     filename = secure_filename(file.filename)
                     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-                    if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html', 'pptx', 'xlsx'):
-                        filepath = os.path.join(DOCUMENTS_FOLDER, filename)
+                    text_doc = ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html', 'pptx', 'xlsx')
+                    if text_doc:
+                        target_dir = _abs_library_path(current_folder)
+                        os.makedirs(target_dir, exist_ok=True)
+                        filepath = os.path.join(target_dir, filename)
                     else:
+                        # Images and other non-text uploads stay in UPLOAD_FOLDER.
                         filepath = os.path.join(str(UPLOAD_FOLDER), filename)
 
-                    # Save the file
                     file.save(filepath)
-
-                    # Get file info
+                    folder = _folder_of_filepath(filepath)
                     file_size = os.path.getsize(filepath)
                     file_hash = get_file_hash(filepath)
 
-                    # Check for duplicates before doing any indexing work.
                     index = load_document_index()
-                    duplicate = any(
-                        doc.get('hash') == file_hash for doc in index['documents']
-                    )
+                    duplicate = any(doc.get('hash') == file_hash for doc in index['documents'])
 
                     if duplicate:
                         message = f"Document '{filename}' already exists (duplicate detected)"
                         message_type = "error"
                         os.remove(filepath)
                     else:
-                        # Extract text once and reuse it for the preview and
-                        # the RAG index — no second PyPDF2 pass.
                         text_content = extract_text_from_file(filepath)
                         text_preview = text_content[:500] if not text_content.startswith("Error") else ""
 
-                        # Register the document in the index *before* indexing
-                        # so the documents-folder watcher's hash dedup skips
-                        # this file instead of racing in to index it again.
                         doc_entry = {
                             'filename': filename,
                             'filepath': str(filepath),
+                            'folder': folder,
                             'size': file_size,
                             'hash': file_hash,
                             'uploaded_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
@@ -9679,19 +10060,16 @@ def manage_documents():
                         index['documents'].append(doc_entry)
                         save_document_index(index)
 
-                        # Index into the local ChromaDB RAG store exactly
-                        # once. rag.index_document serializes its writes, so
-                        # this can no longer deadlock the upload request.
                         try:
                             from blue.tools.rag import index_document as rag_index
                             if ext in ('pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'rtf', 'html'):
                                 rag_result = rag_index(
                                     filepath, filename,
-                                    doc_id=file_hash, text=text_content,
+                                    doc_id=file_hash, text=text_content, folder=folder,
                                 )
                                 doc_entry['indexed_in_rag'] = rag_result.get('success', False)
                                 if doc_entry['indexed_in_rag']:
-                                    print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks for {filename}")
+                                    print(f"   [RAG] Indexed {rag_result.get('chunks_indexed', 0)} chunks for {filename} [{folder or 'root'}]")
                                 else:
                                     print(f"   [RAG] indexing skipped: {rag_result.get('error')}")
                         except ImportError:
@@ -9700,60 +10078,38 @@ def manage_documents():
                             print(f"   [WARN] Local RAG indexing error: {e}")
 
                         save_document_index(index)
-
-                        message = f"✅ Successfully uploaded and indexed '{filename}'!"
+                        where = current_folder if current_folder else "Library root"
+                        message = f"✅ Uploaded and indexed '{filename}' into {where}!"
                         message_type = "success"
 
                 except Exception as e:
                     message = f"Error uploading file: {str(e)}"
                     message_type = "error"
 
-    # Load documents for display
-    index = load_document_index()
-    documents = [doc for doc in index.get('documents', []) if not doc.get('camera_capture', False)]
-
-    # Calculate stats
-    total_size_bytes = sum(doc.get('size', 0) for doc in documents)
-    total_size = f"{total_size_bytes / 1024 / 1024:.1f} MB" if total_size_bytes > 0 else "0 MB"
-
-    # Format document sizes
-    for doc in documents:
-        size_bytes = doc.get('size', 0)
-        if size_bytes > 1024 * 1024:
-            doc['size'] = f"{size_bytes / 1024 / 1024:.1f} MB"
-        else:
-            doc['size'] = f"{size_bytes / 1024:.1f} KB"
-
-    return render_template_string(
-        DOCUMENT_MANAGER_HTML,
-        documents=documents,
-        document_count=len(documents),
-        total_size=total_size,
-        message=message,
-        message_type=message_type
-    )
+    ctx = _library_view_context(current_folder, message, message_type)
+    return render_template_string(DOCUMENT_MANAGER_HTML, **ctx)
 
 
-@app.route('/documents/delete/<filename>', methods=['POST'])
-
-
-def delete_document(filename):
-    """Delete a document."""
+@app.route('/documents/delete', methods=['POST'])
+def delete_document():
+    """Delete one document, identified by folder + filename so files with the
+    same name in different folders don't collide."""
+    folder = _safe_rel_folder(request.form.get('folder', ''))
+    filename = request.form.get('filename', '')
     try:
         index = load_document_index()
         documents = index.get('documents', [])
-
-        # Find and remove document
-        updated_documents = []
-        deleted = False
-
+        kept, deleted = [], False
         for doc in documents:
-            if doc['filename'] == filename:
-                # Delete file
-                filepath = doc['filepath']
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                # Remove from ChromaDB RAG
+            same_name = doc.get('filename') == filename
+            same_folder = _safe_rel_folder(doc.get('folder', '')) == folder
+            if same_name and same_folder and not deleted:
+                filepath = doc.get('filepath', '')
+                if filepath and os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except OSError:
+                        pass
                 try:
                     from blue.tools.rag import remove_document
                     remove_document(doc.get('hash', ''))
@@ -9761,45 +10117,66 @@ def delete_document(filename):
                     pass
                 deleted = True
             else:
-                updated_documents.append(doc)
-
+                kept.append(doc)
         if deleted:
-            index['documents'] = updated_documents
+            index['documents'] = kept
             save_document_index(index)
-
-        return redirect(url_for('manage_documents'))
-
     except Exception as e:
         print(f"Error deleting document: {e}")
-        return redirect(url_for('manage_documents'))
+    return redirect(url_for('manage_documents', folder=folder))
 
 
-@app.route('/documents/download/<filename>', methods=['GET'])
+@app.route('/documents/folder/delete', methods=['POST'])
+def delete_library_folder():
+    """Delete an (empty) library folder. Refuses if it still holds documents
+    or subfolders, so files are never silently destroyed."""
+    folder = _safe_rel_folder(request.form.get('folder', ''))
+    back = _safe_rel_folder(request.form.get('back', ''))
+    full = _abs_library_path(folder)
+    base = os.path.abspath(DOCUMENTS_FOLDER)
+    try:
+        if folder and os.path.isdir(full) and os.path.abspath(full) != base:
+            if os.listdir(full):
+                # Non-empty (files or subfolders) — don't destroy anything.
+                print(f"   [LIBRARY] refused to delete non-empty folder: {folder}")
+            else:
+                os.rmdir(full)
+                print(f"   [LIBRARY] deleted empty folder: {folder}")
+    except Exception as e:
+        print(f"   [LIBRARY] folder delete error: {e}")
+    return redirect(url_for('manage_documents', folder=back))
 
 
-def download_document(filename):
-    """Download a document."""
+@app.route('/documents/download', methods=['GET'])
+def download_document():
+    """Download a document, resolved via the index by folder + filename (with
+    a legacy fallback that scans the known storage folders)."""
     try:
         from flask import send_file
+        folder = _safe_rel_folder(request.args.get('folder', ''))
+        filename = request.args.get('filename', '')
 
-        # Security: Make sure filename is safe
-        filename = secure_filename(filename)
-        # Check all folders for the file
         filepath = None
-        for folder in [str(UPLOAD_FOLDER), DOCUMENTS_FOLDER, CAMERA_FOLDER]:
-            candidate = os.path.join(folder, filename)
-            if os.path.exists(candidate):
-                filepath = candidate
+        for doc in load_document_index().get('documents', []):
+            if (doc.get('filename') == filename
+                    and _safe_rel_folder(doc.get('folder', '')) == folder):
+                cand = doc.get('filepath', '')
+                if cand and os.path.exists(cand):
+                    filepath = cand
                 break
+
+        if not filepath:
+            safe = secure_filename(filename)
+            for base in [_abs_library_path(folder), str(UPLOAD_FOLDER), DOCUMENTS_FOLDER, CAMERA_FOLDER]:
+                candidate = os.path.join(base, safe)
+                if os.path.exists(candidate):
+                    filepath = candidate
+                    break
 
         if not filepath:
             return "File not found", 404
 
-        return send_file(
-            filepath,
-            as_attachment=True,
-            download_name=filename
-        )
+        return send_file(filepath, as_attachment=True, download_name=os.path.basename(filepath))
 
     except Exception as e:
         print(f"Error downloading document: {e}")

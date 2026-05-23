@@ -126,11 +126,16 @@ def _get_file_hash(filepath: str) -> str:
     return hash_md5.hexdigest()
 
 
-def index_document(filepath: str, filename: str, doc_id: str = None, text: str = None) -> Dict:
+def index_document(filepath: str, filename: str, doc_id: str = None,
+                   text: str = None, folder: str = "") -> Dict:
     """Extract text from a document and add its chunks to ChromaDB.
 
     If `text` is provided, skip extraction — callers that already extracted
     can pass it in to avoid a second PyPDF2 pass on large files.
+
+    `folder` is the document's library folder (POSIX rel path, "" for root).
+    It's stored on every chunk so retrieval can be scoped to an area of
+    expertise (e.g. only "Publications" or only "Courses/CS240").
     """
     collection = _get_collection()
     if collection is None:
@@ -161,6 +166,7 @@ def index_document(filepath: str, filename: str, doc_id: str = None, text: str =
             "doc_id": doc_id,
             "filename": filename,
             "filepath": str(filepath),
+            "folder": folder or "",
             "chunk_index": i,
             "total_chunks": len(chunks),
         }
@@ -218,10 +224,27 @@ def remove_document(doc_id: str) -> bool:
         return False
 
 
-def search(query: str, max_results: int = 3) -> List[Dict]:
+def _folder_where(folders):
+    """Build a ChromaDB metadata filter that scopes a query to one or more
+    library folders, or None for no scoping."""
+    if not folders:
+        return None
+    fl = [f for f in folders if f is not None]
+    if not fl:
+        return None
+    if len(fl) == 1:
+        return {"folder": fl[0]}
+    return {"folder": {"$in": fl}}
+
+
+def search(query: str, max_results: int = 3, folders=None) -> List[Dict]:
     """Semantic search across indexed documents.
 
-    Returns list of dicts with keys: filename, filepath, content, score, chunk_index, total_chunks
+    `folders` (optional list of POSIX rel paths) scopes the search to those
+    library folders — used for expertise-area queries.
+
+    Returns list of dicts with keys: filename, filepath, folder, content,
+    score, chunk_index, total_chunks
     """
     collection = _get_collection()
     if collection is None:
@@ -231,11 +254,13 @@ def search(query: str, max_results: int = 3) -> List[Dict]:
         return []
 
     try:
+        where = _folder_where(folders)
         # Request extra results so we can deduplicate by document
         n_results = min(max_results * 3, collection.count())
         results = collection.query(
             query_texts=[query],
             n_results=n_results,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
 
@@ -259,6 +284,7 @@ def search(query: str, max_results: int = 3) -> List[Dict]:
                 seen_docs[fname] = {
                     "filename": fname,
                     "filepath": meta["filepath"],
+                    "folder": meta.get("folder", ""),
                     "content": doc_text,
                     "score": score,
                     "chunk_index": meta["chunk_index"],
@@ -275,7 +301,7 @@ def search(query: str, max_results: int = 3) -> List[Dict]:
 
 
 def search_expertise(
-    query: str, max_chunks: int = 8, max_per_doc: int = 3
+    query: str, max_chunks: int = 8, max_per_doc: int = 3, folders=None
 ) -> List[Dict]:
     """Multi-chunk semantic search for expertise-style queries.
 
@@ -296,12 +322,14 @@ def search_expertise(
         return []
 
     try:
+        where = _folder_where(folders)
         # Over-fetch so we can group, dedupe near-identical chunks, and cap
         # per-document. Want roughly max_chunks * max_per_doc to be safe.
         n_results = min(max_chunks * max_per_doc, collection.count())
         results = collection.query(
             query_texts=[query],
             n_results=n_results,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         if not results or not results["documents"] or not results["documents"][0]:
@@ -330,6 +358,7 @@ def search_expertise(
             ranked.append({
                 "filename": fname,
                 "filepath": meta["filepath"],
+                "folder": meta.get("folder", ""),
                 "content": doc_text,
                 "score": 1.0 - dist,
                 "chunk_index": meta.get("chunk_index"),
@@ -357,27 +386,32 @@ def index_all_documents(documents_folder: str) -> Dict:
         results["errors"].append(f"Folder not found: {documents_folder}")
         return results
 
-    for filename in os.listdir(documents_folder):
-        ext = os.path.splitext(filename)[1].lower()
-        if ext not in text_extensions:
-            results["skipped"] += 1
-            continue
+    base = os.path.abspath(documents_folder)
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        rel = os.path.relpath(root, base)
+        folder = "" if rel == "." else rel.replace("\\", "/")
+        for filename in files:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in text_extensions:
+                results["skipped"] += 1
+                continue
 
-        filepath = os.path.join(documents_folder, filename)
-        if not os.path.isfile(filepath):
-            results["skipped"] += 1
-            continue
+            filepath = os.path.join(root, filename)
+            if not os.path.isfile(filepath):
+                results["skipped"] += 1
+                continue
 
-        result = index_document(filepath, filename)
+            result = index_document(filepath, filename, folder=folder)
 
-        if result.get("success"):
-            results["indexed"] += 1
-            print(f"   [RAG] OK: {filename} ({result['chunks_indexed']} chunks)")
-        else:
-            results["failed"] += 1
-            error_msg = f"{filename}: {result.get('error', 'unknown')}"
-            results["errors"].append(error_msg)
-            print(f"   [RAG] FAIL: {error_msg}")
+            if result.get("success"):
+                results["indexed"] += 1
+                print(f"   [RAG] OK: {filename} ({result['chunks_indexed']} chunks) [{folder or 'root'}]")
+            else:
+                results["failed"] += 1
+                error_msg = f"{filename}: {result.get('error', 'unknown')}"
+                results["errors"].append(error_msg)
+                print(f"   [RAG] FAIL: {error_msg}")
 
     return results
 
