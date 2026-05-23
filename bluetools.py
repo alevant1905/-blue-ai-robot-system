@@ -6054,7 +6054,10 @@ BLUE_SELF_ADDRESSES = {
 # is Alex's personal gmail; extend via BLUE_OWNER_EMAILS.
 BLUE_OWNER_ADDRESSES = {
     a.strip().lower()
-    for a in os.environ.get("BLUE_OWNER_EMAILS", "alevant1905@gmail.com").split(",")
+    for a in os.environ.get(
+        "BLUE_OWNER_EMAILS",
+        "alevant1905@gmail.com,alevant@yorku.ca",
+    ).split(",")
     if a.strip()
 }
 
@@ -6338,14 +6341,29 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 executed.add(tname)
                 _rs = tresult if isinstance(tresult, str) else json.dumps(tresult)
                 print(f"   [AUTO-REPLY] pre-exec result: {_rs[:200]}")
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"[You ALREADY handled this request by running {tname}. "
-                        f"Result: {_rs[:400]}. Do NOT call it again — just confirm "
-                        f"the outcome naturally in your reply, based on that result.]"
-                    ),
-                })
+                if tname == "capture_camera":
+                    # The capture queued an image that's injected right after
+                    # this block. The reply should DESCRIBE what's in it, not
+                    # just say "photo taken", so don't tell the model to merely
+                    # confirm — _inject_pending_vision carries the look-prompt.
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "[You already opened your camera. The image you "
+                            "captured follows — look at it and describe what you "
+                            "actually see, then answer the sender. Do NOT call "
+                            "capture_camera again.]"
+                        ),
+                    })
+                else:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[You ALREADY handled this request by running {tname}. "
+                            f"Result: {_rs[:400]}. Do NOT call it again — just confirm "
+                            f"the outcome naturally in your reply, based on that result.]"
+                        ),
+                    })
     except Exception as e:
         print(f"   [AUTO-REPLY] selector pre-exec error: {e}")
 

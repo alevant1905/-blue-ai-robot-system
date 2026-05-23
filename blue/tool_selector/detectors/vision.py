@@ -39,6 +39,20 @@ class VisionDetector(BaseDetector):
             'take a picture', 'take a photo', 'capture image', 'camera capture',
             'snap a photo', 'take screenshot', 'get an image'
         ]
+        # Present-tense "look right now" phrasings. Blue is a physical robot
+        # with a camera, so "what do you see" means look through it NOW — a
+        # live capture, not a recollection. Past-tense ("what did you see")
+        # is handled separately by _detect_recall_intent, so these stay
+        # strictly present tense to avoid stealing recall queries.
+        live_view_signals = [
+            'what do you see', 'what can you see', 'what are you seeing',
+            'what are you looking at', 'what do you see right now',
+            'describe what you see', 'tell me what you see',
+            "what's in front of you", 'what is in front of you',
+            'look around', 'look through your camera', 'use your camera',
+            'open your camera', 'turn on your camera', 'can you see me',
+            'do you see me', 'look at me', 'what does it look like there',
+        ]
         camera_keywords = ['camera', 'picture', 'photo', 'image', 'snapshot', 'capture']
         action_verbs = ['take', 'capture', 'snap', 'get', 'grab']
 
@@ -48,6 +62,9 @@ class VisionDetector(BaseDetector):
         if any(s in msg_lower for s in strong_signals):
             confidence = 0.95
             reasons.append("explicit camera keywords")
+        elif any(s in msg_lower for s in live_view_signals):
+            confidence = 0.90
+            reasons.append("live-view request - capturing camera")
         elif any(v in msg_lower for v in action_verbs) and any(k in msg_lower for k in camera_keywords):
             confidence = 0.85
             reasons.append("action verb + camera keyword")
