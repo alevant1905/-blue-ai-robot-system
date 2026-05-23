@@ -4470,6 +4470,28 @@ def _is_full_document_request(query: str) -> bool:
     return False
 
 
+def _is_document_list_request(query: str) -> bool:
+    """True when the user wants an INVENTORY of the library (what/which/how
+    many documents or files, what's in the library) rather than a semantic
+    search. These must route to the local index lister — ChromaDB would
+    semantic-search the literal question and return irrelevant chunks (or
+    nothing), which is why 'what documents are in your library' came back
+    empty by email."""
+    q = f" {query.lower().strip()} "
+    list_phrases = (
+        "what documents", "what files", "which documents", "which files",
+        "list documents", "list files", "list my documents", "list my files",
+        "list all", "show documents", "show files", "show me my documents",
+        "show me my files", "show my documents", "show my files",
+        "how many documents", "how many files", "count documents",
+        "count files", "documents do you have", "files do you have",
+        "documents are in", "files are in", "in your library",
+        "in my library", "what's in your library", "whats in your library",
+        "what is in your library", "what do you have in your library",
+    )
+    return any(p in q for p in list_phrases)
+
+
 def _is_expertise_query(query: str) -> bool:
     """True for queries that ask Blue to draw on his corpus expertise.
 
@@ -4502,6 +4524,14 @@ def _is_expertise_query(query: str) -> bool:
 def search_documents_rag(query: str, max_results: int = 3) -> str:
     """Search documents using local ChromaDB RAG first, then keyword fallback."""
     print(f"   [FIND] Searching documents for: '{query}'")
+
+    # Inventory requests ("what documents are in your library", "list my
+    # files") must be answered by enumerating the index, NOT by semantic
+    # search — ChromaDB would match the literal question against chunk text
+    # and return noise. Route straight to the local lister.
+    if _is_document_list_request(query):
+        print(f"   [LIST] Library inventory request — routing to local lister")
+        return search_documents_local(query, max_results)
 
     is_expertise = _is_expertise_query(query)
 
@@ -4643,7 +4673,11 @@ def search_documents_local(query: str, max_results: int = 3) -> str:
 
     # Special handling for document listing queries
     list_keywords = ["list documents", "what documents", "show documents", "all documents",
-                     "summarize all", "list all", "show all"]
+                     "summarize all", "list all", "show all",
+                     "what files", "which documents", "which files", "list files",
+                     "show files", "how many documents", "how many files",
+                     "count documents", "count files", "in your library",
+                     "in my library", "documents do you have", "files do you have"]
     is_list_query = any(kw in query_lower for kw in list_keywords)
 
     # Also treat very generic queries as list requests (e.g., just "documents" or "files")
