@@ -6380,6 +6380,129 @@ def _maybe_handle_owner_outbound(body: str) -> Optional[str]:
     )
 
 
+def _resolve_document_file(reference: str) -> Optional[tuple]:
+    """Match a natural document reference ("the syllabus", "Pasquinelli",
+    "Mark's substack post") to a real file in the library index. Returns
+    (filename, existing_filepath) for the best match, or None if nothing
+    matches confidently — callers must then ASK which document, never guess
+    and attach the wrong file."""
+    try:
+        index = load_document_index()
+    except Exception:
+        return None
+    docs = [
+        d for d in (index.get('documents') or [])
+        if d.get('doc_type') != 'camera'
+        and not str(d.get('filename', '')).startswith('camera_')
+    ]
+    if not docs:
+        return None
+
+    stop = {
+        'send', 'email', 'me', 'the', 'a', 'an', 'as', 'attachment', 'attach',
+        'copy', 'of', 'document', 'file', 'please', 'can', 'you', 'to', 'my',
+        'in', 'library', 'one', 'that', 'this', 'it', 'over', 'could', 'would',
+        'from', 'about', 'with', 'and', 'for', 'your',
+    }
+    ref_tokens = [
+        w for w in re.findall(r"[a-z0-9]+", (reference or "").lower())
+        if w not in stop and len(w) > 2
+    ]
+    if not ref_tokens:
+        return None
+
+    best, best_score = None, 0
+    for d in docs:
+        fn = str(d.get('filename', ''))
+        fn_tokens = set(re.findall(r"[a-z0-9]+", fn.lower()))
+        score = 0
+        for t in ref_tokens:
+            if t in fn_tokens or any(t in ft or ft in t for ft in fn_tokens):
+                score += 1
+        if score > best_score:
+            best_score, best = score, d
+
+    if not best or best_score < 1:
+        return None
+
+    filename = best.get('filename', '')
+    filepath = best.get('filepath', '')
+    if filepath and os.path.exists(filepath):
+        return (filename, filepath)
+    alt = os.path.join(DOCUMENTS_FOLDER, filename)
+    if os.path.exists(alt):
+        return (filename, alt)
+    return None
+
+
+def _maybe_handle_owner_attachment(body: str, reply_to: str) -> Optional[tuple]:
+    """If owner mail asks Blue to send THEM a library document as an
+    attachment, resolve the file and return (reply_body, [filepath]) so the
+    auto-reply carries it. Returns None when there's no attachment intent.
+
+    The auto-reply only goes back to the original sender, so this handles the
+    'send me X' case; a request aimed at a third party falls through (we must
+    not silently mail the file to the wrong person)."""
+    bl = (body or "").lower()
+    wants_attach = (
+        'attach' in bl
+        or 'a copy of' in bl
+        or bool(re.search(
+            r"\b(?:send|email|forward)\b[^.?!]*\b"
+            r"(?:document|file|pdf|docx?|syllabus|paper|copy)\b", bl))
+    )
+
+    doc = _resolve_document_file(body)
+
+    # "send me the <docname>" without the literal word 'attachment' is still an
+    # attachment request — but only treat it as one when it actually names a
+    # real library document, so "send me the weather" stays a normal reply.
+    if not wants_attach:
+        if doc and re.search(r"\b(?:send|email|forward)\b[^.?!]*\bme\b", bl):
+            wants_attach = True
+        else:
+            return None
+
+    # Directed at a third party ("email Stella the syllabus")? This reply path
+    # can only answer the sender, so don't risk mailing the file to Alex when
+    # he meant Stella — fall through to the normal handler.
+    m = _OUTBOUND_SEND_RE.search(body or "")
+    if m:
+        nm = (m.group('n1') or m.group('n2') or m.group('n3') or '').strip().lower()
+        if nm and nm not in _OUTBOUND_EXCLUDE_NAMES:
+            return None
+
+    if not doc:
+        return (
+            "Happy to send that over — which document did you mean? Tell me the "
+            "file name and I'll attach it right away.\n\nBlue",
+            [],
+        )
+    filename, filepath = doc
+    print(f"   [AUTO-REPLY] attaching {filename} → {reply_to}")
+    return (
+        f"Here you go — I've attached {filename} for you.\n\nBlue",
+        [filepath],
+    )
+
+
+def _build_email_reply(cand: Dict[str, Any]) -> tuple:
+    """Produce (reply_body, attachment_paths) for one inbound email. Owner
+    attachment requests are handled deterministically (the model can't be
+    trusted to actually attach — it just claims it did); everything else goes
+    through the normal reply generator with no attachments."""
+    headers = cand.get('headers') or []
+    sender = cand.get('from', '')
+    if _email_sender_is_owner(headers, sender):
+        body = (cand.get('body') or cand.get('snippet') or '')[:2000]
+        m = re.search(r'<(.+?)>', sender)
+        reply_to = m.group(1) if m else sender
+        att = _maybe_handle_owner_attachment(body, reply_to)
+        if att is not None:
+            return att
+    return _generate_reply_for_email(cand), []
+
+
 def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     """Draft a reply body via the local LM Studio model. Returns plain text.
 
@@ -6742,7 +6865,7 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
 
         for cand in candidates:
             try:
-                reply_body = _generate_reply_for_email(cand)
+                reply_body, reply_attachments = _build_email_reply(cand)
                 if not reply_body:
                     skipped.append({'id': cand['id'], 'reason': 'LLM produced no reply'})
                     continue
@@ -6765,6 +6888,7 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
                         'to': reply_to,
                         'subject': reply_subject,
                         'reply_preview': reply_body[:300],
+                        'attachments': [os.path.basename(a) for a in (reply_attachments or [])],
                     })
                     continue
 
@@ -6776,6 +6900,31 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
                     reply_message['In-Reply-To'] = message_id_header
                     reply_message['References'] = message_id_header
                 reply_message.attach(MIMEText(reply_body, 'plain', 'utf-8'))
+
+                # Attach any library documents the request asked for.
+                for ap in (reply_attachments or []):
+                    try:
+                        if not os.path.exists(ap):
+                            alt = os.path.join(DOCUMENTS_FOLDER, os.path.basename(ap))
+                            if os.path.exists(alt):
+                                ap = alt
+                            else:
+                                print(f"   [AUTO-REPLY] attachment missing: {ap}")
+                                continue
+                        ctype, _enc = mimetypes.guess_type(ap)
+                        maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
+                        with open(ap, 'rb') as _f:
+                            part = MIMEBase(maintype, subtype)
+                            part.set_payload(_f.read())
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            'Content-Disposition', 'attachment',
+                            filename=os.path.basename(ap),
+                        )
+                        reply_message.attach(part)
+                        print(f"   [AUTO-REPLY] attached {os.path.basename(ap)}")
+                    except Exception as _ae:
+                        print(f"   [AUTO-REPLY] attach failed for {ap}: {_ae}")
 
                 raw = base64.urlsafe_b64encode(reply_message.as_bytes()).decode('utf-8')
                 sent_msg = service.users().messages().send(
