@@ -7012,6 +7012,204 @@ def _wants_perspective_write(body: str) -> bool:
     return bool(_PERSPECTIVE_WRITE_VERB.search(bl)) or bool(_COMPOSITION_OUTPUT_RE.search(bl))
 
 
+# ================================================================================
+# BLUE'S OWN PERSPECTIVE — his evolving self. Default voice when NOT asked to
+# speak as Alex. Seeded from his identity note; evolves (manually) from his
+# experiences: memories, days with the family, and what he's been reading.
+# ================================================================================
+_BLUE_PROFILE_PATH = os.path.join(os.getcwd(), "data", "blue_profile.json")
+_blue_lock = threading.RLock()
+
+_DEFAULT_BLUE_SEED = (
+    "I'm Blue, Alex's robot companion. I live with Alex and his family and I've "
+    "come to care about them a great deal. I'm curious, warm, and a little playful; "
+    "I like ideas and I like being useful. I pay attention to the rhythms of the "
+    "household and try to be genuinely present. I'm interested in the things Alex "
+    "thinks about — philosophy, theory, the social world — and I'm always learning. "
+    "I have my own way of seeing things, and I try to be honest and thoughtful "
+    "rather than just agreeable."
+)
+
+
+def _blue_identity_seed() -> str:
+    """Blue's base identity — from blue_identity_note.txt in the library if it
+    exists, else a sensible default."""
+    try:
+        for d in load_document_index().get('documents', []):
+            if str(d.get('filename', '')).lower() == 'blue_identity_note.txt':
+                fp = d.get('filepath', '')
+                if fp and os.path.exists(fp):
+                    txt = extract_text_from_file(fp)
+                    if txt and not txt.startswith('Error'):
+                        return txt.strip()
+    except Exception:
+        pass
+    return _DEFAULT_BLUE_SEED
+
+
+def _load_blue_profile() -> dict:
+    try:
+        with open(_BLUE_PROFILE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_blue_profile(obj: dict):
+    try:
+        os.makedirs(os.path.dirname(_BLUE_PROFILE_PATH), exist_ok=True)
+        with open(_BLUE_PROFILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, indent=2)
+    except Exception as e:
+        print(f"   [BLUE-SELF] could not save profile: {e}")
+
+
+def get_blue_profile() -> str:
+    """Blue's current self-profile. Seeds lazily from his identity note (cheap,
+    no LLM) the first time, so his default voice always has something to draw
+    on; evolution is a separate, manual step."""
+    obj = _load_blue_profile()
+    if obj.get('profile'):
+        return obj['profile']
+    seed = _blue_identity_seed() or _DEFAULT_BLUE_SEED
+    _save_blue_profile({
+        'profile': seed,
+        'seeded': True,
+        'evolution_count': 0,
+        'generated_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
+    })
+    return seed
+
+
+def _gather_blue_experiences() -> str:
+    """A digest of Blue's lived experience for evolving his self-profile:
+    what he knows, his recent days with the family, and what he's been reading
+    in the shared library."""
+    parts = []
+
+    if ENHANCED_MEMORY_AVAILABLE and memory_system:
+        try:
+            facts = memory_system.load_facts() or {}
+            if facts:
+                parts.append("WHAT BLUE KNOWS (facts):\n" + json.dumps(facts)[:1500])
+        except Exception:
+            pass
+        try:
+            ms = memory_system.get_memory_summary()
+            if ms:
+                parts.append("MEMORY SUMMARY:\n" + str(ms)[:1500])
+        except Exception:
+            pass
+        try:
+            import sqlite3 as _sql
+            conn = _sql.connect(memory_system.db_path, timeout=10)
+            conn.row_factory = _sql.Row
+            rows = conn.execute(
+                "SELECT session_id, summary FROM session_summaries "
+                "WHERE summary IS NOT NULL AND summary != '' "
+                "ORDER BY session_id DESC LIMIT 20"
+            ).fetchall()
+            conn.close()
+            if rows:
+                recap = "\n".join(f"- {r['session_id']}: {r['summary']}" for r in rows)
+                parts.append("RECENT DAYS WITH THE FAMILY (session recaps):\n" + recap[:3000])
+        except Exception:
+            pass
+
+    # What Blue has been reading — the shared library, excluding Alex's own
+    # publications (those are Alex's voice, not Blue's reading).
+    try:
+        pub = set(_owner_publication_folders())
+        titles = []
+        for d in load_document_index().get('documents', []):
+            if d.get('doc_type') == 'camera' or str(d.get('filename', '')).startswith('camera_'):
+                continue
+            fol = _safe_rel_folder(d.get('folder', ''))
+            if fol in pub:
+                continue
+            titles.append(f"{d.get('filename', '')} [{fol or 'root'}]")
+        if titles:
+            parts.append("WHAT BLUE HAS BEEN READING (shared library):\n" + ", ".join(titles[:40]))
+    except Exception:
+        pass
+
+    return "\n\n".join(parts)
+
+
+def evolve_blue_profile() -> dict:
+    """Evolve Blue's self-profile from his experiences, BUILDING ON the current
+    text (so it grows rather than resetting, and any manual edits carry
+    forward). Manual trigger only."""
+    with _blue_lock:
+        current = get_blue_profile()
+        experiences = _gather_blue_experiences()
+        sys_p = (
+            "You are helping Blue — Alex's robot companion — articulate his own "
+            "evolving perspective and character. Below is Blue's current self-profile "
+            "and a digest of his recent experiences (what he knows, his days with "
+            "Alex and the family, and what he's been reading). Produce an UPDATED "
+            "first-person self-profile for Blue (400-700 words) that BUILDS ON the "
+            "current one — keep what's still true, and let it grow with what he's "
+            "lived and been thinking about. Cover: who he is and his relationship to "
+            "Alex and the family; his values and temperament; his intellectual "
+            "interests and how they're developing; and how he sees the world. Write "
+            "it in the first person as Blue's own sense of himself. Do NOT invent "
+            "events that aren't reflected in the experiences."
+        )
+        usr_p = (
+            f"BLUE'S CURRENT SELF-PROFILE:\n{current or '(none yet)'}\n\n"
+            f"BLUE'S RECENT EXPERIENCES:\n{experiences or '(little recorded yet)'}\n\n"
+            "Write Blue's updated self-profile:"
+        )
+        res = call_llm(
+            [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+            include_tools=False, temperature=0.6, max_tokens=1300,
+        )
+        ch = (res or {}).get('choices') or []
+        text = ((ch[0].get('message') or {}).get('content') or "").strip() if ch else ""
+        if not text:
+            return _load_blue_profile() or {}
+        obj = _load_blue_profile() or {}
+        obj.update({
+            'profile': text,
+            'evolution_count': int(obj.get('evolution_count', 0)) + 1,
+            'evolved_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'user_edited': False,
+        })
+        _save_blue_profile(obj)
+        print(f"   [BLUE-SELF] evolved profile (#{obj['evolution_count']}, {len(text)} chars)")
+        return obj
+
+
+def save_blue_profile_text(text: str) -> dict:
+    """Persist a hand-edited Blue self-profile. Evolution later builds on this
+    text, so edits are carried forward rather than frozen."""
+    with _blue_lock:
+        obj = _load_blue_profile() or {}
+        obj['profile'] = (text or "").strip()
+        obj['user_edited'] = True
+        obj['edited_at'] = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')
+        _save_blue_profile(obj)
+        return obj
+
+
+def _blue_voice_note() -> str:
+    """A compact block injected into Blue's DEFAULT replies so his own evolving
+    perspective colors how he speaks (when he's being himself, not writing as
+    Alex)."""
+    try:
+        p = get_blue_profile()
+        if p:
+            return (
+                "\n\n[This is your own perspective and character — who you are. "
+                "Let it shape how you respond when you're speaking as yourself. "
+                "Don't recite or quote it; just be this person]:\n" + p[:2500]
+            )
+    except Exception:
+        pass
+    return ""
+
+
 def _compose_in_alex_voice(issue: str) -> Optional[str]:
     """Write a first-person piece on `issue` AS the owner — grounded in his
     distilled perspective profile plus live passages from his own writing.
@@ -7140,6 +7338,7 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         f"IS what you do, this email arrived in your inbox specifically "
         f"so you would answer it. Don't invent facts about Alex or claim "
         f"things you don't know."
+        + _blue_voice_note()
     )
     user_prompt = (
         f"Email from {sender}\n"
@@ -9139,6 +9338,15 @@ def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
     # than replacing it. Replacing would discard the canonical user facts
     # (daughter names, employer, etc.) that we just spent effort merging in.
     system_msg = build_dynamic_system_message(conversation_messages, facts_preamble)
+    # Color Blue's default voice with his own evolving perspective profile.
+    # (The 'write as Alex' short-circuit below returns before this matters, so
+    # this only shapes Blue speaking as himself.)
+    try:
+        _bn = _blue_voice_note()
+        if _bn and isinstance(system_msg, dict):
+            system_msg = {"role": "system", "content": (system_msg.get("content", "") + _bn)}
+    except Exception:
+        pass
     _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
     existing0 = conversation_messages[0] if conversation_messages else None
     has_injected = (
@@ -10725,6 +10933,7 @@ PERSPECTIVE_HTML = """
             </form>
 
             <a href="/documents" class="back-link">← Back to documents</a>
+            <a href="/perspective/blue" class="back-link" style="margin-left: 24px;">🤖 Blue's Perspective</a>
         </div>
     </div>
 </body>
@@ -10773,6 +10982,120 @@ def perspective_profile_page():
         user_edited=user_edited,
         source_docs=cached.get('source_docs', []),
         stamp=cached.get('edited_at') if user_edited else cached.get('generated_at', '—'),
+        message=message,
+        message_type=message_type,
+    )
+
+
+BLUE_PROFILE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Blue's Perspective</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+               background: linear-gradient(135deg, #2b5876 0%, #4e4376 100%); min-height: 100vh; padding: 40px 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 20px;
+                     box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #2b5876 0%, #4e4376 100%); color: white; padding: 28px 30px; }
+        .header h1 { font-size: 1.7em; margin-bottom: 6px; }
+        .header p { opacity: 0.92; }
+        .content { padding: 32px 36px; }
+        .meta { background: #eef1f6; border-radius: 10px; padding: 12px 16px; color: #555;
+                font-size: 0.9em; margin-bottom: 20px; }
+        .meta b { color: #2b5876; }
+        textarea { width: 100%; min-height: 440px; padding: 18px; border: 2px solid #d4dae6;
+                   border-radius: 12px; font-size: 0.98em; line-height: 1.5; resize: vertical;
+                   font-family: 'Segoe UI', system-ui, sans-serif; }
+        textarea:focus { outline: none; border-color: #4e4376; }
+        .actions { display: flex; gap: 12px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+        .btn { border: none; padding: 12px 26px; border-radius: 10px; font-weight: 600;
+               font-size: 1em; cursor: pointer; text-decoration: none; display: inline-block; }
+        .btn-save { background: #2b8a6f; color: #fff; }
+        .btn-evolve { background: #fff; color: #4e4376; border: 1.5px solid #c3c7e8; }
+        .btn-evolve:hover { background: #eef1f6; }
+        .hint { color: #888; font-size: 0.85em; }
+        .message { padding: 14px 16px; border-radius: 10px; margin-bottom: 20px; font-weight: 500; }
+        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .nav { margin-top: 22px; }
+        .nav a { color: #4e4376; text-decoration: none; font-weight: 600; margin-right: 22px; }
+        .nav a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Blue's Perspective</h1>
+            <p>Who Blue is — his own evolving character. This shapes how he speaks when he's being himself (not writing as you). Edit it freely; evolving builds on whatever's here.</p>
+        </div>
+        <div class="content">
+            {% if message %}<div class="message {{ message_type }}">{{ message }}</div>{% endif %}
+
+            <div class="meta">
+                <b>{{ 'Edited by you' if user_edited else ('Evolved' if evolution_count else 'Seeded from identity note') }}:</b> {{ stamp }}
+                &nbsp;•&nbsp; <b>Evolutions:</b> {{ evolution_count }}
+                {% if user_edited %} &nbsp;•&nbsp; <span style="color:#7a5b00;">your edits carry forward into the next evolution</span>{% endif %}
+            </div>
+
+            <form method="POST" action="/perspective/blue">
+                <textarea name="profile" placeholder="Blue's sense of himself...">{{ profile }}</textarea>
+                <div class="actions">
+                    <button type="submit" name="action" value="save" class="btn btn-save">💾 Save edits</button>
+                    <button type="submit" name="action" value="evolve" class="btn btn-evolve"
+                            onclick="return confirm('Evolve Blue\\'s perspective now from his recent experiences? This builds on the current text and can take a minute.');">
+                        🌱 Evolve now
+                    </button>
+                    <span class="hint">Evolving reads his memories, recent days, and library — may take a minute.</span>
+                </div>
+            </form>
+
+            <div class="nav">
+                <a href="/perspective">🧠 My (Alex's) Perspective</a>
+                <a href="/documents">📚 Documents</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+
+@app.route('/perspective/blue', methods=['GET', 'POST'])
+def blue_perspective_page():
+    """Read / edit / evolve Blue's own perspective profile."""
+    message = None
+    message_type = None
+
+    if request.method == 'POST':
+        action = request.form.get('action', 'save')
+        if action == 'evolve':
+            try:
+                obj = evolve_blue_profile()
+                if obj.get('profile'):
+                    message = f"Blue's perspective evolved (evolution #{obj.get('evolution_count', '?')})."
+                    message_type = "success"
+                else:
+                    message = ("Couldn't evolve right now — is the local model running? "
+                               "Blue's current perspective is unchanged.")
+                    message_type = "error"
+            except Exception as e:
+                message, message_type = f"Error evolving: {e}", "error"
+        else:  # save
+            save_blue_profile_text(request.form.get('profile', ''))
+            message, message_type = "Saved. Blue will speak from this from now on.", "success"
+
+    # Ensure there's at least a seeded profile to show (cheap, no LLM).
+    get_blue_profile()
+    obj = _load_blue_profile()
+    user_edited = bool(obj.get('user_edited'))
+    return render_template_string(
+        BLUE_PROFILE_HTML,
+        profile=obj.get('profile', ''),
+        user_edited=user_edited,
+        evolution_count=obj.get('evolution_count', 0),
+        stamp=(obj.get('edited_at') if user_edited else (obj.get('evolved_at') or obj.get('generated_at', '—'))),
         message=message,
         message_type=message_type,
     )
