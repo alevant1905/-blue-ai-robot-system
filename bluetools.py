@@ -9379,7 +9379,7 @@ DOCUMENT_MANAGER_HTML = """
             padding: 40px 20px;
         }
         .container {
-            max-width: 900px;
+            max-width: 1080px;
             margin: 0 auto;
             background: white;
             border-radius: 20px;
@@ -9401,16 +9401,16 @@ DOCUMENT_MANAGER_HTML = """
             font-size: 1.1em;
         }
         .content {
-            padding: 40px;
+            padding: 32px 36px;
         }
         .upload-section {
             background: #f8f9fa;
-            border: 3px dashed #667eea;
-            border-radius: 15px;
-            padding: 40px;
+            border: 2px dashed #c3c7e8;
+            border-radius: 12px;
+            padding: 22px;
             text-align: center;
-            margin-bottom: 40px;
-            transition: all 0.3s;
+            margin-bottom: 30px;
+            transition: all 0.2s;
         }
         .upload-section:hover {
             border-color: #764ba2;
@@ -9423,7 +9423,8 @@ DOCUMENT_MANAGER_HTML = """
         }
         .upload-section h2 {
             color: #667eea;
-            margin-bottom: 20px;
+            font-size: 1.15em;
+            margin-bottom: 12px;
         }
         .file-input-wrapper {
             position: relative;
@@ -9437,10 +9438,10 @@ DOCUMENT_MANAGER_HTML = """
         .file-input-label {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 15px 40px;
+            padding: 11px 28px;
             border-radius: 50px;
             cursor: pointer;
-            font-size: 1.1em;
+            font-size: 1em;
             font-weight: 600;
             transition: transform 0.2s;
             display: inline-block;
@@ -9449,20 +9450,21 @@ DOCUMENT_MANAGER_HTML = """
             transform: scale(1.05);
         }
         .file-name {
-            margin-top: 20px;
+            margin-top: 12px;
             color: #666;
             font-style: italic;
+            font-size: 0.9em;
         }
         .upload-btn {
             background: #28a745;
             color: white;
             border: none;
-            padding: 15px 40px;
+            padding: 11px 28px;
             border-radius: 50px;
-            font-size: 1.1em;
+            font-size: 1em;
             font-weight: 600;
             cursor: pointer;
-            margin-top: 20px;
+            margin-top: 14px;
             transition: transform 0.2s;
         }
         .upload-btn:hover:not(:disabled) {
@@ -9482,59 +9484,74 @@ DOCUMENT_MANAGER_HTML = """
         }
         .document-item {
             background: #f8f9fa;
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 15px;
+            border: 1px solid #ebecf3;
+            border-radius: 12px;
+            padding: 16px 18px;
+            margin-bottom: 12px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            transition: transform 0.2s;
+            gap: 16px;
+            transition: box-shadow 0.15s, border-color 0.15s;
         }
         .document-item:hover {
-            transform: translateX(5px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            box-shadow: 0 6px 16px rgba(102,126,234,0.15);
+            border-color: #d8d9ef;
         }
         .document-info {
-            flex: 1;
+            flex: 1 1 auto;
+            min-width: 0;            /* lets long names wrap instead of pushing buttons off-screen */
         }
         .document-name {
             font-weight: 600;
-            color: #667eea;
-            font-size: 1.1em;
-            margin-bottom: 5px;
+            color: #4b3b8f;
+            font-size: 1.05em;
+            margin-bottom: 4px;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
         .document-meta {
-            color: #666;
-            font-size: 0.9em;
+            color: #777;
+            font-size: 0.85em;
+        }
+        .doc-actions {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;          /* buttons always stay visible */
+            align-items: center;
         }
         .delete-btn {
-            background: #dc3545;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 25px;
+            background: #fff;
+            color: #dc3545;
+            border: 1.5px solid #f1c4c9;
+            padding: 8px 16px;
+            border-radius: 8px;
             cursor: pointer;
-            transition: transform 0.2s;
+            transition: background 0.15s, color 0.15s;
             text-decoration: none;
-            font-size: 14px;
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
         }
         .delete-btn:hover {
-            transform: scale(1.05);
+            background: #dc3545;
+            color: #fff;
         }
         .download-btn {
             background: #28a745;
             color: white;
             border: none;
-            padding: 10px 20px;
-            border-radius: 25px;
+            padding: 8px 18px;
+            border-radius: 8px;
             cursor: pointer;
-            transition: transform 0.2s;
+            transition: background 0.15s;
             text-decoration: none;
-            font-size: 14px;
+            font-size: 13px;
+            font-weight: 600;
             display: inline-block;
+            white-space: nowrap;
         }
         .download-btn:hover {
-            transform: scale(1.05);
             background: #218838;
         }
         .message {
@@ -9839,7 +9856,7 @@ DOCUMENT_MANAGER_HTML = """
                                         {% endif %}
                                     </div>
                                 </div>
-                                <div style="display: flex; gap: 10px;">
+                                <div class="doc-actions">
                                     <a href="/documents/download?folder={{ current_folder|urlencode }}&filename={{ doc.filename|urlencode }}" class="download-btn">
                                         Download
                                     </a>
