@@ -4008,6 +4008,56 @@ def _folders_under(prefix: str) -> List[str]:
     return result
 
 
+# The owner's name, used to recognize the folder that holds HIS publications
+# when he says "my published work" / "my articles". Override via env if the
+# folder is named differently.
+BLUE_OWNER_NAME = os.environ.get("BLUE_OWNER_NAME", "Alex Levant")
+
+# Phrases that mean "draw on my own published writing".
+_OWN_WORK_PHRASES = (
+    "my published work", "my publications", "my published", "my articles",
+    "my article", "my papers", "my paper", "my writing", "my own work",
+    "my own writing", "my research", "my work", "my book", "my chapter",
+    "my essays", "my essay", "published work", "my scholarship",
+)
+
+
+def _infer_expertise_folders(query: str) -> List[str]:
+    """Map a request to the library folder(s) it should be answered from, or
+    [] for 'search the whole library'. Two cues:
+
+      • "my published work / my articles / my publications …" → the folder
+        holding the owner's own writing (matched by publications-style names
+        or the owner's name, e.g. an "Alex Levant" folder).
+      • An explicit folder name appearing in the request → that folder.
+
+    Returns each matched folder plus its descendants, deduped.
+    """
+    q = (query or "").lower()
+    folders = list_library_folders()
+    if not folders:
+        return []
+
+    targets = set()
+    owner_tokens = [t for t in re.findall(r"[a-z]+", BLUE_OWNER_NAME.lower()) if len(t) > 2]
+
+    if any(p in q for p in _OWN_WORK_PHRASES):
+        for f in folders:
+            fl = f.lower()
+            is_pub = any(k in fl for k in ("publication", "published", "papers", "articles", "writing"))
+            is_owner_named = bool(owner_tokens) and all(t in fl for t in owner_tokens)
+            if is_pub or is_owner_named:
+                targets.update(_folders_under(f))
+
+    # Explicit folder-name mention (match on the leaf name as a whole word).
+    for f in folders:
+        leaf = f.split("/")[-1].lower()
+        if len(leaf) >= 4 and re.search(r"\b" + re.escape(leaf) + r"\b", q):
+            targets.update(_folders_under(f))
+
+    return sorted(targets)
+
+
 def load_document_index() -> Dict:
     """Load the document index from disk. Repairs corrupt files in place.
 
@@ -4650,6 +4700,11 @@ def _is_expertise_query(query: str) -> bool:
         "across my", "across all", "compare what",
         # discipline / field hints — these almost always want corpus coverage
         " literature ", " corpus ", "the field of",
+        # the owner's own body of work — "using my published work", "my
+        # articles", etc. — wants broad coverage across several of his pieces,
+        # not a single best-matching chunk.
+        "my published work", "my publications", "my articles", "my papers",
+        "my own work", "my writing", "my scholarship", "published work",
     )
     return any(p in f" {q} " for p in expertise_phrases)
 
@@ -4667,6 +4722,15 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
         return search_documents_local(query, max_results)
 
     is_expertise = _is_expertise_query(query)
+
+    # Scope to an area of expertise when the request names one ("my published
+    # work" → the publications folder, a folder name, …). [] = whole library.
+    try:
+        scope_folders = _infer_expertise_folders(query)
+    except Exception:
+        scope_folders = []
+    if scope_folders:
+        print(f"   [SCOPE] Restricting search to folders: {scope_folders}")
 
     # Expertise queries (e.g. "what does the literature say…") want
     # multi-chunk RAG, NOT a full-document dump. Check expertise *before*
@@ -4686,13 +4750,25 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
         )
         stats = get_stats()
         if stats.get('available') and stats.get('total_chunks', 0) > 0:
+            scope = scope_folders or None
             if is_expertise:
-                # Pull up to 8 chunks across multiple documents, max 3 per doc
-                # — deeper coverage so Blue can synthesize across his corpus.
-                results = rag_search_expertise(query, max_chunks=8, max_per_doc=3)
+                # Scoped to a folder (e.g. his publications), spread coverage
+                # across MORE documents (lower per-doc cap, higher total) so a
+                # synthesis draws on several pieces, not just the closest one.
+                if scope:
+                    results = rag_search_expertise(query, max_chunks=14, max_per_doc=2, folders=scope)
+                else:
+                    results = rag_search_expertise(query, max_chunks=8, max_per_doc=3)
+                # If folder scoping was too tight and found nothing, retry wide.
+                if not results and scope:
+                    print("   [SCOPE] No scoped results; retrying across whole library")
+                    results = rag_search_expertise(query, max_chunks=8, max_per_doc=3)
                 print(f"   [EXPERTISE] Multi-chunk mode: {len(results)} chunk(s)")
             else:
-                results = rag_search(query, max_results)
+                results = rag_search(query, max_results, folders=scope)
+                if not results and scope:
+                    print("   [SCOPE] No scoped results; retrying across whole library")
+                    results = rag_search(query, max_results)
             if results:
                 # In normal (non-expertise) mode, if all results come from one
                 # document, fall through to local search for full text.
@@ -6624,11 +6700,123 @@ def _maybe_handle_owner_attachment(body: str, reply_to: str) -> Optional[tuple]:
     )
 
 
+# Substantive written outputs Blue can be asked to produce (vs. a chatty
+# reply). Detected so they bypass the "under 150 words" reply prompt.
+_COMPOSITION_OUTPUT_RE = re.compile(
+    r"\b(critical\s+assessments?|assessments?|critiques?|critical\s+reviews?|"
+    r"book\s+reviews?|literature\s+reviews?|review\s+essays?|essays?|"
+    r"analys[ie]s|commentar(?:y|ies)|appraisals?|evaluations?|"
+    r"reflection\s+pieces?|response\s+(?:papers?|essays?)|position\s+papers?|"
+    r"think\s+pieces?)\b", re.I)
+_COMPOSITION_VERB_RE = re.compile(
+    r"\b(write|draft|compose|produce|prepare|put\s+together|give\s+me|"
+    r"generate|craft|critically\s+assess|assess|critique)\b", re.I)
+
+
+def _gather_owner_work_sources(query: str, pub_folders, max_total: int = 18) -> tuple:
+    """Pull a BROAD spread of passages — several of the owner's own articles
+    (scoped to his publications folder), plus a wider pass to surface the
+    target text. Returns (formatted_passages, [filenames])."""
+    try:
+        from blue.tools.rag import search_expertise as _se
+    except Exception:
+        return "", []
+
+    chunks, seen = [], set()
+
+    def _add(rs):
+        for r in rs or []:
+            key = (r.get('filename'), r.get('chunk_index'))
+            if key not in seen:
+                seen.add(key)
+                chunks.append(r)
+
+    if pub_folders:
+        try:
+            _add(_se(query, max_chunks=14, max_per_doc=2, folders=pub_folders))
+        except Exception as e:
+            print(f"   [AUTO-REPLY] composition scoped search error: {e}")
+    try:
+        _add(_se(query, max_chunks=8, max_per_doc=2))
+    except Exception:
+        pass
+
+    chunks = chunks[:max_total]
+    if not chunks:
+        return "", []
+    formatted = [
+        f"[{i}] [{r.get('filename', '?')}]\n{(r.get('content') or '')[:1000]}"
+        for i, r in enumerate(chunks, 1)
+    ]
+    return "\n\n".join(formatted), sorted({r.get('filename', '?') for r in chunks})
+
+
+def _maybe_handle_owner_composition(body: str) -> Optional[str]:
+    """Owner asked Blue to WRITE something substantive (critical assessment,
+    essay, review, analysis) drawing on his library. Gather broad source
+    coverage — several of his articles, not one — and compose a real piece
+    without the chatty 150-word reply limit. Returns the piece, or None to
+    fall through to the normal reply path."""
+    bl = (body or "").lower()
+    m = _COMPOSITION_OUTPUT_RE.search(bl)
+    if not m:
+        return None
+    output_type = m.group(1).strip()
+
+    references_own = any(p in bl for p in _OWN_WORK_PHRASES)
+    if not references_own and not _COMPOSITION_VERB_RE.search(bl):
+        return None
+
+    pub_folders = _infer_expertise_folders(body)
+    # He explicitly wants HIS work but there's no publications folder to draw
+    # from — let the normal path answer rather than fake scholarly depth.
+    if references_own and not pub_folders:
+        return None
+
+    sources, filenames = _gather_owner_work_sources(body, pub_folders)
+    if not sources:
+        return None
+
+    print(f"   [AUTO-REPLY] composing '{output_type}' from {len(filenames)} source doc(s): {filenames}")
+
+    sys_p = (
+        "You are Blue, Alex's thoughtful robot companion and intellectual "
+        f"interlocutor. Alex has asked you to write a substantive {output_type}. "
+        "Write in an intelligent, scholarly yet readable voice — make a real "
+        "argument and engage critically rather than just summarizing. You MUST "
+        "draw on and cite SEVERAL of the source passages below (refer to works "
+        "by their [filename] or title), not just one: Alex has several relevant "
+        "pieces and wants them brought to bear. Ground every claim about his "
+        "work in the passages and never invent quotations. This is a considered "
+        "piece — take the space you need (several paragraphs); do NOT keep it "
+        "under 150 words. End by signing off as Blue."
+    )
+    usr_p = (
+        f"Alex's request:\n{body}\n\n"
+        f"Source passages from Alex's library (cite by [filename]):\n\n{sources}\n\n"
+        f"Now write the {output_type}."
+    )
+    res = call_llm(
+        [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+        include_tools=False, temperature=0.6, max_tokens=1800,
+    )
+    choices = (res or {}).get('choices') or []
+    if not choices:
+        return None
+    text = ((choices[0].get('message') or {}).get('content') or "").strip()
+    if not text:
+        return None
+    if "blue" not in text[-40:].lower():
+        text += "\n\nBlue"
+    return text
+
+
 def _build_email_reply(cand: Dict[str, Any]) -> tuple:
     """Produce (reply_body, attachment_paths) for one inbound email. Owner
-    attachment requests are handled deterministically (the model can't be
-    trusted to actually attach — it just claims it did); everything else goes
-    through the normal reply generator with no attachments."""
+    attachment + composition requests are handled deterministically (the
+    model can't be trusted to actually attach, and the chatty reply prompt
+    caps it at 150 words); everything else goes through the normal reply
+    generator with no attachments."""
     headers = cand.get('headers') or []
     sender = cand.get('from', '')
     if _email_sender_is_owner(headers, sender):
@@ -6638,6 +6826,9 @@ def _build_email_reply(cand: Dict[str, Any]) -> tuple:
         att = _maybe_handle_owner_attachment(body, reply_to)
         if att is not None:
             return att
+        composition = _maybe_handle_owner_composition(body)
+        if composition:
+            return composition, []
     return _generate_reply_for_email(cand), []
 
 
