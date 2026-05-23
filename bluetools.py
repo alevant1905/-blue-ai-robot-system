@@ -6811,6 +6811,229 @@ def _maybe_handle_owner_composition(body: str) -> Optional[str]:
     return text
 
 
+# ================================================================================
+# ALEX'S PERSPECTIVE — learn his worldview from his publications folder and
+# write in his first-person voice on new issues.
+# ================================================================================
+_PERSPECTIVE_PROFILE_PATH = os.path.join(os.getcwd(), "data", "perspective_profile.json")
+_perspective_lock = threading.RLock()
+
+
+def _owner_publication_folders() -> List[str]:
+    """Library folders holding the owner's OWN writing — matched by
+    publications-style names or the owner's name (e.g. an 'Alex Levant'
+    folder). Returns each plus descendants."""
+    folders = list_library_folders()
+    owner_tokens = [t for t in re.findall(r"[a-z]+", BLUE_OWNER_NAME.lower()) if len(t) > 2]
+    out = set()
+    for f in folders:
+        fl = f.lower()
+        is_pub = any(k in fl for k in ("publication", "published", "papers", "articles", "writing"))
+        is_owner_named = bool(owner_tokens) and all(t in fl for t in owner_tokens)
+        if is_pub or is_owner_named:
+            out.update(_folders_under(f))
+    return sorted(out)
+
+
+def _docs_in_folders(folders) -> List[dict]:
+    """Index entries (excluding camera frames) that live in the given folders."""
+    fset = set(folders or [])
+    out = []
+    for d in load_document_index().get('documents', []):
+        if d.get('doc_type') == 'camera' or str(d.get('filename', '')).startswith('camera_'):
+            continue
+        if _safe_rel_folder(d.get('folder', '')) in fset:
+            out.append(d)
+    return out
+
+
+def _profile_signature(docs) -> str:
+    """A stable hash of the folder's contents so the profile rebuilds only
+    when documents are added/removed/changed."""
+    items = sorted((d.get('filename', ''), d.get('hash', '')) for d in docs)
+    return hashlib.md5(json.dumps(items).encode('utf-8')).hexdigest()
+
+
+def _load_cached_profile() -> dict:
+    try:
+        with open(_PERSPECTIVE_PROFILE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_cached_profile(obj: dict):
+    try:
+        os.makedirs(os.path.dirname(_PERSPECTIVE_PROFILE_PATH), exist_ok=True)
+        with open(_PERSPECTIVE_PROFILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, indent=2)
+    except Exception as e:
+        print(f"   [PERSPECTIVE] could not save profile: {e}")
+
+
+def _summarize_one_doc(filename: str, text: str) -> str:
+    text = (text or "")[:8000]
+    if not text.strip():
+        return ""
+    res = call_llm(
+        [
+            {"role": "system", "content": (
+                f"You are analyzing one text by the scholar {BLUE_OWNER_NAME} to help "
+                "build a profile of how he thinks and writes. In ~200 words, capture: "
+                "his central arguments/claims, the key theoretical concepts he uses, the "
+                "thinkers and traditions he engages, his method, and his characteristic "
+                "voice and style. Be specific; quote a distinctive phrase or two."
+            )},
+            {"role": "user", "content": f"Text: {filename}\n\n{text}\n\nProfile notes for this text:"},
+        ],
+        include_tools=False, temperature=0.4, max_tokens=400,
+    )
+    ch = (res or {}).get('choices') or []
+    return ((ch[0].get('message') or {}).get('content') or "").strip() if ch else ""
+
+
+def build_perspective_profile(force: bool = False) -> dict:
+    """Distill a worldview profile from the owner's publications folder via
+    map-reduce summarization. Cached to disk; rebuilds only when the folder's
+    contents change (or force=True). Returns the cached dict on any failure so
+    a transient LLM hiccup never wipes a good profile."""
+    with _perspective_lock:
+        folders = _owner_publication_folders()
+        docs = _docs_in_folders(folders)
+        sig = _profile_signature(docs)
+        cached = _load_cached_profile()
+
+        if not force and cached.get('signature') == sig and cached.get('profile') and docs:
+            return cached
+        if not docs:
+            return cached or {}
+
+        print(f"   [PERSPECTIVE] (re)building worldview profile from {len(docs)} doc(s) in {folders}...")
+        notes = []
+        for d in docs[:12]:
+            fp = d.get('filepath', '')
+            try:
+                txt = extract_text_from_file(fp) if fp and os.path.exists(fp) else ''
+            except Exception:
+                txt = ''
+            s = _summarize_one_doc(d.get('filename', ''), txt)
+            if s:
+                notes.append(f"[{d.get('filename', '')}]\n{s}")
+                print(f"   [PERSPECTIVE] summarized {d.get('filename', '')}")
+
+        if not notes:
+            return cached or {}
+
+        synth = call_llm(
+            [
+                {"role": "system", "content": (
+                    f"You are building a profile of the scholar {BLUE_OWNER_NAME}'s "
+                    "intellectual perspective — how he understands the world — from notes "
+                    "on his published writing. Write a structured profile (500-800 words) "
+                    "covering: (1) his core theoretical framework and commitments; (2) "
+                    "recurring themes and central concepts; (3) the thinkers, traditions, "
+                    "and interlocutors he works with; (4) his method and mode of argument; "
+                    "(5) his political/ethical orientation; (6) his characteristic voice, "
+                    "tone, and rhetorical style. Write it as a reference Blue can use to "
+                    "think and write AS him. Be specific and concrete."
+                )},
+                {"role": "user", "content": "Notes from across his work:\n\n" + "\n\n".join(notes) + "\n\nWrite the profile:"},
+            ],
+            include_tools=False, temperature=0.5, max_tokens=1400,
+        )
+        ch = (synth or {}).get('choices') or []
+        profile_text = ((ch[0].get('message') or {}).get('content') or "").strip() if ch else ""
+        if not profile_text:
+            return cached or {}
+
+        obj = {
+            "folders": folders,
+            "signature": sig,
+            "profile": profile_text,
+            "source_docs": [d.get('filename', '') for d in docs],
+            "generated_at": __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
+        }
+        _save_cached_profile(obj)
+        print(f"   [PERSPECTIVE] profile built ({len(profile_text)} chars) from {len(notes)} doc(s)")
+        return obj
+
+
+def get_perspective_profile() -> str:
+    """The distilled worldview profile text, built/refreshed lazily."""
+    try:
+        return build_perspective_profile().get('profile') or ""
+    except Exception as e:
+        print(f"   [PERSPECTIVE] profile error: {e}")
+        return _load_cached_profile().get('profile') or ""
+
+
+# "Write this in my voice / from my perspective" intent.
+_PERSPECTIVE_PHRASES = (
+    "from my perspective", "in my voice", "in my own voice", "in my style",
+    "as i would", "as if i wrote", "as though i wrote", "write as me",
+    "as me ", "from my standpoint", "from my point of view", "from my vantage",
+    "the way i would write", "channel my perspective", "in my perspective",
+    "from my own perspective", "as i would write", "like i would write",
+    "in my own words", "speak as me", "speaking as me",
+)
+_PERSPECTIVE_WRITE_VERB = re.compile(
+    r"\b(write|draft|compose|produce|pen|put\s+together|give\s+me|generate|"
+    r"prepare|craft)\b", re.I)
+
+
+def _wants_perspective_write(body: str) -> bool:
+    bl = (body or "").lower()
+    if not any(p in bl for p in _PERSPECTIVE_PHRASES):
+        return False
+    # Require an actual writing request so "from my perspective, that's wrong"
+    # in normal conversation doesn't trigger it.
+    return bool(_PERSPECTIVE_WRITE_VERB.search(bl)) or bool(_COMPOSITION_OUTPUT_RE.search(bl))
+
+
+def _compose_in_alex_voice(issue: str) -> Optional[str]:
+    """Write a first-person piece on `issue` AS the owner — grounded in his
+    distilled perspective profile plus live passages from his own writing.
+    Returns None if there's nothing of his to draw on."""
+    folders = _owner_publication_folders()
+    if not folders:
+        return None
+    profile = get_perspective_profile()
+    sources, filenames = _gather_owner_work_sources(issue, folders)
+    if not profile and not sources:
+        return None
+
+    print(f"   [PERSPECTIVE] composing in {BLUE_OWNER_NAME}'s voice "
+          f"(profile={'yes' if profile else 'no'}, {len(filenames)} source doc(s))")
+
+    sys_p = (
+        f"You are writing AS {BLUE_OWNER_NAME}, in the first person and in his own "
+        "voice — not about him. Adopt his theoretical perspective, his commitments, "
+        "his characteristic concepts and rhetorical style. Below is a profile of how "
+        "he thinks and writes (distilled from his published work) and passages from "
+        "his actual writing. Use them to think and write as he would on the topic "
+        "he's raised. Write in the first person ('I'); do NOT refer to him in the "
+        "third person; do NOT mention being an AI or Blue; and do NOT fabricate "
+        "quotations or citations. Produce a substantive piece of several paragraphs."
+    )
+    parts = []
+    if profile:
+        parts.append(f"PROFILE OF HIS PERSPECTIVE:\n{profile}")
+    if sources:
+        parts.append(f"PASSAGES FROM HIS OWN WRITING:\n{sources}")
+    usr_p = (
+        "\n\n".join(parts)
+        + f"\n\nTOPIC / REQUEST (write on this, in the first person, as him):\n{issue}\n\nWrite the piece now:"
+    )
+    res = call_llm(
+        [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+        include_tools=False, temperature=0.7, max_tokens=1800,
+    )
+    ch = (res or {}).get('choices') or []
+    if not ch:
+        return None
+    return (((ch[0].get('message') or {}).get('content') or "").strip()) or None
+
+
 def _build_email_reply(cand: Dict[str, Any]) -> tuple:
     """Produce (reply_body, attachment_paths) for one inbound email. Owner
     attachment + composition requests are handled deterministically (the
@@ -6826,6 +7049,13 @@ def _build_email_reply(cand: Dict[str, Any]) -> tuple:
         att = _maybe_handle_owner_attachment(body, reply_to)
         if att is not None:
             return att
+        # "Write this from my perspective / in my voice" — first-person piece
+        # in Alex's voice, grounded in his publications. Checked before the
+        # generic composition path since it's the more specific intent.
+        if _wants_perspective_write(body):
+            piece = _compose_in_alex_voice(body)
+            if piece:
+                return (f"Here's a piece in your voice:\n\n{piece}", [])
         composition = _maybe_handle_owner_composition(body)
         if composition:
             return composition, []
@@ -8927,6 +9157,18 @@ def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
     # Purge old camera images from conversation to prevent confusion
     # OPTIMIZATION: Quick scan using only string content (skip base64 image data in lists)
     last_user_message = messages[-1].get("content", "") if messages else ""
+
+    # "Write this from my perspective / in my voice" — chat is the trusted
+    # local channel (always Alex), so compose a first-person piece in his
+    # voice grounded in his publications and short-circuit the tool loop.
+    _luser = last_user_message if isinstance(last_user_message, str) else ""
+    if _luser and _wants_perspective_write(_luser):
+        try:
+            _piece = _compose_in_alex_voice(_luser)
+            if _piece:
+                return {"choices": [{"message": {"role": "assistant", "content": _piece}}]}
+        except Exception as _pe:
+            print(f"   [PERSPECTIVE] chat compose error: {_pe}")
 
     # Fast check: scan text content only (no str() on entire messages with base64)
     _has_camera_content = False
