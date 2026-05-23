@@ -6207,6 +6207,145 @@ def _inject_pending_vision(messages: List[Dict[str, Any]]) -> bool:
         return False
 
 
+# When the OWNER emails Blue asking him to email a third party ("email Stella
+# and tell her ..."), the reply loop is framed as "answer the sender", so the
+# local model just writes the message back to Alex instead of calling
+# send_gmail to Stella. Detect that intent deterministically and actually send.
+_OUTBOUND_SEND_RE = re.compile(
+    r"\b(?:"
+    r"(?:send|write|shoot|fire\s+off)\s+(?:an?\s+)?(?:email|message|note|reply)\s+to\s+(?P<n1>[A-Za-z][A-Za-z.'-]*)"
+    r"|(?:email|message|write\s+to|reach\s+out\s+to|get\s+in\s+touch\s+with)\s+(?P<n2>[A-Za-z][A-Za-z.'-]*)"
+    r"|(?:tell|let|ask|remind)\s+(?P<n3>[A-Za-z][A-Za-z.'-]*)\s+(?:know|that|to\b|about)"
+    r")",
+    re.IGNORECASE,
+)
+# Pronouns / self-references that are never a third-party recipient.
+_OUTBOUND_EXCLUDE_NAMES = {
+    "me", "myself", "i", "you", "yourself", "us", "we", "them", "they",
+    "him", "her", "he", "she", "blue", "everyone", "someone", "anybody",
+    "somebody", "myself", "yours",
+}
+
+
+def _resolve_recipient_email(name: str, service) -> Optional[str]:
+    """Map a first name / display name to an email address by looking at who
+    has actually corresponded with Blue. Returns None if no confident match —
+    callers must NOT guess, so Blue asks for the address instead of mailing a
+    stranger."""
+    name_n = (name or "").strip().lower()
+    if not name_n:
+        return None
+    try:
+        for q in (f'from:{name}', f'to:{name}'):
+            resp = service.users().messages().list(
+                userId='me', q=q, maxResults=5,
+            ).execute()
+            for ref in resp.get('messages', []):
+                md = service.users().messages().get(
+                    userId='me', id=ref['id'], format='metadata',
+                    metadataHeaders=['From', 'To'],
+                ).execute()
+                for h in md.get('payload', {}).get('headers', []):
+                    val = h.get('value', '') or ''
+                    for mm in re.finditer(
+                        r'(?:"?([^"<]*?)"?\s*)?<?([\w.+-]+@[\w.-]+\.\w+)>?', val
+                    ):
+                        disp = (mm.group(1) or '').strip().lower()
+                        addr = mm.group(2).lower()
+                        disp_tokens = set(re.findall(r"[a-z]+", disp))
+                        if name_n in disp_tokens or name_n == addr.split('@')[0]:
+                            return addr
+    except Exception as e:
+        print(f"   [AUTO-REPLY] recipient resolve error for {name!r}: {e}")
+    return None
+
+
+def _compose_outbound_email(recipient_name: str, owner_instruction: str) -> str:
+    """Turn Alex's instruction ("tell her the girls are awake") into an actual
+    warm email addressed TO the recipient, in Blue's voice."""
+    sys_p = (
+        "You are Blue, Alex's friendly robot companion. Alex has asked you to "
+        f"send an email to {recipient_name}. Write that email directly TO "
+        f"{recipient_name} in Blue's warm, natural voice, conveying what Alex "
+        "wants said. Address them by name, keep it under 120 words, and sign "
+        "it 'Blue'. Output ONLY the email body — no subject line, no headers."
+    )
+    usr_p = (
+        f"Alex's instruction to you:\n{owner_instruction}\n\n"
+        f"Write the email to {recipient_name} now."
+    )
+    res = call_llm(
+        [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+        include_tools=False, temperature=0.7, max_tokens=300,
+    )
+    choices = (res or {}).get('choices') or []
+    if not choices:
+        return ""
+    return ((choices[0].get('message') or {}).get('content') or "").strip()
+
+
+def _maybe_handle_owner_outbound(body: str) -> Optional[str]:
+    """If owner mail asks Blue to email a third party, resolve + send it and
+    return a confirmation to reply to the owner with. Returns None when there's
+    no outbound-send intent (fall through to a normal reply)."""
+    m = _OUTBOUND_SEND_RE.search(body or "")
+    if not m:
+        return None
+    name = (m.group('n1') or m.group('n2') or m.group('n3') or '').strip()
+    if not name or name.lower() in _OUTBOUND_EXCLUDE_NAMES:
+        return None
+
+    try:
+        service = get_gmail_service()
+    except Exception as e:
+        print(f"   [AUTO-REPLY] outbound: no gmail service: {e}")
+        return None
+
+    recipient_email = _resolve_recipient_email(name, service)
+    if not recipient_email:
+        # An explicit address in the body is a fallback ("email Stella at x@y").
+        am = re.search(r'[\w.+-]+@[\w.-]+\.\w+', body or "")
+        if am:
+            recipient_email = am.group(0)
+
+    if not recipient_email:
+        print(f"   [AUTO-REPLY] outbound: could not resolve recipient {name!r}")
+        return (
+            f"I'd love to pass that along to {name}, but I don't have an email "
+            f"address for them yet. Send me their address and I'll fire it right "
+            f"off.\n\nBlue"
+        )
+
+    blocked = set(BLUE_OWNER_ADDRESSES) | set(BLUE_SELF_ADDRESSES) | {
+        (BLUE_OWN_EMAIL or "").lower()
+    }
+    if recipient_email.lower() in blocked:
+        # The "recipient" is Alex or Blue himself — not a real third-party send.
+        return None
+
+    email_body = _compose_outbound_email(name, body) or body
+    subject = f"A message from Alex"
+    print(f"   [AUTO-REPLY] outbound send → {name} <{recipient_email}>")
+    res = execute_tool("send_gmail", {
+        "to": recipient_email, "subject": subject, "body": email_body,
+    })
+    ok = False
+    try:
+        ok = bool(json.loads(res).get('success'))
+    except Exception:
+        ok = '"success": true' in (res or "").lower()
+
+    if ok:
+        return (
+            f"Done — I've emailed {name} for you (and BCC'd you a copy). "
+            f"Here's what I sent:\n\n\"{email_body}\"\n\nBlue"
+        )
+    return (
+        f"I tried to email {name} but the send didn't go through. Want me to "
+        f"try again?\n\nBlue"
+    )
+
+
 def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     """Draft a reply body via the local LM Studio model. Returns plain text.
 
@@ -6223,6 +6362,11 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     # gets the read-only public-info whitelist.
     is_owner = _email_sender_is_owner(headers, sender)
     if is_owner:
+        # Owner asked Blue to email a third party? Do it deterministically —
+        # the model otherwise just writes the message back to the owner.
+        outbound = _maybe_handle_owner_outbound(body)
+        if outbound:
+            return outbound
         tools_payload = _email_owner_tools()
         print(f"   [AUTO-REPLY] owner-verified sender {sender!r} → full tool access")
         capability_note = (
