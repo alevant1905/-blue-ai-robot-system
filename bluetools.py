@@ -6903,6 +6903,10 @@ def build_perspective_profile(force: bool = False) -> dict:
         sig = _profile_signature(docs)
         cached = _load_cached_profile()
 
+        # A hand-edited profile is authoritative: never auto-overwrite it on a
+        # folder change. The user can hit "Regenerate" (force=True) to rebuild.
+        if not force and cached.get('user_edited') and cached.get('profile'):
+            return cached
         if not force and cached.get('signature') == sig and cached.get('profile') and docs:
             return cached
         if not docs:
@@ -6965,6 +6969,24 @@ def get_perspective_profile() -> str:
     except Exception as e:
         print(f"   [PERSPECTIVE] profile error: {e}")
         return _load_cached_profile().get('profile') or ""
+
+
+def save_perspective_profile_text(text: str) -> dict:
+    """Persist a hand-edited profile. Marks it user_edited so the auto-refresh
+    won't overwrite it, and pins the signature to the current folder state so
+    it's treated as fresh."""
+    with _perspective_lock:
+        obj = _load_cached_profile() or {}
+        folders = _owner_publication_folders()
+        docs = _docs_in_folders(folders)
+        obj['profile'] = (text or "").strip()
+        obj['folders'] = folders
+        obj['signature'] = _profile_signature(docs)
+        obj['user_edited'] = True
+        obj['edited_at'] = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')
+        obj.setdefault('source_docs', [d.get('filename', '') for d in docs])
+        _save_cached_profile(obj)
+        return obj
 
 
 # "Write this in my voice / from my perspective" intent.
@@ -10315,6 +10337,7 @@ DOCUMENT_MANAGER_HTML = """
             </div>
 
             <a href="/" class="back-link">← Back to main page</a>
+            <a href="/perspective" class="back-link" style="margin-left: 24px;">🧠 My Perspective Profile</a>
         </div>
     </div>
 
@@ -10631,6 +10654,128 @@ def download_document():
     except Exception as e:
         print(f"Error downloading document: {e}")
         return f"Error: {str(e)}", 500
+
+
+PERSPECTIVE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Perspective Profile</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 40px 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 20px;
+                     box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 28px 30px; }
+        .header h1 { font-size: 1.7em; margin-bottom: 6px; }
+        .header p { opacity: 0.9; }
+        .content { padding: 32px 36px; }
+        .meta { background: #f0f1f5; border-radius: 10px; padding: 12px 16px; color: #555;
+                font-size: 0.9em; margin-bottom: 20px; }
+        .meta b { color: #4b3b8f; }
+        textarea { width: 100%; min-height: 460px; padding: 18px; border: 2px solid #d8d9e6;
+                   border-radius: 12px; font-size: 0.98em; line-height: 1.5; resize: vertical;
+                   font-family: 'Segoe UI', system-ui, sans-serif; }
+        textarea:focus { outline: none; border-color: #667eea; }
+        .actions { display: flex; gap: 12px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+        .btn { border: none; padding: 12px 26px; border-radius: 10px; font-weight: 600;
+               font-size: 1em; cursor: pointer; text-decoration: none; display: inline-block; }
+        .btn-save { background: #28a745; color: #fff; }
+        .btn-regen { background: #fff; color: #667eea; border: 1.5px solid #c3c7e8; }
+        .btn-regen:hover { background: #f0f1f5; }
+        .hint { color: #888; font-size: 0.85em; }
+        .message { padding: 14px 16px; border-radius: 10px; margin-bottom: 20px; font-weight: 500; }
+        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .message.info { background: #e7e9fb; color: #3a3a7a; border: 1px solid #c9cdf3; }
+        .back-link { display: inline-block; margin-top: 22px; color: #667eea; text-decoration: none; font-weight: 600; }
+        .back-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 My Perspective Profile</h1>
+            <p>How Blue understands your thinking — distilled from the {{ owner_name }} folder. Edit it freely; your edits stick.</p>
+        </div>
+        <div class="content">
+            {% if message %}<div class="message {{ message_type }}">{{ message }}</div>{% endif %}
+
+            <div class="meta">
+                {% if has_profile %}
+                    <b>Sources:</b> {{ source_docs|join(', ') if source_docs else 'none' }}<br>
+                    <b>{{ 'Edited by you' if user_edited else 'Generated' }}:</b> {{ stamp }}
+                    {% if user_edited %} &nbsp;•&nbsp; <span style="color:#7a5b00;">manual edits are preserved (auto-refresh won't overwrite)</span>{% endif %}
+                {% else %}
+                    No profile yet. Click <b>Regenerate from my writing</b> to build it from your {{ owner_name }} folder.
+                {% endif %}
+            </div>
+
+            <form method="POST" action="/perspective">
+                <textarea name="profile" placeholder="Blue hasn't learned your perspective yet — regenerate to build it, or write/paste your own here and save.">{{ profile }}</textarea>
+                <div class="actions">
+                    <button type="submit" name="action" value="save" class="btn btn-save">💾 Save my edits</button>
+                    <button type="submit" name="action" value="regenerate" class="btn btn-regen"
+                            onclick="return confirm('Rebuild the profile from scratch by reading your {{ owner_name }} folder? This replaces the current text and can take a minute.');">
+                        ♻️ Regenerate from my writing
+                    </button>
+                    <span class="hint">Regenerating reads each document, so it may take a minute.</span>
+                </div>
+            </form>
+
+            <a href="/documents" class="back-link">← Back to documents</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+
+@app.route('/perspective', methods=['GET', 'POST'])
+def perspective_profile_page():
+    """Read / edit / regenerate the distilled worldview profile."""
+    message = None
+    message_type = None
+
+    if request.method == 'POST':
+        action = request.form.get('action', 'save')
+        if action == 'regenerate':
+            try:
+                folders = _owner_publication_folders()
+                if not folders:
+                    message = (f"I couldn't find your publications folder. Create a folder named "
+                               f"'{BLUE_OWNER_NAME}' (or 'Publications') and put your writing in it.")
+                    message_type = "error"
+                else:
+                    obj = build_perspective_profile(force=True)
+                    if obj.get('profile'):
+                        message = f"Rebuilt your profile from {len(obj.get('source_docs', []))} document(s)."
+                        message_type = "success"
+                    else:
+                        message = ("Couldn't build a profile — is the local model running, and are there "
+                                   "readable documents in your publications folder?")
+                        message_type = "error"
+            except Exception as e:
+                message, message_type = f"Error regenerating: {e}", "error"
+        else:  # save
+            save_perspective_profile_text(request.form.get('profile', ''))
+            message, message_type = "Saved. Blue will use your edited profile from now on.", "success"
+
+    cached = _load_cached_profile()
+    has_profile = bool(cached.get('profile'))
+    user_edited = bool(cached.get('user_edited'))
+    return render_template_string(
+        PERSPECTIVE_HTML,
+        owner_name=BLUE_OWNER_NAME,
+        profile=cached.get('profile', ''),
+        has_profile=has_profile,
+        user_edited=user_edited,
+        source_docs=cached.get('source_docs', []),
+        stamp=cached.get('edited_at') if user_edited else cached.get('generated_at', '—'),
+        message=message,
+        message_type=message_type,
+    )
 
 
 # ===== Conversation Persistence Functions =====
