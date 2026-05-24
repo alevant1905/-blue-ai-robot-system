@@ -7409,6 +7409,12 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         "read_gmail", "send_gmail", "reply_gmail", "auto_reply_emails",
         "browse_website", "web_search",
     }
+    # A "what do you see" request is look-and-describe: once the camera has
+    # fired there is no follow-up action to take. When this is set we skip the
+    # action-tool loop below and draft a text-only reply, so the model can't
+    # wander off and call an unrelated house tool (e.g. turning the lights
+    # "cool white") in response to a question that only asked Blue to look.
+    vision_only_reply = False
     try:
         sel = TOOL_SELECTOR.select_tool(f"{subject}. {body}") if "TOOL_SELECTOR" in globals() else None
         prim = getattr(sel, "primary_tool", None) if sel else None
@@ -7423,19 +7429,39 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 _rs = tresult if isinstance(tresult, str) else json.dumps(tresult)
                 print(f"   [AUTO-REPLY] pre-exec result: {_rs[:200]}")
                 if tname == "capture_camera":
-                    # The capture queued an image that's injected right after
-                    # this block. The reply should DESCRIBE what's in it, not
-                    # just say "photo taken", so don't tell the model to merely
-                    # confirm — _inject_pending_vision carries the look-prompt.
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "[You already opened your camera. The image you "
-                            "captured follows — look at it and describe what you "
-                            "actually see, then answer the sender. Do NOT call "
-                            "capture_camera again.]"
-                        ),
-                    })
+                    # Look-and-describe: reply from the image, never via more
+                    # tools. Branch on whether the capture actually succeeded —
+                    # a misleading "the image follows" note when the camera
+                    # failed is what used to push the model into improvising
+                    # with other tools.
+                    vision_only_reply = True
+                    try:
+                        _captured_ok = bool(json.loads(_rs).get("success"))
+                    except Exception:
+                        _captured_ok = False
+                    if _captured_ok:
+                        # _inject_pending_vision (below) carries the look-prompt
+                        # and the actual image; just steer the description.
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[You already opened your camera. The image you "
+                                "captured follows — look at it and describe what "
+                                "you actually see, then answer the sender. Do NOT "
+                                "call any tools.]"
+                            ),
+                        })
+                    else:
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[You tried to open your camera to look, but it "
+                                "isn't available right now. Tell the sender you "
+                                "tried to see but couldn't access your camera at "
+                                "the moment. Do NOT call any tools, and do NOT "
+                                "pretend you can see anything.]"
+                            ),
+                        })
                 else:
                     messages.append({
                         "role": "system",
@@ -7451,6 +7477,11 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     # A deterministic capture_camera (above) queued an image — show it to
     # the model before it drafts, so the reply is grounded in what Blue saw.
     _inject_pending_vision(messages)
+
+    # Look-and-describe request: draft from the image with NO tools available,
+    # so the question "what do you see?" can't turn into a house-control action.
+    if vision_only_reply:
+        return _final_text()
 
     try:
         # Up to a few tool round-trips (browse → read → act → confirm),
