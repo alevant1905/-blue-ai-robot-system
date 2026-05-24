@@ -11196,6 +11196,314 @@ def blue_perspective_page():
     )
 
 
+# ===== Text chat GUI =====
+
+CHAT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat with Blue</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+            --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+            --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--cream); color: var(--ink); line-height: 1.55;
+            display: flex; justify-content: center; padding: 32px 20px;
+        }
+        .container {
+            width: 100%; max-width: 820px; height: calc(100vh - 64px);
+            background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+            box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
+        }
+        .header { padding: 24px 30px 20px; border-bottom: 1px solid var(--line); }
+        .header::before {
+            content: ""; display: block; width: 56px; height: 3px;
+            background: linear-gradient(90deg, var(--gold), var(--blue)); margin-bottom: 14px;
+        }
+        .header h1 {
+            font-family: 'Playfair Display', Georgia, serif; font-weight: 700;
+            font-size: 1.7em; color: var(--ink); letter-spacing: -0.01em;
+        }
+        .header p { color: var(--slate); font-size: 0.95em; margin-top: 4px; }
+        .header a { color: var(--forest); text-decoration: none; font-weight: 500; }
+        .header a:hover { color: var(--ink); text-decoration: underline; }
+        .messages { flex: 1 1 auto; overflow-y: auto; padding: 28px 30px; display: flex; flex-direction: column; gap: 18px; }
+        .row { display: flex; flex-direction: column; max-width: 80%; }
+        .row.user { align-self: flex-end; align-items: flex-end; }
+        .row.blue { align-self: flex-start; align-items: flex-start; }
+        .who {
+            font-family: 'IBM Plex Mono', monospace; font-size: 0.68em; text-transform: uppercase;
+            letter-spacing: 0.12em; color: var(--slate); margin-bottom: 5px;
+        }
+        .bubble { padding: 13px 17px; border-radius: 12px; font-size: 0.98em; white-space: pre-wrap; word-wrap: break-word; }
+        .row.user .bubble { background: var(--ink); color: #fff; border-bottom-right-radius: 4px; }
+        .row.blue .bubble { background: var(--cream); border: 1px solid var(--line); color: var(--ink); border-bottom-left-radius: 4px; }
+        .bubble .att {
+            display: inline-block; margin-top: 8px; font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.78em; opacity: 0.85;
+        }
+        .row.user .bubble .att { color: #d9e6d9; }
+        .empty { color: var(--slate); text-align: center; margin: auto; max-width: 380px; }
+        .empty .big { font-family: 'Playfair Display', Georgia, serif; font-size: 1.3em; color: var(--ink); margin-bottom: 8px; }
+        .composer { border-top: 1px solid var(--line); padding: 16px 22px 20px; background: var(--paper); }
+        .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .chip {
+            display: inline-flex; align-items: center; gap: 8px; background: var(--cream);
+            border: 1px solid var(--sage); border-radius: 6px; padding: 5px 10px;
+            font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest);
+        }
+        .chip.err { border-color: #e2c4be; color: #7a2e22; background: #f7ece9; }
+        .chip button { background: none; border: none; color: inherit; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0; }
+        .input-bar { display: flex; gap: 10px; align-items: flex-end; }
+        textarea {
+            flex: 1; resize: none; min-height: 48px; max-height: 180px; padding: 13px 15px;
+            border: 1px solid var(--sage); border-radius: 8px; font-family: inherit; font-size: 1em;
+            color: var(--ink); background: var(--paper); line-height: 1.5;
+        }
+        textarea:focus { outline: none; border-color: var(--forest); }
+        .iconbtn {
+            flex-shrink: 0; width: 48px; height: 48px; border-radius: 8px; cursor: pointer;
+            border: 1px solid var(--sage); background: var(--paper); color: var(--forest);
+            font-size: 1.2em; transition: background 0.2s, border-color 0.2s;
+        }
+        .iconbtn:hover { background: var(--cream); border-color: var(--forest); }
+        .sendbtn {
+            flex-shrink: 0; height: 48px; padding: 0 24px; border-radius: 8px; border: none;
+            background: var(--ink); color: #fff; font-weight: 500; font-size: 0.95em; cursor: pointer;
+            transition: background 0.2s;
+        }
+        .sendbtn:hover:not(:disabled) { background: var(--forest); }
+        .sendbtn:disabled { background: #c7cdc5; cursor: not-allowed; }
+        .typing { font-family: 'IBM Plex Mono', monospace; font-size: 0.8em; color: var(--slate); }
+        .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Chat with Blue</h1>
+            <p>Type to talk with Blue, and attach images or documents for him to look at. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/documents">Documents</a></p>
+        </div>
+        <div class="messages" id="messages">
+            <div class="empty" id="empty">
+                <div class="big">Say hello to Blue</div>
+                <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
+            </div>
+        </div>
+        <div class="composer">
+            <div class="chips" id="chips"></div>
+            <div class="input-bar">
+                <input type="file" id="fileInput" multiple style="display:none"
+                       accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.rtf,.pptx,.xlsx">
+                <button class="iconbtn" id="attachBtn" title="Attach files" aria-label="Attach files">+</button>
+                <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
+                <button class="sendbtn" id="sendBtn">Send</button>
+            </div>
+            <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
+        </div>
+    </div>
+
+    <script>
+        const messagesEl = document.getElementById('messages');
+        const emptyEl = document.getElementById('empty');
+        const inputEl = document.getElementById('input');
+        const sendBtn = document.getElementById('sendBtn');
+        const attachBtn = document.getElementById('attachBtn');
+        const fileInput = document.getElementById('fileInput');
+        const chipsEl = document.getElementById('chips');
+
+        // Conversation as sent to the API (role/content). Persona + memory are
+        // applied server-side, so we only carry the user/assistant turns.
+        let apiMessages = [];
+        // Staged attachments for the NEXT message. Images are already staged in
+        // Blue's vision queue server-side; docs carry their extracted text here.
+        let pending = [];
+        let busy = false;
+
+        function esc(s) {
+            const d = document.createElement('div');
+            d.textContent = s == null ? '' : String(s);
+            return d.innerHTML;
+        }
+
+        function addBubble(role, text, attachments) {
+            if (emptyEl) emptyEl.style.display = 'none';
+            const row = document.createElement('div');
+            row.className = 'row ' + (role === 'user' ? 'user' : 'blue');
+            let inner = '<div class="who">' + (role === 'user' ? 'You' : 'Blue') + '</div>';
+            let body = esc(text);
+            if (attachments && attachments.length) {
+                body += attachments.map(a => '<span class="att">[' + esc(a.name) + ']</span>').join(' ');
+            }
+            inner += '<div class="bubble">' + body + '</div>';
+            row.innerHTML = inner;
+            messagesEl.appendChild(row);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            return row;
+        }
+
+        function renderChips() {
+            chipsEl.innerHTML = pending.map((a, i) => {
+                if (a.kind === 'error') {
+                    return '<span class="chip err">' + esc(a.name) + ' — ' + esc(a.error || 'unsupported') + '</span>';
+                }
+                const tag = a.kind === 'image' ? 'image' : 'doc';
+                return '<span class="chip">' + esc(a.name) + ' <span style="opacity:.6">' + tag + '</span>'
+                     + '<button data-i="' + i + '" title="Remove">&times;</button></span>';
+            }).join('');
+            chipsEl.querySelectorAll('button[data-i]').forEach(b => {
+                b.addEventListener('click', () => { pending.splice(parseInt(b.dataset.i), 1); renderChips(); });
+            });
+        }
+
+        attachBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', async () => {
+            if (!fileInput.files.length) return;
+            const fd = new FormData();
+            for (const f of fileInput.files) fd.append('files', f);
+            fileInput.value = '';
+            attachBtn.disabled = true;
+            try {
+                const res = await fetch('/chat/attach', { method: 'POST', body: fd });
+                const data = await res.json();
+                (data.attachments || []).forEach(a => pending.push(a));
+                renderChips();
+            } catch (e) {
+                pending.push({ name: 'upload failed', kind: 'error', error: String(e) });
+                renderChips();
+            } finally {
+                attachBtn.disabled = false;
+            }
+        });
+
+        function autoGrow() {
+            inputEl.style.height = 'auto';
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
+        }
+        inputEl.addEventListener('input', autoGrow);
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+        });
+        sendBtn.addEventListener('click', send);
+
+        async function send() {
+            if (busy) return;
+            const text = inputEl.value.trim();
+            const atts = pending.slice();
+            if (!text && !atts.length) return;
+
+            // Build the content actually sent: user's text plus any extracted
+            // document text (images are injected server-side from the queue).
+            let sentContent = text;
+            const docBlocks = atts.filter(a => a.kind === 'doc' && a.text)
+                .map(a => '[Attached document: ' + a.name + ']\\n\"\"\"\\n' + a.text + '\\n\"\"\"');
+            if (docBlocks.length) {
+                sentContent = docBlocks.join('\\n\\n') + (text ? ('\\n\\n' + text) : '\\n\\nPlease take a look at the attached document.');
+            }
+            if (!sentContent) sentContent = 'What do you make of this?';
+
+            addBubble('user', text || '(see attachment)', atts.filter(a => a.kind !== 'error'));
+            apiMessages.push({ role: 'user', content: sentContent });
+
+            inputEl.value = '';
+            autoGrow();
+            pending = [];
+            renderChips();
+
+            busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
+            const thinking = addBubble('blue', '');
+            thinking.querySelector('.bubble').innerHTML = '<span class="typing">Blue is thinking…</span>';
+
+            try {
+                const res = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages: apiMessages })
+                });
+                const data = await res.json();
+                let reply = '';
+                try { reply = data.choices[0].message.content || ''; } catch (e) { reply = ''; }
+                if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
+                thinking.querySelector('.bubble').textContent = reply;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                apiMessages.push({ role: 'assistant', content: reply });
+            } catch (e) {
+                thinking.querySelector('.bubble').textContent = 'I had trouble reaching my brain just now. Is the server running?';
+            } finally {
+                busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
+                inputEl.focus();
+            }
+        }
+
+        inputEl.focus();
+    </script>
+</body>
+</html>
+"""
+
+
+@app.route('/chat', methods=['GET'])
+def chat_page():
+    """Serve the text chat GUI."""
+    return render_template_string(CHAT_HTML)
+
+
+@app.route('/chat/attach', methods=['POST'])
+def chat_attach():
+    """Stage chat attachments. Images go into Blue's vision queue so the next
+    message injects them as something he can see; documents are text-extracted
+    and returned so the client can include them in the next message."""
+    global _vision_queue
+    import datetime as _dt
+
+    _IMAGE_EXTS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff'}
+    results = []
+    files = request.files.getlist('files')
+    for f in files:
+        if not f or not f.filename:
+            continue
+        orig = f.filename
+        safe = secure_filename(orig) or 'file'
+        ext = safe.rsplit('.', 1)[1].lower() if '.' in safe else ''
+        if not allowed_file(safe):
+            results.append({"name": orig, "kind": "error", "error": "unsupported file type"})
+            continue
+        stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        try:
+            if ext in _IMAGE_EXTS:
+                os.makedirs(CAMERA_FOLDER, exist_ok=True)
+                saved = os.path.join(CAMERA_FOLDER, f"chat_{stamp}_{safe}")
+                f.save(saved)
+                _vision_queue.add_image(saved, safe, is_camera=False)
+                print(f"   [CHAT] staged image attachment for vision: {safe}")
+                results.append({"name": orig, "kind": "image"})
+            else:
+                UPLOAD_FOLDER.mkdir(exist_ok=True)
+                saved = str(UPLOAD_FOLDER / f"chat_{stamp}_{safe}")
+                f.save(saved)
+                text = (extract_text_from_file(saved) or "").strip()
+                if not text:
+                    text = f"(No readable text could be extracted from {orig}.)"
+                # Cap so a huge file can't blow up the prompt.
+                text = text[:8000]
+                print(f"   [CHAT] extracted {len(text)} chars from doc attachment: {safe}")
+                results.append({"name": orig, "kind": "doc", "text": text})
+        except Exception as e:
+            print(f"   [CHAT] attachment error for {orig}: {e}")
+            results.append({"name": orig, "kind": "error", "error": str(e)})
+
+    return jsonify({"attachments": results})
+
+
 # ===== Conversation Persistence Functions =====
 
 def _normalize_message_alternation(messages: list) -> list:
@@ -12103,6 +12411,7 @@ def index():
                 </div>
             </div>
 
+            <a href="/chat" class="btn" style="margin-right:12px">Chat with Blue</a>
             <a href="/documents" class="btn">Manage Documents</a>
         </div>
     </body>
