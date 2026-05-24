@@ -10032,62 +10032,83 @@ DOCUMENT_MANAGER_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Blue Document Manager [DOC]</title>
+    <title>Blue Document Manager</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+            --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+            --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--cream);
+            color: var(--ink);
             min-height: 100vh;
-            padding: 40px 20px;
+            padding: 48px 20px;
+            line-height: 1.55;
         }
         .container {
             max-width: 1080px;
             margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
             overflow: hidden;
         }
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
+            padding: 36px 36px 28px;
+            border-bottom: 1px solid var(--line);
+        }
+        .header::before {
+            content: "";
+            display: block;
+            width: 56px; height: 3px;
+            background: linear-gradient(90deg, var(--gold), var(--blue));
+            margin-bottom: 18px;
         }
         .header h1 {
-            font-size: 2em;
-            margin-bottom: 10px;
+            font-family: 'Playfair Display', Georgia, serif;
+            font-weight: 700;
+            font-size: 2.1em;
+            color: var(--ink);
+            letter-spacing: -0.01em;
         }
         .header p {
-            opacity: 0.9;
-            font-size: 1.1em;
+            color: var(--slate);
+            font-size: 1.02em;
+            margin-top: 8px;
         }
         .content {
             padding: 32px 36px;
         }
         .upload-section {
-            background: #f8f9fa;
-            border: 2px dashed #c3c7e8;
-            border-radius: 12px;
-            padding: 22px;
+            background: var(--cream);
+            border: 1px dashed var(--sage);
+            border-radius: 10px;
+            padding: 24px;
             text-align: center;
             margin-bottom: 30px;
-            transition: all 0.2s;
+            transition: border-color 0.2s, background 0.2s;
         }
         .upload-section:hover {
-            border-color: #764ba2;
-            background: #f0f1f5;
+            border-color: var(--forest);
+            background: #f4f1ea;
         }
         .upload-section.dragover {
-            border-color: #28a745;
-            background: #e8f5e9;
-            transform: scale(1.01);
+            border-color: var(--forest);
+            background: #eef2ec;
         }
         .upload-section h2 {
-            color: #667eea;
-            font-size: 1.15em;
-            margin-bottom: 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--forest);
+            font-size: 0.8em;
+            font-weight: 500;
+            margin-bottom: 14px;
         }
         .file-input-wrapper {
             position: relative;
@@ -10099,56 +10120,58 @@ DOCUMENT_MANAGER_HTML = """
             left: -9999px;
         }
         .file-input-label {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 11px 28px;
-            border-radius: 50px;
+            background: var(--ink);
+            color: #fff;
+            padding: 11px 26px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 1em;
-            font-weight: 600;
-            transition: transform 0.2s;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: background 0.2s;
             display: inline-block;
         }
         .file-input-label:hover {
-            transform: scale(1.05);
+            background: var(--forest);
         }
         .file-name {
             margin-top: 12px;
-            color: #666;
+            color: var(--slate);
             font-style: italic;
             font-size: 0.9em;
         }
         .upload-btn {
-            background: #28a745;
+            background: var(--forest);
             color: white;
             border: none;
-            padding: 11px 28px;
-            border-radius: 50px;
-            font-size: 1em;
-            font-weight: 600;
+            padding: 11px 26px;
+            border-radius: 6px;
+            font-size: 0.95em;
+            font-weight: 500;
             cursor: pointer;
             margin-top: 14px;
-            transition: transform 0.2s;
+            transition: background 0.2s;
         }
         .upload-btn:hover:not(:disabled) {
-            transform: scale(1.05);
+            background: var(--ink);
         }
         .upload-btn:disabled {
-            background: #ccc;
+            background: #c7cdc5;
             cursor: not-allowed;
         }
         .documents-list {
             margin-top: 40px;
         }
         .documents-list h2 {
-            color: #333;
+            color: var(--ink);
             margin-bottom: 20px;
-            font-size: 1.5em;
+            font-size: 1.4em;
+            font-family: 'Playfair Display', Georgia, serif;
+            font-weight: 600;
         }
         .document-item {
-            background: #f8f9fa;
-            border: 1px solid #ebecf3;
-            border-radius: 12px;
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 10px;
             padding: 16px 18px;
             margin-bottom: 12px;
             display: flex;
@@ -10158,8 +10181,8 @@ DOCUMENT_MANAGER_HTML = """
             transition: box-shadow 0.15s, border-color 0.15s;
         }
         .document-item:hover {
-            box-shadow: 0 6px 16px rgba(102,126,234,0.15);
-            border-color: #d8d9ef;
+            box-shadow: var(--shadow);
+            border-color: var(--sage);
         }
         .document-info {
             flex: 1 1 auto;
@@ -10167,15 +10190,16 @@ DOCUMENT_MANAGER_HTML = """
         }
         .document-name {
             font-weight: 600;
-            color: #4b3b8f;
-            font-size: 1.05em;
+            color: var(--ink);
+            font-size: 1.02em;
             margin-bottom: 4px;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
         .document-meta {
-            color: #777;
-            font-size: 0.85em;
+            color: var(--slate);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8em;
         }
         .doc-actions {
             display: flex;
@@ -10185,53 +10209,54 @@ DOCUMENT_MANAGER_HTML = """
         }
         .delete-btn {
             background: #fff;
-            color: #dc3545;
-            border: 1.5px solid #f1c4c9;
+            color: #9a3b2f;
+            border: 1px solid #e2c4be;
             padding: 8px 16px;
-            border-radius: 8px;
+            border-radius: 6px;
             cursor: pointer;
             transition: background 0.15s, color 0.15s;
             text-decoration: none;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 500;
             white-space: nowrap;
         }
         .delete-btn:hover {
-            background: #dc3545;
+            background: #9a3b2f;
             color: #fff;
         }
         .download-btn {
-            background: #28a745;
+            background: var(--forest);
             color: white;
             border: none;
             padding: 8px 18px;
-            border-radius: 8px;
+            border-radius: 6px;
             cursor: pointer;
             transition: background 0.15s;
             text-decoration: none;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 500;
             display: inline-block;
             white-space: nowrap;
         }
         .download-btn:hover {
-            background: #218838;
+            background: var(--ink);
         }
         .message {
-            padding: 15px;
-            border-radius: 10px;
+            padding: 14px 16px;
+            border-radius: 8px;
             margin-bottom: 20px;
             font-weight: 500;
+            border: 1px solid transparent;
         }
         .message.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: #eef2ec;
+            color: #2e4a2e;
+            border-color: var(--sage);
         }
         .message.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: #f7ece9;
+            color: #7a2e22;
+            border-color: #e2c4be;
         }
         .stats {
             display: grid;
@@ -10240,55 +10265,64 @@ DOCUMENT_MANAGER_HTML = """
             margin-bottom: 40px;
         }
         .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 25px;
-            border-radius: 15px;
+            background: var(--ink);
+            color: #fff;
+            padding: 24px;
+            border-radius: 10px;
             text-align: center;
+            border-top: 3px solid var(--gold);
         }
         .stat-number {
-            font-size: 2.5em;
+            font-family: 'Playfair Display', Georgia, serif;
+            font-size: 2.4em;
             font-weight: 700;
             margin-bottom: 5px;
         }
         .stat-label {
-            font-size: 1em;
-            opacity: 0.9;
+            font-family: 'IBM Plex Mono', monospace;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-size: 0.72em;
+            opacity: 0.85;
         }
         .back-link {
             display: inline-block;
             margin-top: 20px;
-            color: #667eea;
+            color: var(--forest);
             text-decoration: none;
-            font-weight: 600;
+            font-weight: 500;
         }
         .back-link:hover {
+            color: var(--ink);
             text-decoration: underline;
         }
         .empty-state {
             text-align: center;
             padding: 60px 20px;
-            color: #999;
+            color: var(--slate);
         }
         .empty-state-icon {
-            font-size: 4em;
+            font-size: 3em;
             margin-bottom: 20px;
+            opacity: 0.6;
         }
         .breadcrumb {
-            background: #f0f1f5;
-            border-radius: 10px;
+            background: var(--cream);
+            border: 1px solid var(--line);
+            border-radius: 8px;
             padding: 12px 18px;
             margin-bottom: 25px;
-            font-size: 0.98em;
-            color: #555;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.85em;
+            color: var(--slate);
         }
         .breadcrumb a {
-            color: #667eea;
+            color: var(--forest);
             text-decoration: none;
-            font-weight: 600;
+            font-weight: 500;
         }
         .breadcrumb a:hover { text-decoration: underline; }
-        .breadcrumb .sep { color: #aaa; margin: 0 6px; }
+        .breadcrumb .sep { color: var(--sage); margin: 0 6px; }
         .layout {
             display: grid;
             grid-template-columns: 240px 1fr;
@@ -10299,35 +10333,38 @@ DOCUMENT_MANAGER_HTML = """
             .layout { grid-template-columns: 1fr; }
         }
         .sidebar {
-            background: #f8f9fa;
-            border-radius: 14px;
+            background: var(--cream);
+            border: 1px solid var(--line);
+            border-radius: 10px;
             padding: 18px;
         }
         .sidebar h3 {
-            color: #667eea;
-            font-size: 1em;
+            color: var(--forest);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.78em;
+            font-weight: 500;
             margin-bottom: 12px;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.12em;
         }
         .tree { list-style: none; }
         .tree li { margin: 2px 0; }
         .tree a {
             display: block;
             padding: 6px 10px;
-            border-radius: 8px;
-            color: #444;
+            border-radius: 6px;
+            color: var(--ink);
             text-decoration: none;
             font-size: 0.95em;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .tree a:hover { background: #e8e9f5; }
+        .tree a:hover { background: #eef2ec; }
         .tree a.active {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            font-weight: 600;
+            background: var(--ink);
+            color: #fff;
+            font-weight: 500;
         }
         .folder-grid {
             display: grid;
@@ -10336,24 +10373,24 @@ DOCUMENT_MANAGER_HTML = """
             margin-bottom: 30px;
         }
         .folder-card {
-            background: #f8f9fa;
-            border: 1px solid #e7e8f0;
-            border-radius: 12px;
+            background: var(--cream);
+            border: 1px solid var(--line);
+            border-radius: 10px;
             padding: 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            transition: transform 0.15s, box-shadow 0.15s;
+            transition: border-color 0.15s, box-shadow 0.15s;
         }
         .folder-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 16px rgba(102,126,234,0.18);
+            border-color: var(--sage);
+            box-shadow: var(--shadow);
         }
         .folder-card a {
-            color: #4b3b8f;
+            color: var(--ink);
             font-weight: 600;
             text-decoration: none;
-            font-size: 1.02em;
+            font-size: 1em;
             flex: 1;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -10362,13 +10399,13 @@ DOCUMENT_MANAGER_HTML = """
         .folder-card .folder-del {
             background: none;
             border: none;
-            color: #c0392b;
+            color: #9a3b2f;
             cursor: pointer;
             font-size: 1.1em;
             padding: 2px 6px;
             border-radius: 6px;
         }
-        .folder-card .folder-del:hover { background: #fdecea; }
+        .folder-card .folder-del:hover { background: #f7ece9; }
         .newfolder-form {
             display: flex;
             gap: 10px;
@@ -10379,26 +10416,33 @@ DOCUMENT_MANAGER_HTML = """
             flex: 1;
             min-width: 200px;
             padding: 12px 16px;
-            border: 2px solid #d8d9e6;
-            border-radius: 10px;
+            border: 1px solid var(--sage);
+            border-radius: 6px;
             font-size: 1em;
+            font-family: inherit;
+            background: var(--paper);
+            color: var(--ink);
         }
         .newfolder-form input[type=text]:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: var(--forest);
         }
         .newfolder-form button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--ink);
             color: white;
             border: none;
             padding: 12px 24px;
-            border-radius: 10px;
-            font-weight: 600;
+            border-radius: 6px;
+            font-weight: 500;
             cursor: pointer;
+            transition: background 0.2s;
         }
+        .newfolder-form button:hover { background: var(--forest); }
         .section-title {
-            color: #333;
+            color: var(--ink);
+            font-family: 'Playfair Display', Georgia, serif;
             font-size: 1.25em;
+            font-weight: 600;
             margin: 0 0 16px;
             display: flex;
             align-items: center;
@@ -10869,36 +10913,46 @@ PERSPECTIVE_HTML = """
 <html>
 <head>
     <title>My Perspective Profile</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+            --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+            --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 40px 20px; }
-        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 20px;
-                     box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 28px 30px; }
-        .header h1 { font-size: 1.7em; margin-bottom: 6px; }
-        .header p { opacity: 0.9; }
+        body { font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: var(--cream); color: var(--ink); min-height: 100vh; padding: 48px 20px; line-height: 1.55; }
+        .container { max-width: 900px; margin: 0 auto; background: var(--paper); border: 1px solid var(--line);
+                     border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+        .header { padding: 36px 36px 28px; border-bottom: 1px solid var(--line); }
+        .header::before { content: ""; display: block; width: 56px; height: 3px;
+                          background: linear-gradient(90deg, var(--gold), var(--blue)); margin-bottom: 18px; }
+        .header h1 { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; font-size: 1.9em;
+                     color: var(--ink); letter-spacing: -0.01em; margin-bottom: 8px; }
+        .header p { color: var(--slate); }
         .content { padding: 32px 36px; }
-        .meta { background: #f0f1f5; border-radius: 10px; padding: 12px 16px; color: #555;
-                font-size: 0.9em; margin-bottom: 20px; }
-        .meta b { color: #4b3b8f; }
-        textarea { width: 100%; min-height: 460px; padding: 18px; border: 2px solid #d8d9e6;
-                   border-radius: 12px; font-size: 0.98em; line-height: 1.5; resize: vertical;
-                   font-family: 'Segoe UI', system-ui, sans-serif; }
-        textarea:focus { outline: none; border-color: #667eea; }
+        .meta { background: var(--cream); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px;
+                color: var(--slate); font-family: 'IBM Plex Mono', monospace; font-size: 0.82em; margin-bottom: 20px; }
+        .meta b { color: var(--forest); }
+        textarea { width: 100%; min-height: 460px; padding: 18px; border: 1px solid var(--sage);
+                   border-radius: 8px; font-size: 0.98em; line-height: 1.6; resize: vertical;
+                   font-family: 'IBM Plex Sans', system-ui, sans-serif; color: var(--ink); background: var(--paper); }
+        textarea:focus { outline: none; border-color: var(--forest); }
         .actions { display: flex; gap: 12px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
-        .btn { border: none; padding: 12px 26px; border-radius: 10px; font-weight: 600;
-               font-size: 1em; cursor: pointer; text-decoration: none; display: inline-block; }
-        .btn-save { background: #28a745; color: #fff; }
-        .btn-regen { background: #fff; color: #667eea; border: 1.5px solid #c3c7e8; }
-        .btn-regen:hover { background: #f0f1f5; }
-        .hint { color: #888; font-size: 0.85em; }
-        .message { padding: 14px 16px; border-radius: 10px; margin-bottom: 20px; font-weight: 500; }
-        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .message.info { background: #e7e9fb; color: #3a3a7a; border: 1px solid #c9cdf3; }
-        .back-link { display: inline-block; margin-top: 22px; color: #667eea; text-decoration: none; font-weight: 600; }
-        .back-link:hover { text-decoration: underline; }
+        .btn { border: none; padding: 12px 26px; border-radius: 6px; font-weight: 500;
+               font-size: 0.95em; cursor: pointer; text-decoration: none; display: inline-block; transition: background 0.2s; }
+        .btn-save { background: var(--ink); color: #fff; }
+        .btn-save:hover { background: var(--forest); }
+        .btn-regen { background: #fff; color: var(--forest); border: 1px solid var(--sage); }
+        .btn-regen:hover { background: var(--cream); }
+        .hint { color: var(--slate); font-size: 0.85em; }
+        .message { padding: 14px 16px; border-radius: 8px; margin-bottom: 20px; font-weight: 500; border: 1px solid transparent; }
+        .message.success { background: #eef2ec; color: #2e4a2e; border-color: var(--sage); }
+        .message.error { background: #f7ece9; color: #7a2e22; border-color: #e2c4be; }
+        .message.info { background: #eef3fb; color: #2a4a7a; border-color: #c4d6f2; }
+        .back-link { display: inline-block; margin-top: 22px; color: var(--forest); text-decoration: none; font-weight: 500; }
+        .back-link:hover { color: var(--ink); text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -10992,36 +11046,46 @@ BLUE_PROFILE_HTML = """
 <html>
 <head>
     <title>Blue's Perspective</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+            --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+            --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-               background: linear-gradient(135deg, #2b5876 0%, #4e4376 100%); min-height: 100vh; padding: 40px 20px; }
-        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 20px;
-                     box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
-        .header { background: linear-gradient(135deg, #2b5876 0%, #4e4376 100%); color: white; padding: 28px 30px; }
-        .header h1 { font-size: 1.7em; margin-bottom: 6px; }
-        .header p { opacity: 0.92; }
+        body { font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: var(--cream); color: var(--ink); min-height: 100vh; padding: 48px 20px; line-height: 1.55; }
+        .container { max-width: 900px; margin: 0 auto; background: var(--paper); border: 1px solid var(--line);
+                     border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+        .header { padding: 36px 36px 28px; border-bottom: 1px solid var(--line); }
+        .header::before { content: ""; display: block; width: 56px; height: 3px;
+                          background: linear-gradient(90deg, var(--blue), var(--gold)); margin-bottom: 18px; }
+        .header h1 { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; font-size: 1.9em;
+                     color: var(--ink); letter-spacing: -0.01em; margin-bottom: 8px; }
+        .header p { color: var(--slate); }
         .content { padding: 32px 36px; }
-        .meta { background: #eef1f6; border-radius: 10px; padding: 12px 16px; color: #555;
-                font-size: 0.9em; margin-bottom: 20px; }
-        .meta b { color: #2b5876; }
-        textarea { width: 100%; min-height: 440px; padding: 18px; border: 2px solid #d4dae6;
-                   border-radius: 12px; font-size: 0.98em; line-height: 1.5; resize: vertical;
-                   font-family: 'Segoe UI', system-ui, sans-serif; }
-        textarea:focus { outline: none; border-color: #4e4376; }
+        .meta { background: var(--cream); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px;
+                color: var(--slate); font-family: 'IBM Plex Mono', monospace; font-size: 0.82em; margin-bottom: 20px; }
+        .meta b { color: var(--blue); }
+        textarea { width: 100%; min-height: 440px; padding: 18px; border: 1px solid var(--sage);
+                   border-radius: 8px; font-size: 0.98em; line-height: 1.6; resize: vertical;
+                   font-family: 'IBM Plex Sans', system-ui, sans-serif; color: var(--ink); background: var(--paper); }
+        textarea:focus { outline: none; border-color: var(--blue); }
         .actions { display: flex; gap: 12px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
-        .btn { border: none; padding: 12px 26px; border-radius: 10px; font-weight: 600;
-               font-size: 1em; cursor: pointer; text-decoration: none; display: inline-block; }
-        .btn-save { background: #2b8a6f; color: #fff; }
-        .btn-evolve { background: #fff; color: #4e4376; border: 1.5px solid #c3c7e8; }
-        .btn-evolve:hover { background: #eef1f6; }
-        .hint { color: #888; font-size: 0.85em; }
-        .message { padding: 14px 16px; border-radius: 10px; margin-bottom: 20px; font-weight: 500; }
-        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .btn { border: none; padding: 12px 26px; border-radius: 6px; font-weight: 500;
+               font-size: 0.95em; cursor: pointer; text-decoration: none; display: inline-block; transition: background 0.2s; }
+        .btn-save { background: var(--ink); color: #fff; }
+        .btn-save:hover { background: var(--forest); }
+        .btn-evolve { background: #fff; color: var(--blue); border: 1px solid #c4d6f2; }
+        .btn-evolve:hover { background: #eef3fb; }
+        .hint { color: var(--slate); font-size: 0.85em; }
+        .message { padding: 14px 16px; border-radius: 8px; margin-bottom: 20px; font-weight: 500; border: 1px solid transparent; }
+        .message.success { background: #eef2ec; color: #2e4a2e; border-color: var(--sage); }
+        .message.error { background: #f7ece9; color: #7a2e22; border-color: #e2c4be; }
         .nav { margin-top: 22px; }
-        .nav a { color: #4e4376; text-decoration: none; font-weight: 600; margin-right: 22px; }
-        .nav a:hover { text-decoration: underline; }
+        .nav a { color: var(--forest); text-decoration: none; font-weight: 500; margin-right: 22px; }
+        .nav a:hover { color: var(--ink); text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -11885,119 +11949,106 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Blue Middleware - Music + Light Sync [FIXED]</title>
+        <title>Blue Middleware</title>
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
+            :root {{
+                --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+                --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+                --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+            }}
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                background: var(--cream);
+                color: var(--ink);
                 min-height: 100vh;
                 display: flex;
                 justify-content: center;
                 align-items: center;
                 margin: 0;
-                padding: 20px;
+                padding: 40px 20px;
+                line-height: 1.55;
             }}
             .card {{
-                background: white;
-                border-radius: 20px;
-                padding: 50px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                text-align: center;
+                background: var(--paper);
+                border: 1px solid var(--line);
+                border-radius: 12px;
+                padding: 48px;
+                box-shadow: var(--shadow);
+                text-align: left;
                 max-width: 600px;
+                width: 100%;
+            }}
+            .card::before {{
+                content: "";
+                display: block;
+                width: 56px; height: 3px;
+                background: linear-gradient(90deg, var(--gold), var(--blue));
+                margin-bottom: 22px;
             }}
             h1 {{
-                color: #667eea;
-                font-size: 2.5em;
-                margin-bottom: 10px;
+                font-family: 'Playfair Display', Georgia, serif;
+                color: var(--ink);
+                font-size: 2.3em;
+                font-weight: 700;
+                margin-bottom: 8px;
+                letter-spacing: -0.01em;
             }}
             .subtitle {{
-                color: #666;
-                font-size: 1.2em;
-                margin-bottom: 40px;
+                color: var(--slate);
+                font-size: 1.05em;
+                margin-bottom: 32px;
             }}
             .status {{
-                background: #f8f9fa;
-                border-radius: 15px;
-                padding: 30px;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                padding: 8px 20px;
                 margin-bottom: 30px;
             }}
             .status-item {{
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                margin-bottom: 15px;
-                padding: 15px;
-                background: white;
-                border-radius: 10px;
+                padding: 14px 0;
+                border-bottom: 1px solid var(--line);
             }}
+            .status-item:last-child {{ border-bottom: none; }}
             .status-label {{
-                font-weight: 600;
-                color: #333;
+                font-family: 'IBM Plex Mono', monospace;
+                font-size: 0.82em;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                color: var(--slate);
             }}
             .status-value {{
-                color: #667eea;
-                font-weight: 600;
+                color: var(--ink);
+                font-weight: 500;
             }}
             .btn {{
                 display: inline-block;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: var(--ink);
                 color: white;
                 text-decoration: none;
-                padding: 20px 40px;
-                border-radius: 50px;
-                font-size: 1.2em;
-                font-weight: 600;
-                transition: transform 0.2s;
-                margin: 10px;
+                padding: 14px 28px;
+                border-radius: 6px;
+                font-size: 1em;
+                font-weight: 500;
+                transition: background 0.2s;
             }}
             .btn:hover {{
-                transform: scale(1.05);
-            }}
-            .feature-highlight {{
-                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-                color: white;
-                padding: 20px;
-                border-radius: 15px;
-                margin-bottom: 30px;
-                font-weight: 600;
-            }}
-            .fix-badge {{
-                background: #ff4757;
-                color: white;
-                padding: 10px 20px;
-                border-radius: 25px;
-                display: inline-block;
-                margin-bottom: 20px;
-                font-weight: 700;
-                animation: pulse 2s infinite;
-            }}
-            @keyframes pulse {{
-                0%, 100% {{ transform: scale(1); }}
-                50% {{ transform: scale(1.05); }}
+                background: var(--forest);
             }}
         </style>
     </head>
     <body>
         <div class="card">
-            <div class="fix-badge">🔧 FIXED: Music Controls Now Work!</div>
-            <h1>🎵💡 Blue Middleware</h1>
-            <p class="subtitle">Your AI assistant with music-light sync!</p>
-
-            <div class="feature-highlight">
-                ✨ NEW: Music controls work from ANY window!<br>
-                🎵 Uses system-wide media keys<br>
-                💡 Lights automatically sync with music!<br>
-                🎨 Dynamic light visualizer!
-            </div>
+            <h1>Blue Middleware</h1>
+            <p class="subtitle">Local AI assistant with music and light synchronization.</p>
 
             <div class="status">
                 <div class="status-item">
                     <span class="status-label">Service</span>
-                    <span class="status-value">✅ Running</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Music Controls</span>
-                    <span class="status-value">✅ FIXED - Works from any window!</span>
+                    <span class="status-value">Running</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Music</span>
@@ -12009,7 +12060,7 @@ def index():
                 </div>
                 <div class="status-item">
                     <span class="status-label">Hue Lights</span>
-                    <span class="status-value">{'✅ Connected' if BRIDGE_IP else '⚠️ Not configured'}</span>
+                    <span class="status-value">{'Connected' if BRIDGE_IP else 'Not configured'}</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Documents</span>
@@ -12021,7 +12072,7 @@ def index():
                 </div>
             </div>
 
-            <a href="/documents" class="btn">📚 Manage Documents</a>
+            <a href="/documents" class="btn">Manage Documents</a>
         </div>
     </body>
     </html>
