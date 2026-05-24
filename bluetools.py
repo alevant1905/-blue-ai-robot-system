@@ -9125,11 +9125,14 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
     )
     if _dropped:
         _before = len(payload['messages'])
-        payload['messages'] = _trimmed
-        _approx = _estimate_payload_tokens(_trimmed, payload.get('tools'))
+        # Re-normalize AFTER trimming: dropping the oldest turns can re-create
+        # an orphan leading assistant or a severed tool result, which makes
+        # strict Qwen templates 400 with "No user query found in messages".
+        payload['messages'] = _normalize_message_alternation(_trimmed)
+        _approx = _estimate_payload_tokens(payload['messages'], payload.get('tools'))
         print(
             f"   [TRIM] Dropped {_dropped} oldest msg(s) to fit budget "
-            f"({_budget}t budget, ~{_approx}t after; {_before}->{len(_trimmed)} msgs)",
+            f"({_budget}t budget, ~{_approx}t after; {_before}->{len(payload['messages'])} msgs)",
             flush=True,
         )
 
@@ -9174,7 +9177,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                     f"{_extra}, ~{_est}t after)",
                     flush=True,
                 )
-                payload['messages'] = _retrimmed
+                payload['messages'] = _normalize_message_alternation(_retrimmed)
                 try:
                     response = requests.post(LM_STUDIO_URL, json=payload, timeout=120)
                     response.raise_for_status()
@@ -11723,24 +11726,41 @@ def _normalize_message_alternation(messages: list) -> list:
         return sys_block + [{"role": "user", "content": "(continue)"}]
     rest = rest[first_user_idx:]
 
-    # Merge consecutive same-role turns. For text content we concatenate;
-    # for list content (vision payloads) we just keep the latest one to
-    # avoid reordering image placeholders.
+    # Single pass that enforces the template rules. For text content we
+    # concatenate consecutive same-role turns; for list content (vision
+    # payloads) we keep the latest intact to avoid reordering image parts.
+    # Tool hygiene matters here because this also runs AFTER budget trimming,
+    # which can sever a tool result from the assistant turn that called it:
+    #   - a `tool` message is only valid right after an assistant turn; drop
+    #     orphans rather than let the template choke on them.
     merged: list = []
     for m in rest:
-        if not merged or merged[-1].get("role") != m.get("role"):
-            merged.append(dict(m))
+        role = m.get("role")
+        # Drop an orphan tool result (no assistant turn immediately before it).
+        if role == "tool" and (not merged or merged[-1].get("role") != "assistant"):
             continue
-        # Same role as previous — merge.
-        prev = merged[-1]
-        prev_content = prev.get("content")
-        cur_content = m.get("content")
-        if isinstance(prev_content, str) and isinstance(cur_content, str):
-            prev["content"] = (prev_content.rstrip() + "\n\n" + cur_content.lstrip()).strip()
-        else:
-            # If either side is a list (vision payload), prefer the newer
-            # message intact rather than mangling structure.
-            merged[-1] = dict(m)
+        if merged and merged[-1].get("role") == role and role != "tool":
+            # Same role as previous — merge.
+            prev = merged[-1]
+            prev_content = prev.get("content")
+            cur_content = m.get("content")
+            if isinstance(prev_content, str) and isinstance(cur_content, str):
+                prev["content"] = (prev_content.rstrip() + "\n\n" + cur_content.lstrip()).strip()
+            else:
+                # If either side is a list (vision payload), prefer the newer
+                # message intact rather than mangling structure.
+                merged[-1] = dict(m)
+            continue
+        merged.append(dict(m))
+
+    # An assistant turn that advertises tool_calls but is no longer followed by
+    # a tool response (trimming dropped it) makes strict templates 400 too —
+    # strip the dangling tool_calls so it renders as a plain assistant turn.
+    for i, m in enumerate(merged):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            nxt = merged[i + 1] if i + 1 < len(merged) else None
+            if not nxt or nxt.get("role") != "tool":
+                m.pop("tool_calls", None)
 
     return sys_block + merged
 
