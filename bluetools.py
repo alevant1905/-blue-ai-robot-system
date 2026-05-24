@@ -79,7 +79,7 @@ from email import encoders
 
 # Third-party
 import requests
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, url_for
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
 from werkzeug.utils import secure_filename
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -1497,6 +1497,177 @@ print("[OK] Tool selector initialized - using modular confidence-based selection
 
 
 app = Flask(__name__)
+
+# ============================================================================
+# Remote-access auth gate
+# ----------------------------------------------------------------------------
+# Blue runs with full owner powers (sends email as Alex, reads his inbox,
+# controls the lights, opens the camera). Once the server is reachable beyond
+# this machine, every NON-LOCAL request must authenticate. Localhost stays
+# ungated on purpose: the physical Ohbot client POSTs to 127.0.0.1/v1/chat/
+# completions and the on-PC browser hits 127.0.0.1 — both must keep working
+# untouched. Remote devices (LAN IP, or a Tailscale 100.x peer) are NOT
+# localhost, so they're gated behind a shared password.
+# ============================================================================
+import hmac as _hmac
+import secrets as _secrets
+from datetime import timedelta as _timedelta
+
+_SECRET_KEY_FILE = os.path.join(os.getcwd(), ".blue_secret_key")
+_PASSWORD_FILE = os.path.join(os.getcwd(), ".blue_password")
+
+
+def _load_or_create_secret_key() -> str:
+    """Stable Flask session secret. Env wins; otherwise persist a random key
+    to a gitignored file so sessions survive restarts (no re-login churn)."""
+    val = (os.environ.get("BLUE_SECRET_KEY") or "").strip()
+    if val:
+        return val
+    try:
+        if os.path.exists(_SECRET_KEY_FILE):
+            existing = open(_SECRET_KEY_FILE, encoding="utf-8").read().strip()
+            if existing:
+                return existing
+    except Exception:
+        pass
+    val = _secrets.token_hex(32)
+    try:
+        with open(_SECRET_KEY_FILE, "w", encoding="utf-8") as f:
+            f.write(val)
+    except Exception as e:
+        print(f"   [AUTH] couldn't persist secret key ({e}); using ephemeral key")
+    return val
+
+
+def _access_password() -> str:
+    """The shared remote-access password. Set via BLUE_ACCESS_PASSWORD env or a
+    one-line .blue_password file (both gitignored). Empty => remote disabled."""
+    pw = (os.environ.get("BLUE_ACCESS_PASSWORD") or "").strip()
+    if pw:
+        return pw
+    try:
+        if os.path.exists(_PASSWORD_FILE):
+            return open(_PASSWORD_FILE, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+app.secret_key = _load_or_create_secret_key()
+app.permanent_session_lifetime = _timedelta(days=30)
+
+
+def _is_local_request() -> bool:
+    return (request.remote_addr or "") in ("127.0.0.1", "::1", "localhost")
+
+
+# Endpoints that must stay reachable without a session even from remote, so a
+# logged-out phone can actually render the login form and submit it.
+_AUTH_EXEMPT_ENDPOINTS = {"blue_login", "blue_logout", "static"}
+
+
+@app.before_request
+def _require_remote_auth():
+    # Local traffic (Ohbot client + on-PC browser) is fully trusted.
+    if _is_local_request():
+        return None
+    if request.endpoint in _AUTH_EXEMPT_ENDPOINTS:
+        return None
+    pw = _access_password()
+    if not pw:
+        # Fail closed: someone reached Blue remotely but no password is set.
+        return Response(
+            "Remote access to Blue is disabled. Set a password in a "
+            ".blue_password file (or BLUE_ACCESS_PASSWORD) on the host.",
+            status=503, mimetype="text/plain",
+        )
+    if session.get("blue_auth") is True:
+        return None
+    # Programmatic callers get a clean 401; browsers get the login page.
+    accepts_html = "text/html" in (request.headers.get("Accept") or "")
+    if request.path.startswith(("/v1/", "/api/", "/memory/")) or not accepts_html:
+        return Response("Authentication required.", status=401, mimetype="text/plain")
+    return redirect(url_for("blue_login", next=request.full_path))
+
+
+_LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in to Blue</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+            --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+            --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: var(--cream); color: var(--ink); min-height: 100vh;
+               display: flex; align-items: center; justify-content: center; padding: 24px; line-height: 1.55; }
+        .card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+                box-shadow: var(--shadow); padding: 40px; max-width: 380px; width: 100%; }
+        .card::before { content: ""; display: block; width: 56px; height: 3px;
+                        background: linear-gradient(90deg, var(--gold), var(--blue)); margin-bottom: 20px; }
+        h1 { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; font-size: 1.6em;
+             color: var(--ink); margin-bottom: 6px; letter-spacing: -0.01em; }
+        p.sub { color: var(--slate); font-size: 0.95em; margin-bottom: 24px; }
+        label { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; text-transform: uppercase;
+                letter-spacing: 0.12em; color: var(--forest); display: block; margin-bottom: 8px; }
+        input[type=password] { width: 100%; padding: 13px 15px; border: 1px solid var(--sage);
+               border-radius: 8px; font-family: inherit; font-size: 1em; color: var(--ink); background: var(--paper); }
+        input[type=password]:focus { outline: none; border-color: var(--forest); }
+        button { margin-top: 18px; width: 100%; padding: 13px; border: none; border-radius: 8px;
+                 background: var(--ink); color: #fff; font-weight: 500; font-size: 0.98em; cursor: pointer;
+                 transition: background 0.2s; }
+        button:hover { background: var(--forest); }
+        .err { margin-top: 16px; background: #f7ece9; color: #7a2e22; border: 1px solid #e2c4be;
+               border-radius: 8px; padding: 11px 14px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Sign in to Blue</h1>
+        <p class="sub">Enter the access password to continue.</p>
+        <form method="POST" action="/login">
+            <input type="hidden" name="next" value="{{ next }}">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autofocus autocomplete="current-password">
+            <button type="submit">Sign in</button>
+        </form>
+        {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    </div>
+</body>
+</html>
+"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def blue_login():
+    error = None
+    nxt = request.values.get("next") or "/chat"
+    # Only allow same-site relative redirects.
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/chat"
+    if request.method == "POST":
+        pw = _access_password()
+        supplied = request.form.get("password", "")
+        if pw and _hmac.compare_digest(supplied, pw):
+            session["blue_auth"] = True
+            session.permanent = True
+            return redirect(nxt)
+        error = "Incorrect password." if pw else "No password is configured on the host."
+    return render_template_string(_LOGIN_HTML, error=error, next=nxt)
+
+
+@app.route("/logout")
+def blue_logout():
+    session.pop("blue_auth", None)
+    return redirect(url_for("blue_login"))
+
 
 # Configuration
 LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"
@@ -12584,7 +12755,12 @@ if __name__ == "__main__":
     # on its own (daemon) thread instead of blocking the main thread — that
     # keeps the server responsive to other requests and, crucially, keeps
     # Ctrl+C working even if a request hangs.
-    app.run(host='127.0.0.1', port=PROXY_PORT, debug=False, threaded=True)
+    # Bind to all interfaces by default so phones/laptops can reach Blue
+    # (remote requests are gated by the password in _require_remote_auth;
+    # localhost stays ungated for the Ohbot client). Override with BLUE_HOST.
+    _bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
+    print(f"[NET] Binding to {_bind_host}:{PROXY_PORT} (remote access requires the password)")
+    app.run(host=_bind_host, port=PROXY_PORT, debug=False, threaded=True)
 
 
 # --- Image Upload Endpoints ---

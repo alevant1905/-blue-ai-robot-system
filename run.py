@@ -165,7 +165,14 @@ def run_server():
 
     # Run the server if bluetools has a main guard
     if hasattr(bluetools, '__name__'):
-        print("   Server starting on http://127.0.0.1:5000")
+        # Bind to all interfaces by default so phones/laptops can reach Blue.
+        # Remote requests are gated by the password (see _require_remote_auth
+        # in bluetools.py); localhost stays ungated for the Ohbot client.
+        # Override with BLUE_HOST=127.0.0.1 to restrict to this machine only.
+        bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
+        port = int(os.environ.get("BLUE_PORT", "5000"))
+        print(f"   Server starting on http://{bind_host}:{port}")
+        print("   Remote devices must sign in with the access password.")
         print("   Press CTRL+C to quit")
         print("")
         # The Flask app.run() is inside bluetools' if __name__ == "__main__" block
@@ -173,7 +180,7 @@ def run_server():
         if hasattr(bluetools, 'app'):
             # threaded=True keeps the server responsive (and Ctrl+C working)
             # even when a single request stalls — e.g. a slow ChromaDB call.
-            bluetools.app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
+            bluetools.app.run(host=bind_host, port=port, debug=False, threaded=True)
 
 def main():
     """Main entry point."""

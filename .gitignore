@@ -186,3 +186,6 @@ document_index.json
 document_index.json.before-cleanup
 # Ohbot conversation files.
 *.ocf
+# Remote-access auth: the access password and the Flask session secret.
+.blue_password
+.blue_secret_key
