@@ -1525,7 +1525,7 @@ def _load_or_create_secret_key() -> str:
         return val
     try:
         if os.path.exists(_SECRET_KEY_FILE):
-            existing = open(_SECRET_KEY_FILE, encoding="utf-8").read().strip()
+            existing = open(_SECRET_KEY_FILE, encoding="utf-8-sig").read().strip()
             if existing:
                 return existing
     except Exception:
@@ -1547,7 +1547,9 @@ def _access_password() -> str:
         return pw
     try:
         if os.path.exists(_PASSWORD_FILE):
-            return open(_PASSWORD_FILE, encoding="utf-8").read().strip()
+            # utf-8-sig so a BOM (which Windows PowerShell's Out-File adds) is
+            # stripped rather than read as part of the password.
+            return open(_PASSWORD_FILE, encoding="utf-8-sig").read().strip()
     except Exception:
         pass
     return ""
