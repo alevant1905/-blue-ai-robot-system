@@ -21,12 +21,56 @@ class AutomationDetector(BaseDetector):
 
 
 class ContactsDetector(BaseDetector):
-    """Detects contact management intents."""
+    """Detects contact / address-book intents (add_contact, find_contact,
+    list_contacts). Confidence stays just below the auto-execute threshold so
+    the detector steers tool choice while the model fills in the params."""
 
     def detect(self, message: str, msg_lower: str, context: Dict) -> List[ToolIntent]:
-        # NOTE: list_contacts / add_contact tools are not implemented.
-        # Returning no intents to avoid "Unknown tool" errors.
-        # The LLM can handle contact-related questions conversationally.
+        def intent(tool, reason):
+            return [ToolIntent(tool_name=tool, confidence=0.78,
+                               priority=ToolPriority.MEDIUM, reason=reason,
+                               extracted_params={})]
+
+        # Add — check first, since "add X to my contacts" also contains the
+        # "my contacts" list cue.
+        add_signals = (
+            'add a contact', 'add contact', 'new contact', 'create a contact',
+            'add to my contacts', 'add to contacts', 'to my contacts',
+            'save his email', 'save her email', 'save their email',
+            "save his number", "save her number",
+            'add him to my contacts', 'add her to my contacts',
+            'remember his email', 'remember her email', 'remember their email',
+        )
+        saving = (
+            any(s in msg_lower for s in add_signals)
+            or ('save' in msg_lower and any(w in msg_lower
+                for w in ('email', 'number', 'phone', 'contact')))
+            or ('remember' in msg_lower and any(w in msg_lower
+                for w in ('email', 'phone number', "'s number")))
+        )
+        if saving:
+            return intent('add_contact', 'add contact request')
+
+        # Find a specific person's saved details.
+        find_signals = (
+            "'s email", "'s phone", "'s number", 'email address for',
+            'phone number for', 'email for', 'number for', 'look up the contact',
+            'look up contact', 'find the contact', 'find contact',
+            'do i have a contact', 'contact for', 'contact info for',
+            "what's the email", 'what is the email',
+        )
+        if any(s in msg_lower for s in find_signals):
+            return intent('find_contact', 'contact lookup request')
+
+        # List / browse contacts.
+        list_signals = (
+            'my contacts', 'show contacts', 'list contacts', 'list my contacts',
+            'all my contacts', "who's in my contacts", 'who is in my contacts',
+            'contact list', 'address book', 'show my contacts',
+        )
+        if any(s in msg_lower for s in list_signals):
+            return intent('list_contacts', 'list contacts request')
+
         return []
 
 

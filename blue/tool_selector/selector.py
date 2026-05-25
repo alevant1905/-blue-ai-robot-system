@@ -66,9 +66,11 @@ class ImprovedToolSelector:
         self.registry.register('system', SystemDetector(), enabled=True)
         self.registry.register('utilities', UtilitiesDetector(), enabled=True)
 
+        # Contacts now has real handlers (add/list/find_contact).
+        self.registry.register('contacts', ContactsDetector(), enabled=True)
+
         # Disabled: these detectors return tool names with no handler implemented
         # self.registry.register('automation', AutomationDetector(), enabled=True)
-        # self.registry.register('contacts', ContactsDetector(), enabled=True)
         # self.registry.register('habits', HabitsDetector(), enabled=True)
         # self.registry.register('media_library', MediaLibraryDetector(), enabled=True)
         # self.registry.register('locations', LocationsDetector(), enabled=True)

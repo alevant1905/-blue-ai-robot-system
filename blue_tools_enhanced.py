@@ -111,6 +111,19 @@ def _init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS notes_user
                 ON notes(user_name);
+
+            CREATE TABLE IF NOT EXISTS contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                relationship TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS contacts_name ON contacts(name);
+            CREATE INDEX IF NOT EXISTS contacts_email ON contacts(email);
         """)
 
 
@@ -1292,6 +1305,159 @@ class NoteManager:
             "results": items,
             "message": f"{len(items)} note(s) matching '{query}' for {user_name}",
         }
+
+
+# ===== Contacts =====
+
+def _contact_dict(row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"] or "",
+        "phone": row["phone"] or "",
+        "relationship": row["relationship"] or "",
+        "notes": row["notes"] or "",
+    }
+
+
+class ContactManager:
+    """Address book backed by SQLite — the authoritative source for resolving
+    a name to an email address when Blue sends mail."""
+
+    @staticmethod
+    def add_contact(name: str, email: str = "", phone: str = "",
+                    relationship: str = "", notes: str = "") -> Dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            return {"success": False, "message": "A contact needs a name."}
+        email = (email or "").strip()
+        # If a contact with this email already exists, update it instead of
+        # creating a duplicate.
+        if email:
+            with _DB_LOCK, _conn() as c:
+                existing = c.execute(
+                    "SELECT id FROM contacts WHERE LOWER(email) = LOWER(?)",
+                    (email,),
+                ).fetchone()
+            if existing:
+                return ContactManager.update_contact(
+                    existing["id"], name=name, phone=phone,
+                    relationship=relationship, notes=notes)
+        with _DB_LOCK, _conn() as c:
+            cur = c.execute(
+                "INSERT INTO contacts (name, email, phone, relationship, notes) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (name, email or None, phone or None,
+                 relationship or None, notes or None),
+            )
+            cid = cur.lastrowid
+        return {
+            "success": True,
+            "contact_id": cid,
+            "message": f"Added {name}" + (f" <{email}>" if email else "") + ".",
+        }
+
+    @staticmethod
+    def list_contacts(query: str = "") -> Dict[str, Any]:
+        like = f"%{(query or '').strip().lower()}%"
+        with _DB_LOCK, _conn() as c:
+            if query and query.strip():
+                rows = c.execute(
+                    "SELECT * FROM contacts WHERE LOWER(name) LIKE ? "
+                    "OR LOWER(email) LIKE ? OR LOWER(relationship) LIKE ? "
+                    "ORDER BY name COLLATE NOCASE",
+                    (like, like, like),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM contacts ORDER BY name COLLATE NOCASE"
+                ).fetchall()
+        items = [_contact_dict(r) for r in rows]
+        return {
+            "success": True,
+            "count": len(items),
+            "contacts": items,
+            "message": f"{len(items)} contact(s)"
+                       + (f" matching '{query}'" if query else ""),
+        }
+
+    @staticmethod
+    def find_contact(query: str) -> Dict[str, Any]:
+        """Best-effort single-contact lookup by name token or email."""
+        res = ContactManager.list_contacts(query)
+        items = res["contacts"]
+        if not items:
+            return {"success": False, "message": f"No contact matching '{query}'."}
+        if len(items) == 1:
+            return {"success": True, "contact": items[0]}
+        # Prefer an exact (case-insensitive) name match if present.
+        q = (query or "").strip().lower()
+        for it in items:
+            if it["name"].lower() == q:
+                return {"success": True, "contact": it}
+        return {"success": False, "needs_disambiguation": True,
+                "matches": items,
+                "message": f"{len(items)} contacts match '{query}'."}
+
+    @staticmethod
+    def resolve_email(name: str) -> Optional[str]:
+        """Return the email address for a name, or None. Used by the mail path.
+        Matches a full name (case-insensitive), then a first-name/token match,
+        and only returns an address when the match is unambiguous."""
+        n = (name or "").strip().lower()
+        if not n:
+            return None
+        with _DB_LOCK, _conn() as c:
+            rows = c.execute(
+                "SELECT name, email FROM contacts "
+                "WHERE email IS NOT NULL AND email != ''"
+            ).fetchall()
+        # Exact full-name match wins.
+        for r in rows:
+            if (r["name"] or "").strip().lower() == n:
+                return r["email"]
+        # Otherwise a unique token match (e.g. first name).
+        hits = []
+        for r in rows:
+            tokens = set(re.findall(r"[a-z0-9]+", (r["name"] or "").lower()))
+            if n in tokens:
+                hits.append(r["email"])
+        if len(set(hits)) == 1:
+            return hits[0]
+        return None
+
+    @staticmethod
+    def update_contact(contact_id: int, name: Optional[str] = None,
+                       email: Optional[str] = None, phone: Optional[str] = None,
+                       relationship: Optional[str] = None,
+                       notes: Optional[str] = None) -> Dict[str, Any]:
+        sets, params = [], []
+        for col, val in (("name", name), ("email", email), ("phone", phone),
+                         ("relationship", relationship), ("notes", notes)):
+            if val is not None:
+                sets.append(f"{col} = ?")
+                params.append(val.strip() or None if isinstance(val, str) else val)
+        if not sets:
+            return {"success": False, "message": "Nothing to update."}
+        sets.append("updated_at = datetime('now')")
+        params.append(contact_id)
+        with _DB_LOCK, _conn() as c:
+            cur = c.execute(
+                f"UPDATE contacts SET {', '.join(sets)} WHERE id = ?", params)
+            changed = cur.rowcount
+        if changed == 0:
+            return {"success": False, "message": f"No contact with id {contact_id}."}
+        return {"success": True, "contact_id": contact_id,
+                "message": f"Updated contact {contact_id}."}
+
+    @staticmethod
+    def delete_contact(contact_id: int) -> Dict[str, Any]:
+        with _DB_LOCK, _conn() as c:
+            cur = c.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+            changed = cur.rowcount
+        if changed == 0:
+            return {"success": False, "message": f"No contact with id {contact_id}."}
+        return {"success": True, "message": f"Deleted contact {contact_id}."}
 
 
 # ===== Timers =====
