@@ -3187,7 +3187,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "user_name": {"type": "string"},
-                    "hours_ahead": {"type": "integer", "description": "Look ahead this many hours (default 24)"}
+                    "hours_ahead": {"type": "integer", "description": "Look ahead this many hours (default 168 = one week). Use a smaller value only if the user asks specifically about today."}
                 },
                 "required": ["user_name"]
             }
@@ -9386,14 +9386,17 @@ def _build_now_block() -> str:
     )
 
 
-def _build_upcoming_schedule_block(hours_ahead: int = 24) -> str:
+def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
     """List unfinished reminders due in the next `hours_ahead` hours.
 
     Injected on every turn so Blue can answer "what's on my schedule?" /
-    "anything coming up?" without a tool round-trip and so he naturally
-    anchors statements ("you have X in 20 min") against real data. If the
-    enhanced reminders module isn't loaded or the DB read fails, return an
-    empty string — silent degradation, never break the system prompt.
+    "anything tomorrow?" without a tool round-trip and so he naturally
+    anchors statements ("you have X in 20 min") against real data. Defaults
+    to a full week ahead: a rolling 24-hour window doesn't even cover all of
+    "tomorrow" (a meeting tomorrow afternoon is >24h away if asked at noon),
+    which made Blue wrongly report a clear day. If the enhanced reminders
+    module isn't loaded or the DB read fails, return an empty string — silent
+    degradation, never break the system prompt.
     """
     if not globals().get("ENHANCED_TOOLS_AVAILABLE", False):
         return ""
@@ -9402,17 +9405,19 @@ def _build_upcoming_schedule_block(hours_ahead: int = 24) -> str:
         from blue_tools_enhanced import occurrences_in_window
         now = datetime.now()
         cutoff = now + timedelta(hours=hours_ahead)
-        # occurrences_in_window expands weekly recurring events and carries
-        # end times, so a standing class shows up with its full time range.
+        # occurrences_in_window expands recurring events and carries end
+        # times, so a standing class shows up with its full time range.
         occs = occurrences_in_window(now, cutoff)[:20]
     except Exception as e:
         log.warning(f"[SCHEDULE] block build failed: {e}")
         return ""
 
+    horizon = (f"{hours_ahead // 24} days" if hours_ahead % 24 == 0
+               else f"{hours_ahead} hours")
     if not occs:
         return (
             "<upcoming_schedule>\n"
-            f"No reminders in the next {hours_ahead} hours.\n"
+            f"No reminders in the next {horizon}.\n"
             "</upcoming_schedule>"
         )
 
@@ -9460,7 +9465,7 @@ def _build_upcoming_schedule_block(hours_ahead: int = 24) -> str:
 
     return (
         "<upcoming_schedule>\n"
-        f"Reminders in the next {hours_ahead} hours "
+        f"Reminders in the next {horizon} "
         f"(use this when the user asks about schedule, calendar, "
         f"reminders, or what's coming up — do not call a tool, just answer "
         f"from this list):\n"

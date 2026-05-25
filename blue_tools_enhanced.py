@@ -917,7 +917,7 @@ class CalendarManager:
         }
 
     @staticmethod
-    def get_upcoming_reminders(user_name: str, hours_ahead: int = 24) -> Dict[str, Any]:
+    def get_upcoming_reminders(user_name: str, hours_ahead: int = 168) -> Dict[str, Any]:
         now = datetime.now()
         cutoff = now + timedelta(hours=hours_ahead)
         # occurrences_in_window expands weekly recurring reminders, so a
