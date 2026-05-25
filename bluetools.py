@@ -10687,12 +10687,15 @@ DOCUMENT_MANAGER_HTML = """
             align-items: center;
             gap: 8px;
         }
+        .ic { width:1em; height:1em; vertical-align:-0.12em; margin-right:.4em;
+              fill:none; stroke:currentColor; stroke-width:1.7;
+              stroke-linecap:round; stroke-linejoin:round; flex:none; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎵💡 Blue Document Manager</h1>
+            <h1><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>Blue Document Manager</h1>
             <p>Upload documents to teach Blue about your files</p>
         </div>
 
@@ -10719,7 +10722,7 @@ DOCUMENT_MANAGER_HTML = """
             </div>
 
             <div class="breadcrumb">
-                <a href="/documents?folder=">📚 Library</a>
+                <a href="/documents?folder="><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>Library</a>
                 {% for crumb in breadcrumb %}
                     <span class="sep">/</span>
                     <a href="/documents?folder={{ crumb.path|urlencode }}">{{ crumb.name }}</a>
@@ -10730,25 +10733,25 @@ DOCUMENT_MANAGER_HTML = """
                 <div class="sidebar">
                     <h3>Folders</h3>
                     <ul class="tree">
-                        <li><a href="/documents?folder=" class="{{ 'active' if not current_folder else '' }}">📚 Library</a></li>
+                        <li><a href="/documents?folder=" class="{{ 'active' if not current_folder else '' }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>Library</a></li>
                         {% for node in folder_tree %}
                         <li>
                             <a href="/documents?folder={{ node.path|urlencode }}"
                                class="{{ 'active' if node.path == current_folder else '' }}"
                                style="padding-left: {{ 10 + node.depth * 14 }}px;"
-                               title="{{ node.path }}">📁 {{ node.name }}</a>
+                               title="{{ node.path }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>{{ node.name }}</a>
                         </li>
                         {% endfor %}
                     </ul>
                 </div>
 
                 <div class="main">
-                    <h2 class="section-title">🗂️ Folders in this area</h2>
+                    <h2 class="section-title"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Folders in this area</h2>
                     {% if subfolders %}
                     <div class="folder-grid">
                         {% for sub in subfolders %}
                         <div class="folder-card">
-                            <a href="/documents?folder={{ sub.path|urlencode }}">📁 {{ sub.name }}</a>
+                            <a href="/documents?folder={{ sub.path|urlencode }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>{{ sub.name }}</a>
                             <form method="POST" action="/documents/folder/delete" style="margin:0;"
                                   onsubmit="return confirm('Delete folder {{ sub.name }}? It must be empty.');">
                                 <input type="hidden" name="folder" value="{{ sub.path }}">
@@ -10770,7 +10773,7 @@ DOCUMENT_MANAGER_HTML = """
                     </form>
 
                     <div class="upload-section" id="dropZone">
-                        <h2>📤 Upload to {{ current_folder if current_folder else 'Library root' }}</h2>
+                        <h2><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg>Upload to {{ current_folder if current_folder else 'Library root' }}</h2>
                         <p style="color: #666; margin-bottom: 20px;">
                             <strong>Drag &amp; drop a file here</strong> — or use the button below.<br>
                             Supported: PDF, Word (.doc, .docx), Text (.txt, .md)
@@ -10789,7 +10792,7 @@ DOCUMENT_MANAGER_HTML = """
                     </div>
 
                     <div class="documents-list">
-                        <h2 class="section-title">📄 Documents in this folder</h2>
+                        <h2 class="section-title"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>Documents in this folder</h2>
                         {% if documents %}
                             {% for doc in documents %}
                             <div class="document-item">
@@ -10818,7 +10821,7 @@ DOCUMENT_MANAGER_HTML = """
                             {% endfor %}
                         {% else %}
                             <div class="empty-state">
-                                <div class="empty-state-icon">🔭</div>
+                                <div class="empty-state-icon"><svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></svg></div>
                                 <h3>No documents in this folder</h3>
                                 <p>Upload one above, or pick another folder.</p>
                             </div>
@@ -10828,7 +10831,7 @@ DOCUMENT_MANAGER_HTML = """
             </div>
 
             <a href="/" class="back-link">← Back to main page</a>
-            <a href="/perspective" class="back-link" style="margin-left: 24px;">🧠 My Perspective Profile</a>
+            <a href="/perspective" class="back-link" style="margin-left: 24px;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>My Perspective Profile</a>
         </div>
     </div>
 
@@ -10971,7 +10974,7 @@ def manage_documents():
                 rel = f"{parent}/{name}" if parent else name
                 res = create_library_folder(rel)
                 if res.get('success'):
-                    message, message_type = f"📁 Created folder '{name}'.", "success"
+                    message, message_type = f"Created folder '{name}'.", "success"
                 else:
                     message, message_type = f"Couldn't create folder: {res.get('error')}", "error"
 
@@ -11043,7 +11046,7 @@ def manage_documents():
 
                         save_document_index(index)
                         where = current_folder if current_folder else "Library root"
-                        message = f"✅ Uploaded and indexed '{filename}' into {where}!"
+                        message = f"Uploaded and indexed '{filename}' into {where}."
                         message_type = "success"
 
                 except Exception as e:
@@ -11192,12 +11195,15 @@ PERSPECTIVE_HTML = """
         .message.info { background: #eef3fb; color: #2a4a7a; border-color: #c4d6f2; }
         .back-link { display: inline-block; margin-top: 22px; color: var(--forest); text-decoration: none; font-weight: 500; }
         .back-link:hover { color: var(--ink); text-decoration: underline; }
+        .ic { width:1em; height:1em; vertical-align:-0.12em; margin-right:.4em;
+              fill:none; stroke:currentColor; stroke-width:1.7;
+              stroke-linecap:round; stroke-linejoin:round; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🧠 My Perspective Profile</h1>
+            <h1><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>My Perspective Profile</h1>
             <p>How Blue understands your thinking — distilled from the {{ owner_name }} folder. Edit it freely; your edits stick.</p>
         </div>
         <div class="content">
@@ -11216,17 +11222,17 @@ PERSPECTIVE_HTML = """
             <form method="POST" action="/perspective">
                 <textarea name="profile" placeholder="Blue hasn't learned your perspective yet — regenerate to build it, or write/paste your own here and save.">{{ profile }}</textarea>
                 <div class="actions">
-                    <button type="submit" name="action" value="save" class="btn btn-save">💾 Save my edits</button>
+                    <button type="submit" name="action" value="save" class="btn btn-save"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>Save my edits</button>
                     <button type="submit" name="action" value="regenerate" class="btn btn-regen"
                             onclick="return confirm('Rebuild the profile from scratch by reading your {{ owner_name }} folder? This replaces the current text and can take a minute.');">
-                        ♻️ Regenerate from my writing
+                        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v4h-4"/></svg>Regenerate from my writing
                     </button>
                     <span class="hint">Regenerating reads each document, so it may take a minute.</span>
                 </div>
             </form>
 
             <a href="/documents" class="back-link">← Back to documents</a>
-            <a href="/perspective/blue" class="back-link" style="margin-left: 24px;">🤖 Blue's Perspective</a>
+            <a href="/perspective/blue" class="back-link" style="margin-left: 24px;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>Blue's Perspective</a>
         </div>
     </div>
 </body>
@@ -11325,12 +11331,15 @@ BLUE_PROFILE_HTML = """
         .nav { margin-top: 22px; }
         .nav a { color: var(--forest); text-decoration: none; font-weight: 500; margin-right: 22px; }
         .nav a:hover { color: var(--ink); text-decoration: underline; }
+        .ic { width:1em; height:1em; vertical-align:-0.12em; margin-right:.4em;
+              fill:none; stroke:currentColor; stroke-width:1.7;
+              stroke-linecap:round; stroke-linejoin:round; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🤖 Blue's Perspective</h1>
+            <h1><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>Blue's Perspective</h1>
             <p>Who Blue is — his own evolving character. This shapes how he speaks when he's being himself (not writing as you). Edit it freely; evolving builds on whatever's here.</p>
         </div>
         <div class="content">
@@ -11345,18 +11354,18 @@ BLUE_PROFILE_HTML = """
             <form method="POST" action="/perspective/blue">
                 <textarea name="profile" placeholder="Blue's sense of himself...">{{ profile }}</textarea>
                 <div class="actions">
-                    <button type="submit" name="action" value="save" class="btn btn-save">💾 Save edits</button>
+                    <button type="submit" name="action" value="save" class="btn btn-save"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>Save edits</button>
                     <button type="submit" name="action" value="evolve" class="btn btn-evolve"
                             onclick="return confirm('Evolve Blue\\'s perspective now from his recent experiences? This builds on the current text and can take a minute.');">
-                        🌱 Evolve now
+                        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22V11M12 11C12 7 9 4 4 4c0 5 3 7 8 7zM12 11c0-3 2-5 6-5 0 4-2 6-6 6z"/></svg>Evolve now
                     </button>
                     <span class="hint">Evolving reads his memories, recent days, and library — may take a minute.</span>
                 </div>
             </form>
 
             <div class="nav">
-                <a href="/perspective">🧠 My (Alex's) Perspective</a>
-                <a href="/documents">📚 Documents</a>
+                <a href="/perspective"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>My (Alex's) Perspective</a>
+                <a href="/documents"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>Documents</a>
             </div>
         </div>
     </div>
