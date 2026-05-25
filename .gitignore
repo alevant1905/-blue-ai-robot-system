@@ -122,7 +122,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Blue Robot Middleware specific
+# Blue AI Robot System specific
 # SQLite databases (contain personal data)
 data/*.db
 data/*.db-journal

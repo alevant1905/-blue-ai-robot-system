@@ -1,5 +1,5 @@
 """
-Blue Robot Middleware Package
+Blue AI Robot System Package
 =============================
 A modular home assistant with music, lights, email, vision, and more.
 

@@ -1,5 +1,5 @@
 """
-Blue Robot Middleware Proxy — ENHANCED VERSION v8
+Blue AI Robot System — ENHANCED VERSION v8
 ==================================================
 
 v8 ENHANCEMENTS (November 2025):
@@ -12411,7 +12411,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "version": "v8-enhanced",
-        "service": "Blue Robot Middleware",
+        "service": "Blue AI Robot System",
         "uptime_note": "Flask app running",
         "components": {
             "llm": {
@@ -12481,7 +12481,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Blue Middleware</title>
+        <title>Blue AI Robot System</title>
         <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             :root {{
@@ -12574,7 +12574,7 @@ def index():
     </head>
     <body>
         <div class="card">
-            <h1>Blue Middleware</h1>
+            <h1>Blue AI Robot System</h1>
             <p class="subtitle">Local AI assistant with music and light synchronization.</p>
 
             <div class="status">
@@ -12641,7 +12641,7 @@ def api_rag_stats():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🎵💡 Blue Robot Middleware - WITH MUSIC-LIGHT SYNC!")
+    print("🎵💡 Blue AI Robot System - WITH MUSIC-LIGHT SYNC!")
     print("🔧 FIXED: Music controls now work from ANY window!")
     print("=" * 60)
     print(f"[NET] Listening on: http://127.0.0.1:{PROXY_PORT}")
@@ -13113,7 +13113,7 @@ def clear_gmail_context():
 
 # ================== BEGIN: Browse Website Tool + PRIORITY-EXPLICIT (with browse) ==================
 """
-Adds a safe 'browse_website' tool and updates the middleware to understand and prioritize it.
+Adds a safe 'browse_website' tool and updates the system to understand and prioritize it.
 - Explicit commands ALWAYS win.
 - Smart auto-use (optional) may trigger for obvious "open/read this URL" cases.
 - Web search cannot override an explicit browse request.
@@ -13179,7 +13179,7 @@ if not _has_tool_named("browse_website"):
 # ---- Hook into execute_tool without breaking existing tools ----
 # REMOVED: Duplicate execute_tool override - browse_website is now handled in main execute_tool
 
-# ---- Extend existing middleware alias+scoring with browse ----
+# ---- Extend existing alias+scoring with browse ----
 try:
     KNOWN_TOOL_ALIASES
 except NameError:

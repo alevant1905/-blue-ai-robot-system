@@ -1,14 +1,14 @@
-# Blue Robot Middleware 🤖
+# Blue AI Robot System 🤖
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-11.0.0-green.svg)](https://github.com/yourusername/blue-robot-middleware)
+[![Version](https://img.shields.io/badge/version-11.0.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
 
-A comprehensive personal assistant middleware system with advanced AI capabilities, smart home integration, and productivity tools.
+A comprehensive personal assistant AI system with advanced capabilities, smart home integration, and productivity tools.
 
 ## 🌟 Features
 
-Blue Robot Middleware is a modular, extensible platform that provides:
+Blue AI Robot System is a modular, extensible platform that provides:
 
 ### 🎯 Personal Management
 - **Calendar & Events** - Full event management with conflict detection
@@ -68,8 +68,8 @@ pip --version
 
 1. **Clone the repository:**
 ```bash
-git clone https://github.com/yourusername/blue-robot-middleware.git
-cd blue-robot-middleware
+git clone https://github.com/alevant1905/blue-ai-robot-system.git
+cd blue-ai-robot-system
 ```
 
 2. **Install dependencies:**
@@ -138,7 +138,7 @@ Blue understands natural language:
 ## 🏗️ Architecture
 
 ```
-blue-robot-middleware/
+blue-ai-robot-system/
 ├── blue/                      # Core package
 │   ├── __init__.py           # Package exports
 │   ├── utils.py              # Utility functions
@@ -310,9 +310,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues:** [GitHub Issues](https://github.com/yourusername/blue-robot-middleware/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/yourusername/blue-robot-middleware/discussions)
-- **Documentation:** [Wiki](https://github.com/yourusername/blue-robot-middleware/wiki)
+- **Issues:** [GitHub Issues](https://github.com/alevant1905/blue-ai-robot-system/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/alevant1905/blue-ai-robot-system/discussions)
+- **Documentation:** [Wiki](https://github.com/alevant1905/blue-ai-robot-system/wiki)
 
 ## 📈 Stats
 
@@ -325,7 +325,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/blue-robot-middleware&type=Date)](https://star-history.com/#yourusername/blue-robot-middleware&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=alevant1905/blue-ai-robot-system&type=Date)](https://star-history.com/#alevant1905/blue-ai-robot-system&Date)
 
 ## 🔖 Version History
 

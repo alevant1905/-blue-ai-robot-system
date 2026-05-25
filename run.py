@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Blue Robot Middleware - Modular Entry Point
+Blue AI Robot System - Modular Entry Point
 ============================================
 
 This is the new entry point that uses the refactored modular components.
@@ -45,7 +45,7 @@ if script_dir not in sys.path:
 def print_banner():
     """Print startup banner."""
     print("=" * 60)
-    print("🤖 Blue Robot Middleware - MODULAR VERSION")
+    print("🤖 Blue AI Robot System - MODULAR VERSION")
     print("=" * 60)
 
 def check_modular_imports():
