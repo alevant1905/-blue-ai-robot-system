@@ -153,14 +153,40 @@ def _parse_clock(raw: str) -> Optional[time]:
 
 
 def _next_weekday(target_idx: int, base: datetime) -> date:
+    """The next FUTURE occurrence of a weekday (never today)."""
     days_ahead = (target_idx - base.weekday()) % 7
     if days_ahead == 0:
         days_ahead = 7
     return (base + timedelta(days=days_ahead)).date()
 
 
+def _prev_weekday(target_idx: int, base: datetime) -> date:
+    """The most recent PAST occurrence of a weekday (never today)."""
+    days_behind = (base.weekday() - target_idx) % 7
+    if days_behind == 0:
+        days_behind = 7
+    return (base - timedelta(days=days_behind)).date()
+
+
+def _this_weekday(target_idx: int, base: datetime) -> date:
+    """The weekday within the CURRENT (Mon–Sun) week — may be past or future."""
+    monday = base.date() - timedelta(days=base.weekday())
+    return monday + timedelta(days=target_idx)
+
+
+# Past/relative cues that, if they survive to the dateutil fallback, mean we
+# failed to resolve them — dateutil silently ignores these words and fabricates
+# a (usually wrong) date, so we refuse rather than guess.
+_PAST_CUE_RE = re.compile(r"\b(last|previous|prev|ago|yesterday)\b")
+
+
 def parse_when(raw: str, now: Optional[datetime] = None) -> datetime:
-    """Parse a natural-language time string to a datetime. Raises on failure."""
+    """Parse a natural-language time string to a datetime. Raises on failure.
+
+    Handles relative days (today/tomorrow/yesterday), qualified weekdays
+    (next/this/last <weekday>), "in N units", and explicit dates. Never
+    silently resolves a past-reference phrase to a future date.
+    """
     if not raw or not raw.strip():
         raise ValueError("empty time string")
     now = now or datetime.now()
@@ -193,34 +219,63 @@ def parse_when(raw: str, now: Optional[datetime] = None) -> datetime:
         if unit.startswith("week"):
             return now + timedelta(weeks=n)
 
-    m = re.match(r"^(today|tomorrow|tonight)(?:\s+at\s+(.+))?$", s)
+    m = re.match(r"^(today|tomorrow|tonight|yesterday)(?:\s+at\s+(.+))?$", s)
     if m:
         word = m.group(1)
         clock_raw = m.group(2)
         if word == "tonight":
             base = now.date()
             t = _parse_clock(clock_raw) if clock_raw else time(20, 0)
-        else:
-            base = now.date() if word == "today" else (now.date() + timedelta(days=1))
+        elif word == "today":
+            base = now.date()
+            t = _parse_clock(clock_raw) if clock_raw else time(9, 0)
+        elif word == "tomorrow":
+            base = now.date() + timedelta(days=1)
+            t = _parse_clock(clock_raw) if clock_raw else time(9, 0)
+        else:  # yesterday
+            base = now.date() - timedelta(days=1)
             t = _parse_clock(clock_raw) if clock_raw else time(9, 0)
         if t is None:
             raise ValueError(f"could not parse clock from {clock_raw!r}")
         return datetime.combine(base, t)
 
-    m = re.match(r"^(?:(?:on|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+(.+))?$", s)
+    # Qualified weekdays. Order in the alternation matters: multi-word
+    # qualifiers ("this coming") must precede their single-word prefixes.
+    m = re.match(
+        r"^(?:(last|previous|past|this coming|this|next|coming|on)\s+)?"
+        r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        r"(?:\s+at\s+(.+))?$",
+        s,
+    )
     if m:
-        day_name = m.group(1)
-        clock_raw = m.group(2)
+        qualifier = (m.group(1) or "").strip()
+        day_name = m.group(2)
+        clock_raw = m.group(3)
         target = _DAY_NAMES.index(day_name)
-        target_date = _next_weekday(target, now)
+        if qualifier in ("last", "previous", "past"):
+            target_date = _prev_weekday(target, now)
+        elif qualifier == "this":
+            target_date = _this_weekday(target, now)
+        else:  # "", "on", "next", "coming", "this coming" → upcoming
+            target_date = _next_weekday(target, now)
         t = _parse_clock(clock_raw) if clock_raw else time(9, 0)
         if t is None:
             raise ValueError(f"could not parse clock from {clock_raw!r}")
         return datetime.combine(target_date, t)
 
     if _HAS_DATEUTIL:
+        # If a past/relative cue is still present here, we didn't resolve it
+        # above — dateutil would ignore the word and invent a date. Refuse.
+        if _PAST_CUE_RE.search(s):
+            raise ValueError(
+                f"ambiguous past-relative time {raw!r}; give a specific date "
+                f"(e.g. 'May 18 at 10am')"
+            )
         try:
-            return _dateutil_parser.parse(raw, fuzzy=True, default=now)
+            # Default with zeroed minutes/seconds so a time that only states
+            # the hour ('10am') doesn't inherit the current minute.
+            default = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            return _dateutil_parser.parse(raw, fuzzy=True, default=default)
         except (ValueError, OverflowError) as e:
             raise ValueError(f"could not parse {raw!r}: {e}")
     raise ValueError(f"could not parse {raw!r}")
@@ -317,6 +372,31 @@ def occurrences_in_window(window_start: datetime, window_end: datetime,
     return out
 
 
+def archive_past_oneoffs(now: Optional[datetime] = None,
+                         grace_min: int = 120) -> int:
+    """Mark one-off reminders whose time has fully passed as completed.
+
+    Past one-offs that linger as completed=0 clutter the table and risk
+    resurfacing; archiving them keeps the schedule clean and is the backstop
+    that stops a stale reminder from ever being re-announced. Recurring rows
+    are exempt (their when_iso is a repeating anchor). The grace window is
+    wider than the email scanner's, so a just-due reminder still gets its
+    email before this archives it. Returns the number archived.
+    """
+    now = now or datetime.now()
+    cutoff = (now - timedelta(minutes=grace_min)).isoformat(timespec="minutes")
+    with _DB_LOCK, _conn() as c:
+        cur = c.execute(
+            "UPDATE reminders SET completed = 1 "
+            "WHERE completed = 0 "
+            "AND (recurrence IS NULL OR recurrence = '') "
+            "AND COALESCE(NULLIF(end_iso, ''), when_iso) < ?",
+            (cutoff,),
+        )
+        c.commit()
+        return cur.rowcount
+
+
 # ===== Calendar / Reminders =====
 
 class CalendarManager:
@@ -355,6 +435,30 @@ class CalendarManager:
         # Recurrence: only weekly is supported. A weekly row's when_iso is a
         # reference occurrence — the weekday and time repeat every week.
         recur = "weekly" if (recurrence and "week" in recurrence.lower()) else None
+
+        # Past-time guard: a one-off reminder resolved to the past would either
+        # fire instantly or never — almost always a parse/intent slip (e.g.
+        # "last Monday"). Don't silently schedule it; ask the user to confirm a
+        # future time. (Weekly rows legitimately anchor on a past reference
+        # date, so they're exempt.)
+        if recur != "weekly" and target < now - timedelta(minutes=1):
+            when_human = target.strftime("%A %b %d, %Y at %I:%M %p").lstrip("0")
+            return {
+                "success": False,
+                "past": True,
+                "parsed_when": when_iso,
+                "message": (
+                    f"That time — {when_human} — is in the past, so I didn't set "
+                    f"a reminder. Did you mean an upcoming date?"
+                ),
+                "_instruction": (
+                    f"The requested time, {when_human}, is already in the past. "
+                    f"Do NOT claim a reminder was set. Tell the user it's in the "
+                    f"past and ask which upcoming date/time they meant (for "
+                    f"example the next {target.strftime('%A')}), then call "
+                    f"create_reminder again with the corrected time."
+                ),
+            }
 
         # Duplicate guard: if an active reminder with the same user + title
         # at the same minute was created in the last 5 minutes, return that

@@ -26,7 +26,9 @@ from typing import Dict, List, Optional
 # same reminders DB without duplicating connection setup. occurrences_in_window
 # expands recurring reminders and applies durations — the single source of
 # truth for "what's on the schedule".
-from blue_tools_enhanced import _DB_PATH, _DB_LOCK, occurrences_in_window
+from blue_tools_enhanced import (
+    _DB_PATH, _DB_LOCK, occurrences_in_window, archive_past_oneoffs,
+)
 
 
 # ===== Config =====
@@ -292,6 +294,11 @@ def heartbeat_loop():
             sent = _scan_reminders_email(now)
             if sent:
                 print(f"[PROACTIVE] emailed {sent} reminder(s)", flush=True)
+            # Backstop: retire one-off reminders whose time has fully passed so
+            # they can't linger as 'active' or resurface in any view.
+            archived = archive_past_oneoffs(now)
+            if archived:
+                print(f"[PROACTIVE] archived {archived} past reminder(s)", flush=True)
         except Exception as e:
             print(f"[PROACTIVE] heartbeat error: {e}", flush=True)
         # Keep the Ohbot .ocf conversation file from growing unbounded —
