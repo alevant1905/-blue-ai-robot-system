@@ -1635,19 +1635,27 @@ class EnhancedMemorySystem:
         #    Old code dumped 6 random old messages, which was just noise.
         recent = self._get_relevant_recent_history(user_name, user_msg, limit=8)
         if recent:
+            now = datetime.now()
             history_lines = []
             for r in recent:
                 role = r["role"].upper()
                 content = (r["content"] or "")[:240]
-                history_lines.append(f"{role}: {content}")
+                age = self._humanize_age(r.get("ts"), now)
+                prefix = f"[{age}] " if age else ""
+                history_lines.append(f"{prefix}{role}: {content}")
 
             context_parts.append({
                 "role": "system",
                 "content": (
                     "<recent_history>\n"
-                    "Earlier in the conversation (or just before this session):\n"
+                    "Earlier turns, each tagged with how long ago it was said "
+                    "(compare against the current time in <now>):\n"
                     + "\n".join(history_lines) +
-                    "\n</recent_history>"
+                    "\n\nNote: statements about what the user is doing right then "
+                    "(\"I'm out for a walk\", \"making dinner\") were only true "
+                    "when said — if that was a while ago, it has likely ended, so "
+                    "don't assume it's still happening.\n"
+                    "</recent_history>"
                 ),
             })
 
@@ -2117,11 +2125,37 @@ class EnhancedMemorySystem:
             # so the surrounding flow still reads coherently.
             if r["role"] == "assistant" and self._is_assistant_refusal(content):
                 continue
-            out.append({"role": r["role"], "content": content})
+            out.append({"role": r["role"], "content": content,
+                        "ts": r["timestamp"]})
 
         # Reverse to chronological order (we ORDER BY id DESC above)
         out = list(reversed(out))
         return out[-limit:]
+
+    @staticmethod
+    def _humanize_age(ts_iso: Optional[str], now: Optional[datetime] = None) -> str:
+        """Turn a stored ISO timestamp into a relative age phrase so the model
+        knows WHEN something was said: 'just now', '20 min ago', 'an hour ago',
+        '3 hours ago', 'yesterday', '2 days ago'. Empty string if unparseable."""
+        if not ts_iso:
+            return ""
+        try:
+            ts = datetime.fromisoformat(ts_iso)
+        except (ValueError, TypeError):
+            return ""
+        now = now or datetime.now()
+        secs = (now - ts).total_seconds()
+        if secs < 60:
+            return "just now"
+        mins = secs / 60
+        if mins < 60:
+            return f"{int(round(mins))} min ago"
+        hrs = mins / 60
+        if hrs < 24:
+            h = int(round(hrs))
+            return "an hour ago" if h == 1 else f"{h} hours ago"
+        days = int(hrs // 24)
+        return "yesterday" if days == 1 else f"{days} days ago"
 
     # ------------------------------------------------------------------ Cleanup utilities
 
