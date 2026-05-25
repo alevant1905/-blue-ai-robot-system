@@ -19,6 +19,10 @@ class CalendarDetector(BaseDetector):
         if cancel:
             return [cancel]
 
+        reschedule = self._detect_reschedule(msg_lower)
+        if reschedule:
+            return [reschedule]
+
         create_event = self._detect_create_event(msg_lower)
         if create_event:
             intents.append(create_event)
@@ -72,6 +76,28 @@ class CalendarDetector(BaseDetector):
             reason='explicit cancellation request',
             extracted_params={},
         )
+
+    def _detect_reschedule(self, msg_lower: str) -> Optional[ToolIntent]:
+        # "move my 3pm to 4pm", "reschedule the meeting", "push the dentist to
+        # next week". Needs a reschedule verb near a schedule noun. Confidence
+        # stays just below the auto-execute threshold: the reminder_id has to
+        # come from a get_upcoming_reminders lookup first, so this only steers
+        # the model toward reschedule_reminder — it never fires on its own.
+        verbs = (
+            'reschedule', 'move my', 'move the', 'move that', 'push back',
+            'push the', 'push my', 'postpone', 'bump ', 'shift my',
+            'shift the', 'change the time', 'change my', 'rename the',
+        )
+        nouns = ('reminder', 'appointment', 'meeting', 'event', 'reservation')
+        if any(v in msg_lower for v in verbs) and any(n in msg_lower for n in nouns):
+            return ToolIntent(
+                tool_name='reschedule_reminder',
+                confidence=0.78,
+                priority=ToolPriority.MEDIUM,
+                reason='reschedule/edit request',
+                extracted_params={},
+            )
+        return None
 
     def _detect_create_event(self, msg_lower: str) -> Optional[ToolIntent]:
         # Past-tense gate — never fire on retrospective statements like

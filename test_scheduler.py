@@ -9,7 +9,10 @@ future date with the current minute leaked in — so a past meeting fired today.
 
 from datetime import datetime
 
-from blue_tools_enhanced import parse_when
+from blue_tools_enhanced import (
+    parse_when, parse_recurrence_phrase, parse_lead_minutes,
+    recurrence_label, _expand_row,
+)
 
 # A fixed reference instant so every case is deterministic: Monday 2026-05-25.
 NOW = datetime(2026, 5, 25, 13, 0)
@@ -40,6 +43,51 @@ EXPECTED = {
 MUST_REFUSE = ["last week sometime", "3 days ago", "a while ago"]
 
 
+# --- Recurrence phrase parsing ---
+RECUR = {
+    "every day": "daily", "every other day": "daily:2", "daily": "daily",
+    "every week": "weekly", "every 2 weeks": "weekly:2",
+    "every other week": "weekly:2", "every weekday": "weekdays",
+    "weekends": "weekends", "every monday and wednesday and friday": "dow:0,2,4",
+    "mon/wed/fri": "dow:0,2,4", "every monday": "dow:0", "monthly": "monthly",
+    "every 3 months": "monthly:3", "yearly": "yearly", "annually": "yearly",
+    "once": None, "": None,
+}
+
+# --- Lead-time parsing (minutes) ---
+LEADS = {
+    "30 minutes before": 30, "2 hours before": 120, "1 day before": 1440,
+    "a day before": 1440, "the day before": 1440, "1 week before": 10080,
+    "an hour before": 60, "15": 15, "": 0, "at start": 0,
+}
+
+
+def _row(when, rec="", end=None, until=None):
+    return {"id": 1, "user_name": "Alex", "title": "X", "description": "",
+            "when_iso": when, "end_iso": end, "recurrence": rec,
+            "remind_before_min": 0, "until_iso": until}
+
+
+def _starts(occs):
+    return [o["start"].strftime("%Y-%m-%d %H:%M") for o in occs]
+
+
+# Expansion expectations: (row, window_start, window_end) -> list of starts
+EXPAND = [
+    (_row("2026-05-01T09:00", "daily"), datetime(2026, 5, 10), datetime(2026, 5, 12, 23, 59),
+     ["2026-05-10 09:00", "2026-05-11 09:00", "2026-05-12 09:00"]),
+    (_row("2026-05-04T09:00", "weekly:2"), datetime(2026, 5, 1), datetime(2026, 6, 15, 23, 59),
+     ["2026-05-04 09:00", "2026-05-18 09:00", "2026-06-01 09:00", "2026-06-15 09:00"]),
+    (_row("2026-05-04T08:00", "dow:0,2,4"), datetime(2026, 5, 4), datetime(2026, 5, 10, 23, 59),
+     ["2026-05-04 08:00", "2026-05-06 08:00", "2026-05-08 08:00"]),
+    (_row("2026-01-15T12:00", "monthly"), datetime(2026, 5, 1), datetime(2026, 7, 31, 23, 59),
+     ["2026-05-15 12:00", "2026-06-15 12:00", "2026-07-15 12:00"]),
+    (_row("2026-05-04T09:00", "weekly", until="2026-05-31T23:59"), datetime(2026, 5, 1), datetime(2026, 7, 1),
+     ["2026-05-04 09:00", "2026-05-11 09:00", "2026-05-18 09:00", "2026-05-25 09:00"]),
+    (_row("2026-05-20T10:00", ""), datetime(2026, 6, 1), datetime(2026, 6, 30), []),
+]
+
+
 def run():
     failures = []
     for phrase, expected in EXPECTED.items():
@@ -55,6 +103,24 @@ def run():
             print(f"FAIL {phrase!r:32} -> expected refusal")
         except ValueError:
             print(f"OK   {phrase!r:32} -> refused")
+    for phrase, expected in RECUR.items():
+        got = parse_recurrence_phrase(phrase)
+        status = "OK  " if got == expected else "FAIL"
+        if got != expected:
+            failures.append((phrase, expected, got))
+        print(f"{status} recur {phrase!r:30} -> {got}")
+    for phrase, expected in LEADS.items():
+        got = parse_lead_minutes(phrase)
+        status = "OK  " if got == expected else "FAIL"
+        if got != expected:
+            failures.append((phrase, expected, got))
+        print(f"{status} lead  {phrase!r:30} -> {got}")
+    for row, ws, we, expected in EXPAND:
+        got = _starts(_expand_row(row, ws, we))
+        status = "OK  " if got == expected else "FAIL"
+        if got != expected:
+            failures.append((row["recurrence"] or "one-off", expected, got))
+        print(f"{status} expand {(row['recurrence'] or 'one-off'):12} -> {len(got)} occ")
     if failures:
         print(f"\n{len(failures)} FAILED")
         for ph, exp, got in failures:

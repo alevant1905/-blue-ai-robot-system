@@ -28,6 +28,7 @@ from typing import Dict, List, Optional
 # truth for "what's on the schedule".
 from blue_tools_enhanced import (
     _DB_PATH, _DB_LOCK, occurrences_in_window, archive_past_oneoffs,
+    due_occurrence_alerts, mark_occurrence_alerted,
 )
 
 
@@ -111,47 +112,38 @@ QUEUE = ProactiveQueue()
 
 # ===== Scanners =====
 
+def _voice_phrase(occ: Dict, now: datetime) -> str:
+    """Spoken heads-up for one due occurrence, phrased by time-until-start."""
+    who = occ["user_name"]
+    title = occ["title"]
+    start = occ["start"]
+    delta_min = int((start - now).total_seconds() // 60)
+    if delta_min <= 0:
+        return f"Heads up, {who} — '{title}' is starting now."
+    if delta_min == 1:
+        return f"Heads up, {who} — '{title}' in 1 minute."
+    if delta_min < 60:
+        return f"Heads up, {who} — '{title}' in {delta_min} minutes."
+    clock = start.strftime("%I:%M %p").lstrip("0")
+    if start.date() == now.date():
+        return f"Heads up, {who} — '{title}' today at {clock}."
+    if start.date() == (now.date() + timedelta(days=1)):
+        return f"Heads up, {who} — '{title}' tomorrow at {clock}."
+    return f"Heads up, {who} — '{title}' on {start.strftime('%A')} at {clock}."
+
+
 def _scan_reminders(now: datetime) -> int:
-    """Push alerts for any unfinished reminder due within the alert window.
-
-    Skips reminders that have already been delivered by email — otherwise
-    Blue would verbally announce a reminder that already landed in the
-    user's inbox.
+    """Queue spoken alerts for occurrences whose alert moment (start minus the
+    reminder's lead time) has just arrived. Works for one-off AND recurring
+    events, with per-occurrence dedup via the reminder_alerts ledger.
     """
-    cutoff = now + timedelta(minutes=ALERT_WINDOW_MIN)
-    with _DB_LOCK:
-        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10)
-        try:
-            c.row_factory = sqlite3.Row
-            rows = c.execute(
-                "SELECT id, user_name, title, when_iso "
-                "FROM reminders "
-                "WHERE completed = 0 AND alerted_email = 0 "
-                "AND (recurrence IS NULL OR recurrence = '') "
-                "AND when_iso <= ? AND when_iso >= ? "
-                "ORDER BY when_iso",
-                (cutoff.isoformat(timespec="minutes"),
-                 (now - timedelta(minutes=2)).isoformat(timespec="minutes")),
-            ).fetchall()
-        finally:
-            c.close()
-
     pushed = 0
-    for r in rows:
-        try:
-            when = datetime.fromisoformat(r["when_iso"])
-        except ValueError:
-            continue
-        delta_min = int((when - now).total_seconds() / 60)
-        title = r["title"]
-        who = r["user_name"]
-        if delta_min <= 0:
-            text = f"Heads up, {who} — '{title}' is starting now."
-        elif delta_min == 1:
-            text = f"Heads up, {who} — '{title}' in 1 minute."
-        else:
-            text = f"Heads up, {who} — '{title}' in {delta_min} minutes."
-        if QUEUE.push(text, key=f"reminder:{r['id']}"):
+    for occ in due_occurrence_alerts(now, channel="queue",
+                                     grace_min=ALERT_WINDOW_MIN):
+        text = _voice_phrase(occ, now)
+        key = f"reminder:{occ['id']}:{occ['occurrence_iso']}"
+        if QUEUE.push(text, key=key):
+            mark_occurrence_alerted(occ["id"], occ["occurrence_iso"], "queue")
             pushed += 1
     return pushed
 
@@ -227,50 +219,30 @@ def _send_reminder_email(row) -> bool:
 
 
 def _scan_reminders_email(now: datetime) -> int:
-    """Fire emails for any due, un-alerted reminder within the window."""
+    """Email each occurrence whose alert moment (start minus lead time) has
+    just arrived. Covers one-off AND recurring events; per-occurrence dedup
+    via the reminder_alerts ledger. Anything past the grace window is skipped
+    silently (no spam dump after the host was off)."""
     if not REMINDER_EMAIL:
         return 0
-    lower = now - timedelta(seconds=EMAIL_GRACE_SEC)
-    upper = now + timedelta(seconds=EMAIL_WINDOW_SEC)
-    with _DB_LOCK:
-        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10)
-        try:
-            c.row_factory = sqlite3.Row
-            rows = c.execute(
-                "SELECT id, user_name, title, when_iso, description "
-                "FROM reminders "
-                "WHERE completed = 0 AND alerted_email = 0 "
-                "AND (recurrence IS NULL OR recurrence = '') "
-                "AND when_iso <= ?",
-                (upper.isoformat(timespec="minutes"),),
-            ).fetchall()
-        finally:
-            c.close()
-
+    grace_min = max(1, EMAIL_GRACE_SEC // 60)
     sent = 0
-    for r in rows:
-        try:
-            when = datetime.fromisoformat(r["when_iso"])
-        except ValueError:
-            # Bad timestamp — mark alerted so we don't retry forever.
-            _mark_alerted(r["id"])
-            continue
-        if when < lower:
-            # Past the grace window — silently mark alerted to avoid a
-            # spam dump after server downtime.
-            _mark_alerted(r["id"])
-            print(
-                f"[REMINDER-EMAIL] stale (skip): id={r['id']} "
-                f"when={r['when_iso']}",
-                flush=True,
-            )
-            continue
-        if _send_reminder_email(r):
-            _mark_alerted(r["id"])
+    for occ in due_occurrence_alerts(now, channel="email", grace_min=grace_min):
+        # _send_reminder_email reads when_iso/user_name/title/description/id;
+        # use the concrete occurrence start so the email shows the right date.
+        row = {
+            "id": occ["id"],
+            "user_name": occ["user_name"],
+            "title": occ["title"],
+            "description": occ["description"],
+            "when_iso": occ["occurrence_iso"],
+        }
+        if _send_reminder_email(row):
+            mark_occurrence_alerted(occ["id"], occ["occurrence_iso"], "email")
             sent += 1
             print(
-                f"[REMINDER-EMAIL] sent: id={r['id']} '{r['title']}' -> "
-                f"{REMINDER_EMAIL}",
+                f"[REMINDER-EMAIL] sent: id={occ['id']} '{occ['title']}' "
+                f"@ {occ['occurrence_iso']} -> {REMINDER_EMAIL}",
                 flush=True,
             )
     return sent

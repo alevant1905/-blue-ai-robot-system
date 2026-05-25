@@ -21,6 +21,10 @@ from typing import Any, Dict, List, Optional
 try:
     from dateutil import parser as _dateutil_parser
     from dateutil.relativedelta import relativedelta as _relativedelta
+    from dateutil.rrule import (
+        rrule as _rrule, DAILY as _FREQ_DAILY, WEEKLY as _FREQ_WEEKLY,
+        MONTHLY as _FREQ_MONTHLY, YEARLY as _FREQ_YEARLY,
+    )
     _HAS_DATEUTIL = True
 except ImportError:
     _HAS_DATEUTIL = False
@@ -70,6 +74,18 @@ def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS reminders_user_when
                 ON reminders(user_name, when_iso);
 
+            -- Per-occurrence alert ledger. A one-off reminder alerts once; a
+            -- recurring reminder alerts once PER occurrence, so a row-level
+            -- flag isn't enough. (reminder_id, occurrence_iso, channel) is the
+            -- idempotency key the heartbeat checks before firing.
+            CREATE TABLE IF NOT EXISTS reminder_alerts (
+                reminder_id INTEGER NOT NULL,
+                occurrence_iso TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                alerted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (reminder_id, occurrence_iso, channel)
+            );
+
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_name TEXT NOT NULL,
@@ -115,6 +131,10 @@ def _migrate_reminders_columns() -> None:
         "ALTER TABLE reminders ADD COLUMN alerted_email INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE reminders ADD COLUMN end_iso TEXT",
         "ALTER TABLE reminders ADD COLUMN recurrence TEXT",
+        # Lead time: minutes BEFORE the start to fire the alert (0 = at start).
+        "ALTER TABLE reminders ADD COLUMN remind_before_min INTEGER NOT NULL DEFAULT 0",
+        # Optional end date for a recurrence ('every Monday until 2026-12-31').
+        "ALTER TABLE reminders ADD COLUMN until_iso TEXT",
     ):
         try:
             with _DB_LOCK, _conn() as c:
@@ -281,9 +301,85 @@ def parse_when(raw: str, now: Optional[datetime] = None) -> datetime:
     raise ValueError(f"could not parse {raw!r}")
 
 
-# ===== Reminder occurrence expansion =====
+# ===== Recurrence model =====
+# A reminder's `recurrence` column holds a small canonical string:
+#   ""/None        one-off
+#   "daily"        every day            "daily:2"   every 2 days
+#   "weekly"       every week (on the reference weekday)   "weekly:2" biweekly
+#   "monthly"      every month (same day-of-month)         "monthly:3" quarterly
+#   "yearly"       every year
+#   "weekdays"     Mon–Fri              "weekends"  Sat+Sun
+#   "dow:0,2,4"    specific weekdays (0=Mon … 6=Sun); optional ":N" week interval
+# `until_iso` (separate column) optionally bounds when the recurrence stops.
 
-_WEEKLY = "weekly"
+_WEEKLY = "weekly"  # legacy value still stored on older rows
+
+_WEEKDAY_NAME = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                 "Friday", "Saturday", "Sunday"]
+_WEEKDAY_IDX = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2, "weds": 2, "thursday": 3, "thu": 3,
+    "thurs": 3, "thur": 3, "friday": 4, "fri": 4, "saturday": 5,
+    "sat": 5, "sunday": 6, "sun": 6,
+}
+
+
+def _parse_recurrence(rec: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Normalize a recurrence string into a spec, or None for one-off.
+
+    spec = {freq: 'daily'|'weekly'|'monthly'|'yearly', interval: int,
+            byweekday: list[int] | None}
+    Unknown strings return None (treated as one-off) rather than raising.
+    """
+    if not rec:
+        return None
+    r = rec.strip().lower()
+    if r in ("", "none", "once", "one-off", "oneoff", "no", "never"):
+        return None
+    if r in ("weekdays", "weekday"):
+        return {"freq": "weekly", "interval": 1, "byweekday": [0, 1, 2, 3, 4]}
+    if r in ("weekends", "weekend"):
+        return {"freq": "weekly", "interval": 1, "byweekday": [5, 6]}
+    if r in ("annually", "annual"):
+        return {"freq": "yearly", "interval": 1, "byweekday": None}
+    m = re.match(r"^(daily|weekly|monthly|yearly)(?::(\d+))?$", r)
+    if m:
+        return {"freq": m.group(1),
+                "interval": max(1, int(m.group(2) or 1)),
+                "byweekday": None}
+    m = re.match(r"^dow:([0-6](?:,[0-6])*)(?::(\d+))?$", r)
+    if m:
+        days = sorted({int(x) for x in m.group(1).split(",")})
+        return {"freq": "weekly",
+                "interval": max(1, int(m.group(2) or 1)),
+                "byweekday": days}
+    return None
+
+
+def recurrence_label(rec: Optional[str], ref_start: Optional[datetime] = None) -> str:
+    """Human phrase for a recurrence string, e.g. 'every Monday', 'every 2
+    weeks', 'every weekday', 'monthly'. '' for one-off."""
+    spec = _parse_recurrence(rec)
+    if spec is None:
+        return ""
+    n = spec["interval"]
+    freq = spec["freq"]
+    byday = spec["byweekday"]
+    if byday == [0, 1, 2, 3, 4]:
+        return "every weekday"
+    if byday == [5, 6]:
+        return "every weekend"
+    if freq == "weekly" and byday:
+        names = ", ".join(_WEEKDAY_NAME[d] for d in byday)
+        every = "every week" if n == 1 else f"every {n} weeks"
+        return f"{every} on {names}"
+    unit = {"daily": "day", "weekly": "week", "monthly": "month", "yearly": "year"}[freq]
+    if n == 1:
+        if freq == "weekly" and ref_start is not None:
+            return f"every {_WEEKDAY_NAME[ref_start.weekday()]}"
+        return {"daily": "every day", "weekly": "every week",
+                "monthly": "every month", "yearly": "every year"}[freq]
+    return f"every {n} {unit}s"
 
 
 def _intersects(start_dt: datetime, end_dt: Optional[datetime],
@@ -295,6 +391,8 @@ def _intersects(start_dt: datetime, end_dt: Optional[datetime],
 
 def _occurrence(row, start_dt: datetime, end_dt: Optional[datetime],
                 recurring: bool) -> Dict[str, Any]:
+    # row may be a sqlite Row (no .get); pull optional cols defensively.
+    keys = row.keys() if hasattr(row, "keys") else []
     return {
         "id": row["id"],
         "user_name": row["user_name"],
@@ -303,14 +401,22 @@ def _occurrence(row, start_dt: datetime, end_dt: Optional[datetime],
         "start": start_dt,
         "end": end_dt,
         "recurring": recurring,
+        "recurrence": (row["recurrence"] if "recurrence" in keys else None) or "",
+        "remind_before_min": (row["remind_before_min"]
+                              if "remind_before_min" in keys else 0) or 0,
     }
+
+
+def _freq_const(freq: str):
+    return {"daily": _FREQ_DAILY, "weekly": _FREQ_WEEKLY,
+            "monthly": _FREQ_MONTHLY, "yearly": _FREQ_YEARLY}[freq]
 
 
 def _expand_row(row, window_start: datetime,
                 window_end: datetime) -> List[Dict[str, Any]]:
     """Expand one reminder row into the concrete occurrences that fall in
-    [window_start, window_end]. One-shot rows yield at most one; weekly rows
-    yield one per matching weekday in the window."""
+    [window_start, window_end]. One-shot rows yield at most one; recurring
+    rows yield every occurrence in the window (via dateutil.rrule)."""
     try:
         ref_start = datetime.fromisoformat(row["when_iso"])
     except (ValueError, TypeError):
@@ -322,23 +428,51 @@ def _expand_row(row, window_start: datetime,
         except (ValueError, TypeError):
             ref_end = None
     duration = (ref_end - ref_start) if (ref_end and ref_end > ref_start) else None
-    recurrence = (row["recurrence"] or "").strip().lower()
 
-    occurrences: List[Dict[str, Any]] = []
-    if recurrence == _WEEKLY:
-        day = window_start.date()
-        last = window_end.date()
-        while day <= last:
-            if day.weekday() == ref_start.weekday():
-                occ_start = datetime.combine(day, ref_start.time())
-                occ_end = (occ_start + duration) if duration else None
-                if _intersects(occ_start, occ_end, window_start, window_end):
-                    occurrences.append(_occurrence(row, occ_start, occ_end, True))
-            day += timedelta(days=1)
-    else:
+    spec = _parse_recurrence(row["recurrence"])
+    if spec is None:
         occ_end = (ref_start + duration) if duration else None
         if _intersects(ref_start, occ_end, window_start, window_end):
-            occurrences.append(_occurrence(row, ref_start, occ_end, False))
+            return [_occurrence(row, ref_start, occ_end, False)]
+        return []
+
+    # Recurrence end bound (optional).
+    until_dt = None
+    keys = row.keys() if hasattr(row, "keys") else []
+    if "until_iso" in keys and row["until_iso"]:
+        try:
+            until_dt = datetime.fromisoformat(row["until_iso"])
+        except (ValueError, TypeError):
+            until_dt = None
+
+    occurrences: List[Dict[str, Any]] = []
+    if _HAS_DATEUTIL:
+        kwargs: Dict[str, Any] = {"dtstart": ref_start, "interval": spec["interval"]}
+        if spec["byweekday"] is not None:
+            kwargs["byweekday"] = spec["byweekday"]
+        if until_dt is not None:
+            kwargs["until"] = until_dt
+        rule = _rrule(_freq_const(spec["freq"]), **kwargs)
+        # Start scanning a duration earlier so a long event that began before
+        # the window but still overlaps is included.
+        after = window_start - (duration or timedelta()) - timedelta(seconds=1)
+        for occ_start in rule.between(after, window_end, inc=True):
+            occ_end = (occ_start + duration) if duration else None
+            if _intersects(occ_start, occ_end, window_start, window_end):
+                occurrences.append(_occurrence(row, occ_start, occ_end, True))
+    else:
+        # Minimal fallback (weekly only) if dateutil is unavailable.
+        if spec["freq"] == "weekly":
+            wanted = spec["byweekday"] or [ref_start.weekday()]
+            day = window_start.date()
+            last = window_end.date()
+            while day <= last:
+                if day.weekday() in wanted:
+                    occ_start = datetime.combine(day, ref_start.time())
+                    occ_end = (occ_start + duration) if duration else None
+                    if _intersects(occ_start, occ_end, window_start, window_end):
+                        occurrences.append(_occurrence(row, occ_start, occ_end, True))
+                day += timedelta(days=1)
     return occurrences
 
 
@@ -347,12 +481,12 @@ def occurrences_in_window(window_start: datetime, window_end: datetime,
     """Concrete reminder occurrences overlapping [window_start, window_end],
     earliest first.
 
-    One-shot reminders appear once; weekly recurring reminders are expanded
-    to every matching weekday in the window. Each occurrence is a dict with
-    datetime `start`, datetime-or-None `end`, plus id/title/description/
-    user_name/recurring. This is the single source of truth for "what's on
-    the schedule" — the daily briefing, the system-prompt schedule block,
-    and the get_upcoming_reminders tool all build on it.
+    One-shot reminders appear once; recurring reminders are expanded to every
+    occurrence in the window. Each occurrence is a dict with datetime `start`,
+    datetime-or-None `end`, plus id/title/description/user_name/recurring/
+    recurrence/remind_before_min. This is the single source of truth for
+    "what's on the schedule" — the daily briefing, the system-prompt schedule
+    block, the calendar GUI, and get_upcoming_reminders all build on it.
     """
     clause = "WHERE completed = 0"
     params: List[Any] = []
@@ -362,7 +496,7 @@ def occurrences_in_window(window_start: datetime, window_end: datetime,
     with _DB_LOCK, _conn() as c:
         rows = c.execute(
             "SELECT id, user_name, title, description, when_iso, end_iso, "
-            "recurrence FROM reminders " + clause,
+            "recurrence, remind_before_min, until_iso FROM reminders " + clause,
             params,
         ).fetchall()
     out: List[Dict[str, Any]] = []
@@ -370,6 +504,130 @@ def occurrences_in_window(window_start: datetime, window_end: datetime,
         out.extend(_expand_row(row, window_start, window_end))
     out.sort(key=lambda o: o["start"])
     return out
+
+
+# ===== Natural-language recurrence + lead-time parsing =====
+
+def parse_recurrence_phrase(text: Optional[str]) -> Optional[str]:
+    """Map a natural-language recurrence phrase to a canonical recurrence
+    string (see the recurrence model above). Returns None for one-off / no
+    recurrence. Tolerant: unknown phrasing yields None rather than raising."""
+    if not text:
+        return None
+    t = text.strip().lower()
+    if t in ("", "none", "once", "one time", "one-time", "no", "never", "no repeat"):
+        return None
+
+    # Explicit weekday sets, e.g. "every monday and wednesday", "mon/wed/fri".
+    found_days = []
+    for name, idx in _WEEKDAY_IDX.items():
+        # word-ish boundary so 'sun' doesn't match 'sunday' twice etc.
+        if re.search(rf"\b{name}\b", t):
+            if idx not in found_days:
+                found_days.append(idx)
+
+    if "weekday" in t and "every" in t or t in ("weekdays", "every weekday"):
+        return "weekdays"
+    if "weekend" in t:
+        return "weekends"
+
+    # Explicit weekday SET, e.g. "every monday and wednesday", "mon/wed/fri".
+    if len(found_days) >= 2 or (found_days and ("and" in t or "," in t or "/" in t)):
+        wk = 1
+        mo = re.search(r"every\s+(other|\d+)\s*weeks?", t)
+        if mo:
+            wk = 2 if mo.group(1) == "other" else max(1, int(mo.group(1)))
+        days = ",".join(str(d) for d in sorted(set(found_days)))
+        return f"dow:{days}" + (f":{wk}" if wk > 1 else "")
+
+    # General "every [other|N] <unit>" (covers "every other day", "every 2
+    # weeks", "every 3 months", etc.).
+    interval = 1
+    unit = None
+    m = re.search(r"every\s+(other\s+|\d+\s*)?(day|week|month|year)s?\b", t)
+    if m:
+        q = (m.group(1) or "").strip()
+        if q == "other":
+            interval = 2
+        elif q.isdigit():
+            interval = max(1, int(q))
+        unit = m.group(2)
+    if unit is None:
+        if re.search(r"\bdaily\b", t):
+            unit = "day"
+        elif re.search(r"\bweekly\b", t):
+            unit = "week"
+        elif re.search(r"\bmonthly\b", t):
+            unit = "month"
+        elif re.search(r"\b(yearly|annually|annual)\b", t):
+            unit = "year"
+    if unit:
+        base = {"day": "daily", "week": "weekly",
+                "month": "monthly", "year": "yearly"}[unit]
+        return base + (f":{interval}" if interval > 1 else "")
+
+    # A lone weekday with "every" → weekly on that day.
+    if found_days and "every" in t:
+        return f"dow:{found_days[0]}"
+    return None
+
+
+def normalize_recurrence(text: Optional[str]) -> Optional[str]:
+    """Accept either an already-canonical recurrence string (from the GUI) or
+    a natural-language phrase (from the LLM) and return the canonical form, or
+    None for one-off."""
+    if not text:
+        return None
+    if _parse_recurrence(text) is not None:
+        return text.strip().lower()
+    return parse_recurrence_phrase(text)
+
+
+def parse_lead_minutes(text: Optional[str]) -> int:
+    """Parse a 'remind me N before' lead time to minutes. 0 if none/at-start.
+
+    Accepts '30 minutes before', '2 hours before', '1 day before', 'a day
+    before', '1 week before', 'the day before', etc. Also tolerates a bare
+    integer (interpreted as minutes)."""
+    if text is None:
+        return 0
+    if isinstance(text, (int, float)):
+        return max(0, int(text))
+    t = str(text).strip().lower()
+    if not t or t in ("0", "at start", "at time", "on time", "none"):
+        return 0
+    if t.isdigit():
+        return int(t)
+    units = {"minute": 1, "min": 1, "hour": 60, "hr": 60, "day": 1440,
+             "week": 10080}
+    m = re.search(r"(\d+)\s*(minute|min|hour|hr|day|week)s?", t)
+    if m:
+        return int(m.group(1)) * units[m.group(2)]
+    # Word quantities: "a/the day before", "an hour before".
+    if re.search(r"\b(a|an|the)\s+day\b", t):
+        return 1440
+    if re.search(r"\b(a|an|the)\s+(hour|hr)\b", t):
+        return 60
+    if re.search(r"\b(a|an|the)\s+week\b", t):
+        return 10080
+    return 0
+
+
+def _humanize_lead(minutes: int) -> str:
+    """Minutes → 'the right phrase' for confirmations: '30 minutes', '2 hours',
+    '1 day', '1 week'."""
+    if minutes <= 0:
+        return ""
+    if minutes % 10080 == 0:
+        n = minutes // 10080
+        return f"{n} week" + ("s" if n > 1 else "")
+    if minutes % 1440 == 0:
+        n = minutes // 1440
+        return f"{n} day" + ("s" if n > 1 else "")
+    if minutes % 60 == 0:
+        n = minutes // 60
+        return f"{n} hour" + ("s" if n > 1 else "")
+    return f"{minutes} minute" + ("s" if minutes != 1 else "")
 
 
 def archive_past_oneoffs(now: Optional[datetime] = None,
@@ -397,6 +655,63 @@ def archive_past_oneoffs(now: Optional[datetime] = None,
         return cur.rowcount
 
 
+# ===== Per-occurrence alert ledger =====
+# Used by the proactive heartbeat so a recurring event alerts once per
+# occurrence (not once ever) and a lead time fires at start - lead.
+
+def is_occurrence_alerted(reminder_id: int, occurrence_iso: str,
+                          channel: str) -> bool:
+    with _DB_LOCK, _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM reminder_alerts "
+            "WHERE reminder_id = ? AND occurrence_iso = ? AND channel = ?",
+            (reminder_id, occurrence_iso, channel),
+        ).fetchone()
+    return row is not None
+
+
+def mark_occurrence_alerted(reminder_id: int, occurrence_iso: str,
+                            channel: str) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO reminder_alerts "
+            "(reminder_id, occurrence_iso, channel) VALUES (?, ?, ?)",
+            (reminder_id, occurrence_iso, channel),
+        )
+        c.commit()
+
+
+def due_occurrence_alerts(now: Optional[datetime] = None, *, channel: str,
+                          grace_min: int = 10,
+                          horizon_days: int = 8) -> List[Dict[str, Any]]:
+    """Occurrences whose alert moment (start - lead) has just arrived and that
+    haven't been alerted yet on `channel`.
+
+    The grace window absorbs heartbeat gaps and brief downtime; anything whose
+    alert moment is older than that is skipped (no spam after the host was
+    off), and since it's never recorded it simply won't fire. Lead times up to
+    a week are covered by expanding `horizon_days` ahead.
+    """
+    now = now or datetime.now()
+    lower = now - timedelta(minutes=grace_min)
+    occs = occurrences_in_window(
+        now - timedelta(minutes=grace_min + 2),
+        now + timedelta(days=horizon_days),
+    )
+    due: List[Dict[str, Any]] = []
+    for o in occs:
+        lead = int(o.get("remind_before_min") or 0)
+        alert_at = o["start"] - timedelta(minutes=lead)
+        if lower <= alert_at <= now:
+            occ_iso = o["start"].isoformat(timespec="minutes")
+            if not is_occurrence_alerted(o["id"], occ_iso, channel):
+                o = dict(o)
+                o["occurrence_iso"] = occ_iso
+                o["alert_at"] = alert_at
+                due.append(o)
+    return due
+
+
 # ===== Calendar / Reminders =====
 
 class CalendarManager:
@@ -405,7 +720,8 @@ class CalendarManager:
     @staticmethod
     def create_reminder(user_name: str, title: str, when: str,
                         description: str = "", end: str = "",
-                        recurrence: str = "") -> Dict[str, Any]:
+                        recurrence: str = "", remind_before: str = "",
+                        until: str = "") -> Dict[str, Any]:
         try:
             target = parse_when(when)
         except ValueError as e:
@@ -432,9 +748,22 @@ class CalendarManager:
             if end_dt and end_dt > target:
                 end_iso = end_dt.isoformat(timespec="minutes")
 
-        # Recurrence: only weekly is supported. A weekly row's when_iso is a
-        # reference occurrence — the weekday and time repeat every week.
-        recur = "weekly" if (recurrence and "week" in recurrence.lower()) else None
+        # Recurrence: canonical string (daily/weekly/monthly/yearly/intervals/
+        # weekday-sets) or None. Accepts either a natural-language phrase
+        # ("every other Monday") or an already-canonical value from the GUI.
+        recur = normalize_recurrence(recurrence)
+        # Lead time: fire the alert this many minutes before the start.
+        lead_min = parse_lead_minutes(remind_before)
+        # Optional recurrence end date. Store as end-of-that-day so the final
+        # occurrence on that date is still included.
+        until_iso = None
+        if until and str(until).strip():
+            try:
+                _u = parse_when(until)
+                until_iso = _u.replace(hour=23, minute=59, second=0,
+                                       microsecond=0).isoformat(timespec="minutes")
+            except ValueError:
+                until_iso = None
 
         # Past-time guard: a one-off reminder resolved to the past would either
         # fire instantly or never — almost always a parse/intent slip (e.g.
@@ -497,12 +826,17 @@ class CalendarManager:
         with _DB_LOCK, _conn() as c:
             cur = c.execute(
                 "INSERT INTO reminders "
-                "(user_name, title, when_iso, description, end_iso, recurrence) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(user_name, title, when_iso, description, end_iso, recurrence, "
+                "remind_before_min, until_iso) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (user_name, title, when_iso, description or None,
-                 end_iso, recur),
+                 end_iso, recur, lead_min, until_iso),
             )
             rid = cur.lastrowid
+
+        lead_phrase = ""
+        if lead_min:
+            lead_phrase = " (reminding you " + _humanize_lead(lead_min) + " before)"
 
         end_clock = ""
         if end_iso:
@@ -510,11 +844,16 @@ class CalendarManager:
                 "%I:%M %p").lstrip("0")
 
         # Recurring events repeat, so a one-time date would be misleading —
-        # confirm them as "every <weekday>".
-        if recur == "weekly":
-            weekday = target.strftime("%A")
+        # confirm them with the repeat phrase ("every Monday", "every weekday",
+        # "every 2 weeks", etc.).
+        if recur:
+            label = recurrence_label(recur, target)
             clock_str = target.strftime("%I:%M %p").lstrip("0")
-            when_human = f"every {weekday} at {clock_str}{end_clock}"
+            until_phrase = ""
+            if until_iso:
+                until_phrase = " until " + datetime.fromisoformat(
+                    until_iso).strftime("%b %d, %Y").lstrip("0")
+            when_human = f"{label} at {clock_str}{end_clock}{until_phrase}{lead_phrase}"
             return {
                 "success": True,
                 "message": (
@@ -524,11 +863,14 @@ class CalendarManager:
                 "reminder_id": rid,
                 "when": when_iso,
                 "end": end_iso,
-                "recurrence": "weekly",
+                "recurrence": recur,
+                "recurrence_human": label,
+                "remind_before_min": lead_min,
+                "until": until_iso,
                 "when_human": when_human,
                 "_instruction": (
                     f"Confirm this back to the user: '{title}' is now set to "
-                    f"repeat {when_human}. Make clear it recurs every week."
+                    f"repeat {when_human}. Make clear how often it recurs."
                 ),
             }
 
@@ -556,13 +898,14 @@ class CalendarManager:
             "success": True,
             "message": (
                 f"Reminder set for {user_name}: '{title}' on {when_human} "
-                f"({rel_day})."
+                f"({rel_day}){lead_phrase}."
             ),
             "reminder_id": rid,
             "when": when_iso,
             "end": end_iso,
             "when_human": when_human,
             "relative_day": rel_day,
+            "remind_before_min": lead_min,
             "minutes_from_now": int(delta.total_seconds() // 60),
             "_instruction": (
                 "Confirm this reminder back to the user with the EXPLICIT day "
@@ -692,6 +1035,149 @@ class CalendarManager:
             "reminder_id": rid,
             "message": f"Cancelled '{rows[0]['title']}'",
         }
+
+    @staticmethod
+    def update_reminder(reminder_id: int, title: Optional[str] = None,
+                        when: Optional[str] = None, end: Optional[str] = None,
+                        description: Optional[str] = None,
+                        recurrence: Optional[str] = None,
+                        remind_before: Optional[str] = None,
+                        until: Optional[str] = None) -> Dict[str, Any]:
+        """Edit / reschedule a reminder. Only the fields you pass are changed.
+        recurrence='none' makes a repeating event one-off; end='' clears the
+        duration; until='' clears the recurrence end. Changing the timing
+        re-arms alerts so the new schedule notifies again."""
+        with _DB_LOCK, _conn() as c:
+            row = c.execute("SELECT * FROM reminders WHERE id = ?",
+                            (reminder_id,)).fetchone()
+        if row is None:
+            return {"success": False, "message": f"No reminder with id {reminder_id}"}
+
+        sets: List[str] = []
+        params: List[Any] = []
+        rearm = False
+        try:
+            base_date = datetime.fromisoformat(row["when_iso"]).date()
+        except Exception:
+            base_date = datetime.now().date()
+
+        if when is not None and str(when).strip():
+            try:
+                tgt = parse_when(when)
+            except ValueError as e:
+                return {"success": False,
+                        "message": f"Could not parse time '{when}': {e}"}
+            sets.append("when_iso = ?")
+            params.append(tgt.isoformat(timespec="minutes"))
+            base_date = tgt.date()
+            rearm = True
+        if title is not None:
+            sets.append("title = ?")
+            params.append(title)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description or None)
+        if end is not None:
+            if str(end).strip():
+                t = _parse_clock(str(end).strip())
+                end_dt = datetime.combine(base_date, t) if t is not None else None
+                if end_dt is None:
+                    try:
+                        end_dt = parse_when(end)
+                    except ValueError:
+                        end_dt = None
+                sets.append("end_iso = ?")
+                params.append(end_dt.isoformat(timespec="minutes") if end_dt else None)
+            else:
+                sets.append("end_iso = ?")
+                params.append(None)
+        if recurrence is not None:
+            sets.append("recurrence = ?")
+            params.append(normalize_recurrence(recurrence))
+            rearm = True
+        if remind_before is not None:
+            sets.append("remind_before_min = ?")
+            params.append(parse_lead_minutes(remind_before))
+            rearm = True
+        if until is not None:
+            if str(until).strip():
+                try:
+                    u = parse_when(until).replace(hour=23, minute=59, second=0,
+                                                  microsecond=0)
+                    sets.append("until_iso = ?")
+                    params.append(u.isoformat(timespec="minutes"))
+                except ValueError:
+                    sets.append("until_iso = ?")
+                    params.append(None)
+            else:
+                sets.append("until_iso = ?")
+                params.append(None)
+
+        if not sets:
+            return {"success": False, "message": "Nothing to update"}
+        if rearm:
+            sets.append("alerted_email = 0")
+        params.append(reminder_id)
+        with _DB_LOCK, _conn() as c:
+            cur = c.execute(
+                f"UPDATE reminders SET {', '.join(sets)} WHERE id = ?", params)
+            if rearm:
+                c.execute("DELETE FROM reminder_alerts WHERE reminder_id = ?",
+                          (reminder_id,))
+            c.commit()
+            changed = cur.rowcount
+        if changed == 0:
+            return {"success": False, "message": f"No reminder with id {reminder_id}"}
+        return {"success": True, "reminder_id": reminder_id,
+                "message": f"Updated reminder {reminder_id}."}
+
+    @staticmethod
+    def delete_reminder(reminder_id: int) -> Dict[str, Any]:
+        """Permanently delete a reminder (and its alert ledger). Unlike cancel
+        (which marks completed), this removes the row entirely — used by the
+        calendar GUI's delete action."""
+        with _DB_LOCK, _conn() as c:
+            cur = c.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+            c.execute("DELETE FROM reminder_alerts WHERE reminder_id = ?",
+                      (reminder_id,))
+            c.commit()
+            changed = cur.rowcount
+        if changed == 0:
+            return {"success": False, "message": f"No reminder with id {reminder_id}"}
+        return {"success": True, "message": f"Deleted reminder {reminder_id}."}
+
+    @staticmethod
+    def list_events(start: str, end: str,
+                    user_name: Optional[str] = None) -> Dict[str, Any]:
+        """Occurrences between start and end (ISO or natural language) for the
+        calendar GUI. Recurring events are expanded to concrete occurrences."""
+        def _coerce(s, default):
+            if not s:
+                return default
+            try:
+                return datetime.fromisoformat(s)
+            except (ValueError, TypeError):
+                try:
+                    return parse_when(s)
+                except ValueError:
+                    return default
+        now = datetime.now()
+        ws = _coerce(start, now)
+        we = _coerce(end, ws + timedelta(days=31))
+        events = []
+        for o in occurrences_in_window(ws, we, user_name=user_name):
+            events.append({
+                "id": o["id"],
+                "title": o["title"],
+                "start": o["start"].isoformat(timespec="minutes"),
+                "end": o["end"].isoformat(timespec="minutes") if o["end"] else None,
+                "description": o["description"],
+                "recurring": o["recurring"],
+                "recurrence": o.get("recurrence") or "",
+                "recurrence_human": recurrence_label(o.get("recurrence"), o["start"]),
+                "remind_before_min": o.get("remind_before_min") or 0,
+            })
+        return {"success": True, "count": len(events), "events": events}
 
 
 # ===== Tasks =====
