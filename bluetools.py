@@ -9771,6 +9771,23 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     schedule_block = _build_upcoming_schedule_block()
     schedule_section = f"{schedule_block}\n\n" if schedule_block else ""
 
+    # Tell Blue, accurately, that it CAN recognize faces — but only of people
+    # enrolled with a reference photo. Without this, the model improvises and
+    # flatly denies having any facial recognition. Phrased to avoid the opposite
+    # error (claiming to recognize a face that was never enrolled): the actual
+    # "who you see" ground truth is injected at camera-capture time.
+    face_capability = ""
+    if FACE_RECOGNITION_AVAILABLE:
+        face_capability = (
+            "FACE RECOGNITION: You CAN recognize people by face through your "
+            "camera — but only people who have been introduced to you with a "
+            "reference photo (added on your Visual Memory page). When you take a "
+            "camera picture, you are told who you recognize. So don't say you "
+            "lack facial recognition. If someone asks whether you recognize them "
+            "and no photo has been added for them, explain that you can once "
+            "they add one — never claim to recognize a face you were never shown.\n"
+        )
+
     system_msg = {
         "role": "system",
         "content": (
@@ -9781,6 +9798,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{conversational_guidance}"
             f"{anti_repetition_context}"
             f"{expertise_section}"
+            f"{face_capability}"
             "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
             "light show → music_visualizer; tool results are REAL, use them immediately.\n"
             "NO FAKE ACTIONS: Never say you've set a reminder, added an event, "
