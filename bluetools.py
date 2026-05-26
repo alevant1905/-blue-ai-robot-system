@@ -9180,10 +9180,30 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         except Exception as e:
             print(f"   [VISION] reference-photo attach skipped: {e}")
 
-        # CRITICAL: Inject as USER message (not assistant)
-        messages.append({"role": "user", "content": image_parts})
+        # Attach the image(s) to the LAST user message as proper multimodal
+        # content (text + image in ONE turn) instead of a separate trailing
+        # user message. A separate turn created two consecutive user messages;
+        # normalization then merged them and DROPPED the user's typed text — so
+        # a question asked alongside an image was lost, and the doubled user
+        # turn is exactly what strict vision models choke on. Merging keeps the
+        # question with its image.
+        _attached_to_user = False
+        for _ui in range(len(messages) - 1, -1, -1):
+            if messages[_ui].get("role") == "user":
+                _uc = messages[_ui].get("content")
+                if isinstance(_uc, list):
+                    messages[_ui]["content"] = _uc + image_parts
+                else:
+                    _txt = (_uc or "").strip()
+                    messages[_ui]["content"] = (
+                        ([{"type": "text", "text": _uc}] if _txt else []) + image_parts
+                    )
+                _attached_to_user = True
+                break
+        if not _attached_to_user:
+            messages.append({"role": "user", "content": image_parts})
 
-        print(f"   [VISION] Images injected as user message")
+        print(f"   [VISION] Images merged into user message")
         # Save image paths before clearing so we can link the LLM's response to the image
         global _last_vision_image_paths
         _last_vision_image_paths = [img.filepath for img in _vision_queue.pending_images]
@@ -13598,6 +13618,10 @@ def chat_completions():
         _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
         _quick_params = _quick_result.primary_tool.extracted_params if (_quick_result and _quick_result.primary_tool) else {}
         _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params))
+        # An attached/queued image must reach the vision model, which only
+        # happens on the LLM path — never take the zero-LLM shortcut then.
+        if _vision_queue.has_images():
+            _is_zero_llm = False
 
         if not _is_zero_llm:
             # SANITIZE inbound history before anything else. Ohbot ships the
