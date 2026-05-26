@@ -10370,6 +10370,7 @@ DOCUMENT_MANAGER_HTML = """
 <html>
 <head>
     <title>Blue Document Manager</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
@@ -11255,6 +11256,7 @@ PERSPECTIVE_HTML = """
 <html>
 <head>
     <title>My Perspective Profile</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
@@ -11393,6 +11395,7 @@ BLUE_PROFILE_HTML = """
 <html>
 <head>
     <title>Blue's Perspective</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
@@ -11546,6 +11549,15 @@ CHAT_HTML = """
             width: 100%; max-width: 820px; height: calc(100vh - 64px);
             background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
             box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
+        }
+        /* Phone: full-screen chat, input bar above the URL bar (100dvh). */
+        @media (max-width: 640px) {
+            body { padding: 0; }
+            .container { height: 100dvh; max-width: 100%; border: none; border-radius: 0; }
+            .header { padding: 16px 16px 12px; }
+            .messages { padding: 16px; }
+            .composer { padding: 12px 14px 16px; }
+            .hint { display: none; }
         }
         .header { padding: 24px 30px 20px; border-bottom: 1px solid var(--line); }
         .header::before {
@@ -13053,6 +13065,36 @@ html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
 :root[data-theme="dark"] .ticon,
 :root[data-theme="dark"] .empty-state-icon { background: #243021 !important; }
 :root[data-theme="dark"] .upload-section { background: #161d13 !important; }
+
+/* ===== Phone-friendly ===== */
+@media (max-width: 640px) {
+    /* iOS zooms in when a focused field is under 16px — pin inputs to 16px. */
+    input, textarea, select { font-size: 16px !important; }
+    /* Collapse multi-column layouts to a single column. */
+    .tiles, .folder-grid, .stats, .grid { grid-template-columns: 1fr !important; }
+    .layout { grid-template-columns: 1fr !important; }
+    .row2 { flex-direction: column !important; gap: 0 !important; }
+    /* Modals fill the screen and anchor near the top. */
+    .overlay { padding: 8px !important; align-items: flex-start !important; }
+    .modal { max-width: 100% !important; padding: 18px !important; }
+    /* Comfortable tap targets. */
+    .btn, .tab, .iconbtn, .sendbtn, .file-input-label, .download-btn,
+    .delete-btn, .btn-icon, .btn-primary {
+        min-height: 42px; display: inline-flex; align-items: center; justify-content: center; }
+    /* Trim oversized desktop padding. */
+    .content { padding: 20px 16px !important; }
+    .header { padding: 22px 18px 16px !important; }
+    /* Scale big headings down. */
+    .wordmark .name { font-size: 2em !important; }
+    h1 { font-size: 1.55em !important; }
+    /* Keep the month grid usable on a narrow screen. */
+    .cell { min-height: 48px !important; padding: 3px !important; }
+    .cell .num { font-size: 0.78em !important; }
+    .ev { font-size: 0.56em !important; padding: 1px 4px !important; }
+    /* Long emails / filenames must wrap, not overflow. */
+    .c-sub, .document-name, .ev-time, .tagline { overflow-wrap: anywhere; }
+    .blue-theme-toggle { bottom: 12px; right: 12px; }
+}
 """
 
 
@@ -13897,6 +13939,7 @@ def index():
     <html>
     <head>
         <title>Blue AI Robot System</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="/assets/blue.css">
         <script src="/assets/blue.js" defer></script>
