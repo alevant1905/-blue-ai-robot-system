@@ -64,6 +64,18 @@ def _detect_threshold() -> float:
         return 0.6
 
 
+# Minimum face size (shorter side, px) to attempt recognition. Below this a face
+# is too small/distant for a reliable embedding — e.g. a photo held up to the
+# camera, or someone across the room — and is reported as "distant" rather than
+# matched or guessed. A real 56px face still matched correctly in testing, so
+# 40 is conservative; raise via BLUE_FACE_MIN_PX for stricter behavior.
+def _min_face_px() -> float:
+    try:
+        return float(os.environ.get("BLUE_FACE_MIN_PX", "40"))
+    except ValueError:
+        return 40.0
+
+
 # Longest-side cap before detection. Huge phone photos (4000px+) are slow and
 # less reliable; YuNet works well at moderate sizes. Faces stay well above the
 # 112px SFace needs.
@@ -266,15 +278,16 @@ class FaceEngine:
               "available": bool,          # engine usable
               "faces_detected": int,
               "recognized": [ {"name", "confidence"} ],  # one per matched face
-              "unknown_faces": int,
+              "unknown_faces": int,       # big enough to judge, but no match
+              "distant_faces": int,       # too small/far to reliably identify
             }
         """
         if not self._init():
             return {"available": False, "faces_detected": 0,
-                    "recognized": [], "unknown_faces": 0}
+                    "recognized": [], "unknown_faces": 0, "distant_faces": 0}
 
         result = {"available": True, "faces_detected": 0,
-                  "recognized": [], "unknown_faces": 0}
+                  "recognized": [], "unknown_faces": 0, "distant_faces": 0}
 
         img = self._load_bgr(image_path)
         if img is None:
@@ -285,8 +298,16 @@ class FaceEngine:
         result["faces_detected"] = len(faces)
 
         threshold = _cos_threshold()
+        min_px = _min_face_px()
         unknown = 0
+        distant = 0
         for row in faces:
+            # Faces too small to embed reliably (a photo held to the camera, or
+            # someone across the room) are reported as distant, never matched —
+            # a tiny face produces a noisy embedding that can falsely match.
+            if min(float(row[2]), float(row[3])) < min_px:
+                distant += 1
+                continue
             probe = self._embed(img, row)
             if probe is None:
                 unknown += 1
@@ -303,6 +324,7 @@ class FaceEngine:
             else:
                 unknown += 1
         result["unknown_faces"] = unknown
+        result["distant_faces"] = distant
         return result
 
 

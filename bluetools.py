@@ -9214,6 +9214,18 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                             _face_engine_handled = True
                             _names = [m["name"] for m in _fr.get("recognized", [])]
                             _unknown = _fr.get("unknown_faces", 0)
+                            _distant = _fr.get("distant_faces", 0)
+
+                            # Clause for faces too small/far to identify — e.g. a
+                            # photo held to the camera, or someone across the room.
+                            def _distant_clause():
+                                if not _distant:
+                                    return ""
+                                return (" Someone is too far away to make out clearly"
+                                        if _distant == 1 else
+                                        f" {_distant} people are too far away to make "
+                                        f"out clearly") + " — don't guess who they are."
+
                             if _names:
                                 _who = (", ".join(_names[:-1]) + " and " + _names[-1]
                                         if len(_names) > 1 else _names[0])
@@ -9225,6 +9237,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                                               f"also {_unknown} face"
                                               f"{'' if _unknown == 1 else 's'} you don't "
                                               f"recognize — don't guess who they are.")
+                                _line += _distant_clause()
                                 _line += "]"
                                 vision_prompt_parts.append(_line)
                                 # Record the sighting for each recognized person.
@@ -9234,18 +9247,26 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                                     except Exception:
                                         pass
                                 print(f"   [FACE] recognized: {', '.join(_names)}"
-                                      f"{f' (+{_unknown} unknown)' if _unknown else ''}")
-                            elif _fr.get("faces_detected", 0) > 0:
-                                _n = _fr["faces_detected"]
+                                      f"{f' (+{_unknown} unknown)' if _unknown else ''}"
+                                      f"{f' (+{_distant} distant)' if _distant else ''}")
+                            elif _unknown > 0:
                                 _tail = ("it doesn't match anyone you've been "
-                                         "introduced to" if _n == 1 else
+                                         "introduced to" if _unknown == 1 else
                                          "none of them match anyone you've been "
                                          "introduced to")
+                                _line = (f"[FACE RECOGNITION: There "
+                                         f"{'is' if _unknown == 1 else 'are'} "
+                                         f"{_unknown} face{'' if _unknown == 1 else 's'} "
+                                         f"here but {_tail}. Don't guess a name.")
+                                _line += _distant_clause() + "]"
+                                vision_prompt_parts.append(_line)
+                                print(f"   [FACE] {_unknown} face(s) unrecognized"
+                                      f"{f', {_distant} distant' if _distant else ''}")
+                            elif _distant > 0:
                                 vision_prompt_parts.append(
-                                    f"[FACE RECOGNITION: There {'is' if _n == 1 else 'are'} "
-                                    f"{_n} face{'' if _n == 1 else 's'} here but "
-                                    f"{_tail}. Don't guess a name.]")
-                                print(f"   [FACE] {_n} face(s), none recognized")
+                                    "[FACE RECOGNITION:"
+                                    + _distant_clause().lstrip() + "]")
+                                print(f"   [FACE] only distant face(s): {_distant}")
                 except Exception as e:
                     print(f"   [FACE] recognition skipped: {e}")
 
