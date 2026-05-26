@@ -54,6 +54,22 @@ def _cos_threshold() -> float:
         return 0.40
 
 
+# YuNet detection confidence. 0.7 (the OpenCV sample default) rejects perfectly
+# good faces — real enrollment photos commonly score ~0.65. 0.6 reliably catches
+# them without the false positives that appear at 0.5. Override BLUE_FACE_DETECT.
+def _detect_threshold() -> float:
+    try:
+        return float(os.environ.get("BLUE_FACE_DETECT", "0.6"))
+    except ValueError:
+        return 0.6
+
+
+# Longest-side cap before detection. Huge phone photos (4000px+) are slow and
+# less reliable; YuNet works well at moderate sizes. Faces stay well above the
+# 112px SFace needs.
+_MAX_SIDE = 1600
+
+
 _lock = threading.Lock()
 
 
@@ -140,7 +156,7 @@ class FaceEngine:
         try:
             self._cv2 = cv2
             self._detector = cv2.FaceDetectorYN.create(
-                yunet, "", (320, 320), 0.7, 0.3, 5000)
+                yunet, "", (320, 320), _detect_threshold(), 0.3, 5000)
             self._recognizer = cv2.FaceRecognizerSF.create(sface, "")
         except Exception as e:
             print(f"[FACE] Failed to create models: {e}")
@@ -153,6 +169,28 @@ class FaceEngine:
         return self._init()
 
     # ---- detection + embedding ------------------------------------------
+
+    def _load_bgr(self, image_path: str):
+        """Load an image as a BGR ndarray, applying EXIF orientation and
+        downscaling huge images. cv2.imread ignores EXIF, so portrait phone
+        photos would otherwise load sideways and detection would miss the face.
+        Detection and embedding both use this same array so face coordinates
+        stay consistent. Falls back to cv2.imread if Pillow is unavailable."""
+        img = None
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(image_path) as im:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                img = self._cv2.cvtColor(np.array(im), self._cv2.COLOR_RGB2BGR)
+        except Exception:
+            img = self._cv2.imread(image_path)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        if max(h, w) > _MAX_SIDE:
+            s = _MAX_SIDE / float(max(h, w))
+            img = self._cv2.resize(img, (int(w * s), int(h * s)))
+        return img
 
     def _detect(self, img) -> Optional[np.ndarray]:
         """Return YuNet face rows (Nx15) or None."""
@@ -179,7 +217,7 @@ class FaceEngine:
         Returns None if no usable face is found or recognition is unavailable."""
         if not self._init():
             return None
-        img = self._cv2.imread(image_path)
+        img = self._load_bgr(image_path)
         if img is None:
             return None
         faces = self._detect(img)
@@ -238,7 +276,7 @@ class FaceEngine:
         result = {"available": True, "faces_detected": 0,
                   "recognized": [], "unknown_faces": 0}
 
-        img = self._cv2.imread(image_path)
+        img = self._load_bgr(image_path)
         if img is None:
             return result
         faces = self._detect(img)
