@@ -94,6 +94,16 @@ except ImportError:
     VISUAL_MEMORY_AVAILABLE = False
     print("[WARN] Visual memory system not available")
 
+# Face Recognition Engine (OpenCV SFace; degrades gracefully if unavailable)
+try:
+    from blue.tools import face_engine as FACE_ENGINE
+    FACE_RECOGNITION_AVAILABLE = True
+    print("[OK] Face engine module loaded - Blue can recognize faces by embedding!")
+except Exception as _e:
+    FACE_ENGINE = None
+    FACE_RECOGNITION_AVAILABLE = False
+    print(f"[WARN] Face engine not available: {_e}")
+
 # Enhanced Visual Understanding (if available)
 try:
     from blue_visual_understanding import get_visual_understanding, get_enhanced_vision_context
@@ -2975,6 +2985,33 @@ _vision_queue = VisionImageQueue()
 
 # Track image paths from the last vision injection so we can save the LLM's description
 _last_vision_image_paths = []
+
+# Sticky reference to the most recently shown image, so chat follow-ups
+# ("what color is it?") can reuse it for a short window without re-uploading.
+# Kept separate from _last_vision_image_paths, which the observation logger
+# clears after each turn.
+_recent_image_paths = []
+_recent_image_at = 0.0
+
+_IMAGE_FOLLOWUP_CUES = (
+    "it", "this", "that", "the image", "the photo", "the picture", "the pic",
+    "color", "colour", "wearing", "background", "behind", "who is", "who's",
+    "what is", "what's", "how many", "describe", "zoom", "closer", "look again",
+    "the person", "the man", "the woman", "the kid", "the dog", "the cat",
+    "in the", "on the", "left", "right", "foreground", "the shirt", "the sign",
+    "again", "same image", "same photo", "same picture",
+)
+
+
+def _refers_to_recent_image(text: str) -> bool:
+    """Heuristic: is the user still asking about the image they just shared?
+    Triggers on a referential/visual cue, or a very short follow-up."""
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+    if any(c in t for c in _IMAGE_FOLLOWUP_CUES):
+        return True
+    return len(t.split()) <= 5
 
 
 def _save_visual_observation(description: str):
@@ -9064,6 +9101,37 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
 
     # INJECT PENDING IMAGES as a NEW USER MESSAGE (CRITICAL FIX!)
     global _vision_queue
+    # Sticky image follow-ups: if no new image is queued but the user is still
+    # asking about the one they shared a moment ago, re-attach it so questions
+    # like "what color is it?" work without re-uploading. Bounded window
+    # (BLUE_IMAGE_MEMORY_MIN, default 5 minutes).
+    global _recent_image_paths, _recent_image_at
+    if not _vision_queue.has_images() and _recent_image_paths:
+        import time as _t
+        try:
+            _win_min = int(os.environ.get("BLUE_IMAGE_MEMORY_MIN", "5"))
+        except ValueError:
+            _win_min = 5
+        if (_t.time() - _recent_image_at) <= _win_min * 60:
+            _lu = ""
+            for _m in reversed(messages):
+                if _m.get("role") == "user":
+                    _cc = _m.get("content")
+                    if isinstance(_cc, str):
+                        _lu = _cc
+                    elif isinstance(_cc, list):
+                        _lu = " ".join(p.get("text", "") for p in _cc
+                                       if isinstance(p, dict) and p.get("type") == "text")
+                    break
+            if _refers_to_recent_image(_lu):
+                for _p in _recent_image_paths:
+                    if os.path.exists(_p):
+                        try:
+                            _vision_queue.add_image(_p, os.path.basename(_p), is_camera=False)
+                        except Exception:
+                            pass
+                if _vision_queue.has_images():
+                    print("   [VISION] re-attached recent image for a follow-up")
     if _vision_queue.has_images():
         print(f"   [VISION] Injecting {len(_vision_queue.pending_images)} image(s)")
 
@@ -9095,6 +9163,61 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             # Add recognition context
             if recognition_context:
                 vision_prompt_parts.append(recognition_context)
+
+            # Deterministic face recognition (OpenCV SFace). Match the live
+            # camera frame against enrolled reference photos BEFORE the LLM
+            # sees it, then feed the model ground truth so it names people
+            # reliably instead of guessing from descriptions. When this
+            # succeeds we skip dumping reference photos into the prompt.
+            _face_engine_handled = False
+            if (FACE_RECOGNITION_AVAILABLE
+                    and VISUAL_MEMORY_AVAILABLE
+                    and os.environ.get("BLUE_FACE_RECOGNITION", "1") != "0"):
+                try:
+                    _cam_path = next(
+                        (img.filepath for img in _vision_queue.pending_images
+                         if img.is_camera_capture), None)
+                    if _cam_path:
+                        _people_rows = vm.get_all_people()
+                        _fr = FACE_ENGINE.identify_people(_cam_path, _people_rows)
+                        if _fr.get("available"):
+                            _face_engine_handled = True
+                            _names = [m["name"] for m in _fr.get("recognized", [])]
+                            _unknown = _fr.get("unknown_faces", 0)
+                            if _names:
+                                _who = (", ".join(_names[:-1]) + " and " + _names[-1]
+                                        if len(_names) > 1 else _names[0])
+                                _line = (f"[FACE RECOGNITION: You recognize {_who} "
+                                         f"in this view (matched by face). Refer to "
+                                         f"them by name naturally.")
+                                if _unknown:
+                                    _line += (f" There {'is' if _unknown == 1 else 'are'} "
+                                              f"also {_unknown} face"
+                                              f"{'' if _unknown == 1 else 's'} you don't "
+                                              f"recognize — don't guess who they are.")
+                                _line += "]"
+                                vision_prompt_parts.append(_line)
+                                # Record the sighting for each recognized person.
+                                for _nm in _names:
+                                    try:
+                                        vm.update_seen("person", _nm)
+                                    except Exception:
+                                        pass
+                                print(f"   [FACE] recognized: {', '.join(_names)}"
+                                      f"{f' (+{_unknown} unknown)' if _unknown else ''}")
+                            elif _fr.get("faces_detected", 0) > 0:
+                                _n = _fr["faces_detected"]
+                                _tail = ("it doesn't match anyone you've been "
+                                         "introduced to" if _n == 1 else
+                                         "none of them match anyone you've been "
+                                         "introduced to")
+                                vision_prompt_parts.append(
+                                    f"[FACE RECOGNITION: There {'is' if _n == 1 else 'are'} "
+                                    f"{_n} face{'' if _n == 1 else 's'} here but "
+                                    f"{_tail}. Don't guess a name.]")
+                                print(f"   [FACE] {_n} face(s), none recognized")
+                except Exception as e:
+                    print(f"   [FACE] recognition skipped: {e}")
 
             # Add recent visual history for scene change awareness
             if VISUAL_MEMORY_AVAILABLE:
@@ -9152,14 +9275,17 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
 
         # (vision prompt already added above — no need for duplicate reminder)
 
-        # Attach reference photos of known people so Blue can RECOGNIZE by
-        # visual comparison, not just by description. Bounded (local vision
-        # models handle only a few images) and best-effort — set
-        # BLUE_RECOGNITION_REFS=0 to disable if it strains the model.
+        # Fallback: attach reference photos so Blue can recognize by visual
+        # comparison when the deterministic face engine isn't available (no
+        # OpenCV face models / offline). When the engine already produced a
+        # result above we skip this — embedding matches beat LLM eyeballing
+        # and save tokens. Bounded and best-effort; BLUE_RECOGNITION_REFS=0
+        # disables it entirely.
         try:
             _is_cam = any(img.is_camera_capture for img in _vision_queue.pending_images)
             _ref_cap = int(os.environ.get("BLUE_RECOGNITION_REFS", "3"))
-            if _is_cam and _ref_cap > 0 and VISUAL_MEMORY_AVAILABLE:
+            if (_is_cam and _ref_cap > 0 and VISUAL_MEMORY_AVAILABLE
+                    and not locals().get("_face_engine_handled")):
                 _refs = get_visual_memory().entities_with_images("person")
                 _refs = sorted(_refs, key=lambda p: p.get("last_seen") or "",
                                reverse=True)[:_ref_cap]
@@ -9207,6 +9333,10 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         # Save image paths before clearing so we can link the LLM's response to the image
         global _last_vision_image_paths
         _last_vision_image_paths = [img.filepath for img in _vision_queue.pending_images]
+        # Remember this image for short-window chat follow-ups.
+        import time as _t
+        _recent_image_paths = list(_last_vision_image_paths)
+        _recent_image_at = _t.time()
         _vision_queue.mark_as_viewed()
         _vision_queue.clear()
 
@@ -12827,7 +12957,9 @@ VISUAL_HTML = r"""
         document.getElementById('photoMsg').textContent='Uploading...';
         try {
             const r=await fetch('/visual/image',{method:'POST',body:fd}); const data=await r.json();
-            if(data&&data.success){ document.getElementById('photoMsg').className='msg ok'; document.getElementById('photoMsg').textContent='Photo saved.';
+            if(data&&data.success){ const m=document.getElementById('photoMsg');
+                if(data.warning){ m.className='msg err'; m.textContent=data.warning; }
+                else { m.className='msg ok'; m.textContent=data.face_found?'Photo saved — face detected, ready to recognize.':'Photo saved.'; }
                 const it=items.find(x=>x.id===parseInt(id,10)); if(it){ it.has_image=true; it._t=Date.now(); setThumb(it);} load();
             } else { document.getElementById('photoMsg').className='msg err'; document.getElementById('photoMsg').textContent=(data&&data.message)||'Upload failed.'; }
         } catch(e){ document.getElementById('photoMsg').className='msg err'; document.getElementById('photoMsg').textContent='Upload failed.'; }
@@ -12838,7 +12970,9 @@ VISUAL_HTML = r"""
         try {
             const r=await fetch('/visual/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:curType,id:parseInt(id,10)})});
             const data=await r.json();
-            if(data&&data.success){ document.getElementById('photoMsg').className='msg ok'; document.getElementById('photoMsg').textContent='Captured.';
+            if(data&&data.success){ const m=document.getElementById('photoMsg');
+                if(data.warning){ m.className='msg err'; m.textContent=data.warning; }
+                else { m.className='msg ok'; m.textContent=data.face_found?'Captured — face detected, ready to recognize.':'Captured.'; }
                 const it=items.find(x=>x.id===parseInt(id,10)); if(it){ it.has_image=true; it._t=Date.now(); setThumb(it);} load();
             } else { document.getElementById('photoMsg').className='msg err'; document.getElementById('photoMsg').textContent=(data&&data.message)||'Camera unavailable.'; }
         } catch(e){ document.getElementById('photoMsg').className='msg err'; document.getElementById('photoMsg').textContent='Camera error.'; }
@@ -12942,6 +13076,27 @@ def _save_visual_reference(etype, eid, src_path):
     return dest
 
 
+def _face_enrollment_feedback(etype, image_path):
+    """Best-effort: for a person reference photo, report whether a usable face
+    was detected so the GUI can warn when recognition won't work. Returns a
+    dict to merge into the route's JSON response."""
+    if etype != "person" or not FACE_RECOGNITION_AVAILABLE:
+        return {}
+    try:
+        res = FACE_ENGINE.enroll_validate(image_path)
+        if not res.get("available"):
+            return {}
+        if res.get("face_found"):
+            return {"face_found": True}
+        return {"face_found": False,
+                "warning": "No face detected in this photo — Blue won't be able "
+                           "to recognize this person from it. Try a clear, "
+                           "front-facing photo."}
+    except Exception as e:
+        print(f"   [FACE] enrollment validation skipped: {e}")
+        return {}
+
+
 @app.route('/visual/image', methods=['GET', 'POST'])
 def visual_image():
     if not VISUAL_MEMORY_AVAILABLE:
@@ -12979,7 +13134,7 @@ def visual_image():
         get_visual_memory().set_entity_image(etype, eid, dest)
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
-    return jsonify({"success": True})
+    return jsonify({"success": True, **_face_enrollment_feedback(etype, dest)})
 
 
 @app.route('/visual/capture', methods=['POST'])
@@ -13000,13 +13155,13 @@ def visual_capture():
         info = json.loads(raw) if isinstance(raw, str) else (raw or {})
         if not info.get("success") or not info.get("filepath"):
             return jsonify({"success": False, "message": info.get("error", "camera unavailable")})
-        _save_visual_reference(etype, eid, info["filepath"])
+        dest = _save_visual_reference(etype, eid, info["filepath"])
         # Don't let this reference grab linger in the live vision queue.
         try:
             _vision_queue.clear()
         except Exception:
             pass
-        return jsonify({"success": True})
+        return jsonify({"success": True, **_face_enrollment_feedback(etype, dest)})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 

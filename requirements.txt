@@ -55,14 +55,18 @@ ddgs>=5.0.0                 # DuckDuckGo search
 # Media Control (Optional)
 pyautogui>=0.9.54           # System-wide media keys
 
-# Face Recognition (Optional - for identifying people)
-# Note: face_recognition requires dlib which requires cmake
-# Install cmake first: pip install cmake
-# Then: pip install dlib face_recognition
-# face_recognition>=1.3.0   # Face detection and recognition
-# dlib>=19.24.0             # Machine learning library for face_recognition
-# cmake>=3.27.0             # Build system for dlib
-numpy>=1.24.0               # Required for face encodings
+# Face Recognition (Recommended - lets Blue recognize who he sees)
+# Blue uses OpenCV's built-in YuNet detector + SFace recognizer (no dlib, no
+# compilation). opencv-python>=4.5.4 bundles both. The small ONNX model files
+# are auto-downloaded from the OpenCV Zoo on first use into data/models/.
+opencv-python>=4.5.4        # YuNet (FaceDetectorYN) + SFace (FaceRecognizerSF)
+numpy>=1.24.0               # Required for face embeddings
+#
+# Legacy alternative (NOT used; left for reference). face_recognition needs
+# dlib + cmake, which is painful to build on Windows:
+# face_recognition>=1.3.0
+# dlib>=19.24.0
+# cmake>=3.27.0
 
 # Development Tools (Optional - for developers)
 pytest>=7.4.0               # Testing
