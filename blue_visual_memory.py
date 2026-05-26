@@ -17,12 +17,130 @@ try:
 except ImportError:
     VISUAL_MEMORY_DB = os.environ.get("BLUE_VISUAL_MEMORY_DB", "data/visual_memory.db")
 
+# Where reference photos for recognition are stored. Under data/ (gitignored),
+# so personal images never leave the machine.
+VISUAL_REF_DIR = os.path.join(os.path.dirname(VISUAL_MEMORY_DB) or "data", "visual_refs")
+
+# entity_type -> (table, editable columns) for the generic GUI CRUD helpers.
+_ENTITY_TABLES = {
+    "person": ("people", ["name", "description", "typical_appearance",
+                          "relationship", "common_locations", "notes"]),
+    "place": ("places", ["name", "description", "typical_contents",
+                         "typical_lighting", "notes"]),
+    "object": ("objects", ["name", "category", "description",
+                          "typical_location", "notes"]),
+}
+
+
 class VisualMemory:
     """Manages Blue's visual memory - what he knows about people, places, and things."""
-    
+
     def __init__(self, db_path: str = VISUAL_MEMORY_DB):
         self.db_path = db_path
         self._ensure_database()
+
+    # ---- Generic, id-keyed CRUD used by the Visual Memory GUI ----
+
+    def list_entities(self, entity_type: str) -> List[Dict[str, Any]]:
+        table = _ENTITY_TABLES[entity_type][0]
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM {table} ORDER BY name COLLATE NOCASE").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_entity(self, entity_type: str, entity_id: int) -> Optional[Dict[str, Any]]:
+        table = _ENTITY_TABLES[entity_type][0]
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f"SELECT * FROM {table} WHERE id = ?", (entity_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def add_entity(self, entity_type: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        table, cols = _ENTITY_TABLES[entity_type]
+        data = {k: (fields.get(k) or None) for k in cols if k in fields}
+        if not (str(data.get("name") or "").strip()):
+            return {"success": False, "message": "A name is required."}
+        keys = list(data.keys())
+        placeholders = ", ".join("?" for _ in keys)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute(
+                f"INSERT INTO {table} ({', '.join(keys)}) VALUES ({placeholders})",
+                [data[k] for k in keys])
+            conn.commit()
+            eid = cur.lastrowid
+        except sqlite3.IntegrityError:
+            return {"success": False, "message": f"{data.get('name')} already exists."}
+        finally:
+            conn.close()
+        return {"success": True, "id": eid}
+
+    def update_entity(self, entity_type: str, entity_id: int,
+                      fields: Dict[str, Any]) -> Dict[str, Any]:
+        table, cols = _ENTITY_TABLES[entity_type]
+        sets, params = [], []
+        for k in cols:
+            if k in fields:
+                sets.append(f"{k} = ?")
+                v = fields[k]
+                params.append((v.strip() or None) if isinstance(v, str) else v)
+        if not sets:
+            return {"success": False, "message": "Nothing to update."}
+        params.append(entity_id)
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.execute(
+            f"UPDATE {table} SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+        if not changed:
+            return {"success": False, "message": "Not found."}
+        return {"success": True, "id": entity_id}
+
+    def delete_entity(self, entity_type: str, entity_id: int) -> Dict[str, Any]:
+        table = _ENTITY_TABLES[entity_type][0]
+        conn = sqlite3.connect(self.db_path)
+        # Remove the reference image file too, if any.
+        row = conn.execute(
+            f"SELECT image_path FROM {table} WHERE id = ?", (entity_id,)).fetchone()
+        cur = conn.execute(f"DELETE FROM {table} WHERE id = ?", (entity_id,))
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+        if row and row[0]:
+            try:
+                os.remove(row[0])
+            except OSError:
+                pass
+        if not changed:
+            return {"success": False, "message": "Not found."}
+        return {"success": True}
+
+    def set_entity_image(self, entity_type: str, entity_id: int,
+                         image_path: str) -> Dict[str, Any]:
+        table = _ENTITY_TABLES[entity_type][0]
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.execute(
+            f"UPDATE {table} SET image_path = ? WHERE id = ?",
+            (image_path, entity_id))
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+        return {"success": bool(changed)}
+
+    def entities_with_images(self, entity_type: str) -> List[Dict[str, Any]]:
+        """Known entities that have a reference photo on disk — the candidates
+        for visual recognition matching."""
+        out = []
+        for e in self.list_entities(entity_type):
+            p = e.get("image_path")
+            if p and os.path.exists(p):
+                out.append(e)
+        return out
     
     def _ensure_database(self):
         """Create the visual memory database if it doesn't exist."""
@@ -96,6 +214,14 @@ class VisualMemory:
                 cursor.execute(f"ALTER TABLE observations ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+        # Migration: a reference photo per known person/place/object, used to
+        # recognize them by visual comparison (not just text description).
+        for tbl in ("people", "places", "objects"):
+            try:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN image_path TEXT")
+            except sqlite3.OperationalError:
+                pass
 
         conn.commit()
         conn.close()
