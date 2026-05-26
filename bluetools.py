@@ -1899,7 +1899,22 @@ YOUTUBE_MUSIC_BROWSER = None  # Will store ytmusicapi instance
 # Document storage
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+# 64MB: modern phone photos (48MP, HDR) routinely exceed 16MB, and a chat photo
+# upload that trips the limit returns an HTML 413 the client can't parse, which
+# surfaced as a generic "upload failed".
+app.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    """Return JSON (not HTML) so uploads that exceed MAX_CONTENT_LENGTH show a
+    real message instead of the client's generic 'upload failed'."""
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    return jsonify({
+        "attachments": [{"name": "file", "kind": "error",
+                         "error": f"file too large (limit {limit_mb}MB)"}],
+        "error": f"file too large (limit {limit_mb}MB)",
+    }), 413
 
 # Document index (stores metadata)
 DOCUMENT_INDEX_FILE = "document_index.json"
@@ -11877,8 +11892,16 @@ CHAT_HTML = """
             attachBtn.disabled = true;
             try {
                 const res = await fetch('/chat/attach', { method: 'POST', body: fd });
-                const data = await res.json();
-                (data.attachments || []).forEach(a => pending.push(a));
+                let data = null;
+                try { data = await res.json(); } catch (_) { /* non-JSON (e.g. HTML error page) */ }
+                if (data && data.attachments) {
+                    data.attachments.forEach(a => pending.push(a));
+                } else {
+                    const msg = (data && data.error)
+                        || (res.status === 413 ? 'file too large'
+                            : ('upload failed (HTTP ' + res.status + ')'));
+                    pending.push({ name: msg, kind: 'error', error: msg });
+                }
                 renderChips();
             } catch (e) {
                 pending.push({ name: 'upload failed', kind: 'error', error: String(e) });
