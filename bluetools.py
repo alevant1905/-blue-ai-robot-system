@@ -1566,7 +1566,8 @@ def _is_local_request() -> bool:
 
 # Endpoints that must stay reachable without a session even from remote, so a
 # logged-out phone can actually render the login form and submit it.
-_AUTH_EXEMPT_ENDPOINTS = {"blue_login", "blue_logout", "static"}
+_AUTH_EXEMPT_ENDPOINTS = {"blue_login", "blue_logout", "static",
+                          "asset_blue_css", "asset_blue_js"}
 
 
 @app.before_request
@@ -1600,6 +1601,8 @@ _LOGIN_HTML = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sign in to Blue</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -10367,6 +10370,8 @@ DOCUMENT_MANAGER_HTML = """
 <html>
 <head>
     <title>Blue Document Manager</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -11250,6 +11255,8 @@ PERSPECTIVE_HTML = """
 <html>
 <head>
     <title>My Perspective Profile</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -11386,6 +11393,8 @@ BLUE_PROFILE_HTML = """
 <html>
 <head>
     <title>Blue's Perspective</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -11517,6 +11526,8 @@ CHAT_HTML = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Chat with Blue</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -11825,6 +11836,8 @@ CALENDAR_HTML = r"""
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Calendar - Blue</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -12293,6 +12306,8 @@ CONTACTS_HTML = r"""
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Contacts - Blue</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -12556,6 +12571,8 @@ VISUAL_HTML = r"""
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Visual Memory - Blue</title>
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -12960,6 +12977,122 @@ def visual_capture():
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ===== Shared theme assets (polish + dark mode + identity) =====
+
+BLUE_CSS = r"""
+/* Shared polish + theming for Blue AI Robot System.
+   Every page defines the same CSS variables (--cream, --ink, --paper, ...),
+   so dark mode only has to flip those variables here, plus fix the few
+   strong-background elements that hardcode white text. */
+html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+       text-rendering: optimizeLegibility; scroll-behavior: smooth; }
+::selection { background: rgba(212,175,55,0.28); }
+*:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+* { scrollbar-width: thin; scrollbar-color: var(--sage) transparent; }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: var(--sage); border-radius: 7px;
+    border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--forest); background-clip: content-box; }
+
+/* Floating light/dark toggle, injected on every page by blue.js */
+.blue-theme-toggle {
+    position: fixed; bottom: 18px; right: 18px; z-index: 9999;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--paper); color: var(--forest);
+    border: 1px solid var(--line); box-shadow: 0 6px 18px rgba(26,46,26,0.18);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    transition: transform .15s ease, color .2s, background .2s;
+}
+.blue-theme-toggle:hover { transform: translateY(-2px); color: var(--ink); }
+.blue-theme-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
+    stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Gentle entrance for cards/containers — a touch of life without bounce. */
+@keyframes blueFadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.container, .card, .grid, .day-panel { animation: blueFadeUp .28s ease both; }
+@media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+
+/* ===== Dark theme: flip the shared palette ===== */
+:root[data-theme="dark"] {
+    --cream:#11160f; --paper:#1a2217; --ink:#e9efe4; --forest:#a9c9a4;
+    --sage:#5f7a5f; --slate:#9fb1a4; --blue:#80b0ff; --gold:#e3c76c;
+    --line:rgba(169,201,164,0.16); --shadow:0 10px 30px rgba(0,0,0,0.5);
+}
+/* Strong-background elements hardcode white text; --ink is now light, so give
+   them a fixed dark surface back. */
+:root[data-theme="dark"] .btn-primary,
+:root[data-theme="dark"] .btn-save,
+:root[data-theme="dark"] .sendbtn,
+:root[data-theme="dark"] .file-input-label,
+:root[data-theme="dark"] .upload-btn,
+:root[data-theme="dark"] .download-btn,
+:root[data-theme="dark"] .newfolder-form button,
+:root[data-theme="dark"] .stat-card,
+:root[data-theme="dark"] .tree a.active,
+:root[data-theme="dark"] .cell.today .num,
+:root[data-theme="dark"] .tab.active,
+:root[data-theme="dark"] .row.user .bubble,
+:root[data-theme="dark"] .tile-cta {
+    background: #294326 !important; color: #f3f7f1 !important;
+}
+:root[data-theme="dark"] .btn-primary:hover,
+:root[data-theme="dark"] .sendbtn:hover:not(:disabled),
+:root[data-theme="dark"] .file-input-label:hover,
+:root[data-theme="dark"] .upload-btn:hover:not(:disabled),
+:root[data-theme="dark"] .newfolder-form button:hover {
+    background: #34552f !important;
+}
+/* Light accent chips → dark surfaces so their text stays legible. */
+:root[data-theme="dark"] .avatar,
+:root[data-theme="dark"] .photo,
+:root[data-theme="dark"] .ev,
+:root[data-theme="dark"] .c-rel,
+:root[data-theme="dark"] .badge,
+:root[data-theme="dark"] .ticon,
+:root[data-theme="dark"] .empty-state-icon { background: #243021 !important; }
+:root[data-theme="dark"] .upload-section { background: #161d13 !important; }
+"""
+
+
+BLUE_JS = r"""
+(function(){
+  try { if (localStorage.getItem('blue-theme') === 'dark')
+          document.documentElement.setAttribute('data-theme','dark'); } catch(e){}
+  var SUN='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>';
+  var MOON='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>';
+  function cur(){ return document.documentElement.getAttribute('data-theme')==='dark' ? 'dark':'light'; }
+  function build(){
+    if (document.querySelector('.blue-theme-toggle')) return;
+    var b=document.createElement('button');
+    b.className='blue-theme-toggle'; b.type='button';
+    b.setAttribute('aria-label','Toggle light or dark mode'); b.title='Light / dark';
+    function paint(){ b.innerHTML = cur()==='dark' ? SUN : MOON; }
+    paint();
+    b.addEventListener('click', function(){
+      var next = cur()==='dark' ? 'light':'dark';
+      if (next==='dark') document.documentElement.setAttribute('data-theme','dark');
+      else document.documentElement.removeAttribute('data-theme');
+      try { localStorage.setItem('blue-theme', next); } catch(e){}
+      paint();
+    });
+    document.body.appendChild(b);
+  }
+  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', build);
+  else build();
+})();
+"""
+
+
+@app.route('/assets/blue.css')
+def asset_blue_css():
+    return Response(BLUE_CSS, mimetype="text/css")
+
+
+@app.route('/assets/blue.js')
+def asset_blue_js():
+    return Response(BLUE_JS, mimetype="application/javascript")
 
 
 # ===== Conversation Persistence Functions =====
@@ -13756,8 +13889,8 @@ def index():
     """Home page with links."""
     index_data = load_document_index()
     doc_count = len(index_data.get('documents', []))
-    music_status = "✅ Ready" if YOUTUBE_MUSIC_BROWSER else "⚠️ Not initialized"
-    visualizer_status = "🎨 Active" if _visualizer_active else "⚪ Inactive"
+    music_status = "Ready" if YOUTUBE_MUSIC_BROWSER else "Idle"
+    visualizer_status = "Active" if _visualizer_active else "Idle"
 
     html = f"""
     <!DOCTYPE html>
@@ -13765,132 +13898,82 @@ def index():
     <head>
         <title>Blue AI Robot System</title>
         <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="/assets/blue.css">
+        <script src="/assets/blue.js" defer></script>
         <style>
             :root {{
                 --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
                 --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
                 --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
             }}
+            * {{ box-sizing: border-box; }}
             body {{
                 font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                background: var(--cream);
-                color: var(--ink);
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                margin: 0;
-                padding: 40px 20px;
-                line-height: 1.55;
+                background: var(--cream); color: var(--ink); margin: 0;
+                min-height: 100vh; padding: 56px 20px; line-height: 1.55;
             }}
-            .card {{
-                background: var(--paper);
-                border: 1px solid var(--line);
-                border-radius: 12px;
-                padding: 48px;
-                box-shadow: var(--shadow);
-                text-align: left;
-                max-width: 600px;
-                width: 100%;
-            }}
-            .card::before {{
-                content: "";
-                display: block;
-                width: 56px; height: 3px;
-                background: linear-gradient(90deg, var(--gold), var(--blue));
-                margin-bottom: 22px;
-            }}
-            h1 {{
-                font-family: 'Playfair Display', Georgia, serif;
-                color: var(--ink);
-                font-size: 2.3em;
-                font-weight: 700;
-                margin-bottom: 8px;
-                letter-spacing: -0.01em;
-            }}
-            .subtitle {{
-                color: var(--slate);
-                font-size: 1.05em;
-                margin-bottom: 32px;
-            }}
-            .status {{
-                border: 1px solid var(--line);
-                border-radius: 10px;
-                padding: 8px 20px;
-                margin-bottom: 30px;
-            }}
-            .status-item {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 14px 0;
-                border-bottom: 1px solid var(--line);
-            }}
-            .status-item:last-child {{ border-bottom: none; }}
-            .status-label {{
-                font-family: 'IBM Plex Mono', monospace;
-                font-size: 0.82em;
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-                color: var(--slate);
-            }}
-            .status-value {{
-                color: var(--ink);
-                font-weight: 500;
-            }}
-            .btn {{
-                display: inline-block;
-                background: var(--ink);
-                color: white;
-                text-decoration: none;
-                padding: 14px 28px;
-                border-radius: 6px;
-                font-size: 1em;
-                font-weight: 500;
-                transition: background 0.2s;
-            }}
-            .btn:hover {{
-                background: var(--forest);
-            }}
+            .hub {{ max-width: 940px; margin: 0 auto; }}
+            .hero {{ text-align: center; margin-bottom: 30px; }}
+            .wordmark {{ display: inline-flex; align-items: center; gap: 14px; }}
+            .wordmark .mark {{ width: 46px; height: 46px; }}
+            .wordmark .name {{ font-family: 'Playfair Display', Georgia, serif; font-weight: 700;
+                font-size: 2.6em; letter-spacing: -0.015em; line-height: 1; text-align: left; }}
+            .wordmark .sys {{ display: block; font-family: 'IBM Plex Mono', monospace; font-size: 0.30em;
+                letter-spacing: 0.34em; text-transform: uppercase; color: var(--slate); font-weight: 500; margin-top: 7px; }}
+            .tagline {{ color: var(--slate); font-size: 1.06em; margin: 16px auto 0; max-width: 560px; }}
+            .status {{ display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 22px; }}
+            .chip {{ display: inline-flex; align-items: center; gap: 8px; background: var(--paper);
+                border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px;
+                font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); }}
+            .chip .dot {{ width: 7px; height: 7px; border-radius: 50%; background: var(--sage); }}
+            .chip.on .dot {{ background: #3f9d52; }}
+            .chip b {{ color: var(--ink); font-weight: 600; }}
+            .tiles {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 18px; margin-top: 34px; }}
+            .tile {{ display: block; text-decoration: none; color: inherit; background: var(--paper);
+                border: 1px solid var(--line); border-radius: 14px; padding: 22px;
+                box-shadow: var(--shadow); transition: transform .15s ease, box-shadow .15s ease, border-color .15s; }}
+            .tile:hover {{ transform: translateY(-3px); border-color: var(--sage); box-shadow: 0 14px 32px rgba(26,46,26,0.12); }}
+            .tile .ticon {{ width: 42px; height: 42px; border-radius: 11px; background: #eef2ec; color: var(--forest);
+                display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }}
+            .tile .ticon svg {{ width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7;
+                stroke-linecap: round; stroke-linejoin: round; }}
+            .tile h2 {{ font-family: 'Playfair Display', Georgia, serif; font-size: 1.2em; font-weight: 600; margin: 0 0 5px; }}
+            .tile p {{ margin: 0; color: var(--slate); font-size: 0.9em; }}
+            .tile .arrow {{ margin-top: 12px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest); }}
+            .foot {{ text-align: center; color: var(--slate); font-family: 'IBM Plex Mono', monospace;
+                font-size: 0.72em; margin-top: 34px; letter-spacing: 0.04em; }}
         </style>
     </head>
     <body>
-        <div class="card">
-            <h1>Blue AI Robot System</h1>
-            <p class="subtitle">Local AI assistant with music and light synchronization.</p>
-
-            <div class="status">
-                <div class="status-item">
-                    <span class="status-label">Service</span>
-                    <span class="status-value">Running</span>
+        <div class="hub">
+            <div class="hero">
+                <div class="wordmark">
+                    <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
+                        <circle cx="24" cy="24" r="20" style="fill:none;stroke:var(--forest);stroke-width:2"/>
+                        <circle cx="24" cy="24" r="6" style="fill:var(--blue)"/>
+                        <circle cx="44" cy="24" r="3.5" style="fill:var(--gold)"/>
+                    </svg>
+                    <span class="name">Blue<span class="sys">AI Robot System</span></span>
                 </div>
-                <div class="status-item">
-                    <span class="status-label">Music</span>
-                    <span class="status-value">{music_status}</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Visualizer</span>
-                    <span class="status-value">{visualizer_status}</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Hue Lights</span>
-                    <span class="status-value">{'Connected' if BRIDGE_IP else 'Not configured'}</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Documents</span>
-                    <span class="status-value">{doc_count} indexed</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Moods Available</span>
-                    <span class="status-value">{len(MOOD_PRESETS)}</span>
+                <p class="tagline">Your local, private AI companion — conversation, calendar, contacts, and memory, all on your own hardware.</p>
+                <div class="status">
+                    <span class="chip on"><span class="dot"></span>Service <b>Running</b></span>
+                    <span class="chip"><span class="dot"></span>Music <b>{music_status}</b></span>
+                    <span class="chip"><span class="dot"></span>Visualizer <b>{visualizer_status}</b></span>
+                    <span class="chip"><span class="dot"></span>Hue Lights <b>{'Connected' if BRIDGE_IP else 'Not set'}</b></span>
+                    <span class="chip"><span class="dot"></span>Documents <b>{doc_count}</b></span>
+                    <span class="chip"><span class="dot"></span>Moods <b>{len(MOOD_PRESETS)}</b></span>
                 </div>
             </div>
-
-            <a href="/chat" class="btn" style="margin-right:12px">Chat with Blue</a>
-            <a href="/calendar" class="btn" style="margin-right:12px">Calendar</a>
-            <a href="/contacts" class="btn" style="margin-right:12px">Contacts</a>
-            <a href="/visual" class="btn" style="margin-right:12px">Visual Memory</a>
-            <a href="/documents" class="btn">Manage Documents</a>
+            <div class="tiles">
+                <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/calendar"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h2>Calendar</h2><p>Reminders and events, one-off or recurring.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/contacts"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></div><h2>Contacts</h2><p>Blue's address book for email.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/visual"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div><h2>Visual Memory</h2><p>People, places, and things Blue recognizes.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/documents"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h2>Documents</h2><p>The library Blue reads and searches.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/perspective"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h2>Perspective</h2><p>How Blue understands you — and himself.</p><div class="arrow">Open &rarr;</div></a>
+            </div>
+            <div class="foot">Running locally &middot; 100% on your own hardware</div>
         </div>
     </body>
     </html>
