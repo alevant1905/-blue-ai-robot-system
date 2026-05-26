@@ -4786,34 +4786,49 @@ def encode_image_to_base64(filepath: str) -> Optional[Dict[str, Any]]:
         }
     }
     """
-    ext = filepath.rsplit('.', 1)[1].lower()
-    if ext not in ['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp']:
+    ext = filepath.rsplit('.', 1)[1].lower() if '.' in filepath else ''
+    if ext not in ['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp', 'mpo']:
         return None
 
+    import base64
+    # Normalize through Pillow into a clean, standard JPEG before sending to the
+    # vision model. Phone photos are often MPO (HDR multi-frame JPEGs) or huge
+    # (36MP) — LM Studio rejects those with "Invalid image detected". Taking the
+    # primary frame, applying EXIF orientation, forcing RGB, and downscaling
+    # produces something every vision model can decode.
     try:
-        import base64
+        import io
+        from PIL import Image, ImageOps
+        try:
+            _max = int(os.environ.get("BLUE_VISION_MAX_SIDE", "1280"))
+        except ValueError:
+            _max = 1280
+        with Image.open(filepath) as im:
+            im = ImageOps.exif_transpose(im)  # honor orientation, drop EXIF
+            im = im.convert("RGB")            # strip alpha/CMYK; flatten MPO frame
+            w, h = im.size
+            if max(w, h) > _max:
+                s = _max / float(max(w, h))
+                im = im.resize((max(1, int(w * s)), max(1, int(h * s))))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85)
+            image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return {"type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+    except Exception as e:
+        print(f"   [VISION] PIL normalize failed for {filepath}, sending raw: {e}")
+
+    # Fallback: raw bytes with a best-effort MIME (only if Pillow couldn't open it)
+    try:
         with open(filepath, 'rb') as f:
             image_data = base64.b64encode(f.read()).decode('utf-8')
-
-        # Map extensions to MIME types
-        mime_types = {
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'png': 'image/png',
-            'gif': 'image/gif',
-            'webp': 'image/webp',
-            'bmp': 'image/bmp',
-            'tiff': 'image/tiff'
-        }
-
-        mime_type = mime_types.get(ext, 'image/jpeg')
-
-        return {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{image_data}"
-            }
-        }
+        mime_type = {
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+            'gif': 'image/gif', 'webp': 'image/webp', 'bmp': 'image/bmp',
+            'tiff': 'image/tiff', 'mpo': 'image/jpeg',
+        }.get(ext, 'image/jpeg')
+        return {"type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}
     except Exception as e:
         print(f"   [ERROR] Failed to encode image {filepath}: {e}")
         return None
