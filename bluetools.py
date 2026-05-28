@@ -1622,15 +1622,39 @@ def _device_tag_from_user_agent(ua: str) -> str:
     return "other"
 
 
+# Stable Tailscale IPs identify a device even with no browser hint. Needed
+# because Tailscale Serve terminates HTTPS and proxies in from localhost (so
+# remote_addr looks local), while forwarding the real client IP in
+# X-Forwarded-For. Verified machine: ipad-2 = 100.71.165.19 (Vilda).
+_TAILSCALE_IP_OWNER = {"100.71.165.19": "Vilda"}
+
+
+def _forwarded_client_ip() -> str:
+    """Real client IP when behind a proxy (Tailscale Serve), else ''."""
+    xff = (request.headers.get("X-Forwarded-For") or "").strip()
+    return xff.split(",")[0].strip() if xff else ""
+
+
 def _identify_user_from_request() -> str:
-    """Map the requesting device to the person behind it (Alex by default)."""
-    # The PC browser and the physical robot reach Blue on localhost — both Alex.
+    """Map the requesting device to the person behind it (Alex by default).
+
+    Order matters: an explicit hint from our own chat page wins; then the
+    Tailscale source IP (survives Tailscale Serve's localhost proxying); then a
+    direct localhost request is Alex (PC browser + Ohbot client); finally a
+    best-effort User-Agent guess.
+    """
+    tag = (request.headers.get("X-Blue-Device") or "").strip().lower()
+    if tag:
+        return _DEVICE_OWNER.get(tag, _DEFAULT_USER)
+    fip = _forwarded_client_ip()
+    if fip in _TAILSCALE_IP_OWNER:
+        return _TAILSCALE_IP_OWNER[fip]
     if _is_local_request():
         return _DEFAULT_USER
-    tag = (request.headers.get("X-Blue-Device") or "").strip().lower()
-    if not tag:
-        tag = _device_tag_from_user_agent(request.headers.get("User-Agent", ""))
-    return _DEVICE_OWNER.get(tag, _DEFAULT_USER)
+    return _DEVICE_OWNER.get(
+        _device_tag_from_user_agent(request.headers.get("User-Agent", "")),
+        _DEFAULT_USER,
+    )
 
 
 # Endpoints that must stay reachable without a session even from remote, so a
@@ -11907,6 +11931,12 @@ CHAT_HTML = """
             font-size: 1.2em; transition: background 0.2s, border-color 0.2s;
         }
         .iconbtn:hover { background: var(--cream); border-color: var(--forest); }
+        .iconbtn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+        .iconbtn.active { background: var(--forest); border-color: var(--forest); color: #fff; }
+        .micbtn { transition: background 0.15s, border-color 0.15s, transform 0.15s; }
+        .micbtn.listening { background: #e9534e; border-color: #e9534e; color: #fff; transform: scale(1.08); }
+        .micbtn.big { width: 60px; height: 60px; }
+        .micbtn.big svg { width: 28px; height: 28px; }
         .sendbtn {
             flex-shrink: 0; height: 48px; padding: 0 24px; border-radius: 8px; border: none;
             background: var(--ink); color: #fff; font-weight: 500; font-size: 0.95em; cursor: pointer;
@@ -11936,7 +11966,13 @@ CHAT_HTML = """
                 <input type="file" id="fileInput" multiple style="display:none"
                        accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.rtf,.pptx,.xlsx">
                 <button class="iconbtn" id="attachBtn" title="Attach files" aria-label="Attach files">+</button>
+                <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to Blue" aria-label="Talk to Blue">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
+                </button>
                 <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
+                <button class="iconbtn" id="speakBtn" title="Blue reads his answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg>
+                </button>
                 <button class="sendbtn" id="sendBtn">Send</button>
             </div>
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
@@ -12051,6 +12087,7 @@ CHAT_HTML = """
 
         async function send() {
             if (busy) return;
+            primeAudio();
             const text = inputEl.value.trim();
             const atts = pending.slice();
             if (!text && !atts.length) return;
@@ -12088,6 +12125,7 @@ CHAT_HTML = """
                 try { reply = data.choices[0].message.content || ''; } catch (e) { reply = ''; }
                 if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
                 thinking.querySelector('.bubble').textContent = reply;
+                speak(reply);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
             } catch (e) {
@@ -12096,6 +12134,116 @@ CHAT_HTML = """
                 busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
                 inputEl.focus();
             }
+        }
+
+        // ===== Voice: Blue speaks aloud, and (over HTTPS) you can talk to him =====
+        // Voice-first for Vilda's iPad: replies are read out loud and the mic is
+        // big. The mic uses the browser's speech recognition, which Safari only
+        // allows over a secure (https) connection — hence the Tailscale setup.
+        const isVilda = blueDeviceTag() === 'ipad';
+        let speakOn = isVilda;
+        let audioPrimed = false;
+        const micBtn = document.getElementById('micBtn');
+        const speakBtn = document.getElementById('speakBtn');
+
+        function primeAudio() {
+            // iOS only lets speech start after a real tap; speaking an empty line
+            // during the tap unlocks it for the automatic replies that follow.
+            if (audioPrimed || !('speechSynthesis' in window)) return;
+            try { window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); audioPrimed = true; }
+            catch (e) { /* no speech available */ }
+        }
+
+        function pickVoice() {
+            const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+            const pref = ['Samantha', 'Karen', 'Moira', 'Tessa', 'Google US English'];
+            for (let i = 0; i < pref.length; i++) {
+                const v = voices.find(x => x.name === pref[i]);
+                if (v) return v;
+            }
+            return voices.find(x => /^en/i.test(x.lang)) || null;
+        }
+
+        function cleanForSpeech(t) {
+            return (t || '')
+                .replace(/https?:\\/\\/\\S+/g, ' a link ')
+                .replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu, '')
+                .replace(/[*_`#>~]/g, '')
+                .replace(/\\s+/g, ' ')
+                .trim();
+        }
+
+        function speak(text) {
+            if (!speakOn || !('speechSynthesis' in window)) return;
+            const msg = cleanForSpeech(text);
+            if (!msg) return;
+            try {
+                window.speechSynthesis.cancel();
+                const u = new SpeechSynthesisUtterance(msg);
+                const v = pickVoice();
+                if (v) u.voice = v;
+                u.rate = isVilda ? 0.95 : 1.0;
+                u.pitch = 1.0;
+                window.speechSynthesis.speak(u);
+            } catch (e) { /* ignore */ }
+        }
+
+        if ('speechSynthesis' in window) {
+            try { window.speechSynthesis.onvoiceschanged = pickVoice; } catch (e) {}
+        }
+
+        function setSpeakOn(on) {
+            speakOn = on;
+            speakBtn.classList.toggle('active', on);
+            speakBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            if (!on && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+        }
+        speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
+        setSpeakOn(speakOn);
+
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recog = null, listening = false;
+
+        function startListening() {
+            primeAudio();
+            if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+            if (!SR) {
+                addBubble('blue', 'I can\\'t use the microphone in this browser. Open Blue using the secure https web address so I can hear you.');
+                return;
+            }
+            if (listening) { try { recog.stop(); } catch (e) {} return; }
+            try {
+                recog = new SR();
+                recog.lang = 'en-US';
+                recog.interimResults = false;
+                recog.maxAlternatives = 1;
+                recog.onstart = () => { listening = true; micBtn.classList.add('listening'); };
+                recog.onend = () => { listening = false; micBtn.classList.remove('listening'); };
+                recog.onerror = (ev) => {
+                    listening = false; micBtn.classList.remove('listening');
+                    const err = ev && ev.error;
+                    if (err === 'not-allowed' || err === 'service-not-allowed') {
+                        addBubble('blue', 'I need permission to use the microphone. Open Blue with the secure https address and tap Allow.');
+                    }
+                };
+                recog.onresult = (ev) => {
+                    let said = '';
+                    for (let i = 0; i < ev.results.length; i++) said += ev.results[i][0].transcript;
+                    said = said.trim();
+                    if (said) { inputEl.value = said; send(); }
+                };
+                recog.start();
+            } catch (e) {
+                listening = false; micBtn.classList.remove('listening');
+                addBubble('blue', 'I couldn\\'t start listening. Make sure you opened Blue with the secure https web address.');
+            }
+        }
+        micBtn.addEventListener('click', startListening);
+
+        if (isVilda) {
+            micBtn.classList.add('big');
+            const hintEl = document.querySelector('.hint');
+            if (hintEl) hintEl.textContent = 'Tap the microphone and talk to Blue.';
         }
 
         inputEl.focus();
