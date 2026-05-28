@@ -1574,6 +1574,49 @@ def _is_local_request() -> bool:
     return (request.remote_addr or "") in ("127.0.0.1", "::1", "localhost")
 
 
+# ============================================================================
+# Device-based speaker identity
+# ----------------------------------------------------------------------------
+# The household has a fixed device-per-person split: the iPad is always Vilda;
+# the MacBook, PC, iPhone, and the physical robot are always Alex. We tag each
+# request with a device, then map device -> person. The chat web page computes
+# a reliable device tag in the browser (where a "desktop-mode" iPad is still
+# distinguishable from a real Mac via touch support) and sends it as the
+# X-Blue-Device header. When that header is absent (e.g. the Ohbot client
+# POSTing directly) we fall back to sniffing the User-Agent.
+#
+# To remap a device to a different person, edit _DEVICE_OWNER below.
+# ============================================================================
+_DEVICE_OWNER = {"ipad": "Vilda"}   # everything not listed here => _DEFAULT_USER
+_DEFAULT_USER = "Alex"
+
+
+def _device_tag_from_user_agent(ua: str) -> str:
+    ua = (ua or "").lower()
+    if "ipad" in ua:
+        return "ipad"
+    if "iphone" in ua or "ipod" in ua:
+        return "iphone"
+    if "android" in ua:
+        return "android"
+    if "macintosh" in ua or "mac os" in ua:
+        return "mac"
+    if "windows" in ua:
+        return "windows"
+    return "other"
+
+
+def _identify_user_from_request() -> str:
+    """Map the requesting device to the person behind it (Alex by default)."""
+    # The PC browser and the physical robot reach Blue on localhost — both Alex.
+    if _is_local_request():
+        return _DEFAULT_USER
+    tag = (request.headers.get("X-Blue-Device") or "").strip().lower()
+    if not tag:
+        tag = _device_tag_from_user_agent(request.headers.get("User-Agent", ""))
+    return _DEVICE_OWNER.get(tag, _DEFAULT_USER)
+
+
 # Endpoints that must stay reachable without a session even from remote, so a
 # logged-out phone can actually render the login form and submit it.
 _AUTH_EXEMPT_ENDPOINTS = {"blue_login", "blue_logout", "static",
@@ -9873,7 +9916,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex") -> Dict:
     """Process conversation with tool support."""
     conversation_messages = messages.copy()
 
@@ -9903,6 +9946,20 @@ def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
             system_msg = {"role": "system", "content": (system_msg.get("content", "") + _bn)}
     except Exception:
         pass
+
+    # Tell Blue who is actually speaking when it isn't Alex. The facts/pronoun
+    # blocks above all describe Alex (the owner); without this note Blue assumes
+    # every speaker is Alex and addresses them wrongly.
+    _speaker = (user_name or "Alex").strip()
+    if _speaker and _speaker.lower() != "alex" and isinstance(system_msg, dict):
+        speaker_note = (
+            f"\nWHO YOU'RE TALKING TO: You are currently talking with {_speaker}, "
+            f"a member of Alex's household — not Alex himself. Address them by name "
+            f"as {_speaker} and don't assume they are Alex. The identity facts and "
+            f"pronouns above describe Alex (your owner) and may not apply to "
+            f"{_speaker}.\n"
+        )
+        system_msg = {"role": "system", "content": (system_msg.get("content", "") + speaker_note)}
     _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
     existing0 = conversation_messages[0] if conversation_messages else None
     has_injected = (
@@ -9944,11 +10001,12 @@ def process_with_tools(messages: List[Dict], _pre_selection=None) -> Dict:
     # OPTIMIZATION: Quick scan using only string content (skip base64 image data in lists)
     last_user_message = messages[-1].get("content", "") if messages else ""
 
-    # "Write this from my perspective / in my voice" — chat is the trusted
-    # local channel (always Alex), so compose a first-person piece in his
-    # voice grounded in his publications and short-circuit the tool loop.
+    # "Write this from my perspective / in my voice" — compose a first-person
+    # piece in Alex's voice grounded in his publications and short-circuit the
+    # tool loop. Only when ALEX is the speaker: writing as Alex for someone else
+    # (e.g. Vilda on the iPad) would put words in the wrong person's mouth.
     _luser = last_user_message if isinstance(last_user_message, str) else ""
-    if _luser and _wants_perspective_write(_luser):
+    if _luser and (user_name or "Alex").strip().lower() == "alex" and _wants_perspective_write(_luser):
         try:
             _piece = _compose_in_alex_voice(_luser)
             if _piece:
@@ -11875,6 +11933,21 @@ CHAT_HTML = """
         const fileInput = document.getElementById('fileInput');
         const chipsEl = document.getElementById('chips');
 
+        // Identify this device so the server knows who's chatting (iPad => Vilda,
+        // everything else => Alex). Done in the browser because a "desktop-mode"
+        // iPad masquerades as a Mac in the User-Agent and is only distinguishable
+        // here, via touch support (a real Mac reports zero touch points).
+        function blueDeviceTag() {
+            const ua = navigator.userAgent || '';
+            const touch = (navigator.maxTouchPoints || 0) > 1;
+            if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) return 'ipad';
+            if (/iPhone|iPod/.test(ua)) return 'iphone';
+            if (/Android/.test(ua)) return 'android';
+            if (/Macintosh|Mac OS X/.test(ua)) return 'mac';
+            if (/Windows/.test(ua)) return 'windows';
+            return 'other';
+        }
+
         // Conversation as sent to the API (role/content). Persona + memory are
         // applied server-side, so we only carry the user/assistant turns.
         let apiMessages = [];
@@ -11988,7 +12061,7 @@ CHAT_HTML = """
             try {
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
                     body: JSON.stringify({ messages: apiMessages })
                 });
                 const data = await res.json();
@@ -13818,8 +13891,11 @@ def chat_completions():
         print(f"{'='*60}")
         print(f"[MSG] Received request from Ohbot")
 
-        # Extract user name from messages if available (default to Alex)
-        user_name = "Alex"
+        # Who's chatting? Determined by the device the request came from
+        # (see _identify_user_from_request): the iPad is Vilda; the MacBook,
+        # PC, iPhone, and the physical robot are Alex.
+        user_name = _identify_user_from_request()
+        print(f"   [WHO] Speaker identified as: {user_name}")
 
         # Find the last actual USER message
         user_messages = [m for m in messages if m.get('role') == 'user']
@@ -13884,7 +13960,7 @@ def chat_completions():
                         messages = _splice_context_after_system(messages, historical_context[-6:])
 
         # Process with tools (pre-check result passed to avoid double selector run)
-        response = process_with_tools(messages, _pre_selection=_quick_result)
+        response = process_with_tools(messages, _pre_selection=_quick_result, user_name=user_name)
 
         # SAVE ASSISTANT RESPONSE TO DATABASE
         if response:
@@ -13942,6 +14018,11 @@ def chat_completions():
                 import threading
                 def _background_fact_extraction(msgs, uname):
                     try:
+                        # The facts/memory store is Alex's (single-owner profile).
+                        # Don't mine another speaker's turns into it, or Blue would
+                        # later report Vilda's statements back to Alex as his own.
+                        if (uname or _DEFAULT_USER) != _DEFAULT_USER:
+                            return
                         if extract_and_save_facts(msgs):
                             log.info("[MEM] ✓ Auto-saved learned facts (background)")
                         if ENHANCED_MEMORY_AVAILABLE and memory_system:
