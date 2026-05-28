@@ -12231,7 +12231,12 @@ CHAT_HTML = """
                 if (!window.isSecureContext) {
                     addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work. (Right now you are on ' + location.protocol + '//' + location.host + '.)');
                 } else {
-                    addBubble('blue', 'This browser will not let me record audio.');
+                    const miss = [];
+                    if (!navigator.mediaDevices) miss.push('mediaDevices');
+                    else if (!navigator.mediaDevices.getUserMedia) miss.push('getUserMedia');
+                    if (typeof MediaRecorder === 'undefined') miss.push('MediaRecorder');
+                    const mode = (('standalone' in navigator) && navigator.standalone) ? 'home-screen app' : 'Safari';
+                    addBubble('blue', 'This browser will not let me record audio. Missing: ' + miss.join(', ') + '. Running as: ' + mode + '. If it says home-screen app, open me in the Safari app instead. (Show Alex this message.)');
                 }
                 return;
             }
