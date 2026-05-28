@@ -12201,53 +12201,99 @@ CHAT_HTML = """
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
 
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        let recog = null, listening = false;
+        // Vilda's iPad can't use the in-browser Web Speech API reliably, so we
+        // record audio here and let Blue transcribe it on the PC (POST /stt).
+        let listening = false, mediaRecorder = null, audioChunks = [], audioStream = null, autoStopTimer = null;
+        const hintEl = document.querySelector('.hint');
+        const originalHint = hintEl ? hintEl.textContent : '';
+        const defaultHint = isVilda ? 'Tap the microphone and talk to Blue.' : originalHint;
+        function setHint(t) { if (hintEl) hintEl.textContent = t; }
+        setHint(defaultHint);
 
-        function startListening() {
+        function stopStream() {
+            if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+        }
+
+        function stopListening() {
+            if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                try { mediaRecorder.stop(); } catch (e) {}
+            }
+            listening = false;
+            micBtn.classList.remove('listening');
+        }
+
+        async function startListening() {
             primeAudio();
             if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-            if (!SR) {
+            if (listening) { stopListening(); return; }
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
                 if (!window.isSecureContext) {
-                    addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat — then the microphone will work. (Right now you are on ' + location.protocol + '//' + location.host + '.)');
+                    addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work. (Right now you are on ' + location.protocol + '//' + location.host + '.)');
                 } else {
-                    addBubble('blue', 'This iPad\\'s browser will not give me the microphone directly, even on the secure address. Tell Alex \\u2014 he can switch me to listen a different way.');
+                    addBubble('blue', 'This browser will not let me record audio.');
                 }
                 return;
             }
-            if (listening) { try { recog.stop(); } catch (e) {} return; }
             try {
-                recog = new SR();
-                recog.lang = 'en-US';
-                recog.interimResults = false;
-                recog.maxAlternatives = 1;
-                recog.onstart = () => { listening = true; micBtn.classList.add('listening'); };
-                recog.onend = () => { listening = false; micBtn.classList.remove('listening'); };
-                recog.onerror = (ev) => {
-                    listening = false; micBtn.classList.remove('listening');
-                    const err = ev && ev.error;
-                    if (err === 'not-allowed' || err === 'service-not-allowed') {
-                        addBubble('blue', 'I need permission to use the microphone. Open Blue with the secure https address and tap Allow.');
-                    }
-                };
-                recog.onresult = (ev) => {
-                    let said = '';
-                    for (let i = 0; i < ev.results.length; i++) said += ev.results[i][0].transcript;
-                    said = said.trim();
-                    if (said) { inputEl.value = said; send(); }
-                };
-                recog.start();
+                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
             } catch (e) {
-                listening = false; micBtn.classList.remove('listening');
-                addBubble('blue', 'I couldn\\'t start listening. Make sure you opened Blue with the secure https web address.');
+                addBubble('blue', 'I need permission to use the microphone. Tap the mic again and choose Allow.');
+                return;
+            }
+            audioChunks = [];
+            let mr = null;
+            try { mr = new MediaRecorder(audioStream); }
+            catch (e1) {
+                try { mr = new MediaRecorder(audioStream, { mimeType: 'audio/mp4' }); } catch (e2) { mr = null; }
+            }
+            if (!mr) { addBubble('blue', 'This browser will not let me record audio.'); stopStream(); return; }
+            mediaRecorder = mr;
+            mr.ondataavailable = (ev) => { if (ev.data && ev.data.size) audioChunks.push(ev.data); };
+            mr.onstop = transcribeRecording;
+            try { mr.start(); }
+            catch (e) { addBubble('blue', 'I could not start recording.'); stopStream(); return; }
+            listening = true;
+            micBtn.classList.add('listening');
+            setHint('Listening\\u2026 tap the microphone again when you are done.');
+            autoStopTimer = setTimeout(stopListening, 15000);
+        }
+
+        async function transcribeRecording() {
+            micBtn.classList.remove('listening');
+            listening = false;
+            const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
+            const blob = new Blob(audioChunks, { type: type });
+            audioChunks = [];
+            stopStream();
+            if (!blob.size) { setHint(defaultHint); return; }
+            let ext = 'm4a';
+            if (type.indexOf('webm') >= 0) ext = 'webm';
+            else if (type.indexOf('ogg') >= 0) ext = 'ogg';
+            else if (type.indexOf('wav') >= 0) ext = 'wav';
+            const fd = new FormData();
+            fd.append('audio', blob, 'speech.' + ext);
+            micBtn.disabled = true;
+            setHint('Figuring out what you said\\u2026');
+            try {
+                const res = await fetch('/stt', { method: 'POST', body: fd });
+                const data = await res.json().catch(() => null);
+                const said = (data && data.text || '').trim();
+                if (said) { inputEl.value = said; send(); }
+                else { addBubble('blue', 'I did not catch that \\u2014 tap the mic and try again.'); }
+            } catch (e) {
+                addBubble('blue', 'I could not hear that just now. Tap the mic and try again.');
+            } finally {
+                micBtn.disabled = false;
+                setHint(defaultHint);
             }
         }
+
         micBtn.addEventListener('click', startListening);
 
         if (isVilda) {
             micBtn.classList.add('big');
-            const hintEl = document.querySelector('.hint');
-            if (hintEl) hintEl.textContent = 'Tap the microphone and talk to Blue.';
+            try { fetch('/stt/warmup'); } catch (e) {}
         }
 
         inputEl.focus();
@@ -12255,6 +12301,70 @@ CHAT_HTML = """
 </body>
 </html>
 """
+
+
+# ===== Speech-to-text (server side) =====
+# iOS Safari won't reliably expose the in-browser Web Speech API, so the iPad
+# records audio (getUserMedia/MediaRecorder over HTTPS) and posts it here; we
+# transcribe locally with faster-whisper. CPU int8 is plenty for short clips.
+# Override the model with BLUE_WHISPER_MODEL (e.g. "small.en" for more accuracy).
+import threading as _threading_stt
+_WHISPER_MODEL = None
+_WHISPER_LOCK = _threading_stt.Lock()
+
+
+def _get_whisper():
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        with _WHISPER_LOCK:
+            if _WHISPER_MODEL is None:
+                from faster_whisper import WhisperModel
+                name = (os.environ.get("BLUE_WHISPER_MODEL") or "base.en").strip()
+                print(f"   [STT] Loading Whisper model '{name}' (first use)...")
+                _WHISPER_MODEL = WhisperModel(name, device="cpu", compute_type="int8")
+                print("   [STT] Whisper model ready.")
+    return _WHISPER_MODEL
+
+
+@app.route('/stt/warmup', methods=['GET', 'POST'])
+def stt_warmup():
+    """Load the model in the background so the first real transcription isn't
+    slow. Fire-and-forget — returns immediately."""
+    def _warm():
+        try:
+            _get_whisper()
+        except Exception as e:
+            log.warning(f"[STT] warmup failed: {e}")
+    _threading_stt.Thread(target=_warm, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route('/stt', methods=['POST'])
+def stt():
+    """Transcribe an uploaded audio clip to text."""
+    import tempfile
+    f = request.files.get('audio')
+    if not f or not f.filename:
+        return jsonify({"error": "no audio"}), 400
+    ext = os.path.splitext(f.filename)[1] or ".m4a"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        f.save(tmp_path)
+        model = _get_whisper()
+        segments, _info = model.transcribe(tmp_path, language="en", beam_size=1)
+        text = " ".join(seg.text for seg in segments).strip()
+        print(f"   [STT] Transcribed -> {text[:120]!r}")
+        return jsonify({"text": text})
+    except Exception as e:
+        log.error(f"[STT] transcription failed: {e}")
+        return jsonify({"error": "transcription failed"}), 500
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 @app.route('/chat', methods=['GET'])

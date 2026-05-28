@@ -34,6 +34,13 @@ python-pptx>=0.6.23         # PowerPoint .pptx text extraction
 striprtf>=0.0.26            # Rich Text Format extraction
 watchdog>=3.0.0             # Filesystem watcher for auto-indexing dropped documents
 
+# Voice Input (Recommended - lets kids/non-readers talk to Blue on the iPad)
+# The browser records audio over HTTPS and posts it to /stt; Blue transcribes
+# locally on CPU. Bundles PyAV so no separate ffmpeg install is needed.
+# Override the model with BLUE_WHISPER_MODEL (default base.en; small.en = more
+# accurate, slower). Model files auto-download from HuggingFace on first use.
+faster-whisper>=1.0.0       # Local speech-to-text (Whisper, CTranslate2 + PyAV)
+
 # Advanced Features (Optional)
 python-dateutil>=2.8.2      # Better date/time parsing
 pytz>=2023.3                # Timezone support
