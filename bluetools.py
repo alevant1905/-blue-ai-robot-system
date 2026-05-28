@@ -1590,6 +1590,22 @@ def _is_local_request() -> bool:
 _DEVICE_OWNER = {"ipad": "Vilda"}   # everything not listed here => _DEFAULT_USER
 _DEFAULT_USER = "Alex"
 
+# Per-person guidance Blue follows when that person is the one chatting. The
+# text is appended to the "who you're talking to" note built in
+# process_with_tools. Keyed by the name _identify_user_from_request returns;
+# add an entry here to tune how Blue speaks to another household member.
+_SPEAKER_PROFILES = {
+    "Vilda": (
+        "Vilda is 8 years old — one of the children in Alex's household. Talk to "
+        "her accordingly: warm, gentle, patient and encouraging, with short "
+        "sentences and simple everyday words, and keep everything child-safe and "
+        "age-appropriate. You may use a little Gen Z slang now and then to be fun "
+        "and relatable (things like \"that's so cool\", \"bet\", \"no cap\", "
+        "\"slay\") — but only occasionally, never in every sentence, and never "
+        "let the slang make you harder to understand."
+    ),
+}
+
 
 def _device_tag_from_user_agent(ua: str) -> str:
     ua = (ua or "").lower()
@@ -9959,6 +9975,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             f"pronouns above describe Alex (your owner) and may not apply to "
             f"{_speaker}.\n"
         )
+        _profile = _SPEAKER_PROFILES.get(_speaker)
+        if _profile:
+            speaker_note += _profile + "\n"
         system_msg = {"role": "system", "content": (system_msg.get("content", "") + speaker_note)}
     _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
     existing0 = conversation_messages[0] if conversation_messages else None
