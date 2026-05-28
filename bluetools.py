@@ -12156,11 +12156,18 @@ CHAT_HTML = """
 
         function pickVoice() {
             const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
-            const pref = ['Samantha', 'Karen', 'Moira', 'Tessa', 'Google US English'];
+            // Blue is a man, so prefer a male English voice.
+            const pref = ['Daniel', 'Aaron', 'Arthur', 'Gordon', 'Rishi', 'Fred', 'Albert',
+                          'Microsoft David', 'Microsoft Mark',
+                          'Google UK English Male', 'Google US English'];
             for (let i = 0; i < pref.length; i++) {
-                const v = voices.find(x => x.name === pref[i]);
+                const v = voices.find(x => x.name === pref[i] || x.name.indexOf(pref[i]) === 0);
                 if (v) return v;
             }
+            // Fall back to any English voice that looks male by name.
+            const maleHint = /(daniel|aaron|arthur|gordon|rishi|fred|albert|david|mark|male|\bman\b)/i;
+            const m = voices.find(x => /^en/i.test(x.lang) && maleHint.test(x.name));
+            if (m) return m;
             return voices.find(x => /^en/i.test(x.lang)) || null;
         }
 
