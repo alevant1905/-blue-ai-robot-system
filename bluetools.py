@@ -12201,83 +12201,118 @@ CHAT_HTML = """
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
 
-        // Vilda's iPad can't use the in-browser Web Speech API reliably, so we
-        // record audio here and let Blue transcribe it on the PC (POST /stt).
-        let listening = false, mediaRecorder = null, audioChunks = [], audioStream = null, autoStopTimer = null;
+        // The iPad Mini (iOS 12) has no MediaRecorder, so we capture raw audio
+        // with the Web Audio API (works back to iOS 12) and encode a WAV here,
+        // then POST it to /stt for Blue to transcribe on the PC.
+        let listening = false, audioStream = null, audioCtx = null, srcNode = null, procNode = null;
+        let pcmChunks = [], recSampleRate = 16000, autoStopTimer = null;
         const hintEl = document.querySelector('.hint');
         const originalHint = hintEl ? hintEl.textContent : '';
         const defaultHint = isVilda ? 'Tap the microphone and talk to Blue.' : originalHint;
         function setHint(t) { if (hintEl) hintEl.textContent = t; }
         setHint(defaultHint);
 
-        function stopStream() {
-            if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+        function teardownAudio() {
+            try { if (procNode) { procNode.onaudioprocess = null; procNode.disconnect(); } } catch (e) {}
+            try { if (srcNode) srcNode.disconnect(); } catch (e) {}
+            try { if (audioCtx && audioCtx.state !== 'closed') audioCtx.close(); } catch (e) {}
+            if (audioStream) { try { audioStream.getTracks().forEach(t => t.stop()); } catch (e) {} }
+            procNode = null; srcNode = null; audioCtx = null; audioStream = null;
+        }
+
+        function encodeWav(chunks, sampleRate) {
+            let len = 0;
+            for (let i = 0; i < chunks.length; i++) len += chunks[i].length;
+            const buf = new ArrayBuffer(44 + len * 2);
+            const view = new DataView(buf);
+            function ws(off, s) { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); }
+            ws(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); ws(8, 'WAVE');
+            ws(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+            ws(36, 'data'); view.setUint32(40, len * 2, true);
+            let off = 44;
+            for (let i = 0; i < chunks.length; i++) {
+                const c = chunks[i];
+                for (let j = 0; j < c.length; j++) {
+                    let v = c[j]; if (v > 1) v = 1; else if (v < -1) v = -1;
+                    view.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true); off += 2;
+                }
+            }
+            return new Blob([view], { type: 'audio/wav' });
         }
 
         function stopListening() {
             if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                try { mediaRecorder.stop(); } catch (e) {}
-            }
+            if (!listening) return;
             listening = false;
             micBtn.classList.remove('listening');
+            const chunks = pcmChunks, sr = recSampleRate;
+            pcmChunks = [];
+            teardownAudio();
+            transcribePcm(chunks, sr);
         }
 
         async function startListening() {
             primeAudio();
             if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             if (listening) { stopListening(); return; }
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC) {
                 if (!window.isSecureContext) {
-                    addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work. (Right now you are on ' + location.protocol + '//' + location.host + '.)');
+                    addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work.');
                 } else {
-                    const miss = [];
-                    if (!navigator.mediaDevices) miss.push('mediaDevices');
-                    else if (!navigator.mediaDevices.getUserMedia) miss.push('getUserMedia');
-                    if (typeof MediaRecorder === 'undefined') miss.push('MediaRecorder');
-                    const mode = (('standalone' in navigator) && navigator.standalone) ? 'home-screen app' : 'Safari';
-                    addBubble('blue', 'This browser will not let me record audio. Missing: ' + miss.join(', ') + '. Running as: ' + mode + '. If it says home-screen app, open me in the Safari app instead. (Show Alex this message.)');
+                    addBubble('blue', 'This browser will not let me use the microphone.');
                 }
                 return;
             }
+            // Create + resume the audio context inside the tap gesture (iOS
+            // requires this synchronously, before any await).
             try {
-                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioCtx = new AC();
+                if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+            } catch (e) { addBubble('blue', 'I could not start the audio on this device.'); return; }
+            recSampleRate = audioCtx.sampleRate || 44100;
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             } catch (e) {
+                teardownAudio();
                 addBubble('blue', 'I need permission to use the microphone. Tap the mic again and choose Allow.');
                 return;
             }
-            audioChunks = [];
-            let mr = null;
-            try { mr = new MediaRecorder(audioStream); }
-            catch (e1) {
-                try { mr = new MediaRecorder(audioStream, { mimeType: 'audio/mp4' }); } catch (e2) { mr = null; }
+            audioStream = stream;
+            try {
+                srcNode = audioCtx.createMediaStreamSource(stream);
+                procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+                pcmChunks = [];
+                procNode.onaudioprocess = (ev) => {
+                    const ch = ev.inputBuffer.getChannelData(0);
+                    pcmChunks.push(new Float32Array(ch));
+                };
+                const mute = audioCtx.createGain();
+                mute.gain.value = 0;
+                srcNode.connect(procNode);
+                procNode.connect(mute);
+                mute.connect(audioCtx.destination);
+            } catch (e) {
+                teardownAudio();
+                addBubble('blue', 'I could not start recording on this device.');
+                return;
             }
-            if (!mr) { addBubble('blue', 'This browser will not let me record audio.'); stopStream(); return; }
-            mediaRecorder = mr;
-            mr.ondataavailable = (ev) => { if (ev.data && ev.data.size) audioChunks.push(ev.data); };
-            mr.onstop = transcribeRecording;
-            try { mr.start(); }
-            catch (e) { addBubble('blue', 'I could not start recording.'); stopStream(); return; }
             listening = true;
             micBtn.classList.add('listening');
             setHint('Listening\\u2026 tap the microphone again when you are done.');
             autoStopTimer = setTimeout(stopListening, 15000);
         }
 
-        async function transcribeRecording() {
-            micBtn.classList.remove('listening');
-            listening = false;
-            const type = (mediaRecorder && mediaRecorder.mimeType) || 'audio/mp4';
-            const blob = new Blob(audioChunks, { type: type });
-            audioChunks = [];
-            stopStream();
-            if (!blob.size) { setHint(defaultHint); return; }
-            let ext = 'm4a';
-            if (type.indexOf('webm') >= 0) ext = 'webm';
-            else if (type.indexOf('ogg') >= 0) ext = 'ogg';
-            else if (type.indexOf('wav') >= 0) ext = 'wav';
+        async function transcribePcm(chunks, sampleRate) {
+            let total = 0;
+            for (let i = 0; i < chunks.length; i++) total += chunks[i].length;
+            if (!total) { setHint(defaultHint); return; }
+            const blob = encodeWav(chunks, sampleRate);
             const fd = new FormData();
-            fd.append('audio', blob, 'speech.' + ext);
+            fd.append('audio', blob, 'speech.wav');
             micBtn.disabled = true;
             setHint('Figuring out what you said\\u2026');
             try {
