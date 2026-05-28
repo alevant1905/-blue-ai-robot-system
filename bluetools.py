@@ -12208,7 +12208,11 @@ CHAT_HTML = """
             primeAudio();
             if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             if (!SR) {
-                addBubble('blue', 'I can\\'t use the microphone in this browser. Open Blue using the secure https web address so I can hear you.');
+                if (!window.isSecureContext) {
+                    addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat — then the microphone will work. (Right now you are on ' + location.protocol + '//' + location.host + '.)');
+                } else {
+                    addBubble('blue', 'This iPad\\'s browser will not give me the microphone directly, even on the secure address. Tell Alex \\u2014 he can switch me to listen a different way.');
+                }
                 return;
             }
             if (listening) { try { recog.stop(); } catch (e) {} return; }
