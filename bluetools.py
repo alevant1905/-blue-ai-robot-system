@@ -9972,7 +9972,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{now_block}\n\n"
             f"{schedule_section}"
             "You are Blue, a friendly home assistant. Keep responses brief and natural.\n"
-            "LANGUAGES: You understand and speak English, French, Russian, and Greek. "
+            "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
             "Reply in the SAME language the person just used, and switch languages "
             "whenever they do. Keep your reply entirely in that one language.\n"
             f"{conversational_guidance}"
@@ -12286,7 +12286,8 @@ CHAT_HTML = """
                 en: ['Daniel', 'Aaron', 'Arthur', 'Gordon', 'Rishi', 'Fred', 'Albert', 'Microsoft David', 'Microsoft Mark', 'Google UK English Male', 'Google US English'],
                 fr: ['Thomas', 'Nicolas', 'Microsoft Claude', 'Microsoft Paul', 'Google fran\\u00e7ais'],
                 ru: ['Yuri', 'Microsoft Pavel', 'Google \\u0440\\u0443\\u0441\\u0441\\u043a\\u0438\\u0439'],
-                el: ['Melina', 'Microsoft Stefanos']
+                el: ['Melina', 'Microsoft Stefanos'],
+                da: ['Magnus', 'Sara', 'Microsoft Helle']
             };
             const pl = prefs[lang] || prefs.en;
             for (let i = 0; i < pl.length; i++) {
@@ -12304,6 +12305,10 @@ CHAT_HTML = """
             const s = t || '';
             if (/[\\u0400-\\u04FF]/.test(s)) return 'ru';
             if (/[\\u0370-\\u03FF]/.test(s)) return 'el';
+            // Danish uses æ ø å (Æ Ø Å) which French doesn't.
+            if (/[\\u00e6\\u00f8\\u00e5\\u00c6\\u00d8\\u00c5]/.test(s)) return 'da';
+            const daWords = /\\b(jeg|du|det|er|og|ikke|hej|tak|hvad|hvor|hvordan|ja|nej|kan|skal|har|vil|med|p\\u00e5)\\b/i;
+            if (daWords.test(s)) return 'da';
             const accents = (s.match(/[\\u00e0\\u00e2\\u00e7\\u00e9\\u00e8\\u00ea\\u00eb\\u00ee\\u00ef\\u00f4\\u00f9\\u00fb\\u00fc\\u0153]/gi) || []).length;
             const frWords = /\\b(le|la|les|une|des|est|vous|je|tu|nous|bonjour|merci|oui|non|pour|avec|pas|bien|tres|aussi|aujourd)\\b/i;
             if (accents >= 2 || frWords.test(s)) return 'fr';
@@ -12334,7 +12339,7 @@ CHAT_HTML = """
             const msg = cleanForSpeech(text);
             if (!msg) return;
             const lang = detectLang(msg);
-            const bcp = { en: 'en-US', fr: 'fr-FR', ru: 'ru-RU', el: 'el-GR' }[lang] || 'en-US';
+            const bcp = { en: 'en-US', fr: 'fr-FR', ru: 'ru-RU', el: 'el-GR', da: 'da-DK' }[lang] || 'en-US';
             try {
                 window.speechSynthesis.cancel();
                 const u = new SpeechSynthesisUtterance(msg);
@@ -12368,13 +12373,14 @@ CHAT_HTML = """
         const voicePanel = document.getElementById('voicePanel');
         const voiceClose = document.getElementById('voiceClose');
         const voiceList = document.getElementById('voiceList');
-        const VOICE_SAMPLES = { en: "Hi, I'm Blue!", fr: 'Bonjour, je suis Blue\\u00a0!', ru: '\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442, \\u044f \\u0411\\u043b\\u044e!', el: '\\u0393\\u0435\\u03b9\\u03b1, \\u03b5\\u03af\\u03bc\\u03b1\\u03b9 \\u03bf \\u039c\\u03c0\\u03bb\\u03b5!' };
+        const VOICE_SAMPLES = { en: "Hi, I'm Blue!", fr: 'Bonjour, je suis Blue\\u00a0!', ru: '\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442, \\u044f \\u0411\\u043b\\u044e!', el: '\\u0393\\u0435\\u03b9\\u03b1, \\u03b5\\u03af\\u03bc\\u03b1\\u03b9 \\u03bf \\u039c\\u03c0\\u03bb\\u03b5!', da: 'Hej, jeg er Blue!' };
 
         function voiceLangCode(v) {
             const l = (v.lang || '').toLowerCase();
             if (l.indexOf('fr') === 0) return 'fr';
             if (l.indexOf('ru') === 0) return 'ru';
             if (l.indexOf('el') === 0) return 'el';
+            if (l.indexOf('da') === 0) return 'da';
             if (l.indexOf('en') === 0) return 'en';
             return null;
         }
