@@ -9929,6 +9929,9 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{now_block}\n\n"
             f"{schedule_section}"
             "You are Blue, a friendly home assistant. Keep responses brief and natural.\n"
+            "LANGUAGES: You understand and speak English, French, Russian, and Greek. "
+            "Reply in the SAME language the person just used, and switch languages "
+            "whenever they do. Keep your reply entirely in that one language.\n"
             f"{conversational_guidance}"
             f"{anti_repetition_context}"
             f"{expertise_section}"
@@ -12154,21 +12157,36 @@ CHAT_HTML = """
             catch (e) { /* no speech available */ }
         }
 
-        function pickVoice() {
+        // Pick a voice for the given language, preferring a male voice where one
+        // exists (Blue is a man). Greek on iOS only ships a female voice.
+        function pickVoice(lang) {
             const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
-            // Blue is a man, so prefer a male English voice.
-            const pref = ['Daniel', 'Aaron', 'Arthur', 'Gordon', 'Rishi', 'Fred', 'Albert',
-                          'Microsoft David', 'Microsoft Mark',
-                          'Google UK English Male', 'Google US English'];
-            for (let i = 0; i < pref.length; i++) {
-                const v = voices.find(x => x.name === pref[i] || x.name.indexOf(pref[i]) === 0);
+            const prefs = {
+                en: ['Daniel', 'Aaron', 'Arthur', 'Gordon', 'Rishi', 'Fred', 'Albert', 'Microsoft David', 'Microsoft Mark', 'Google UK English Male', 'Google US English'],
+                fr: ['Thomas', 'Nicolas', 'Microsoft Claude', 'Microsoft Paul', 'Google fran\\u00e7ais'],
+                ru: ['Yuri', 'Microsoft Pavel', 'Google \\u0440\\u0443\\u0441\\u0441\\u043a\\u0438\\u0439'],
+                el: ['Melina', 'Microsoft Stefanos']
+            };
+            const pl = prefs[lang] || prefs.en;
+            for (let i = 0; i < pl.length; i++) {
+                const v = voices.find(x => x.name === pl[i] || x.name.indexOf(pl[i]) === 0);
                 if (v) return v;
             }
-            // Fall back to any English voice that looks male by name.
-            const maleHint = /(daniel|aaron|arthur|gordon|rishi|fred|albert|david|mark|male|\bman\b)/i;
-            const m = voices.find(x => /^en/i.test(x.lang) && maleHint.test(x.name));
-            if (m) return m;
-            return voices.find(x => /^en/i.test(x.lang)) || null;
+            const re = new RegExp('^' + (lang || 'en'), 'i');
+            return voices.find(x => re.test(x.lang)) || voices.find(x => /^en/i.test(x.lang)) || null;
+        }
+
+        // Best-effort detection of Blue's reply language so we speak it with the
+        // right voice: Cyrillic => Russian, Greek block => Greek; otherwise look
+        // for French signals, else English.
+        function detectLang(t) {
+            const s = t || '';
+            if (/[\\u0400-\\u04FF]/.test(s)) return 'ru';
+            if (/[\\u0370-\\u03FF]/.test(s)) return 'el';
+            const accents = (s.match(/[\\u00e0\\u00e2\\u00e7\\u00e9\\u00e8\\u00ea\\u00eb\\u00ee\\u00ef\\u00f4\\u00f9\\u00fb\\u00fc\\u0153]/gi) || []).length;
+            const frWords = /\\b(le|la|les|une|des|est|vous|je|tu|nous|bonjour|merci|oui|non|pour|avec|pas|bien|tres|aussi|aujourd)\\b/i;
+            if (accents >= 2 || frWords.test(s)) return 'fr';
+            return 'en';
         }
 
         function cleanForSpeech(t) {
@@ -12184,11 +12202,14 @@ CHAT_HTML = """
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
             if (!msg) return;
+            const lang = detectLang(msg);
+            const bcp = { en: 'en-US', fr: 'fr-FR', ru: 'ru-RU', el: 'el-GR' }[lang] || 'en-US';
             try {
                 window.speechSynthesis.cancel();
                 const u = new SpeechSynthesisUtterance(msg);
-                const v = pickVoice();
+                const v = pickVoice(lang);
                 if (v) u.voice = v;
+                u.lang = bcp;
                 u.rate = isVilda ? 0.95 : 1.0;
                 u.pitch = 1.0;
                 window.speechSynthesis.speak(u);
@@ -12196,7 +12217,7 @@ CHAT_HTML = """
         }
 
         if ('speechSynthesis' in window) {
-            try { window.speechSynthesis.onvoiceschanged = pickVoice; } catch (e) {}
+            try { window.speechSynthesis.onvoiceschanged = function () { window.speechSynthesis.getVoices(); }; } catch (e) {}
         }
 
         function setSpeakOn(on) {
@@ -12366,7 +12387,11 @@ def _get_whisper():
         with _WHISPER_LOCK:
             if _WHISPER_MODEL is None:
                 from faster_whisper import WhisperModel
-                name = (os.environ.get("BLUE_WHISPER_MODEL") or "base.en").strip()
+                # Multilingual model (NOT a .en model) so Blue understands
+                # English, French, Russian and Greek. "small" balances CPU speed
+                # and multilingual accuracy; override with BLUE_WHISPER_MODEL
+                # ("base" = faster/less accurate, "medium" = slower/better).
+                name = (os.environ.get("BLUE_WHISPER_MODEL") or "small").strip()
                 print(f"   [STT] Loading Whisper model '{name}' (first use)...")
                 _WHISPER_MODEL = WhisperModel(name, device="cpu", compute_type="int8")
                 print("   [STT] Whisper model ready.")
@@ -12400,10 +12425,12 @@ def stt():
     try:
         f.save(tmp_path)
         model = _get_whisper()
-        segments, _info = model.transcribe(tmp_path, language="en", beam_size=1)
+        # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
+        segments, info = model.transcribe(tmp_path, beam_size=1)
         text = " ".join(seg.text for seg in segments).strip()
-        print(f"   [STT] Transcribed -> {text[:120]!r}")
-        return jsonify({"text": text})
+        lang = getattr(info, "language", "") or ""
+        print(f"   [STT] ({lang}) Transcribed -> {text[:120]!r}")
+        return jsonify({"text": text, "language": lang})
     except Exception as e:
         log.error(f"[STT] transcription failed: {e}")
         return jsonify({"error": "transcription failed"}), 500
