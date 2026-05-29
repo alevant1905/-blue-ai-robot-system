@@ -12014,6 +12014,21 @@ CHAT_HTML = """
         body.kid .micbtn.big svg { width: 40px; height: 40px; }
         body.kid .sendbtn { font-size: 1.05em; border-radius: 14px; }
         body.kid .hint { font-size: 0.92em; text-align: center; }
+        /* Fun activity buttons */
+        body.kid .kid-activities { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; padding: 12px 14px 2px; }
+        body.kid .act { display: flex; flex-direction: column; align-items: center; gap: 6px; border: none; border-radius: 18px;
+                        padding: 12px 10px; min-width: 88px; cursor: pointer; font-family: inherit; font-weight: 600;
+                        font-size: 0.92em; color: var(--ink); box-shadow: 0 3px 10px rgba(26,46,26,0.10); transition: transform 0.12s; }
+        body.kid .act:active { transform: scale(0.93); }
+        body.kid .act svg { width: 30px; height: 30px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        body.kid .act:nth-child(1) { background: #ffe1c7; }
+        body.kid .act:nth-child(2) { background: #fff3b0; }
+        body.kid .act:nth-child(3) { background: #c9f0d6; }
+        body.kid .act:nth-child(4) { background: #d8e3ff; }
+        body.kid .act:nth-child(5) { background: #f3d7ff; }
+        body.kid .act:nth-child(6) { background: #ffd6e0; }
+        @keyframes kidpulse { 0% { box-shadow: 0 0 0 0 rgba(59,130,246,0.35); } 70% { box-shadow: 0 0 0 15px rgba(59,130,246,0); } 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); } }
+        body.kid .micbtn.big:not(.listening) { animation: kidpulse 2.4s infinite; }
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
@@ -12031,13 +12046,23 @@ CHAT_HTML = """
             <div class="empty" id="empty">
                 {% if kid %}
                 <div class="big">Hi Vilda!</div>
-                <div>Tap the big microphone and talk to Blue.</div>
+                <div>Tap the big microphone and talk to me, or pick something fun below!</div>
                 {% else %}
                 <div class="big">Say hello to Blue</div>
                 <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
                 {% endif %}
             </div>
         </div>
+        {% if kid %}
+        <div class="kid-activities" id="kidActivities">
+            <button class="act" data-msg="Tell me a fun story!"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg><span>Story</span></button>
+            <button class="act" data-msg="Tell me a funny joke!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01"/><path d="M8.5 14.5a4 4 0 0 0 7 0"/></svg><span>Joke</span></button>
+            <button class="act" data-msg="Tell me a cool animal fact!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="11" r="1.7"/><circle cx="11" cy="8.5" r="1.7"/><circle cx="15" cy="8.5" r="1.7"/><circle cx="17.5" cy="11.5" r="1.7"/><path d="M12 13c-2.4 0-4 1.7-4 3.4 0 1.6 1.6 2.6 4 2.6s4-1 4-2.6c0-1.7-1.6-3.4-4-3.4z"/></svg><span>Animals</span></button>
+            <button class="act" data-msg="Give me an easy riddle to guess!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.8 2.8 0 1 1 4.3 2.6c-.9.6-1.5 1.1-1.5 2.1"/><path d="M12 17.3h.01"/></svg><span>Riddle</span></button>
+            <button class="act" data-msg="Let's play a guessing game!"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M9 9h.01M15 9h.01M9 15h.01M15 15h.01M12 12h.01"/></svg><span>Game</span></button>
+            <button class="act" data-msg="Sing me a little song!"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/></svg><span>Song</span></button>
+        </div>
+        {% endif %}
         <div class="composer">
             <div class="chips" id="chips"></div>
             <div class="input-bar">
@@ -12523,6 +12548,23 @@ CHAT_HTML = """
         }
 
         micBtn.addEventListener('click', startListening);
+
+        // Fun activity buttons: tapping one sends a kid-friendly prompt to Blue,
+        // who answers (and reads it aloud). No reading required.
+        const kidActivities = document.getElementById('kidActivities');
+        if (kidActivities) {
+            const acts = kidActivities.querySelectorAll('.act');
+            for (let i = 0; i < acts.length; i++) {
+                acts[i].addEventListener('click', function () {
+                    if (busy) return;
+                    primeAudio();
+                    const msg = this.getAttribute('data-msg') || '';
+                    if (!msg) return;
+                    inputEl.value = msg;
+                    send();
+                });
+            }
+        }
 
         if (isVilda) {
             micBtn.classList.add('big');
