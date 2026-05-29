@@ -12349,24 +12349,12 @@ CHAT_HTML = """
             for (let i = 0; i < chunks.length; i++) total += chunks[i].length;
             if (!total) {
                 setHint(defaultHint);
-                addBubble('blue', 'I did not get any sound (mic: ' + (audioCtx ? audioCtx.state : 'none') + ', pieces: ' + chunks.length + '). Tap the mic, wait a second, then talk.');
+                addBubble('blue', 'I did not hear anything that time \\u2014 tap the mic, wait a second, then talk.');
                 return;
             }
             const blob = encodeWav(chunks, sampleRate);
             const fd = new FormData();
             fd.append('audio', blob, 'speech.wav');
-            try {
-                const tr = (micStream && micStream.getAudioTracks) ? micStream.getAudioTracks()[0] : null;
-                fd.append('meta', JSON.stringify({
-                    build: 'stt-v7',
-                    ctx: audioCtx ? audioCtx.state : 'none',
-                    sr: sampleRate, pieces: chunks.length, samples: total,
-                    trackMuted: tr ? tr.muted : null,
-                    trackEnabled: tr ? tr.enabled : null,
-                    trackState: tr ? tr.readyState : null,
-                    trackLabel: tr ? tr.label : null
-                }));
-            } catch (e) {}
             micBtn.disabled = true;
             setHint('Figuring out what you said\\u2026');
             try {
@@ -12448,58 +12436,17 @@ def stt():
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
     tmp_path = tmp.name
     tmp.close()
-    import json as _json
-    dbg = {"filename": f.filename, "ext": ext}
-    _meta = request.form.get("meta")
-    if _meta:
-        dbg["client_meta"] = _meta
-    _dbg_dir = os.path.join(os.getcwd(), "data")
-
-    def _write_dbg():
-        try:
-            os.makedirs(_dbg_dir, exist_ok=True)
-            with open(os.path.join(_dbg_dir, "last_stt.json"), "w", encoding="utf-8") as jf:
-                _json.dump(dbg, jf, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
     try:
         f.save(tmp_path)
-        dbg["bytes"] = os.path.getsize(tmp_path)
-        # Keep the last clip + measure it so we can tell silence from a real
-        # recording when transcription comes back empty. (Debug aid.)
-        try:
-            import shutil, wave, audioop
-            os.makedirs(_dbg_dir, exist_ok=True)
-            shutil.copyfile(tmp_path, os.path.join(_dbg_dir, "last_stt" + ext))
-            if ext.lower() == ".wav":
-                with wave.open(tmp_path, "rb") as w:
-                    sr = w.getframerate(); nf = w.getnframes()
-                    sw = w.getsampwidth(); ch = w.getnchannels()
-                    frames = w.readframes(nf)
-                dbg["sample_rate"] = sr; dbg["channels"] = ch; dbg["sampwidth"] = sw
-                dbg["duration_s"] = round(nf / float(sr), 2) if sr else 0
-                if frames and sw == 2:
-                    mono = audioop.tomono(frames, sw, 1, 0) if ch == 2 else frames
-                    dbg["peak"] = audioop.max(mono, sw)
-                    dbg["peak_frac"] = round(dbg["peak"] / 32768.0, 4)
-                    dbg["rms"] = audioop.rms(mono, sw)
-        except Exception as de:
-            dbg["analyze_error"] = str(de)
         model = _get_whisper()
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
         segments, info = model.transcribe(tmp_path, beam_size=1)
         text = " ".join(seg.text for seg in segments).strip()
         lang = getattr(info, "language", "") or ""
-        dbg["language"] = lang; dbg["text"] = text
-        print(f"   [STT] ({lang}) bytes={dbg.get('bytes')} dur={dbg.get('duration_s')} "
-              f"peak_frac={dbg.get('peak_frac')} -> {text[:120]!r}")
-        _write_dbg()
+        print(f"   [STT] ({lang}) {os.path.getsize(tmp_path)} bytes -> {text[:120]!r}")
         return jsonify({"text": text, "language": lang})
     except Exception as e:
         log.error(f"[STT] transcription failed: {e}")
-        dbg["error"] = str(e)
-        _write_dbg()
         return jsonify({"error": "transcription failed"}), 500
     finally:
         try:
