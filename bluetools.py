@@ -12358,6 +12358,7 @@ CHAT_HTML = """
             try {
                 const tr = (micStream && micStream.getAudioTracks) ? micStream.getAudioTracks()[0] : null;
                 fd.append('meta', JSON.stringify({
+                    build: 'stt-v7',
                     ctx: audioCtx ? audioCtx.state : 'none',
                     sr: sampleRate, pieces: chunks.length, samples: total,
                     trackMuted: tr ? tr.muted : null,
@@ -12510,7 +12511,14 @@ def stt():
 @app.route('/chat', methods=['GET'])
 def chat_page():
     """Serve the text chat GUI."""
-    return render_template_string(CHAT_HTML)
+    # No-cache headers: iOS Safari was serving a stale cached copy of this page,
+    # so new client fixes never reached the iPad. Force a fresh fetch each time.
+    html = render_template_string(CHAT_HTML)
+    return Response(html, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 
 @app.route('/chat/attach', methods=['POST'])
