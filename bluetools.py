@@ -1687,6 +1687,35 @@ def _require_remote_auth():
     return redirect(url_for("blue_login", next=request.full_path))
 
 
+# Users who are restricted to the chat only (e.g. Vilda on the iPad — she can
+# talk to Blue but not reach contacts/calendar/visual memory/documents/etc).
+_CHAT_ONLY_USERS = {"Vilda"}
+# The only endpoints those users may reach: the chat page + everything the chat
+# page needs to function (send messages, attachments, voice, assets, login).
+_CHAT_ONLY_ALLOWED = {
+    "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
+    "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
+}
+
+
+@app.before_request
+def _restrict_chat_only_users():
+    """Keep chat-only users (the kids' iPad) inside the chat. Page navigations
+    elsewhere bounce back to /chat; API calls get a plain 403."""
+    try:
+        user = _identify_user_from_request()
+    except Exception:
+        return None
+    if user not in _CHAT_ONLY_USERS:
+        return None
+    if (request.endpoint or "") in _CHAT_ONLY_ALLOWED:
+        return None
+    accepts_html = "text/html" in (request.headers.get("Accept") or "")
+    if request.method == "GET" and accepts_html:
+        return redirect(url_for("chat_page"))
+    return Response("Not available on this device.", status=403, mimetype="text/plain")
+
+
 _LOGIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -11966,18 +11995,47 @@ CHAT_HTML = """
         .voice-row.sel .vn:after { content: ' \2713'; color: var(--forest); }
         .voice-row .vl { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); white-space: nowrap; }
         .voice-empty { padding: 18px; color: var(--slate); text-align: center; }
+        /* ---- Kid mode (Vilda's iPad): bigger, warmer, simpler ---- */
+        body.kid { background: linear-gradient(160deg, #fff7ed 0%, #eef6ff 100%); }
+        body.kid .container { max-width: 760px; }
+        body.kid .header { text-align: center; }
+        body.kid .header h1 { font-size: 2.1em; display: inline-flex; align-items: center; gap: 12px; }
+        body.kid .header h1 .robot { width: 46px; height: 46px; color: #3b82f6; }
+        body.kid .header p { font-size: 1.08em; color: var(--forest); }
+        body.kid .messages { font-size: 1.12em; gap: 22px; }
+        body.kid .row { max-width: 92%; }
+        body.kid .bubble { font-size: 1.15em; border-radius: 20px; padding: 16px 20px; line-height: 1.5; }
+        body.kid .row.blue .bubble { background: #fffdf7; border-color: #e7dcc2; }
+        body.kid .empty .big { font-size: 1.8em; }
+        body.kid textarea { font-size: 1.12em; border-radius: 14px; }
+        body.kid #attachBtn { display: none; }
+        body.kid .iconbtn { width: 54px; height: 54px; }
+        body.kid .micbtn.big { width: 84px; height: 84px; border-width: 2px; }
+        body.kid .micbtn.big svg { width: 40px; height: 40px; }
+        body.kid .sendbtn { font-size: 1.05em; border-radius: 14px; }
+        body.kid .hint { font-size: 0.92em; text-align: center; }
     </style>
 </head>
-<body>
+<body{% if kid %} class="kid"{% endif %}>
     <div class="container">
         <div class="header">
+            {% if kid %}
+            <h1><svg class="robot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 5.4v2.6"/><circle cx="12" cy="4" r="1.4"/><circle cx="9.6" cy="13" r="1.1"/><circle cx="14.4" cy="13" r="1.1"/><path d="M9.8 16.3h4.4"/><path d="M5 12H3.4M19 12h1.6"/></svg> Hi! I'm Blue</h1>
+            <p>Tap the big microphone and talk to me!</p>
+            {% else %}
             <h1>Chat with Blue</h1>
             <p>Type to talk with Blue, and attach images or documents for him to look at. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
+            {% endif %}
         </div>
         <div class="messages" id="messages">
             <div class="empty" id="empty">
+                {% if kid %}
+                <div class="big">Hi Vilda!</div>
+                <div>Tap the big microphone and talk to Blue.</div>
+                {% else %}
                 <div class="big">Say hello to Blue</div>
                 <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
+                {% endif %}
             </div>
         </div>
         <div class="composer">
@@ -12553,7 +12611,12 @@ def chat_page():
     """Serve the text chat GUI."""
     # No-cache headers: iOS Safari was serving a stale cached copy of this page,
     # so new client fixes never reached the iPad. Force a fresh fetch each time.
-    html = render_template_string(CHAT_HTML)
+    kid = False
+    try:
+        kid = _identify_user_from_request() in _CHAT_ONLY_USERS
+    except Exception:
+        pass
+    html = render_template_string(CHAT_HTML, kid=kid)
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
