@@ -12240,12 +12240,25 @@ CHAT_HTML = """
         function setHint(t) { if (hintEl) hintEl.textContent = t; }
         setHint(defaultHint);
 
-        function teardownAudio() {
+        // Reuse ONE AudioContext for every recording. iOS Safari caps how many
+        // you can create, so making (and closing) a fresh one each time
+        // eventually fails silently and the mic stops capturing after a while.
+        // We keep one context alive and just resume it on each tap.
+        function getCtx() {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return null;
+            if (!audioCtx || audioCtx.state === 'closed') {
+                try { audioCtx = new AC(); } catch (e) { audioCtx = null; }
+            }
+            return audioCtx;
+        }
+
+        // Tear down only the per-recording nodes + mic stream; KEEP the context.
+        function teardownNodes() {
             try { if (procNode) { procNode.onaudioprocess = null; procNode.disconnect(); } } catch (e) {}
             try { if (srcNode) srcNode.disconnect(); } catch (e) {}
-            try { if (audioCtx && audioCtx.state !== 'closed') audioCtx.close(); } catch (e) {}
             if (audioStream) { try { audioStream.getTracks().forEach(t => t.stop()); } catch (e) {} }
-            procNode = null; srcNode = null; audioCtx = null; audioStream = null;
+            procNode = null; srcNode = null; audioStream = null;
         }
 
         function encodeWav(chunks, sampleRate) {
@@ -12277,7 +12290,7 @@ CHAT_HTML = """
             micBtn.classList.remove('listening');
             const chunks = pcmChunks, sr = recSampleRate;
             pcmChunks = [];
-            teardownAudio();
+            teardownNodes();
             transcribePcm(chunks, sr);
         }
 
@@ -12285,8 +12298,8 @@ CHAT_HTML = """
             primeAudio();
             if ('speechSynthesis' in window) window.speechSynthesis.cancel();
             if (listening) { stopListening(); return; }
-            const AC = window.AudioContext || window.webkitAudioContext;
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC) {
+            const ctx = getCtx();
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !ctx) {
                 if (!window.isSecureContext) {
                     addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work.');
                 } else {
@@ -12294,18 +12307,15 @@ CHAT_HTML = """
                 }
                 return;
             }
-            // Create + resume the audio context inside the tap gesture (iOS
-            // requires this synchronously, before any await).
-            try {
-                audioCtx = new AC();
-                if (audioCtx.state === 'suspended') { audioCtx.resume(); }
-            } catch (e) { addBubble('blue', 'I could not start the audio on this device.'); return; }
-            recSampleRate = audioCtx.sampleRate || 44100;
+            // Resume the (reused) context inside the tap gesture — iOS suspends
+            // or interrupts it when idle or after Siri/another app uses audio.
+            if (ctx.state !== 'running') { try { ctx.resume(); } catch (e) {} }
+            recSampleRate = ctx.sampleRate || 44100;
             let stream;
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             } catch (e) {
-                teardownAudio();
+                teardownNodes();
                 addBubble('blue', 'I need permission to use the microphone. Tap the mic again and choose Allow.');
                 return;
             }
@@ -12324,7 +12334,7 @@ CHAT_HTML = """
                 procNode.connect(mute);
                 mute.connect(audioCtx.destination);
             } catch (e) {
-                teardownAudio();
+                teardownNodes();
                 addBubble('blue', 'I could not start recording on this device.');
                 return;
             }
