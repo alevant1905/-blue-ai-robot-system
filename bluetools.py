@@ -12232,7 +12232,14 @@ CHAT_HTML = """
         // The iPad Mini (iOS 12) has no MediaRecorder, so we capture raw audio
         // with the Web Audio API (works back to iOS 12) and encode a WAV here,
         // then POST it to /stt for Blue to transcribe on the PC.
-        let listening = false, audioStream = null, audioCtx = null, srcNode = null, procNode = null;
+        // Set the mic up ONCE and keep it running. iOS Safari (iOS 12) both caps
+        // how many AudioContexts a page may create AND yields SILENT audio when a
+        // MediaStreamSource is re-attached to a context — which is why tearing
+        // down and rebuilding per recording produced 6s of pure silence. So we
+        // build the context + mic + nodes a single time, leave them connected,
+        // and just gate sample collection with the `recording` flag.
+        let listening = false, recording = false, audioReady = false;
+        let audioCtx = null, micStream = null, srcNode = null, procNode = null;
         let pcmChunks = [], recSampleRate = 16000, autoStopTimer = null;
         const hintEl = document.querySelector('.hint');
         const originalHint = hintEl ? hintEl.textContent : '';
@@ -12240,25 +12247,32 @@ CHAT_HTML = """
         function setHint(t) { if (hintEl) hintEl.textContent = t; }
         setHint(defaultHint);
 
-        // Reuse ONE AudioContext for every recording. iOS Safari caps how many
-        // you can create, so making (and closing) a fresh one each time
-        // eventually fails silently and the mic stops capturing after a while.
-        // We keep one context alive and just resume it on each tap.
-        function getCtx() {
-            const AC = window.AudioContext || window.webkitAudioContext;
-            if (!AC) return null;
-            if (!audioCtx || audioCtx.state === 'closed') {
-                try { audioCtx = new AC(); } catch (e) { audioCtx = null; }
+        // Returns true once the mic graph is live; 'denied' / 'unsupported' otherwise.
+        async function ensureAudio() {
+            if (audioReady && audioCtx && audioCtx.state !== 'closed') {
+                if (audioCtx.state !== 'running') { try { await audioCtx.resume(); } catch (e) {} }
+                return true;
             }
-            return audioCtx;
-        }
-
-        // Tear down only the per-recording nodes + mic stream; KEEP the context.
-        function teardownNodes() {
-            try { if (procNode) { procNode.onaudioprocess = null; procNode.disconnect(); } } catch (e) {}
-            try { if (srcNode) srcNode.disconnect(); } catch (e) {}
-            if (audioStream) { try { audioStream.getTracks().forEach(t => t.stop()); } catch (e) {} }
-            procNode = null; srcNode = null; audioStream = null;
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC) return 'unsupported';
+            // Ask for the mic first, while we're still inside the tap gesture.
+            try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+            catch (e) { return 'denied'; }
+            try { if (!audioCtx) audioCtx = new AC(); } catch (e) { return 'unsupported'; }
+            if (audioCtx.state !== 'running') { try { await audioCtx.resume(); } catch (e) {} }
+            recSampleRate = audioCtx.sampleRate || 44100;
+            srcNode = audioCtx.createMediaStreamSource(micStream);
+            procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+            procNode.onaudioprocess = function (ev) {
+                if (recording) pcmChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+            };
+            const mute = audioCtx.createGain();
+            mute.gain.value = 0;
+            srcNode.connect(procNode);
+            procNode.connect(mute);
+            mute.connect(audioCtx.destination);
+            audioReady = true;
+            return true;
         }
 
         function encodeWav(chunks, sampleRate) {
@@ -12285,21 +12299,25 @@ CHAT_HTML = """
 
         function stopListening() {
             if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
-            if (!listening) return;
+            if (!recording) return;
+            recording = false;
             listening = false;
             micBtn.classList.remove('listening');
-            const chunks = pcmChunks, sr = recSampleRate;
+            const chunks = pcmChunks;
             pcmChunks = [];
-            teardownNodes();
-            transcribePcm(chunks, sr);
+            transcribePcm(chunks, recSampleRate);
         }
 
         async function startListening() {
             primeAudio();
             if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-            if (listening) { stopListening(); return; }
-            const ctx = getCtx();
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !ctx) {
+            if (recording) { stopListening(); return; }
+            const ok = await ensureAudio();
+            if (ok === 'denied') {
+                addBubble('blue', 'I need permission to use the microphone. Tap the mic again and choose Allow.');
+                return;
+            }
+            if (ok !== true) {
                 if (!window.isSecureContext) {
                     addBubble('blue', 'Please open me at my secure address first: https://ai-workstation.tail211c96.ts.net/chat \\u2014 then the microphone will work.');
                 } else {
@@ -12307,37 +12325,9 @@ CHAT_HTML = """
                 }
                 return;
             }
-            // Resume the (reused) context inside the tap gesture — iOS suspends
-            // or interrupts it when idle or after Siri/another app uses audio.
-            if (ctx.state !== 'running') { try { ctx.resume(); } catch (e) {} }
-            recSampleRate = ctx.sampleRate || 44100;
-            let stream;
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            } catch (e) {
-                teardownNodes();
-                addBubble('blue', 'I need permission to use the microphone. Tap the mic again and choose Allow.');
-                return;
-            }
-            audioStream = stream;
-            try {
-                srcNode = audioCtx.createMediaStreamSource(stream);
-                procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-                pcmChunks = [];
-                procNode.onaudioprocess = (ev) => {
-                    const ch = ev.inputBuffer.getChannelData(0);
-                    pcmChunks.push(new Float32Array(ch));
-                };
-                const mute = audioCtx.createGain();
-                mute.gain.value = 0;
-                srcNode.connect(procNode);
-                procNode.connect(mute);
-                mute.connect(audioCtx.destination);
-            } catch (e) {
-                teardownNodes();
-                addBubble('blue', 'I could not start recording on this device.');
-                return;
-            }
+            if (audioCtx.state !== 'running') { try { await audioCtx.resume(); } catch (e) {} }
+            pcmChunks = [];
+            recording = true;
             listening = true;
             micBtn.classList.add('listening');
             setHint('Listening\\u2026 tap the microphone again when you are done.');
@@ -12432,17 +12422,55 @@ def stt():
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
     tmp_path = tmp.name
     tmp.close()
+    import json as _json
+    dbg = {"filename": f.filename, "ext": ext}
+    _dbg_dir = os.path.join(os.getcwd(), "data")
+
+    def _write_dbg():
+        try:
+            os.makedirs(_dbg_dir, exist_ok=True)
+            with open(os.path.join(_dbg_dir, "last_stt.json"), "w", encoding="utf-8") as jf:
+                _json.dump(dbg, jf, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     try:
         f.save(tmp_path)
+        dbg["bytes"] = os.path.getsize(tmp_path)
+        # Keep the last clip + measure it so we can tell silence from a real
+        # recording when transcription comes back empty. (Debug aid.)
+        try:
+            import shutil, wave, audioop
+            os.makedirs(_dbg_dir, exist_ok=True)
+            shutil.copyfile(tmp_path, os.path.join(_dbg_dir, "last_stt" + ext))
+            if ext.lower() == ".wav":
+                with wave.open(tmp_path, "rb") as w:
+                    sr = w.getframerate(); nf = w.getnframes()
+                    sw = w.getsampwidth(); ch = w.getnchannels()
+                    frames = w.readframes(nf)
+                dbg["sample_rate"] = sr; dbg["channels"] = ch; dbg["sampwidth"] = sw
+                dbg["duration_s"] = round(nf / float(sr), 2) if sr else 0
+                if frames and sw == 2:
+                    mono = audioop.tomono(frames, sw, 1, 0) if ch == 2 else frames
+                    dbg["peak"] = audioop.max(mono, sw)
+                    dbg["peak_frac"] = round(dbg["peak"] / 32768.0, 4)
+                    dbg["rms"] = audioop.rms(mono, sw)
+        except Exception as de:
+            dbg["analyze_error"] = str(de)
         model = _get_whisper()
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
         segments, info = model.transcribe(tmp_path, beam_size=1)
         text = " ".join(seg.text for seg in segments).strip()
         lang = getattr(info, "language", "") or ""
-        print(f"   [STT] ({lang}) Transcribed -> {text[:120]!r}")
+        dbg["language"] = lang; dbg["text"] = text
+        print(f"   [STT] ({lang}) bytes={dbg.get('bytes')} dur={dbg.get('duration_s')} "
+              f"peak_frac={dbg.get('peak_frac')} -> {text[:120]!r}")
+        _write_dbg()
         return jsonify({"text": text, "language": lang})
     except Exception as e:
         log.error(f"[STT] transcription failed: {e}")
+        dbg["error"] = str(e)
+        _write_dbg()
         return jsonify({"error": "transcription failed"}), 500
     finally:
         try:
