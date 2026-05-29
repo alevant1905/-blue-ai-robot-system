@@ -12248,18 +12248,21 @@ CHAT_HTML = """
         setHint(defaultHint);
 
         // Returns true once the mic graph is live; 'denied' / 'unsupported' otherwise.
+        // CRITICAL on iOS: both audioCtx.resume() and getUserMedia() must be
+        // *initiated* synchronously inside the tap gesture (before any await),
+        // or iOS leaves the context suspended and nothing is ever captured.
         async function ensureAudio() {
-            if (audioReady && audioCtx && audioCtx.state !== 'closed') {
-                if (audioCtx.state !== 'running') { try { await audioCtx.resume(); } catch (e) {} }
-                return true;
-            }
             const AC = window.AudioContext || window.webkitAudioContext;
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC) return 'unsupported';
-            // Ask for the mic first, while we're still inside the tap gesture.
-            try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-            catch (e) { return 'denied'; }
             try { if (!audioCtx) audioCtx = new AC(); } catch (e) { return 'unsupported'; }
-            if (audioCtx.state !== 'running') { try { await audioCtx.resume(); } catch (e) {} }
+            // Kick both off NOW, while still in the gesture; await afterwards.
+            const resumeP = (audioCtx.state !== 'running') ? audioCtx.resume() : null;
+            const mediaP = audioReady ? null : navigator.mediaDevices.getUserMedia({ audio: true });
+            if (resumeP) { try { await resumeP; } catch (e) {} }
+            if (audioReady && audioCtx.state !== 'closed') return true;
+            let stream;
+            try { stream = await mediaP; } catch (e) { return 'denied'; }
+            micStream = stream;
             recSampleRate = audioCtx.sampleRate || 44100;
             srcNode = audioCtx.createMediaStreamSource(micStream);
             procNode = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -12337,7 +12340,11 @@ CHAT_HTML = """
         async function transcribePcm(chunks, sampleRate) {
             let total = 0;
             for (let i = 0; i < chunks.length; i++) total += chunks[i].length;
-            if (!total) { setHint(defaultHint); return; }
+            if (!total) {
+                setHint(defaultHint);
+                addBubble('blue', 'I did not get any sound (mic: ' + (audioCtx ? audioCtx.state : 'none') + ', pieces: ' + chunks.length + '). Tap the mic, wait a second, then talk.');
+                return;
+            }
             const blob = encodeWav(chunks, sampleRate);
             const fd = new FormData();
             fd.append('audio', blob, 'speech.wav');
