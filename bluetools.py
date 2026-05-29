@@ -12274,6 +12274,13 @@ CHAT_HTML = """
             srcNode.connect(procNode);
             procNode.connect(mute);
             mute.connect(audioCtx.destination);
+            // iOS may garbage-collect the source/stream and then feed silence;
+            // pin everything to a global so it can't be collected.
+            window.__blueKeep = [audioCtx, srcNode, procNode, mute, micStream];
+            try {
+                const tr0 = micStream.getAudioTracks ? micStream.getAudioTracks()[0] : null;
+                if (tr0) tr0.enabled = true;
+            } catch (e) {}
             audioReady = true;
             return true;
         }
@@ -12348,6 +12355,17 @@ CHAT_HTML = """
             const blob = encodeWav(chunks, sampleRate);
             const fd = new FormData();
             fd.append('audio', blob, 'speech.wav');
+            try {
+                const tr = (micStream && micStream.getAudioTracks) ? micStream.getAudioTracks()[0] : null;
+                fd.append('meta', JSON.stringify({
+                    ctx: audioCtx ? audioCtx.state : 'none',
+                    sr: sampleRate, pieces: chunks.length, samples: total,
+                    trackMuted: tr ? tr.muted : null,
+                    trackEnabled: tr ? tr.enabled : null,
+                    trackState: tr ? tr.readyState : null,
+                    trackLabel: tr ? tr.label : null
+                }));
+            } catch (e) {}
             micBtn.disabled = true;
             setHint('Figuring out what you said\\u2026');
             try {
@@ -12431,6 +12449,9 @@ def stt():
     tmp.close()
     import json as _json
     dbg = {"filename": f.filename, "ext": ext}
+    _meta = request.form.get("meta")
+    if _meta:
+        dbg["client_meta"] = _meta
     _dbg_dir = os.path.join(os.getcwd(), "data")
 
     def _write_dbg():
