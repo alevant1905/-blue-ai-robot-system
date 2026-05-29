@@ -11949,6 +11949,23 @@ CHAT_HTML = """
         .sendbtn:disabled { background: #c7cdc5; cursor: not-allowed; }
         .typing { font-family: 'IBM Plex Mono', monospace; font-size: 0.8em; color: var(--slate); }
         .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 8px; }
+        .voice-panel { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(26,46,26,0.45);
+                       display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
+        .voice-card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+                      width: 100%; max-width: 380px; max-height: 72vh; display: flex; flex-direction: column; overflow: hidden; }
+        .voice-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px;
+                      border-bottom: 1px solid var(--line); font-family: 'Playfair Display', Georgia, serif; font-size: 1.15em; color: var(--ink); }
+        .voice-head button { background: none; border: none; font-size: 1.6em; line-height: 1; color: var(--slate); cursor: pointer; padding: 0 4px; }
+        .voice-sub { padding: 11px 18px 2px; color: var(--slate); font-size: 0.82em; }
+        .voice-list { overflow-y: auto; padding: 10px; }
+        .voice-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
+                     background: var(--cream); border: 1px solid var(--line); border-radius: 8px; padding: 13px 14px; margin: 6px 0;
+                     cursor: pointer; font-family: inherit; font-size: 0.96em; color: var(--ink); }
+        .voice-row.sel { border-color: var(--forest); background: #eef4ee; }
+        .voice-row .vn { font-weight: 500; }
+        .voice-row.sel .vn:after { content: ' \2713'; color: var(--forest); }
+        .voice-row .vl { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); white-space: nowrap; }
+        .voice-empty { padding: 18px; color: var(--slate); text-align: center; }
     </style>
 </head>
 <body>
@@ -11973,12 +11990,23 @@ CHAT_HTML = """
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
                 <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
+                <button class="iconbtn" id="voiceBtn" title="Choose Blue's voice" aria-label="Choose Blue's voice">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
+                </button>
                 <button class="iconbtn" id="speakBtn" title="Blue reads his answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg>
                 </button>
                 <button class="sendbtn" id="sendBtn">Send</button>
             </div>
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
+        </div>
+    </div>
+
+    <div class="voice-panel" id="voicePanel" style="display:none">
+        <div class="voice-card">
+            <div class="voice-head"><span>Pick Blue's voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
+            <div class="voice-sub">Tap a voice to hear it. The one with a check mark is the one Blue uses.</div>
+            <div class="voice-list" id="voiceList"></div>
         </div>
     </div>
 
@@ -12198,6 +12226,16 @@ CHAT_HTML = """
                 .trim();
         }
 
+        // The voice Vilda picked (saved per-device), or null if none chosen.
+        function chosenVoice() {
+            let name = '';
+            try { name = localStorage.getItem('blueVoiceName') || ''; } catch (e) {}
+            if (!name) return null;
+            const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+            for (let i = 0; i < voices.length; i++) { if (voices[i].name === name) return voices[i]; }
+            return null;
+        }
+
         function speak(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
@@ -12207,7 +12245,10 @@ CHAT_HTML = """
             try {
                 window.speechSynthesis.cancel();
                 const u = new SpeechSynthesisUtterance(msg);
-                const v = pickVoice(lang);
+                // Use Vilda's chosen voice when it speaks the reply's language;
+                // otherwise fall back to the automatic per-language pick.
+                let v = chosenVoice();
+                if (!v || (v.lang || '').toLowerCase().indexOf(lang) !== 0) v = pickVoice(lang);
                 if (v) u.voice = v;
                 u.lang = bcp;
                 u.rate = isVilda ? 0.95 : 1.0;
@@ -12228,6 +12269,58 @@ CHAT_HTML = """
         }
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
+
+        // ---- Voice picker: tap a voice to hear it, tap to keep it (saved per device) ----
+        const voiceBtn = document.getElementById('voiceBtn');
+        const voicePanel = document.getElementById('voicePanel');
+        const voiceClose = document.getElementById('voiceClose');
+        const voiceList = document.getElementById('voiceList');
+        const VOICE_SAMPLES = { en: "Hi, I'm Blue!", fr: 'Bonjour, je suis Blue\\u00a0!', ru: '\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442, \\u044f \\u0411\\u043b\\u044e!', el: '\\u0393\\u0435\\u03b9\\u03b1, \\u03b5\\u03af\\u03bc\\u03b1\\u03b9 \\u03bf \\u039c\\u03c0\\u03bb\\u03b5!' };
+
+        function voiceLangCode(v) {
+            const l = (v.lang || '').toLowerCase();
+            if (l.indexOf('fr') === 0) return 'fr';
+            if (l.indexOf('ru') === 0) return 'ru';
+            if (l.indexOf('el') === 0) return 'el';
+            if (l.indexOf('en') === 0) return 'en';
+            return null;
+        }
+
+        function buildVoiceList() {
+            const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+            const supported = voices.filter(voiceLangCode);
+            let chosen = '';
+            try { chosen = localStorage.getItem('blueVoiceName') || ''; } catch (e) {}
+            voiceList.innerHTML = '';
+            if (!supported.length) {
+                voiceList.innerHTML = '<div class="voice-empty">No voices are installed on this device yet.</div>';
+                return;
+            }
+            supported.forEach(function (v) {
+                const row = document.createElement('button');
+                row.className = 'voice-row' + (v.name === chosen ? ' sel' : '');
+                row.innerHTML = '<span class="vn">' + esc(v.name) + '</span><span class="vl">' + esc(v.lang) + '</span>';
+                row.addEventListener('click', function () {
+                    primeAudio();
+                    try { localStorage.setItem('blueVoiceName', v.name); } catch (e) {}
+                    try {
+                        window.speechSynthesis.cancel();
+                        const code = voiceLangCode(v) || 'en';
+                        const u = new SpeechSynthesisUtterance(VOICE_SAMPLES[code] || VOICE_SAMPLES.en);
+                        u.voice = v; u.lang = v.lang || 'en-US';
+                        window.speechSynthesis.speak(u);
+                    } catch (e) {}
+                    buildVoiceList();
+                });
+                voiceList.appendChild(row);
+            });
+        }
+
+        if (voiceBtn) {
+            voiceBtn.addEventListener('click', function () { primeAudio(); buildVoiceList(); voicePanel.style.display = 'flex'; });
+            voiceClose.addEventListener('click', function () { voicePanel.style.display = 'none'; });
+            voicePanel.addEventListener('click', function (e) { if (e.target === voicePanel) voicePanel.style.display = 'none'; });
+        }
 
         // The iPad Mini (iOS 12) has no MediaRecorder, so we capture raw audio
         // with the Web Audio API (works back to iOS 12) and encode a WAV here,
