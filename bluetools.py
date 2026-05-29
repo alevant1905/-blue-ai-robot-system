@@ -1696,6 +1696,9 @@ _CHAT_ONLY_ALLOWED = {
     "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
     "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
 }
+# Tools chat-only users (the kids' iPad) may NOT trigger. Music plays through the
+# PC's own speakers, so controlling it from Vilda's iPad is pointless/disruptive.
+_KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer"}
 
 
 @app.before_request
@@ -8308,8 +8311,19 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """
     import time
     start_time = time.time()
+
+    # Backstop: never let a chat-only user (Vilda's iPad) trigger music tools,
+    # even if the LLM tries to call one. Safe outside a request (no Vilda then).
+    if tool_name in _KID_BLOCKED_TOOLS:
+        try:
+            if _identify_user_from_request() in _CHAT_ONLY_USERS:
+                return json.dumps({"success": False,
+                                   "error": "Music isn't available on this device."})
+        except Exception:
+            pass
+
     state = get_conversation_state()
-    
+
     print(f"[TOOL] Executing tool: {tool_name}")
     print(f"   Arguments: {json.dumps(tool_args, indent=2)}")
     
@@ -10321,6 +10335,13 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         improved_force_tool = _TOOL_NAME_MAP[improved_force_tool]
         print(f"   [NORMALIZE] Mapped tool name: {old_name} -> {improved_force_tool}")
 
+    # Chat-only users (Vilda's iPad) can't control the PC's music from there.
+    if user_name in _CHAT_ONLY_USERS and improved_force_tool in _KID_BLOCKED_TOOLS:
+        print(f"   [KID] Blocked '{improved_force_tool}' for {user_name}")
+        return {"choices": [{"message": {"role": "assistant", "content":
+            "I can't play music here — but we can talk about anything you like! "
+            "What would you like to chat about?"}}]}
+
     # ================================================================================
     # ZERO-LLM PATH: For simple tools, execute and return a templated response
     # without any LLM call at all. This is the fastest possible path.
@@ -12014,20 +12035,19 @@ CHAT_HTML = """
         body.kid .micbtn.big svg { width: 40px; height: 40px; }
         body.kid .sendbtn { font-size: 1.05em; border-radius: 14px; }
         body.kid .hint { font-size: 0.92em; text-align: center; }
-        /* Fun activity buttons */
-        body.kid .kid-activities { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; padding: 12px 14px 2px; }
-        body.kid .act { display: flex; flex-direction: column; align-items: center; gap: 6px; border: none; border-radius: 18px;
-                        padding: 12px 10px; min-width: 88px; cursor: pointer; font-family: inherit; font-weight: 600;
-                        font-size: 0.92em; color: var(--ink); box-shadow: 0 3px 10px rgba(26,46,26,0.10); transition: transform 0.12s; }
-        body.kid .act:active { transform: scale(0.93); }
-        body.kid .act svg { width: 30px; height: 30px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-        body.kid .act:nth-child(1) { background: #ffe1c7; }
-        body.kid .act:nth-child(2) { background: #fff3b0; }
-        body.kid .act:nth-child(3) { background: #c9f0d6; }
-        body.kid .act:nth-child(4) { background: #d8e3ff; }
-        body.kid .act:nth-child(5) { background: #f3d7ff; }
-        body.kid .act:nth-child(6) { background: #ffd6e0; }
-        @keyframes kidpulse { 0% { box-shadow: 0 0 0 0 rgba(59,130,246,0.35); } 70% { box-shadow: 0 0 0 15px rgba(59,130,246,0); } 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); } }
+        /* sweet touches */
+        body.kid { background: linear-gradient(160deg, #fff1f6 0%, #eef6ff 100%); }
+        body.kid .header h1 { color: #c0578f; }
+        body.kid .header h1 .robot { color: #ff7eb3; }
+        body.kid .empty .big { color: #c0578f; }
+        body.kid .row.user .bubble { background: #bfe3ff; color: #143a52; border-bottom-right-radius: 6px; }
+        body.kid .row.blue .bubble { box-shadow: 0 2px 9px rgba(192,87,143,0.10); }
+        body.kid .composer { border-top: 2px solid #ffe1ec; background: #fffdfb; }
+        body.kid .sendbtn { background: #ff7eb3; }
+        body.kid .sendbtn:hover:not(:disabled) { background: #f3669f; }
+        @keyframes kidbob { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-4px) rotate(3deg); } }
+        body.kid .header h1 .robot { animation: kidbob 2.8s ease-in-out infinite; }
+        @keyframes kidpulse { 0% { box-shadow: 0 0 0 0 rgba(255,126,179,0.40); } 70% { box-shadow: 0 0 0 16px rgba(255,126,179,0); } 100% { box-shadow: 0 0 0 0 rgba(255,126,179,0); } }
         body.kid .micbtn.big:not(.listening) { animation: kidpulse 2.4s infinite; }
     </style>
 </head>
@@ -12046,23 +12066,13 @@ CHAT_HTML = """
             <div class="empty" id="empty">
                 {% if kid %}
                 <div class="big">Hi Vilda!</div>
-                <div>Tap the big microphone and talk to me, or pick something fun below!</div>
+                <div>Tap the big microphone and talk to me!</div>
                 {% else %}
                 <div class="big">Say hello to Blue</div>
                 <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
                 {% endif %}
             </div>
         </div>
-        {% if kid %}
-        <div class="kid-activities" id="kidActivities">
-            <button class="act" data-msg="Tell me a fun story!"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg><span>Story</span></button>
-            <button class="act" data-msg="Tell me a funny joke!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01"/><path d="M8.5 14.5a4 4 0 0 0 7 0"/></svg><span>Joke</span></button>
-            <button class="act" data-msg="Tell me a cool animal fact!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="11" r="1.7"/><circle cx="11" cy="8.5" r="1.7"/><circle cx="15" cy="8.5" r="1.7"/><circle cx="17.5" cy="11.5" r="1.7"/><path d="M12 13c-2.4 0-4 1.7-4 3.4 0 1.6 1.6 2.6 4 2.6s4-1 4-2.6c0-1.7-1.6-3.4-4-3.4z"/></svg><span>Animals</span></button>
-            <button class="act" data-msg="Give me an easy riddle to guess!"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.8 2.8 0 1 1 4.3 2.6c-.9.6-1.5 1.1-1.5 2.1"/><path d="M12 17.3h.01"/></svg><span>Riddle</span></button>
-            <button class="act" data-msg="Let's play a guessing game!"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M9 9h.01M15 9h.01M9 15h.01M15 15h.01M12 12h.01"/></svg><span>Game</span></button>
-            <button class="act" data-msg="Sing me a little song!"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/></svg><span>Song</span></button>
-        </div>
-        {% endif %}
         <div class="composer">
             <div class="chips" id="chips"></div>
             <div class="input-bar">
@@ -12548,23 +12558,6 @@ CHAT_HTML = """
         }
 
         micBtn.addEventListener('click', startListening);
-
-        // Fun activity buttons: tapping one sends a kid-friendly prompt to Blue,
-        // who answers (and reads it aloud). No reading required.
-        const kidActivities = document.getElementById('kidActivities');
-        if (kidActivities) {
-            const acts = kidActivities.querySelectorAll('.act');
-            for (let i = 0; i < acts.length; i++) {
-                acts[i].addEventListener('click', function () {
-                    if (busy) return;
-                    primeAudio();
-                    const msg = this.getAttribute('data-msg') || '';
-                    if (!msg) return;
-                    inputEl.value = msg;
-                    send();
-                });
-            }
-        }
 
         if (isVilda) {
             micBtn.classList.add('big');
