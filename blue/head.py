@@ -418,11 +418,13 @@ def _lip_loop():
     bot_c = center(BOTTOMLIP)
     try:
         while _lip_active and _available:
-            # Open: jaw drops; top lip rises about 60% as much (a real upper
-            # lip moves less than the jaw when talking).
+            # Open: top lip rises (TOPLIP higher = up), jaw drops (BOTTOMLIP
+            # HIGHER = jaw down, per the Ohbot convention). Both command
+            # values go up, but physically the lips move APART — that's the
+            # mouth opening.
             open_amt = random.uniform(2.4, 3.4)
             _move_internal(TOPLIP, top_c + open_amt * 0.6, speed=10)
-            _move_internal(BOTTOMLIP, bot_c - open_amt, speed=10)
+            _move_internal(BOTTOMLIP, bot_c + open_amt, speed=10)
             time.sleep(random.uniform(0.08, 0.13))
             if not _lip_active:
                 break
