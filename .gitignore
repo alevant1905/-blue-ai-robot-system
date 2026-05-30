@@ -189,3 +189,6 @@ document_index.json.before-cleanup
 # Remote-access auth: the access password and the Flask session secret.
 .blue_password
 .blue_secret_key
+
+# Ohbot library runtime data (this branch only)
+ohbotData/
