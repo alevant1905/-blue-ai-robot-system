@@ -1503,6 +1503,16 @@ from blue.tool_selector import (
 # isn't connected, all head calls are no-ops, so the rest of Blue keeps running.
 from blue import head as blue_head
 
+# Connect the head at module load (covers both entry points: `python
+# bluetools.py` directly AND `python run.py` which imports this module). Make
+# sure the Ohbot desktop app is CLOSED, or it will hold the serial port.
+try:
+    if blue_head.init():
+        import atexit as _atexit_head
+        _atexit_head.register(blue_head.close)
+except Exception as _head_init_err:
+    print(f"[HEAD] init skipped: {_head_init_err!r}")
+
 # ================================================================================
 # END OF IMPROVED TOOL SELECTION SYSTEM
 # ================================================================================
@@ -15178,18 +15188,6 @@ if __name__ == "__main__":
     # localhost stays ungated for the Ohbot client). Override with BLUE_HOST.
     _bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
     print(f"[NET] Binding to {_bind_host}:{PROXY_PORT} (remote access requires the password)")
-
-    # Direct head control (this branch). Best-effort: if the Ohbot library
-    # isn't installed or the board isn't reachable, head tools become no-ops
-    # and the rest of Blue keeps working. Make sure the Ohbot desktop app is
-    # NOT running, or it will hold the serial port.
-    try:
-        if blue_head.init():
-            import atexit as _atexit
-            _atexit.register(blue_head.close)
-    except Exception as _he:
-        print(f"[HEAD] init skipped: {_he!r}")
-
     app.run(host=_bind_host, port=PROXY_PORT, debug=False, threaded=True)
 
 
