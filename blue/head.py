@@ -399,27 +399,37 @@ def say(text: str, lip_sync: bool = True) -> bool:
 
 _lip_active = False
 _lip_thread = None
-_LIP_SPREAD = 1.8  # how far lips open from centre during flap
 
 
 def _lip_loop():
-    """Open/close the lips repeatedly until lip_stop() is called."""
+    """Open/close the jaw repeatedly until lip_stop() is called.
+
+    Lip-sync on an Ohbot is really *jaw*-sync: keep the top lip pinned at its
+    calibrated rest and only move the bottom lip (the jaw) between closed
+    (at centre) and open (jaw dropped below centre). Driving both lips in
+    opposing offsets at once never actually closes the mouth — it just
+    bounces between two slightly-open states, which looks like the lips
+    quivering together rather than speech.
+    """
     global _lip_active
     top_c = center(TOPLIP)
     bot_c = center(BOTTOMLIP)
+    # Pin the top lip once — the jaw does all the talking motion.
+    _move_internal(TOPLIP, top_c, speed=8)
     try:
         while _lip_active and _available:
-            _move_internal(TOPLIP, top_c + _LIP_SPREAD, speed=10)
-            _move_internal(BOTTOMLIP, bot_c - _LIP_SPREAD, speed=10)
-            time.sleep(0.11)
+            # Open: jaw drops below rest. Vary the open amount a touch so the
+            # motion doesn't look perfectly metronomic.
+            open_amt = random.uniform(2.4, 3.4)
+            _move_internal(BOTTOMLIP, bot_c - open_amt, speed=10)
+            time.sleep(random.uniform(0.08, 0.13))
             if not _lip_active:
                 break
-            _move_internal(TOPLIP, top_c + 0.4, speed=10)
-            _move_internal(BOTTOMLIP, bot_c - 0.4, speed=10)
-            time.sleep(0.11)
+            # Closed: jaw back to rest (mouth shut).
+            _move_internal(BOTTOMLIP, bot_c, speed=10)
+            time.sleep(random.uniform(0.07, 0.12))
     finally:
-        _move_internal(TOPLIP, top_c, speed=10)
-        _move_internal(BOTTOMLIP, bot_c, speed=10)
+        _move_internal(BOTTOMLIP, bot_c, speed=8)
 
 
 def lip_start() -> bool:
