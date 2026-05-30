@@ -34,8 +34,9 @@ LIDBLINK = 3
 TOPLIP = 4
 BOTTOMLIP = 5
 EYETILT = 6
+HEADROLL = 7   # head tilt left/right (rotation), separate from HeadTurn
 
-ALL_MOTORS = (HEADNOD, HEADTURN, EYETURN, LIDBLINK, TOPLIP, BOTTOMLIP, EYETILT)
+ALL_MOTORS = (HEADNOD, HEADTURN, EYETURN, LIDBLINK, TOPLIP, BOTTOMLIP, EYETILT, HEADROLL)
 MOTOR_NAMES = {
     HEADNOD: "HeadNod",
     HEADTURN: "HeadTurn",
@@ -44,6 +45,7 @@ MOTOR_NAMES = {
     TOPLIP: "TopLip",
     BOTTOMLIP: "BottomLip",
     EYETILT: "EyeTilt",
+    HEADROLL: "HeadRoll",
 }
 
 _MIN_POS = 0.0
@@ -339,7 +341,7 @@ _EXPRESSIONS = {
     "happy":     {HEADNOD: +1.0, TOPLIP: +3.0, BOTTOMLIP: -3.0, LIDBLINK: 0},
     "sad":       {HEADNOD: -2.0, TOPLIP: -3.0, BOTTOMLIP: +3.0, LIDBLINK: -4.0},
     "surprised": {HEADNOD: +2.0, TOPLIP: 0, BOTTOMLIP: +4.0, LIDBLINK: +2.0},
-    "curious":   {HEADTURN: +1.5, HEADNOD: +1.0, EYETURN: +1.0, LIDBLINK: 0},
+    "curious":   {HEADTURN: +1.5, HEADNOD: +1.0, HEADROLL: +1.0, EYETURN: +1.0, LIDBLINK: 0},
     "wink":      {LIDBLINK: -8.0},  # both lids close briefly (we only have one)
 }
 
@@ -467,7 +469,7 @@ def _do_idle_motion():
     """Pick one small, natural-looking motion."""
     choice = random.choice([
         "blink", "blink",                       # blinks are common
-        "micro_nod", "micro_turn",
+        "micro_nod", "micro_turn", "micro_tilt",
         "glance_left", "glance_right",
         "eye_up", "eye_down",
     ])
@@ -488,6 +490,12 @@ def _do_idle_motion():
         _move_internal(HEADTURN, c + amt, speed=3)
         time.sleep(random.uniform(0.8, 1.4))
         _move_internal(HEADTURN, c, speed=3)
+    elif choice == "micro_tilt":
+        c = center(HEADROLL)
+        amt = random.choice([-0.6, -0.4, 0.4, 0.6])
+        _move_internal(HEADROLL, c + amt, speed=3)
+        time.sleep(random.uniform(0.8, 1.4))
+        _move_internal(HEADROLL, c, speed=3)
     elif choice == "glance_left":
         c = center(EYETURN)
         _move_internal(EYETURN, c + 1.5, speed=6)

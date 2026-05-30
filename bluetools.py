@@ -12853,7 +12853,7 @@ HEAD_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const MOTORS = [[0,'HeadNod'],[1,'HeadTurn'],[2,'EyeTurn'],[3,'LidBlink'],[4,'TopLip'],[5,'BottomLip'],[6,'EyeTilt']];
+const MOTORS = [[0,'HeadNod'],[1,'HeadTurn'],[7,'HeadRoll'],[2,'EyeTurn'],[6,'EyeTilt'],[3,'LidBlink'],[4,'TopLip'],[5,'BottomLip']];
 const ACTIONS = ['nod_yes','shake_no','blink','wink','look_left','look_right','look_up','look_down','look_center','happy','sad','surprised','curious','neutral'];
 const COLOURS = [
   ['Off',0,0,0,'#222'], ['Blue',0,2,10,'#3b82f6'], ['Pink',10,2,7,'#ff7eb3'],
