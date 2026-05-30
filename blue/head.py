@@ -402,33 +402,36 @@ _lip_thread = None
 
 
 def _lip_loop():
-    """Open/close the jaw repeatedly until lip_stop() is called.
+    """Open/close the mouth repeatedly until lip_stop() is called.
 
-    Lip-sync on an Ohbot is really *jaw*-sync: keep the top lip pinned at its
-    calibrated rest and only move the bottom lip (the jaw) between closed
-    (at centre) and open (jaw dropped below centre). Driving both lips in
-    opposing offsets at once never actually closes the mouth — it just
-    bounces between two slightly-open states, which looks like the lips
-    quivering together rather than speech.
+    Open: top lip rises a little, bottom lip (jaw) drops a lot.
+    Closed: both lips back to their calibrated rest — mouth actually SHUT.
+
+    The earlier bug was holding both lips at offsets from centre the whole
+    time (the "closed" state was still offset), so the mouth never truly
+    closed and the lips just quivered together. We alternate between
+    fully-open and fully-closed instead, and vary the amplitude/timing a
+    touch so it doesn't feel metronomic.
     """
     global _lip_active
     top_c = center(TOPLIP)
     bot_c = center(BOTTOMLIP)
-    # Pin the top lip once — the jaw does all the talking motion.
-    _move_internal(TOPLIP, top_c, speed=8)
     try:
         while _lip_active and _available:
-            # Open: jaw drops below rest. Vary the open amount a touch so the
-            # motion doesn't look perfectly metronomic.
+            # Open: jaw drops; top lip rises about 60% as much (a real upper
+            # lip moves less than the jaw when talking).
             open_amt = random.uniform(2.4, 3.4)
+            _move_internal(TOPLIP, top_c + open_amt * 0.6, speed=10)
             _move_internal(BOTTOMLIP, bot_c - open_amt, speed=10)
             time.sleep(random.uniform(0.08, 0.13))
             if not _lip_active:
                 break
-            # Closed: jaw back to rest (mouth shut).
+            # Closed: BOTH lips back to their calibrated rest.
+            _move_internal(TOPLIP, top_c, speed=10)
             _move_internal(BOTTOMLIP, bot_c, speed=10)
             time.sleep(random.uniform(0.07, 0.12))
     finally:
+        _move_internal(TOPLIP, top_c, speed=8)
         _move_internal(BOTTOMLIP, bot_c, speed=8)
 
 
