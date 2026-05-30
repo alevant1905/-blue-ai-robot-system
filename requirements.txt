@@ -34,6 +34,11 @@ python-pptx>=0.6.23         # PowerPoint .pptx text extraction
 striprtf>=0.0.26            # Rich Text Format extraction
 watchdog>=3.0.0             # Filesystem watcher for auto-indexing dropped documents
 
+# Direct head control (BRANCH: blue-direct-head only — replaces the Ohbot app
+# for moving Blue's head/face from this server). The Ohbot desktop app MUST be
+# closed or it will hold the serial port and our connect will fail.
+ohbot>=4.0                  # Ohbot board serial protocol + lip-synced SAPI speech
+
 # Voice Input (Recommended - lets kids/non-readers talk to Blue on the iPad)
 # The browser records audio over HTTPS and posts it to /stt; Blue transcribes
 # locally on CPU. Bundles PyAV so no separate ffmpeg install is needed.

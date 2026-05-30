@@ -1498,6 +1498,11 @@ from blue.tool_selector import (
     integrate_with_existing_system,
 )
 
+# Direct Ohbot head control (this branch only — replaces the Ohbot app for the
+# head). The module is defensive: if the library isn't installed or the board
+# isn't connected, all head calls are no-ops, so the rest of Blue keeps running.
+from blue import head as blue_head
+
 # ================================================================================
 # END OF IMPROVED TOOL SELECTION SYSTEM
 # ================================================================================
@@ -3327,6 +3332,46 @@ def stop_music_visualizer() -> str:
 
 # Tool definitions with MOOD, DOCUMENT, MUSIC, and VISUALIZER support!
 TOOLS = [
+    # ===== Direct Ohbot head control (replaces the Ohbot app on this branch) =====
+    {
+        "type": "function",
+        "function": {
+            "name": "move_head",
+            "description": "Move Blue's physical head and face. USE THIS to express something with motion: nod yes, shake no, look around, blink, smile, look sad/surprised/curious, wink. Use sparingly and only when motion clearly helps the moment — not on every reply.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "look_left", "look_right", "look_up", "look_down", "look_center",
+                            "nod_yes", "shake_no", "blink", "wink",
+                            "happy", "sad", "surprised", "curious", "neutral"
+                        ],
+                        "description": "Which motion or expression to perform."
+                    },
+                    "times": {"type": "integer", "description": "How many times for nod_yes / shake_no / blink (default 2; max 5)."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "head_eye_color",
+            "description": "Change the colour of Blue's eye LEDs. Each channel is 0-10 (e.g. r=0 g=0 b=10 for blue, r=10 g=2 b=8 for warm pink).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "r": {"type": "integer", "description": "Red 0-10"},
+                    "g": {"type": "integer", "description": "Green 0-10"},
+                    "b": {"type": "integer", "description": "Blue 0-10"}
+                },
+                "required": ["r", "g", "b"]
+            }
+        }
+    },
     # ===== Enhanced Tools - Calendar & Reminders =====
     {
         "type": "function",
@@ -8410,7 +8455,37 @@ def _get_error_suggestion(tool_name: str, error: str) -> str:
 
 def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """Internal tool execution - called by execute_tool wrapper."""
-    
+
+    if tool_name == "move_head":
+        action = (tool_args.get("action") or "").lower().strip()
+        times = int(tool_args.get("times") or 2)
+        ok = False
+        if action.startswith("look_"):
+            ok = blue_head.look(action[len("look_"):])
+        elif action == "nod_yes":
+            ok = blue_head.nod_yes(times)
+        elif action == "shake_no":
+            ok = blue_head.shake_no(times)
+        elif action == "blink":
+            ok = blue_head.blink(times)
+        elif action in ("happy", "sad", "surprised", "curious", "neutral", "wink"):
+            ok = blue_head.expression(action)
+        if ok:
+            return json.dumps({"success": True, "action": action})
+        if not blue_head.is_available():
+            return json.dumps({"success": False, "error": "head not connected"})
+        return json.dumps({"success": False, "error": f"unknown action: {action}"})
+
+    if tool_name == "head_eye_color":
+        r = int(tool_args.get("r", 0))
+        g = int(tool_args.get("g", 0))
+        b = int(tool_args.get("b", 0))
+        if blue_head.eye_color(r, g, b):
+            return json.dumps({"success": True, "r": r, "g": g, "b": b})
+        if not blue_head.is_available():
+            return json.dumps({"success": False, "error": "head not connected"})
+        return json.dumps({"success": False, "error": "eye colour failed"})
+
     if tool_name == "play_music":
         query = tool_args.get("query", "")
         action = tool_args.get("action", "play")
@@ -15103,6 +15178,18 @@ if __name__ == "__main__":
     # localhost stays ungated for the Ohbot client). Override with BLUE_HOST.
     _bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
     print(f"[NET] Binding to {_bind_host}:{PROXY_PORT} (remote access requires the password)")
+
+    # Direct head control (this branch). Best-effort: if the Ohbot library
+    # isn't installed or the board isn't reachable, head tools become no-ops
+    # and the rest of Blue keeps working. Make sure the Ohbot desktop app is
+    # NOT running, or it will hold the serial port.
+    try:
+        if blue_head.init():
+            import atexit as _atexit
+            _atexit.register(blue_head.close)
+    except Exception as _he:
+        print(f"[HEAD] init skipped: {_he!r}")
+
     app.run(host=_bind_host, port=PROXY_PORT, debug=False, threaded=True)
 
 
