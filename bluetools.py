@@ -1710,6 +1710,8 @@ _CHAT_ONLY_USERS = {"Vilda"}
 _CHAT_ONLY_ALLOWED = {
     "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
     "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
+    # On this branch: allow the kid's chat page to drive lip-flap during TTS.
+    "head_lip",
 }
 # Tools chat-only users (the kids' iPad) may NOT trigger. Music plays through the
 # PC's own speakers, so controlling it from Vilda's iPad is pointless/disruptive.
@@ -12436,9 +12438,22 @@ CHAT_HTML = """
                 u.lang = bcp;
                 u.rate = isVilda ? 0.95 : 1.0;
                 u.pitch = 1.0;
+                // Drive the robot's lip motors in sync with this utterance.
+                // Fire-and-forget; if the head isn't connected, the server
+                // call is a cheap no-op.
+                u.onstart = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":true}' }); } catch (e) {} };
+                const _lipOff = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {} };
+                u.onend = _lipOff;
+                u.onerror = _lipOff;
                 window.speechSynthesis.speak(u);
             } catch (e) { /* ignore */ }
         }
+
+        // If the user navigates away mid-speech, the lip thread on the server
+        // would keep flapping until the next speech start. Make sure to stop.
+        window.addEventListener('pagehide', function () {
+            try { navigator.sendBeacon && navigator.sendBeacon('/head/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
+        });
 
         if ('speechSynthesis' in window) {
             try { window.speechSynthesis.onvoiceschanged = function () { window.speechSynthesis.getVoices(); }; } catch (e) {}
@@ -12748,6 +12763,299 @@ def chat_page():
         "Pragma": "no-cache",
         "Expires": "0",
     })
+
+
+# ============================================================================
+# Head control GUI + endpoints (this branch only — Vilda's iPad is blocked by
+# _restrict_chat_only_users; only /head/lip is allowed for the kid so the chat
+# page can drive the lip-flap during speech).
+# ============================================================================
+
+HEAD_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Blue's Head — Tuning</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --cream:#faf8f4; --paper:#fff; --ink:#1a2e1a; --forest:#4a6b4a; --sage:#8fae8f; --slate:#64748b; --line:rgba(143,174,143,0.32); --shadow:0 8px 24px rgba(26,46,26,0.06); }
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { font-family:'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:var(--cream); color:var(--ink); line-height:1.5; padding:22px 18px 60px; }
+        .wrap { max-width: 820px; margin: 0 auto; }
+        .head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:8px; }
+        .head h1 { font-family:'Playfair Display', Georgia, serif; font-weight:700; font-size:1.7em; }
+        .head a { color:var(--forest); text-decoration:none; font-size:0.95em; }
+        .status { display:inline-block; padding:5px 14px; border-radius:20px; font-size:0.85em; font-weight:500; }
+        .status.on { background:#e0f0e0; color:#2d6b2d; }
+        .status.off { background:#f4e0e0; color:#7a2e22; }
+        .card { background:var(--paper); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:18px 20px; margin-bottom:14px; }
+        .card h2 { font-family:'Playfair Display', Georgia, serif; font-size:1.1em; font-weight:600; margin-bottom:6px; color:var(--forest); }
+        .card .sub { font-size:0.85em; color:var(--slate); margin-bottom:10px; }
+        .row { display:grid; grid-template-columns: 110px 1fr 56px 140px; gap:10px; align-items:center; padding:7px 0; border-bottom:1px dashed var(--line); }
+        .row:last-child { border-bottom:none; }
+        .row .name { font-weight:500; }
+        .row input[type=range] { width:100%; accent-color:var(--forest); }
+        .row .val { font-family:'IBM Plex Mono', monospace; text-align:right; font-size:0.9em; color:var(--slate); }
+        .btn { padding:7px 13px; border:1px solid var(--sage); border-radius:8px; background:var(--cream); color:var(--ink); font-family:inherit; font-size:0.9em; cursor:pointer; transition: background .15s, border-color .15s; }
+        .btn:hover { background:#fff; border-color:var(--forest); }
+        .btn.primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+        .btn.primary:hover { background:var(--forest); border-color:var(--forest); }
+        .actions { display:flex; flex-wrap:wrap; gap:8px; }
+        .swatches { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+        .swatch { width:38px; height:38px; border-radius:9px; border:1px solid var(--line); cursor:pointer; transition: transform .12s; }
+        .swatch:hover { transform: scale(1.06); }
+        .toggle { display:inline-flex; align-items:center; gap:10px; cursor:pointer; margin-left:14px; }
+        .toggle input { width:18px; height:18px; cursor:pointer; }
+        .hint { font-size:0.82em; color:var(--slate); margin-top:8px; }
+        @media (max-width: 560px) {
+            .row { grid-template-columns: 90px 1fr 50px; }
+            .row button.primary { grid-column: 1 / -1; }
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="head">
+        <h1>Blue's Head — Tuning</h1>
+        <a href="/">← Home</a>
+    </div>
+
+    <div class="card">
+        <h2>Status</h2>
+        <span id="status" class="status off">Checking…</span>
+        <label class="toggle"><input type="checkbox" id="autoToggle"><span>Thoughtful idle movement</span></label>
+        <div class="hint">If "Not connected," close the Ohbot desktop app, restart Blue, then refresh this page.</div>
+    </div>
+
+    <div class="card">
+        <h2>Calibration</h2>
+        <div class="sub">Drag a slider to move that motor. When it looks right, tap <b>Save as neutral</b> — that becomes the rest position the rest of Blue uses. Saved automatically; survives restarts.</div>
+        <div id="motors"></div>
+        <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn" id="parkBtn">Park all at neutral</button>
+            <button class="btn" id="restoreBtn">Restore factory defaults</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Expression &amp; motion</h2>
+        <div class="actions" id="actBox"></div>
+    </div>
+
+    <div class="card">
+        <h2>Eye colour</h2>
+        <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Red</span><input type="range" id="cR" min="0" max="10" step="1" value="0"><span class="val" id="vR">0</span></div>
+        <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Green</span><input type="range" id="cG" min="0" max="10" step="1" value="0"><span class="val" id="vG">0</span></div>
+        <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Blue</span><input type="range" id="cB" min="0" max="10" step="1" value="0"><span class="val" id="vB">0</span></div>
+        <div class="swatches" id="swatches"></div>
+    </div>
+</div>
+
+<script>
+const MOTORS = [[0,'HeadNod'],[1,'HeadTurn'],[2,'EyeTurn'],[3,'LidBlink'],[4,'TopLip'],[5,'BottomLip'],[6,'EyeTilt']];
+const ACTIONS = ['nod_yes','shake_no','blink','wink','look_left','look_right','look_up','look_down','look_center','happy','sad','surprised','curious','neutral'];
+const COLOURS = [
+  ['Off',0,0,0,'#222'], ['Blue',0,2,10,'#3b82f6'], ['Pink',10,2,7,'#ff7eb3'],
+  ['Yellow',10,7,0,'#f0c419'], ['Green',2,10,3,'#4ade80'], ['Purple',7,3,10,'#a78bfa'],
+  ['Orange',10,5,0,'#fb923c'], ['Warm white',10,8,6,'#f9e3c2']
+];
+
+async function postJSON(url, body) {
+    try {
+        const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+        return await r.json().catch(() => null);
+    } catch (e) { return null; }
+}
+async function getJSON(url) {
+    try { const r = await fetch(url); return await r.json(); } catch (e) { return null; }
+}
+
+function buildMotors(centers) {
+    const cont = document.getElementById('motors'); cont.innerHTML = '';
+    for (const [m, name] of MOTORS) {
+        const c = (centers && centers[m] != null) ? centers[m] : 5;
+        const row = document.createElement('div'); row.className = 'row';
+        row.innerHTML = '<span class="name">' + name + '</span>'
+          + '<input type="range" min="0" max="10" step="0.1" value="' + c + '">'
+          + '<span class="val">' + Number(c).toFixed(1) + '</span>'
+          + '<button class="btn primary">Save as neutral</button>';
+        const slider = row.querySelector('input');
+        const valEl  = row.querySelector('.val');
+        const saveBt = row.querySelector('button');
+        let pending = null;
+        slider.addEventListener('input', () => {
+            const pos = parseFloat(slider.value);
+            valEl.textContent = pos.toFixed(1);
+            // Throttle: at most one request in flight per motor.
+            if (pending) { pending.next = pos; return; }
+            pending = {pos: pos, next: null};
+            (async function drain(){
+                while (pending) {
+                    const p = pending.pos;
+                    await postJSON('/head/move', {motor: m, pos: p});
+                    if (pending.next != null) { pending.pos = pending.next; pending.next = null; }
+                    else { pending = null; }
+                }
+            })();
+        });
+        saveBt.addEventListener('click', async () => {
+            await postJSON('/head/calibrate', {motor: m, pos: parseFloat(slider.value)});
+            saveBt.textContent = 'Saved ✓';
+            setTimeout(() => { saveBt.textContent = 'Save as neutral'; }, 1100);
+        });
+        cont.appendChild(row);
+    }
+}
+
+function buildActions() {
+    const box = document.getElementById('actBox');
+    for (const a of ACTIONS) {
+        const b = document.createElement('button'); b.className = 'btn';
+        b.textContent = a.replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase());
+        b.addEventListener('click', () => postJSON('/head/action', {action: a}));
+        box.appendChild(b);
+    }
+}
+
+function buildSwatches() {
+    const box = document.getElementById('swatches');
+    for (const [name, r, g, b, css] of COLOURS) {
+        const s = document.createElement('div'); s.className = 'swatch'; s.title = name; s.style.background = css;
+        s.addEventListener('click', () => setColour(r, g, b));
+        box.appendChild(s);
+    }
+}
+
+function wireColour(id) {
+    const s = document.getElementById('c'+id), v = document.getElementById('v'+id);
+    s.addEventListener('input', () => {
+        v.textContent = s.value;
+        const r = +document.getElementById('cR').value, g = +document.getElementById('cG').value, b = +document.getElementById('cB').value;
+        postJSON('/head/eye-color', {r, g, b});
+    });
+}
+function setColour(r, g, b) {
+    document.getElementById('cR').value = r; document.getElementById('vR').textContent = r;
+    document.getElementById('cG').value = g; document.getElementById('vG').textContent = g;
+    document.getElementById('cB').value = b; document.getElementById('vB').textContent = b;
+    postJSON('/head/eye-color', {r, g, b});
+}
+
+async function loadState() {
+    const s = await getJSON('/head/state');
+    const status = document.getElementById('status');
+    if (s && s.available) { status.className = 'status on'; status.textContent = 'Connected'; }
+    else { status.className = 'status off'; status.textContent = 'Not connected'; }
+    buildMotors(s && s.centers);
+    document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
+}
+
+document.getElementById('autoToggle').addEventListener('change', e => postJSON('/head/auto', {enabled: e.target.checked}));
+document.getElementById('parkBtn').addEventListener('click', async () => { await postJSON('/head/reset', {}); });
+document.getElementById('restoreBtn').addEventListener('click', async () => {
+    if (!confirm('Reset all neutral positions to factory defaults?')) return;
+    await postJSON('/head/restore-defaults', {});
+    loadState();
+});
+
+buildActions(); buildSwatches();
+wireColour('R'); wireColour('G'); wireColour('B');
+loadState();
+</script>
+</body>
+</html>"""
+
+
+@app.route('/head', methods=['GET'])
+def head_page():
+    """Serve the head tuning GUI. Chat-only users (Vilda) are bounced here by
+    _restrict_chat_only_users before this handler runs."""
+    return Response(render_template_string(HEAD_HTML), headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    })
+
+
+@app.route('/head/state', methods=['GET'])
+def head_state():
+    return jsonify(blue_head.get_calibration())
+
+
+@app.route('/head/move', methods=['POST'])
+def head_move():
+    d = request.get_json(silent=True) or {}
+    motor = int(d.get('motor', -1))
+    pos = float(d.get('pos', blue_head._DEFAULT_CENTER))
+    speed = float(d.get('speed', 7))
+    ok = blue_head.move_raw(motor, pos, speed)
+    return jsonify({"ok": bool(ok)})
+
+
+@app.route('/head/calibrate', methods=['POST'])
+def head_calibrate():
+    d = request.get_json(silent=True) or {}
+    motor = int(d.get('motor', -1))
+    pos = float(d.get('pos', blue_head._DEFAULT_CENTER))
+    ok = blue_head.set_center(motor, pos)
+    return jsonify({"ok": bool(ok), "centers": blue_head.get_calibration()["centers"]})
+
+
+@app.route('/head/eye-color', methods=['POST'])
+def head_color():
+    d = request.get_json(silent=True) or {}
+    ok = blue_head.eye_color(int(d.get('r', 0)), int(d.get('g', 0)), int(d.get('b', 0)))
+    return jsonify({"ok": bool(ok)})
+
+
+@app.route('/head/action', methods=['POST'])
+def head_action():
+    d = request.get_json(silent=True) or {}
+    action = (d.get('action') or '').lower().strip()
+    times = int(d.get('times') or 2)
+    ok = False
+    if action.startswith('look_'):
+        ok = blue_head.look(action[len('look_'):])
+    elif action == 'nod_yes':
+        ok = blue_head.nod_yes(times)
+    elif action == 'shake_no':
+        ok = blue_head.shake_no(times)
+    elif action == 'blink':
+        ok = blue_head.blink(times)
+    elif action in ('happy', 'sad', 'surprised', 'curious', 'neutral', 'wink'):
+        ok = blue_head.expression(action)
+    return jsonify({"ok": bool(ok), "action": action})
+
+
+@app.route('/head/auto', methods=['POST'])
+def head_auto():
+    d = request.get_json(silent=True) or {}
+    blue_head.auto_enable(bool(d.get('enabled', False)))
+    return jsonify({"ok": True, "auto_movement": blue_head.auto_enabled()})
+
+
+@app.route('/head/lip', methods=['POST'])
+def head_lip():
+    """Start or stop the lip-flap loop. Called by the chat page during speech.
+    Allowed for chat-only users (Vilda) so her TTS still drives the lips."""
+    d = request.get_json(silent=True) or {}
+    if bool(d.get('on', False)):
+        blue_head.lip_start()
+    else:
+        blue_head.lip_stop()
+    return jsonify({"ok": True, "lip_active": blue_head.lip_is_active()})
+
+
+@app.route('/head/reset', methods=['POST'])
+def head_reset():
+    return jsonify({"ok": bool(blue_head.reset())})
+
+
+@app.route('/head/restore-defaults', methods=['POST'])
+def head_restore_defaults():
+    for m, c in blue_head._DEFAULT_CENTERS.items():
+        blue_head.set_center(m, c)
+    blue_head.reset()
+    return jsonify({"ok": True, "centers": blue_head.get_calibration()["centers"]})
 
 
 @app.route('/chat/attach', methods=['POST'])
