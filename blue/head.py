@@ -197,16 +197,27 @@ def set_idle_params(frequency=None, amplitude=None) -> bool:
 
 def _idle_interval_range():
     """Map the 0-10 frequency slider to a (min, max) seconds-between-motions
-    range. 0 = quiet (rare), 5 ≈ original, 10 = nearly constant."""
+    range. 0 = quiet (rare), 5 ≈ original, 10 = nearly constant.
+
+    While Blue is SPEAKING (lip-flap active), tighten the range — people
+    gesture more often when talking; we want head/eye motion to come along
+    with the jaw, not freeze."""
     f = _clip(float(_calibration.get("idle_frequency", 7)), 0, 10) / 10.0
-    return (0.8 + (1 - f) * 5.2, 2.5 + (1 - f) * 9.5)
+    lo, hi = 0.8 + (1 - f) * 5.2, 2.5 + (1 - f) * 9.5
+    if _lip_active:
+        lo = max(0.35, lo * 0.45)
+        hi = max(1.2, hi * 0.45)
+    return (lo, hi)
 
 
 def _idle_amp_mult():
     """Map the 0-10 amplitude slider to a motion-size multiplier.
-    0 → 0.3x (barely there), 5 → 1.0x (original), 10 → 2.0x (expressive)."""
+    0 → 0.3x (barely there), 5 → 1.0x (original), 10 → 2.0x (expressive).
+    Slightly subtler during speech so the gestures support the talking
+    rather than distract from it."""
     a = _clip(float(_calibration.get("idle_amplitude", 5)), 0, 10)
-    return 0.3 + (a / 5.0) * 0.7 if a <= 5 else 1.0 + ((a - 5) / 5.0) * 1.0
+    base = 0.3 + (a / 5.0) * 0.7 if a <= 5 else 1.0 + ((a - 5) / 5.0) * 1.0
+    return base * 0.7 if _lip_active else base
 
 
 def set_lip_invert(top=None, bottom=None) -> bool:
@@ -679,20 +690,26 @@ def _do_idle_motion():
 
 
 def _auto_loop():
-    """Background thread: subtle idle motions when Blue isn't doing anything else."""
+    """Background thread: subtle motions to keep Blue looking alive. Two
+    modes:
+      * idle (no speech) — runs when auto_enabled() is on and Blue isn't in
+        the middle of an explicit move; respects _busy_until.
+      * speaking — runs whenever the lip-flap is active, even if auto idle
+        is off, and bypasses _busy_until (the lip thread bumps it 120s).
+    """
     # Stagger the first motion so it doesn't fire the instant the server starts.
     time.sleep(random.uniform(3.0, 6.0))
     while not _auto_stop:
         lo, hi = _idle_interval_range()
         time.sleep(random.uniform(lo, hi))
         try:
-            if not _available or not auto_enabled():
-                continue
-            if time.time() < _busy_until:
+            if not _available:
                 continue
             if _lip_active:
-                continue
-            _do_idle_motion()
+                # Talking: gesture along with the speech, regardless of toggle.
+                _do_idle_motion()
+            elif auto_enabled() and time.time() >= _busy_until:
+                _do_idle_motion()
         except Exception as e:
             _log(f"idle motion error: {e!r}")
             time.sleep(2.0)
