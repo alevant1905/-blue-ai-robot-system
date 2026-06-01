@@ -12693,10 +12693,21 @@ CHAT_HTML = """
         // single pop can't open a recording, and a minimum voiced duration so
         // very short noises get discarded before they ever reach Whisper.
         const HF_NOISE_ALPHA = 0.05;       // EMA smoothing on the ambient floor
-        const HF_THRESHOLD_FACTOR = 2.4;   // "voice" = floor * this
-        const HF_THRESHOLD_MIN = 0.018;    // hard floor for the threshold itself
-        const HF_VOICE_RAMP = 2;           // need N consecutive voicy chunks to enter voicing
-        const HF_MIN_VOICE_CHUNKS = 3;     // need >=N voicy chunks before sending to STT (~0.28s)
+        // VAD thresholds derived from the hands-free sensitivity slider on /head
+        // (0 = strict, 10 = very sensitive). Initial value comes from the server.
+        let HF_THRESHOLD_FACTOR = 2.4;
+        let HF_THRESHOLD_MIN = 0.018;
+        let HF_VOICE_RAMP = 2;
+        let HF_MIN_VOICE_CHUNKS = 3;
+        function applyHfSensitivity(s) {
+            s = Math.max(0, Math.min(10, Number(s)));
+            if (isNaN(s)) s = 5;
+            HF_THRESHOLD_FACTOR = 4.0 - (s / 10) * 2.5;        // 4.0 (strict) → 1.5 (loose)
+            HF_THRESHOLD_MIN    = 0.040 - (s / 10) * 0.032;    // 0.040 → 0.008
+            HF_VOICE_RAMP        = s <= 3 ? 3 : (s <= 7 ? 2 : 1);
+            HF_MIN_VOICE_CHUNKS  = s <= 3 ? 5 : (s <= 7 ? 3 : 2);
+        }
+        applyHfSensitivity({{ hf_sens|default(5) }});
         const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
@@ -12989,7 +13000,11 @@ def chat_page():
         kid = _identify_user_from_request() in _CHAT_ONLY_USERS
     except Exception:
         pass
-    html = render_template_string(CHAT_HTML, kid=kid)
+    try:
+        hf_sens = float(blue_head.get_calibration().get("hf_sensitivity", 5))
+    except Exception:
+        hf_sens = 5.0
+    html = render_template_string(CHAT_HTML, kid=kid, hf_sens=hf_sens)
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
@@ -13128,6 +13143,16 @@ HEAD_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="card">
+        <h2>Hands-free sensitivity</h2>
+        <div class="sub">How easily the ear button on the chat page wakes Blue. <b>Low</b> = strict (fewer false triggers, may miss soft speech). <b>High</b> = sensitive (catches quiet talkers, may trigger on background noise). After changing, reload the chat page for it to take effect.</div>
+        <div class="row" style="grid-template-columns: 130px 1fr 56px;">
+            <span class="name">Sensitivity</span>
+            <input type="range" id="hfSens" min="0" max="10" step="0.5" value="5">
+            <span class="val" id="vHfSens">5.0</span>
+        </div>
+    </div>
+
+    <div class="card">
         <h2>Lip-sync polarity</h2>
         <div class="sub">If when Blue talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
         <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
@@ -13256,6 +13281,10 @@ async function loadState() {
         document.getElementById('idleAmp').value = s.idle_amplitude;
         document.getElementById('vIdleAmp').textContent = Number(s.idle_amplitude).toFixed(1);
     }
+    if (s && s.hf_sensitivity != null) {
+        document.getElementById('hfSens').value = s.hf_sensitivity;
+        document.getElementById('vHfSens').textContent = Number(s.hf_sensitivity).toFixed(1);
+    }
 }
 
 function wireIdle(id, key) {
@@ -13277,6 +13306,25 @@ function wireIdle(id, key) {
 }
 wireIdle('Freq', 'frequency');
 wireIdle('Amp', 'amplitude');
+
+// Hands-free sensitivity slider (chat pages read this at next load).
+(function () {
+    const s = document.getElementById('hfSens'), v = document.getElementById('vHfSens');
+    if (!s) return;
+    let pending = null;
+    s.addEventListener('input', () => {
+        v.textContent = Number(s.value).toFixed(1);
+        if (pending) { pending.next = s.value; return; }
+        pending = {val: s.value, next: null};
+        (async function drain(){
+            while (pending) {
+                await postJSON('/head/hf-config', {sensitivity: parseFloat(pending.val)});
+                if (pending.next != null) { pending.val = pending.next; pending.next = null; }
+                else { pending = null; }
+            }
+        })();
+    });
+})();
 
 document.getElementById('autoToggle').addEventListener('change', e => postJSON('/head/auto', {enabled: e.target.checked}));
 document.getElementById('invTop').addEventListener('change', e => postJSON('/head/lip-config', {invert_top: e.target.checked}));
@@ -13577,6 +13625,15 @@ def head_idle_config():
     blue_head.set_idle_params(frequency=d.get('frequency'), amplitude=d.get('amplitude'))
     cal = blue_head.get_calibration()
     return jsonify({"ok": True, "idle_frequency": cal["idle_frequency"], "idle_amplitude": cal["idle_amplitude"]})
+
+
+@app.route('/head/hf-config', methods=['POST'])
+def head_hf_config():
+    """Set hands-free wake-word sensitivity (0-10). Chat pages pick up the new
+    value at next load (the /chat HTML embeds it as a Jinja-rendered constant)."""
+    d = request.get_json(silent=True) or {}
+    blue_head.set_hf_sensitivity(d.get('sensitivity'))
+    return jsonify({"ok": True, "hf_sensitivity": blue_head.get_calibration()["hf_sensitivity"]})
 
 
 @app.route('/head/lip-config', methods=['POST'])

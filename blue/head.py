@@ -102,6 +102,9 @@ _calibration = {
     # 5 ≈ matches the original feel; defaults skew slightly more active.
     "idle_frequency": 7,   # how often a motion happens (0=quiet, 10=lively)
     "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
+    # Hands-free wake-word sensitivity on the chat page (0=strict, 10=sensitive).
+    # The chat page reads this at load and derives its VAD thresholds from it.
+    "hf_sensitivity": 5,
 }
 
 
@@ -122,7 +125,7 @@ def _load_calibration():
             for k in ("lip_invert_top", "lip_invert_bottom"):
                 if k in data:
                     _calibration[k] = bool(data[k])
-            for k in ("idle_frequency", "idle_amplitude"):
+            for k in ("idle_frequency", "idle_amplitude", "hf_sensitivity"):
                 if k in data:
                     try:
                         _calibration[k] = float(_clip(float(data[k]), 0, 10))
@@ -152,6 +155,7 @@ def _save_calibration():
             "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
             "idle_frequency": float(_calibration.get("idle_frequency", 7)),
             "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
+            "hf_sensitivity": float(_calibration.get("hf_sensitivity", 5)),
             "custom_expressions": {
                 nm: {str(k): float(v) for k, v in pose.items()}
                 for nm, pose in (_calibration.get("custom_expressions") or {}).items()
@@ -178,6 +182,7 @@ def get_calibration():
         "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
         "idle_frequency": float(_calibration.get("idle_frequency", 7)),
         "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
+        "hf_sensitivity": float(_calibration.get("hf_sensitivity", 5)),
         "available": _available,
         "current_pose": current_pose(),
         "builtin_expressions": sorted(_EXPRESSIONS.keys()),
@@ -191,6 +196,15 @@ def set_idle_params(frequency=None, amplitude=None) -> bool:
         _calibration["idle_frequency"] = float(_clip(float(frequency), 0, 10))
     if amplitude is not None:
         _calibration["idle_amplitude"] = float(_clip(float(amplitude), 0, 10))
+    _save_calibration()
+    return True
+
+
+def set_hf_sensitivity(value) -> bool:
+    """Set the hands-free wake-word sensitivity (0-10). Persists."""
+    if value is None:
+        return False
+    _calibration["hf_sensitivity"] = float(_clip(float(value), 0, 10))
     _save_calibration()
     return True
 
