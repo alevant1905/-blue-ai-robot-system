@@ -585,6 +585,7 @@ def say(text: str, lip_sync: bool = True) -> bool:
 
 _lip_active = False
 _lip_thread = None
+_lip_token = 0    # bumped on every new lip action; running loops stop when stale
 
 # How far each lip travels at fully-open (offset from its calibrated centre).
 # The top lip moves less than the jaw, like real speech.
@@ -605,42 +606,77 @@ def _set_mouth(openness: float) -> None:
     _move_internal(BOTTOMLIP, center(BOTTOMLIP) + bot_sign * _LIP_BOTTOM_RANGE * openness, speed=10)
 
 
-def _lip_loop():
-    """Open and shut the mouth repeatedly until lip_stop() is called. The
-    motion alternates between FULLY open and FULLY closed so the mouth
-    actually shuts between syllables (the earlier bug was sitting on two
-    offsets that never returned to rest)."""
+def _lip_loop(my_token):
+    """Continuous open/shut flap (fallback when no timed sequence is given)."""
     global _lip_active
     try:
-        while _lip_active and _available:
+        while _lip_active and _available and _lip_token == my_token:
             _set_mouth(random.uniform(0.78, 1.0))   # open
             time.sleep(random.uniform(0.08, 0.13))
-            if not _lip_active:
+            if not _lip_active or _lip_token != my_token:
                 break
             _set_mouth(0.0)                          # closed
             time.sleep(random.uniform(0.07, 0.12))
     finally:
-        _set_mouth(0.0)
+        if _lip_token == my_token:
+            _set_mouth(0.0)
+
+
+def _lip_seq_loop(my_token, frames):
+    """Play a timed mouth schedule: each frame is (openness 0-1, hold seconds).
+    The browser builds these from the reply text so the jaw moves during words
+    and the mouth CLOSES during the gaps/pauses — far more lifelike than a
+    constant flap."""
+    global _lip_active
+    try:
+        for openness, hold in frames:
+            if not _lip_active or _lip_token != my_token or not _available:
+                break
+            _set_mouth(openness)
+            time.sleep(hold)
+    finally:
+        if _lip_token == my_token:
+            _set_mouth(0.0)
+            _lip_active = False
 
 
 def lip_start() -> bool:
-    """Begin the lip-flap loop. Idempotent."""
-    global _lip_active, _lip_thread
+    """Begin the continuous lip-flap (fallback path). Idempotent-ish."""
+    global _lip_active, _lip_thread, _lip_token
     if not init():
         return False
-    if _lip_active:
-        return True
+    _lip_token += 1
+    my = _lip_token
     _lip_active = True
     _mark_busy(120.0)
-    _lip_thread = threading.Thread(target=_lip_loop, name="blue-lip-flap", daemon=True)
+    _lip_thread = threading.Thread(target=_lip_loop, args=(my,), name="blue-lip-flap", daemon=True)
+    _lip_thread.start()
+    return True
+
+
+def lip_play_sequence(frames) -> bool:
+    """Play a timed mouth schedule (list of [openness, hold_seconds]). Supersedes
+    any current flap/sequence. This is the realistic path used during speech."""
+    global _lip_active, _lip_thread, _lip_token
+    if not init() or not frames:
+        return False
+    _lip_token += 1
+    my = _lip_token
+    _lip_active = True
+    total = sum(h for _, h in frames)
+    _mark_busy(min(120.0, total + 1.0))
+    _lip_thread = threading.Thread(target=_lip_seq_loop, args=(my, frames),
+                                   name="blue-lip-seq", daemon=True)
     _lip_thread.start()
     return True
 
 
 def lip_stop() -> bool:
-    """End the lip-flap loop and close the mouth."""
-    global _lip_active, _busy_until
+    """Stop any lip motion and close the mouth."""
+    global _lip_active, _busy_until, _lip_token
     _lip_active = False
+    _lip_token += 1            # invalidate any running loop
+    _set_mouth(0.0)
     _busy_until = time.time() + 0.3
     return True
 

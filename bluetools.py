@@ -1710,8 +1710,8 @@ _CHAT_ONLY_USERS = {"Vilda"}
 _CHAT_ONLY_ALLOWED = {
     "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
     "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
-    # On this branch: allow the kid's chat page to drive lip-flap during TTS.
-    "head_lip",
+    # On this branch: allow the kid's chat page to drive the lips during TTS.
+    "head_lip", "head_lip_seq",
 }
 # Tools chat-only users (the kids' iPad) may NOT trigger. Music plays through the
 # PC's own speakers, so controlling it from Vilda's iPad is pointless/disruptive.
@@ -12434,6 +12434,39 @@ CHAT_HTML = """
             return null;
         }
 
+        // Build a timed mouth schedule from the reply text so the robot's jaw
+        // moves during words and the mouth CLOSES during the gaps — including
+        // longer pauses at commas and sentence ends. Each frame is
+        // [openness 0-1, hold_seconds]. Sent once to /head/lip-seq; the server
+        // plays it out (works on iOS 12 too, where speech boundary events don't
+        // fire). Durations are an estimate of the TTS rhythm; onend stops it.
+        function buildLipFrames(text, rate) {
+            rate = rate || 1.0;
+            const k = 1.0 / rate;                 // slower speech → longer holds
+            const words = (text.match(/[^\\s]+/g) || []);
+            const frames = [];
+            const MS_PER_CHAR = 0.060;            // seconds of jaw motion per letter
+            for (let wi = 0; wi < words.length; wi++) {
+                const w = words[wi];
+                const core = w.replace(/[^A-Za-z0-9\\u00C0-\\u024F\\u0370-\\u03FF\\u0400-\\u04FF]/g, '');
+                const len = Math.max(1, core.length);
+                let dur = Math.min(0.75, Math.max(0.14, len * MS_PER_CHAR)) * k;
+                const moves = Math.max(1, Math.round(len / 3));   // ~one jaw drop per few letters (syllables)
+                const per = dur / moves;
+                for (let i = 0; i < moves; i++) {
+                    frames.push([0.6 + Math.random() * 0.4, per * 0.6]);  // open (varied)
+                    frames.push([0.1, per * 0.4]);                        // near-closed between syllables
+                }
+                // Gap after the word; longer at punctuation = a real pause.
+                const last = w.slice(-1);
+                let gap = 0.06;
+                if (/[,;:)\\]]/.test(last)) gap = 0.22;
+                else if (/[.!?\\u2026]/.test(last)) gap = 0.40;
+                frames.push([0.0, gap * k]);                              // mouth shut during the gap
+            }
+            return frames;
+        }
+
         function speak(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
@@ -12451,10 +12484,13 @@ CHAT_HTML = """
                 u.lang = bcp;
                 u.rate = isVilda ? 0.95 : 1.0;
                 u.pitch = 1.0;
-                // Drive the robot's lip motors in sync with this utterance.
-                // Fire-and-forget; if the head isn't connected, the server
-                // call is a cheap no-op.
-                u.onstart = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":true}' }); } catch (e) {} };
+                // Drive the robot's lips in sync: send a text-derived mouth
+                // schedule so the jaw moves on words and pauses on gaps.
+                // Fire-and-forget; if the head isn't connected it's a no-op.
+                const _lipFrames = buildLipFrames(msg, u.rate);
+                u.onstart = function () {
+                    try { fetch('/head/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
+                };
                 const _lipOff = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {} };
                 u.onend = _lipOff;
                 u.onerror = _lipOff;
@@ -13683,6 +13719,27 @@ def head_lip():
     else:
         blue_head.lip_stop()
     return jsonify({"ok": True, "lip_active": blue_head.lip_is_active()})
+
+
+@app.route('/head/lip-seq', methods=['POST'])
+def head_lip_seq():
+    """Play a timed mouth schedule the browser built from the reply text, so
+    the jaw moves during words and CLOSES during pauses (realistic lip-sync).
+    Each frame is [openness 0-1, hold_seconds]. Allowed for chat-only users."""
+    d = request.get_json(silent=True) or {}
+    raw = d.get('frames') or []
+    frames = []
+    for fr in raw[:4000]:
+        try:
+            op = max(0.0, min(1.0, float(fr[0])))
+            hold = max(0.01, min(1.5, float(fr[1])))
+            frames.append((op, hold))
+        except Exception:
+            continue
+    if not frames:
+        return jsonify({"ok": False, "error": "no frames"}), 400
+    blue_head.lip_play_sequence(frames)
+    return jsonify({"ok": True, "frames": len(frames)})
 
 
 @app.route('/head/reset', methods=['POST'])
