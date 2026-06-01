@@ -12073,6 +12073,12 @@ CHAT_HTML = """
         .iconbtn:hover { background: var(--cream); border-color: var(--forest); }
         .iconbtn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
         .iconbtn.active { background: var(--forest); border-color: var(--forest); color: #fff; }
+        .hf-status { margin-top: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest); text-align: center; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .hf-status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--forest); display: inline-block; }
+        .hf-status.voicing::before { background: #e9534e; animation: hf-pulse 0.9s infinite; }
+        .hf-status.thinking::before { background: #d4af37; }
+        .hf-status.armed::before { background: #3b82f6; }
+        @keyframes hf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         .micbtn { transition: background 0.15s, border-color 0.15s, transform 0.15s; }
         .micbtn.listening { background: #e9534e; border-color: #e9534e; color: #fff; transform: scale(1.08); }
         .micbtn.big { width: 60px; height: 60px; }
@@ -12169,6 +12175,9 @@ CHAT_HTML = """
                 <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to Blue" aria-label="Talk to Blue">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
+                <button class="iconbtn" id="hfBtn" title="Hands-free: say 'Blue' to start" aria-label="Hands-free listening" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
+                </button>
                 <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
                 <button class="iconbtn" id="voiceBtn" title="Choose Blue's voice" aria-label="Choose Blue's voice">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
@@ -12179,6 +12188,7 @@ CHAT_HTML = """
                 <button class="sendbtn" id="sendBtn">Send</button>
             </div>
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
+            <div id="hfStatus" class="hf-status" style="display:none"></div>
         </div>
     </div>
 
@@ -12558,9 +12568,7 @@ CHAT_HTML = """
             recSampleRate = audioCtx.sampleRate || 44100;
             srcNode = audioCtx.createMediaStreamSource(micStream);
             procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-            procNode.onaudioprocess = function (ev) {
-                if (recording) pcmChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
-            };
+            procNode.onaudioprocess = audioProcessHandler;
             const mute = audioCtx.createGain();
             mute.gain.value = 0;
             srcNode.connect(procNode);
@@ -12664,6 +12672,170 @@ CHAT_HTML = """
         }
 
         micBtn.addEventListener('click', startListening);
+
+        // ======================================================================
+        // Hands-free mode: continuous listening, wake on "Blue", auto-stop on
+        // silence. A second option alongside tap-to-talk; toggled by hfBtn.
+        // ======================================================================
+        let handsFree = false;
+        let hfVoicing = false;          // currently capturing an utterance
+        let hfSilence = 0;              // consecutive silent chunks during voicing
+        let hfPreroll = [];             // last few silent chunks, prepended on voice start
+        let hfProcessing = false;       // /stt in flight or send() running
+        let hfWakeArmed = false;        // user said "Blue" alone; next utterance is the message
+        let hfArmedTimer = null;
+
+        const HF_RMS = 0.020;             // amplitude floor that counts as "voice"
+        const HF_SILENCE_CHUNKS = 13;     // ~1.2s at 4096/44.1k = 0.093s per chunk
+        const HF_PREROLL_MAX = 4;         // ~0.37s of pre-roll keeps first phoneme
+        const HF_MAX_CHUNKS = 250;        // ~23s cap per utterance
+        const HF_ARMED_MS = 10000;         // how long to remember a bare "Blue" wake
+        // Wake-word match: "Blue", "Hey Blue", and a couple of close transliterations
+        // (Whisper sometimes returns these for non-English speakers saying "Blue").
+        const HF_WAKE = /^\\s*(?:hey\\s+|ok\\s+|okay\\s+)?(?:blue|bleu|blu|blew)\\b[\\s,.\\?!:;\\-]*/i;
+
+        const hfBtn = document.getElementById('hfBtn');
+        const hfStatusEl = document.getElementById('hfStatus');
+
+        function setHfStatus(state) {
+            if (!hfStatusEl) return;
+            if (!handsFree) { hfStatusEl.style.display = 'none'; hfStatusEl.className = 'hf-status'; return; }
+            const labels = {
+                waiting:  'Listening for "Blue"\\u2026',
+                voicing:  'Listening to you\\u2026',
+                thinking: 'Thinking\\u2026',
+                armed:    'Yes? I\\'m listening\\u2026',
+                replying: 'Speaking\\u2026',
+            };
+            hfStatusEl.style.display = 'flex';
+            hfStatusEl.className = 'hf-status ' + (state || '');
+            hfStatusEl.textContent = labels[state] || labels.waiting;
+        }
+
+        // Single onaudioprocess callback; routes samples to tap-to-talk OR hands-free.
+        function audioProcessHandler(ev) {
+            const samples = ev.inputBuffer.getChannelData(0);
+            if (recording) {
+                pcmChunks.push(new Float32Array(samples));
+                return;
+            }
+            if (handsFree) handsFreeOnSamples(samples);
+        }
+
+        function handsFreeOnSamples(samples) {
+            // Don't try to hear ourselves while Blue is talking, and don't kick off
+            // a second utterance while one is being processed.
+            if (hfProcessing) return;
+            if (window.speechSynthesis && window.speechSynthesis.speaking) return;
+
+            let sum = 0;
+            for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+            const rms = Math.sqrt(sum / samples.length);
+            const isVoice = rms > HF_RMS;
+
+            if (isVoice) {
+                if (!hfVoicing) {
+                    hfVoicing = true;
+                    hfSilence = 0;
+                    pcmChunks = hfPreroll.slice();   // bring in the pre-roll
+                    setHfStatus('voicing');
+                }
+                pcmChunks.push(new Float32Array(samples));
+                if (pcmChunks.length > HF_MAX_CHUNKS) hfFinalize();
+            } else if (hfVoicing) {
+                pcmChunks.push(new Float32Array(samples));  // small tail
+                hfSilence++;
+                if (hfSilence >= HF_SILENCE_CHUNKS) hfFinalize();
+            } else {
+                hfPreroll.push(new Float32Array(samples));
+                if (hfPreroll.length > HF_PREROLL_MAX) hfPreroll.shift();
+            }
+        }
+
+        async function hfFinalize() {
+            hfVoicing = false;
+            hfSilence = 0;
+            hfPreroll = [];
+            const chunks = pcmChunks; pcmChunks = [];
+            if (!chunks.length) {
+                setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+                return;
+            }
+            hfProcessing = true;
+            setHfStatus('thinking');
+            let said = '';
+            try {
+                const blob = encodeWav(chunks, recSampleRate);
+                const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
+                const res = await fetch('/stt', { method: 'POST', body: fd });
+                const data = await res.json().catch(() => null);
+                said = ((data && data.text) || '').trim();
+            } catch (e) {
+                hfProcessing = false;
+                if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+                return;
+            }
+
+            let message = '';
+            const m = said.match(HF_WAKE);
+            if (m) {
+                message = said.substring(m[0].length).trim();
+                if (!message) {
+                    // Just "Blue" alone — arm for the next utterance.
+                    hfWakeArmed = true;
+                    if (hfArmedTimer) clearTimeout(hfArmedTimer);
+                    hfArmedTimer = setTimeout(function () {
+                        hfWakeArmed = false;
+                        if (handsFree) setHfStatus('waiting');
+                    }, HF_ARMED_MS);
+                    hfProcessing = false;
+                    setHfStatus('armed');
+                    return;
+                }
+            } else if (hfWakeArmed) {
+                message = said;
+                hfWakeArmed = false;
+                if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
+            } else {
+                hfProcessing = false;
+                if (handsFree) setHfStatus('waiting');
+                return;
+            }
+
+            setHfStatus('replying');
+            try {
+                inputEl.value = message;
+                await send();
+            } finally {
+                hfProcessing = false;
+                if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+            }
+        }
+
+        async function toggleHandsFree() {
+            if (handsFree) {
+                handsFree = false;
+                hfVoicing = false; hfSilence = 0; hfPreroll = []; hfWakeArmed = false;
+                if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
+                hfBtn.classList.remove('active');
+                hfBtn.setAttribute('aria-pressed', 'false');
+                setHfStatus(null);
+                return;
+            }
+            primeAudio();
+            const ok = await ensureAudio();
+            if (ok !== true) {
+                addBubble('blue', 'I need permission to use the microphone. Tap once to allow it.');
+                return;
+            }
+            handsFree = true;
+            hfVoicing = false; hfSilence = 0; hfPreroll = []; pcmChunks = [];
+            hfBtn.classList.add('active');
+            hfBtn.setAttribute('aria-pressed', 'true');
+            setHfStatus('waiting');
+        }
+
+        if (hfBtn) hfBtn.addEventListener('click', toggleHandsFree);
 
         if (isVilda) {
             micBtn.classList.add('big');
