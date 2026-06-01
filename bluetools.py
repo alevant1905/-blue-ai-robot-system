@@ -12684,15 +12684,29 @@ CHAT_HTML = """
         let hfProcessing = false;       // /stt in flight or send() running
         let hfWakeArmed = false;        // user said "Blue" alone; next utterance is the message
         let hfArmedTimer = null;
+        let hfNoiseFloor = 0.005;       // running estimate of ambient RMS (adapts to room)
+        let hfVoiceRamp = 0;            // consecutive above-threshold chunks before we commit
+        let hfVoicyCount = 0;           // voiced chunks in the current utterance
 
-        const HF_RMS = 0.020;             // amplitude floor that counts as "voice"
-        const HF_SILENCE_CHUNKS = 13;     // ~1.2s at 4096/44.1k = 0.093s per chunk
-        const HF_PREROLL_MAX = 4;         // ~0.37s of pre-roll keeps first phoneme
-        const HF_MAX_CHUNKS = 250;        // ~23s cap per utterance
+        // VAD tuning. Noise rejection is layered: an adaptive floor (so quiet
+        // rooms stay sensitive and loud rooms get stricter), a ramp-up so a
+        // single pop can't open a recording, and a minimum voiced duration so
+        // very short noises get discarded before they ever reach Whisper.
+        const HF_NOISE_ALPHA = 0.05;       // EMA smoothing on the ambient floor
+        const HF_THRESHOLD_FACTOR = 3.5;   // "voice" = floor * this
+        const HF_THRESHOLD_MIN = 0.030;    // hard floor for the threshold itself
+        const HF_VOICE_RAMP = 3;           // need N consecutive voicy chunks to enter voicing
+        const HF_MIN_VOICE_CHUNKS = 5;     // need >=N voicy chunks before sending to STT (~0.46s)
+        const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
+        const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
+        const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
         const HF_ARMED_MS = 10000;         // how long to remember a bare "Blue" wake
-        // Wake-word match: "Blue", "Hey Blue", and a couple of close transliterations
-        // (Whisper sometimes returns these for non-English speakers saying "Blue").
-        const HF_WAKE = /^\\s*(?:hey\\s+|ok\\s+|okay\\s+)?(?:blue|bleu|blu|blew)\\b[\\s,.\\?!:;\\-]*/i;
+        // Wake-word match. Kept tight: just "Blue" / "Hey Blue" / "OK Blue" + the
+        // closest French spelling. "Blu" / "blew" were too easy to hallucinate.
+        const HF_WAKE = /^\\s*(?:hey\\s+|ok\\s+|okay\\s+)?(?:blue|bleu)\\b[\\s,.\\?!:;\\-]*/i;
+        // Whisper hallucinates a small set of stock phrases when fed near-silence
+        // or non-speech noise. Drop these before they trigger anything.
+        const HF_HALLUC = /^\\s*(?:(?:thanks?(?:\\s+for\\s+watching)?|thank\\s+you|you|bye|\\.|subtitles?\\s+by[^.]*|amara\\.org|MBC\\b[^.]*|copyright[^.]*)[!\\.\\?\\s]*)+$/i;
 
         const hfBtn = document.getElementById('hfBtn');
         const hfStatusEl = document.getElementById('hfStatus');
@@ -12731,24 +12745,60 @@ CHAT_HTML = """
             let sum = 0;
             for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
             const rms = Math.sqrt(sum / samples.length);
-            const isVoice = rms > HF_RMS;
+
+            // Adaptive threshold: stays well above ambient. We only update the
+            // noise floor while we're sure we're NOT hearing the user (idle).
+            const threshold = Math.max(HF_THRESHOLD_MIN, hfNoiseFloor * HF_THRESHOLD_FACTOR);
+            const isVoice = rms > threshold;
+            if (!isVoice && !hfVoicing) {
+                hfNoiseFloor = hfNoiseFloor * (1 - HF_NOISE_ALPHA) + rms * HF_NOISE_ALPHA;
+            }
 
             if (isVoice) {
+                hfVoiceRamp = Math.min(hfVoiceRamp + 1, HF_VOICE_RAMP + 2);
                 if (!hfVoicing) {
+                    if (hfVoiceRamp < HF_VOICE_RAMP) {
+                        // Treat the candidate chunks as pre-roll — if they really
+                        // are speech, we'll keep them; if it's a transient noise,
+                        // the ramp won't reach HF_VOICE_RAMP and we discard them.
+                        hfPreroll.push(new Float32Array(samples));
+                        if (hfPreroll.length > HF_PREROLL_MAX) hfPreroll.shift();
+                        return;
+                    }
                     hfVoicing = true;
                     hfSilence = 0;
-                    pcmChunks = hfPreroll.slice();   // bring in the pre-roll
+                    hfVoicyCount = 0;
+                    pcmChunks = hfPreroll.slice();    // commit the pre-roll
                     setHfStatus('voicing');
                 }
                 pcmChunks.push(new Float32Array(samples));
+                hfVoicyCount++;
+                hfSilence = 0;
                 if (pcmChunks.length > HF_MAX_CHUNKS) hfFinalize();
-            } else if (hfVoicing) {
-                pcmChunks.push(new Float32Array(samples));  // small tail
-                hfSilence++;
-                if (hfSilence >= HF_SILENCE_CHUNKS) hfFinalize();
             } else {
-                hfPreroll.push(new Float32Array(samples));
-                if (hfPreroll.length > HF_PREROLL_MAX) hfPreroll.shift();
+                hfVoiceRamp = Math.max(0, hfVoiceRamp - 1);
+                if (hfVoicing) {
+                    pcmChunks.push(new Float32Array(samples));   // small tail
+                    hfSilence++;
+                    if (hfSilence >= HF_SILENCE_CHUNKS) {
+                        // Drop "too short" utterances silently — they're almost
+                        // always noise, not real speech. Saves a Whisper call AND
+                        // prevents Whisper from hallucinating a wake-word match.
+                        if (hfVoicyCount < HF_MIN_VOICE_CHUNKS) {
+                            hfVoicing = false;
+                            hfSilence = 0;
+                            hfVoicyCount = 0;
+                            hfPreroll = [];
+                            pcmChunks = [];
+                            setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+                            return;
+                        }
+                        hfFinalize();
+                    }
+                } else {
+                    hfPreroll.push(new Float32Array(samples));
+                    if (hfPreroll.length > HF_PREROLL_MAX) hfPreroll.shift();
+                }
             }
         }
 
@@ -12771,6 +12821,15 @@ CHAT_HTML = """
                 const data = await res.json().catch(() => null);
                 said = ((data && data.text) || '').trim();
             } catch (e) {
+                hfProcessing = false;
+                if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+                return;
+            }
+
+            // Whisper hallucinates a small set of stock phrases on near-silence.
+            // Reject those silently — they shouldn't even be considered for the
+            // wake word or be sent as a message when armed.
+            if (!said || said.length < 3 || HF_HALLUC.test(said)) {
                 hfProcessing = false;
                 if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
                 return;
@@ -12830,6 +12889,7 @@ CHAT_HTML = """
             }
             handsFree = true;
             hfVoicing = false; hfSilence = 0; hfPreroll = []; pcmChunks = [];
+            hfVoiceRamp = 0; hfVoicyCount = 0; hfNoiseFloor = 0.005;
             hfBtn.classList.add('active');
             hfBtn.setAttribute('aria-pressed', 'true');
             setHfStatus('waiting');
