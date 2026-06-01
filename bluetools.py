@@ -12748,18 +12748,20 @@ CHAT_HTML = """
         let hfPreroll = [];             // last few silent chunks, prepended on voice start
         // Barge-in ("stop" while Blue is speaking) capture state.
         let biActive = false, biChunks = [], biVoice = 0, biSilence = 0, biBusy = false;
+        let biPreroll = [];                // rolling pre-roll so the "st-" onset isn't clipped
         // Sensitive on purpose: starting a capture does NOT stop Blue — only a
-        // transcript that actually matches BI_STOP does. So we can capture
-        // eagerly at near-normal speaking volume; echo cancellation keeps Blue's
-        // own voice from transcribing to a stop-word.
-        const BI_THRESHOLD_FACTOR = 1.05;  // barely above the normal voice threshold
-        const BI_THRESHOLD_MIN = 0.014;    // low floor — a normal "stop", not a shout
+        // transcript that matches "stop" does. So we capture eagerly at quiet
+        // speaking volume; echo cancellation keeps Blue's own voice out.
+        const BI_THRESHOLD_FACTOR = 1.0;   // right at the normal voice threshold
+        const BI_THRESHOLD_MIN = 0.010;    // very low floor — a soft "stop" should land
         const BI_VOICE_START = 1;          // react on the first loud chunk
+        const BI_PREROLL_MAX = 4;          // ~0.37s kept before onset (captures the "st")
         const BI_SILENCE_END = 4;          // ~0.37s of quiet ends the barge-in clip
         const BI_MAX_CHUNKS = 14;          // ~1.3s cap — transcribe quickly even if
                                            // Blue's echo keeps the mic from going quiet
-        // What counts as "stop". Whisper may render it with punctuation/case.
-        const BI_STOP = /\\b(stop|stop it|stop talking|be quiet|quiet|shush|hush|enough|that.?s enough|never mind|nevermind|cancel)\\b/i;
+        // ONLY "stop" interrupts (per request). Lenient: matches "stop" anywhere
+        // plus the closest mis-hearings Whisper produces (stahp/stawp/staap/stop).
+        const BI_STOP = /\\bst[aou]+w?h?p\\b|\\bstop\\b/i;
         let hfProcessing = false;       // /stt in flight or send() running
         let hfWakeArmed = false;        // user said "Blue" alone; next utterance is the message
         let hfArmedTimer = null;
@@ -12880,7 +12882,7 @@ CHAT_HTML = """
                 return;
             }
             // Just finished speaking? clear any half-built barge-in capture.
-            if (biActive || biChunks.length) { biActive = false; biChunks = []; biVoice = 0; biSilence = 0; }
+            if (biActive || biChunks.length) { biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = []; }
 
             let sum = 0;
             for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
@@ -12954,8 +12956,11 @@ CHAT_HTML = """
             if (rms > threshold) {
                 if (!biActive) {
                     biVoice++;
-                    if (biVoice < BI_VOICE_START) return;   // need a couple loud chunks first
-                    biActive = true; biChunks = []; biSilence = 0;
+                    if (biVoice < BI_VOICE_START) return;
+                    // Seed with the pre-roll so the plosive onset of "stop"
+                    // (the quiet "st-" just before the loud burst) is included —
+                    // without it Whisper only sees "op" and you have to yell.
+                    biActive = true; biChunks = biPreroll.slice(); biSilence = 0;
                 }
                 biChunks.push(new Float32Array(samples));
                 biSilence = 0;
@@ -12966,14 +12971,17 @@ CHAT_HTML = """
                     biChunks.push(new Float32Array(samples));
                     biSilence++;
                     if (biSilence >= BI_SILENCE_END) bargeInFinalize();
+                } else {
+                    biPreroll.push(new Float32Array(samples));
+                    if (biPreroll.length > BI_PREROLL_MAX) biPreroll.shift();
                 }
             }
         }
 
         async function bargeInFinalize() {
             const chunks = biChunks;
-            biActive = false; biChunks = []; biVoice = 0; biSilence = 0;
-            if (chunks.length < 3) return;
+            biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = [];
+            if (chunks.length < 2) return;
             biBusy = true;
             try {
                 const blob = encodeWav(chunks, recSampleRate);
@@ -13080,7 +13088,7 @@ CHAT_HTML = """
             if (handsFree) {
                 handsFree = false;
                 hfVoicing = false; hfSilence = 0; hfPreroll = []; hfWakeArmed = false;
-                biActive = false; biChunks = []; biVoice = 0; biSilence = 0;
+                biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = [];
                 if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
                 hfBtn.classList.remove('active');
                 hfBtn.setAttribute('aria-pressed', 'false');
@@ -13187,7 +13195,7 @@ def stt():
         # best for short, independent voice commands.
         kwargs = {"beam_size": 1, "condition_on_previous_text": False}
         if hint == 'stop':
-            kwargs["hotwords"] = "stop. stop it. wait. quiet. enough. no. cancel."
+            kwargs["hotwords"] = "stop. stop. stop!"   # bias hard toward just "stop"
         elif wake:
             kwargs["hotwords"] = "Blue"
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
