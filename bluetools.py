@@ -12693,10 +12693,10 @@ CHAT_HTML = """
         // single pop can't open a recording, and a minimum voiced duration so
         // very short noises get discarded before they ever reach Whisper.
         const HF_NOISE_ALPHA = 0.05;       // EMA smoothing on the ambient floor
-        const HF_THRESHOLD_FACTOR = 3.5;   // "voice" = floor * this
-        const HF_THRESHOLD_MIN = 0.030;    // hard floor for the threshold itself
-        const HF_VOICE_RAMP = 3;           // need N consecutive voicy chunks to enter voicing
-        const HF_MIN_VOICE_CHUNKS = 5;     // need >=N voicy chunks before sending to STT (~0.46s)
+        const HF_THRESHOLD_FACTOR = 2.4;   // "voice" = floor * this
+        const HF_THRESHOLD_MIN = 0.018;    // hard floor for the threshold itself
+        const HF_VOICE_RAMP = 2;           // need N consecutive voicy chunks to enter voicing
+        const HF_MIN_VOICE_CHUNKS = 3;     // need >=N voicy chunks before sending to STT (~0.28s)
         const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
