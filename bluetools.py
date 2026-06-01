@@ -12711,10 +12711,10 @@ CHAT_HTML = """
         const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
-        const HF_ARMED_MS = 10000;         // how long to remember a bare "Blue" wake
-        // Wake-word match. Kept tight: just "Blue" / "Hey Blue" / "OK Blue" + the
-        // closest French spelling. "Blu" / "blew" were too easy to hallucinate.
-        const HF_WAKE = /^\\s*(?:hey\\s+|ok\\s+|okay\\s+)?(?:blue|bleu)\\b[\\s,.\\?!:;\\-]*/i;
+        const HF_ARMED_MS = 15000;         // follow-up window: keep listening this long without re-wake
+        // Wake-word match. Kept tight: "Blue" / "Hey Blue" / "Hi Blue" / "Hello Blue"
+        // / "OK Blue" + the closest French spelling. "Blu" / "blew" hallucinate too easily.
+        const HF_WAKE = /^\\s*(?:hey|hi|hello|ok|okay)?\\s*(?:blue|bleu)\\b[\\s,.\\?!:;\\-]*/i;
         // Whisper hallucinates a small set of stock phrases when fed near-silence
         // or non-speech noise. Drop these before they trigger anything.
         const HF_HALLUC = /^\\s*(?:(?:thanks?(?:\\s+for\\s+watching)?|thank\\s+you|you|bye|\\.|subtitles?\\s+by[^.]*|amara\\.org|MBC\\b[^.]*|copyright[^.]*)[!\\.\\?\\s]*)+$/i;
@@ -12878,7 +12878,18 @@ CHAT_HTML = """
                 await send();
             } finally {
                 hfProcessing = false;
-                if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+                if (handsFree) {
+                    // Open a brief follow-up window: the next utterance is taken
+                    // as a follow-up without needing to say "Blue" again. After
+                    // HF_ARMED_MS of silence, wake word is required again.
+                    hfWakeArmed = true;
+                    if (hfArmedTimer) clearTimeout(hfArmedTimer);
+                    hfArmedTimer = setTimeout(function () {
+                        hfWakeArmed = false;
+                        if (handsFree) setHfStatus('waiting');
+                    }, HF_ARMED_MS);
+                    setHfStatus('armed');
+                }
             }
         }
 
