@@ -12079,6 +12079,8 @@ CHAT_HTML = """
         .hf-status.thinking::before { background: #d4af37; }
         .hf-status.armed::before { background: #3b82f6; }
         @keyframes hf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .hf-mode-btn { display: block; margin: 6px auto 0; background: none; border: 1px solid var(--sage); color: var(--forest); border-radius: 14px; padding: 4px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; cursor: pointer; }
+        .hf-mode-btn:hover { background: var(--cream); }
         .micbtn { transition: background 0.15s, border-color 0.15s, transform 0.15s; }
         .micbtn.listening { background: #e9534e; border-color: #e9534e; color: #fff; transform: scale(1.08); }
         .micbtn.big { width: 60px; height: 60px; }
@@ -12189,6 +12191,7 @@ CHAT_HTML = """
             </div>
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
+            <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
     </div>
 
@@ -12711,13 +12714,47 @@ CHAT_HTML = """
         const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
-        const HF_ARMED_MS = 15000;         // follow-up window: keep listening this long without re-wake
-        // Wake-word match. Kept tight: "Blue" / "Hey Blue" / "Hi Blue" / "Hello Blue"
-        // / "OK Blue" + the closest French spelling. "Blu" / "blew" hallucinate too easily.
-        const HF_WAKE = /^\\s*(?:hey|hi|hello|ok|okay)?\\s*(?:blue|bleu)\\b[\\s,.\\?!:;\\-]*/i;
+        const HF_ARMED_MS = 15000;         // bare-"Blue" wait window before the message
         // Whisper hallucinates a small set of stock phrases when fed near-silence
         // or non-speech noise. Drop these before they trigger anything.
         const HF_HALLUC = /^\\s*(?:(?:thanks?(?:\\s+for\\s+watching)?|thank\\s+you|you|bye|\\.|subtitles?\\s+by[^.]*|amara\\.org|MBC\\b[^.]*|copyright[^.]*)[!\\.\\?\\s]*)+$/i;
+
+        // Two hands-free modes (toggle on the page, remembered per device):
+        //   'wake'         — must start with "Blue"; noise-gated, always-on safe.
+        //   'conversation' — no wake word; every utterance goes to Blue.
+        let hfMode = 'wake';
+        try { hfMode = localStorage.getItem('blueHfMode') || 'wake'; } catch (e) {}
+
+        // Fillers Whisper may stick before the name; allowed to precede the wake.
+        const HF_FILLERS = ['hey','hi','hello','ok','okay','um','uh','so','well'];
+        // Accepted spellings of the wake word (Whisper is inconsistent on a short
+        // leading proper noun, even with hotword biasing).
+        const HF_WAKE_WORDS = ['blue','bleu','blu','blew','bloo','blues','bews'];
+        function isWakeWord(w) {
+            w = w.toLowerCase().replace(/[^a-z]/g, '');
+            if (!w) return false;
+            if (HF_WAKE_WORDS.indexOf(w) >= 0) return true;
+            // edit-distance ≤1 from "blue" catches Boo/Blu/Blhe/etc. without a lib
+            if (Math.abs(w.length - 4) > 1) return false;
+            let i = 0, j = 0, edits = 0; const t = 'blue';
+            while (i < w.length && j < t.length) {
+                if (w[i] === t[j]) { i++; j++; }
+                else { edits++; if (edits > 1) return false;
+                    if (w.length > t.length) i++; else if (w.length < t.length) j++; else { i++; j++; } }
+            }
+            return (edits + (w.length - i) + (t.length - j)) <= 1;
+        }
+        // Returns the message after the wake word, '' if wake-only, or null if no wake.
+        function extractWake(said) {
+            const words = said.trim().split(/\\s+/);
+            for (let i = 0; i < Math.min(3, words.length); i++) {
+                if (isWakeWord(words[i])) return words.slice(i + 1).join(' ').replace(/^[\\s,.\\?!:;\\-]+/, '').trim();
+                // Only fillers (hi/hey/um…) may precede the wake word; strip
+                // punctuation Whisper attaches ("Um," -> "um") before comparing.
+                if (HF_FILLERS.indexOf(words[i].toLowerCase().replace(/[^a-z]/g, '')) < 0) break;
+            }
+            return null;
+        }
 
         const hfBtn = document.getElementById('hfBtn');
         const hfStatusEl = document.getElementById('hfStatus');
@@ -12725,8 +12762,9 @@ CHAT_HTML = """
         function setHfStatus(state) {
             if (!hfStatusEl) return;
             if (!handsFree) { hfStatusEl.style.display = 'none'; hfStatusEl.className = 'hf-status'; return; }
+            const waitLabel = hfMode === 'conversation' ? 'Conversation on \\u2014 just talk\\u2026' : 'Listening for "Blue"\\u2026';
             const labels = {
-                waiting:  'Listening for "Blue"\\u2026',
+                waiting:  waitLabel,
                 voicing:  'Listening to you\\u2026',
                 thinking: 'Thinking\\u2026',
                 armed:    'Yes? I\\'m listening\\u2026',
@@ -12735,6 +12773,15 @@ CHAT_HTML = """
             hfStatusEl.style.display = 'flex';
             hfStatusEl.className = 'hf-status ' + (state || '');
             hfStatusEl.textContent = labels[state] || labels.waiting;
+        }
+
+        // Mode toggle (Conversation vs wake word). Shown only while listening.
+        function setHfMode(mode) {
+            hfMode = (mode === 'conversation') ? 'conversation' : 'wake';
+            try { localStorage.setItem('blueHfMode', hfMode); } catch (e) {}
+            const mb = document.getElementById('hfModeBtn');
+            if (mb) mb.textContent = hfMode === 'conversation' ? 'Mode: conversation (no wake word)' : 'Mode: say "Blue" first';
+            if (handsFree && !hfProcessing) setHfStatus('waiting');
         }
 
         // Single onaudioprocess callback; routes samples to tap-to-talk OR hands-free.
@@ -12828,6 +12875,8 @@ CHAT_HTML = """
             try {
                 const blob = encodeWav(chunks, recSampleRate);
                 const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
+                // In wake mode, ask the server to bias Whisper toward "Blue".
+                if (hfMode !== 'conversation') fd.append('wake', '1');
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);
                 said = ((data && data.text) || '').trim();
@@ -12840,8 +12889,8 @@ CHAT_HTML = """
             // STT is done — release the listening lock immediately so the mic
             // is hot again while the LLM is composing the reply. TTS playback
             // suspends VAD on its own via window.speechSynthesis.speaking, so
-            // Blue won't hear himself, but the user CAN say "Blue" again the
-            // moment the spinner stops.
+            // Blue won't hear himself, but the user CAN speak again the moment
+            // the spinner stops.
             hfProcessing = false;
 
             // Whisper hallucinates a small set of stock phrases on near-silence.
@@ -12851,10 +12900,22 @@ CHAT_HTML = """
             }
 
             let message = '';
-            const m = said.match(HF_WAKE);
-            if (m) {
-                message = said.substring(m[0].length).trim();
-                if (!message) {
+            if (hfMode === 'conversation') {
+                // No wake word — the whole utterance is the message.
+                message = said;
+            } else {
+                const rest = extractWake(said);   // null = no wake word heard
+                if (rest === null) {
+                    if (hfWakeArmed) {
+                        // We heard a bare "Blue" a moment ago; take this as the message.
+                        message = said;
+                        hfWakeArmed = false;
+                        if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
+                    } else {
+                        if (handsFree) setHfStatus('waiting');   // background talk → ignore
+                        return;
+                    }
+                } else if (rest === '') {
                     // Just "Blue" alone — arm for the next utterance.
                     hfWakeArmed = true;
                     if (hfArmedTimer) clearTimeout(hfArmedTimer);
@@ -12864,14 +12925,9 @@ CHAT_HTML = """
                     }, HF_ARMED_MS);
                     setHfStatus('armed');
                     return;
+                } else {
+                    message = rest;
                 }
-            } else if (hfWakeArmed) {
-                message = said;
-                hfWakeArmed = false;
-                if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
-            } else {
-                if (handsFree) setHfStatus('waiting');
-                return;
             }
 
             // Fire-and-forget the chat call. The mic stays hot so the user can
@@ -12885,6 +12941,8 @@ CHAT_HTML = """
             });
         }
 
+        const hfModeBtn = document.getElementById('hfModeBtn');
+
         async function toggleHandsFree() {
             if (handsFree) {
                 handsFree = false;
@@ -12892,6 +12950,7 @@ CHAT_HTML = """
                 if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
                 hfBtn.classList.remove('active');
                 hfBtn.setAttribute('aria-pressed', 'false');
+                if (hfModeBtn) hfModeBtn.style.display = 'none';
                 setHfStatus(null);
                 return;
             }
@@ -12906,10 +12965,15 @@ CHAT_HTML = """
             hfVoiceRamp = 0; hfVoicyCount = 0; hfNoiseFloor = 0.005;
             hfBtn.classList.add('active');
             hfBtn.setAttribute('aria-pressed', 'true');
+            if (hfModeBtn) hfModeBtn.style.display = 'block';
             setHfStatus('waiting');
         }
 
         if (hfBtn) hfBtn.addEventListener('click', toggleHandsFree);
+        if (hfModeBtn) hfModeBtn.addEventListener('click', function () {
+            setHfMode(hfMode === 'conversation' ? 'wake' : 'conversation');
+        });
+        setHfMode(hfMode);   // initialise the button label from saved preference
 
         if (isVilda) {
             micBtn.classList.add('big');
@@ -12974,14 +13038,21 @@ def stt():
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
     tmp_path = tmp.name
     tmp.close()
+    # Hands-free wake mode sends wake=1 so we bias Whisper toward the name
+    # "Blue" — it otherwise transcribes the short leading word as "Blew/Blu/Boo"
+    # and the wake match fails. hotwords nudges without forcing it into output.
+    wake = (request.form.get('wake') or '') in ('1', 'true', 'yes')
     try:
         f.save(tmp_path)
         model = _get_whisper()
+        kwargs = {"beam_size": 1}
+        if wake:
+            kwargs["hotwords"] = "Blue"
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
-        segments, info = model.transcribe(tmp_path, beam_size=1)
+        segments, info = model.transcribe(tmp_path, **kwargs)
         text = " ".join(seg.text for seg in segments).strip()
         lang = getattr(info, "language", "") or ""
-        print(f"   [STT] ({lang}) {os.path.getsize(tmp_path)} bytes -> {text[:120]!r}")
+        print(f"   [STT] ({lang}{',wake' if wake else ''}) {os.path.getsize(tmp_path)} bytes -> {text[:120]!r}")
         return jsonify({"text": text, "language": lang})
     except Exception as e:
         log.error(f"[STT] transcription failed: {e}")
