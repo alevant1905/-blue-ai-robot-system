@@ -12562,7 +12562,13 @@ CHAT_HTML = """
             try { if (!audioCtx) audioCtx = new AC(); } catch (e) { return 'unsupported'; }
             // Kick both off NOW, while still in the gesture; await afterwards.
             const resumeP = (audioCtx.state !== 'running') ? audioCtx.resume() : null;
-            const mediaP = audioReady ? null : navigator.mediaDevices.getUserMedia({ audio: true });
+            // echoCancellation matters for barge-in ("stop" while Blue talks):
+            // it suppresses Blue's own voice coming back through the mic so we
+            // don't hear (or transcribe) him saying his own words.
+            const _audioConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+            const mediaP = audioReady ? null : navigator.mediaDevices.getUserMedia({ audio: _audioConstraints }).catch(function () {
+                return navigator.mediaDevices.getUserMedia({ audio: true });  // fallback if constraints unsupported
+            });
             if (resumeP) { try { await resumeP; } catch (e) {} }
             if (audioReady && audioCtx.state !== 'closed') return true;
             let stream;
@@ -12684,6 +12690,15 @@ CHAT_HTML = """
         let hfVoicing = false;          // currently capturing an utterance
         let hfSilence = 0;              // consecutive silent chunks during voicing
         let hfPreroll = [];             // last few silent chunks, prepended on voice start
+        // Barge-in ("stop" while Blue is speaking) capture state.
+        let biActive = false, biChunks = [], biVoice = 0, biSilence = 0, biBusy = false;
+        const BI_THRESHOLD_FACTOR = 2.0;   // higher bar than normal (echo residue)
+        const BI_THRESHOLD_MIN = 0.045;    // absolute floor — must be a deliberate voice
+        const BI_VOICE_START = 2;          // chunks above threshold to begin capture
+        const BI_SILENCE_END = 6;          // ~0.55s of quiet ends the barge-in clip
+        const BI_MAX_CHUNKS = 40;          // ~3.7s cap
+        // What counts as "stop". Whisper may render it with punctuation/case.
+        const BI_STOP = /\\b(stop|stop it|stop talking|be quiet|quiet|shush|hush|enough|that.?s enough|never mind|nevermind|cancel)\\b/i;
         let hfProcessing = false;       // /stt in flight or send() running
         let hfWakeArmed = false;        // user said "Blue" alone; next utterance is the message
         let hfArmedTimer = null;
@@ -12795,10 +12810,16 @@ CHAT_HTML = """
         }
 
         function handsFreeOnSamples(samples) {
-            // Don't try to hear ourselves while Blue is talking, and don't kick off
-            // a second utterance while one is being processed.
+            // Don't kick off a second utterance while one is being processed.
             if (hfProcessing) return;
-            if (window.speechSynthesis && window.speechSynthesis.speaking) return;
+            // While Blue is talking, run the barge-in listener instead of the
+            // normal capture — that's how "stop" interrupts him.
+            if (window.speechSynthesis && window.speechSynthesis.speaking) {
+                bargeInOnSamples(samples);
+                return;
+            }
+            // Just finished speaking? clear any half-built barge-in capture.
+            if (biActive || biChunks.length) { biActive = false; biChunks = []; biVoice = 0; biSilence = 0; }
 
             let sum = 0;
             for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
@@ -12858,6 +12879,56 @@ CHAT_HTML = """
                     if (hfPreroll.length > HF_PREROLL_MAX) hfPreroll.shift();
                 }
             }
+        }
+
+        // Barge-in: while Blue is speaking, listen for a deliberate "stop".
+        // Higher threshold than normal because echo cancellation isn't perfect;
+        // we only want to react to the user clearly talking over Blue.
+        function bargeInOnSamples(samples) {
+            if (biBusy) return;
+            let sum = 0;
+            for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+            const rms = Math.sqrt(sum / samples.length);
+            const threshold = Math.max(BI_THRESHOLD_MIN, hfNoiseFloor * HF_THRESHOLD_FACTOR * BI_THRESHOLD_FACTOR);
+            if (rms > threshold) {
+                if (!biActive) {
+                    biVoice++;
+                    if (biVoice < BI_VOICE_START) return;   // need a couple loud chunks first
+                    biActive = true; biChunks = []; biSilence = 0;
+                }
+                biChunks.push(new Float32Array(samples));
+                biSilence = 0;
+                if (biChunks.length > BI_MAX_CHUNKS) bargeInFinalize();
+            } else {
+                biVoice = Math.max(0, biVoice - 1);
+                if (biActive) {
+                    biChunks.push(new Float32Array(samples));
+                    biSilence++;
+                    if (biSilence >= BI_SILENCE_END) bargeInFinalize();
+                }
+            }
+        }
+
+        async function bargeInFinalize() {
+            const chunks = biChunks;
+            biActive = false; biChunks = []; biVoice = 0; biSilence = 0;
+            if (chunks.length < 3) return;
+            biBusy = true;
+            try {
+                const blob = encodeWav(chunks, recSampleRate);
+                const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
+                fd.append('wake', '1');   // bias toward short command words
+                const res = await fetch('/stt', { method: 'POST', body: fd });
+                const data = await res.json().catch(() => null);
+                const said = ((data && data.text) || '').trim();
+                if (said && BI_STOP.test(said)) {
+                    // Heard "stop" — silence Blue immediately and close the mouth.
+                    try { window.speechSynthesis.cancel(); } catch (e) {}
+                    try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+                    if (handsFree) setHfStatus('waiting');
+                }
+            } catch (e) { /* ignore */ }
+            finally { biBusy = false; }
         }
 
         async function hfFinalize() {
@@ -12947,6 +13018,7 @@ CHAT_HTML = """
             if (handsFree) {
                 handsFree = false;
                 hfVoicing = false; hfSilence = 0; hfPreroll = []; hfWakeArmed = false;
+                biActive = false; biChunks = []; biVoice = 0; biSilence = 0;
                 if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
                 hfBtn.classList.remove('active');
                 hfBtn.setAttribute('aria-pressed', 'false');
