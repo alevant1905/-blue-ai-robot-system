@@ -12844,6 +12844,14 @@ HEAD_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="card">
+        <h2>Lip-sync polarity</h2>
+        <div class="sub">If when Blue talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
+        <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
+        <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
+        <div style="margin-top:12px;"><button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button></div>
+    </div>
+
+    <div class="card">
         <h2>Eye colour</h2>
         <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Red</span><input type="range" id="cR" min="0" max="10" step="1" value="0"><span class="val" id="vR">0</span></div>
         <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Green</span><input type="range" id="cG" min="0" max="10" step="1" value="0"><span class="val" id="vG">0</span></div>
@@ -12949,9 +12957,18 @@ async function loadState() {
     else { status.className = 'status off'; status.textContent = 'Not connected'; }
     buildMotors(s && s.centers);
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
+    document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
+    document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
 }
 
 document.getElementById('autoToggle').addEventListener('change', e => postJSON('/head/auto', {enabled: e.target.checked}));
+document.getElementById('invTop').addEventListener('change', e => postJSON('/head/lip-config', {invert_top: e.target.checked}));
+document.getElementById('invBot').addEventListener('change', e => postJSON('/head/lip-config', {invert_bottom: e.target.checked}));
+document.getElementById('testLipBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('testLipBtn');
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
+    try { await postJSON('/head/lip-test', {}); } finally { btn.disabled = false; btn.textContent = orig; }
+});
 document.getElementById('parkBtn').addEventListener('click', async () => { await postJSON('/head/reset', {}); });
 document.getElementById('restoreBtn').addEventListener('click', async () => {
     if (!confirm('Reset all neutral positions to factory defaults?')) return;
@@ -13056,6 +13073,33 @@ def head_restore_defaults():
         blue_head.set_center(m, c)
     blue_head.reset()
     return jsonify({"ok": True, "centers": blue_head.get_calibration()["centers"]})
+
+
+@app.route('/head/lip-config', methods=['POST'])
+def head_lip_config():
+    """Flip the polarity of either lip motor. Hardware varies between Ohbot
+    units; the GUI exposes a checkbox per lip so the user can find the
+    combination that opens and closes the mouth."""
+    d = request.get_json(silent=True) or {}
+    blue_head.set_lip_invert(top=d.get('invert_top'), bottom=d.get('invert_bottom'))
+    cal = blue_head.get_calibration()
+    return jsonify({"ok": True, "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"]})
+
+
+@app.route('/head/lip-test', methods=['POST'])
+def head_lip_test():
+    """Run the lip flap for ~4 seconds so the user can calibrate polarity
+    without having to make Blue speak."""
+    import time as _t, threading as _th
+    def _run():
+        try:
+            blue_head.lip_start()
+            _t.sleep(4.0)
+            blue_head.lip_stop()
+        except Exception as e:
+            log.warning(f"[HEAD] lip-test error: {e}")
+    _th.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route('/chat/attach', methods=['POST'])

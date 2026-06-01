@@ -89,9 +89,15 @@ _DEFAULT_CENTERS = {m: _DEFAULT_CENTER for m in ALL_MOTORS}
 _DEFAULT_CENTERS[LIDBLINK] = 8.0
 
 _CALIB_PATH = os.path.join(os.getcwd(), "data", "head_calibration.json")
+# Lip-motor polarity varies between Ohbot units, so each lip has an invert
+# flag. With invert=False: opening the mouth increases the motor value;
+# invert=True: opening decreases it. The GUI exposes both so the user can
+# experiment without code changes.
 _calibration = {
     "centers": dict(_DEFAULT_CENTERS),
     "auto_movement": True,
+    "lip_invert_top": False,
+    "lip_invert_bottom": False,
 }
 
 
@@ -109,6 +115,9 @@ def _load_calibration():
                     pass
             if "auto_movement" in data:
                 _calibration["auto_movement"] = bool(data["auto_movement"])
+            for k in ("lip_invert_top", "lip_invert_bottom"):
+                if k in data:
+                    _calibration[k] = bool(data[k])
     except Exception as e:
         _log(f"calibration load skipped: {e!r}")
 
@@ -119,6 +128,8 @@ def _save_calibration():
         out = {
             "centers": {str(k): float(v) for k, v in _calibration["centers"].items()},
             "auto_movement": bool(_calibration["auto_movement"]),
+            "lip_invert_top": bool(_calibration.get("lip_invert_top", False)),
+            "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
         }
         with open(_CALIB_PATH, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
@@ -132,13 +143,26 @@ def center(motor: int) -> float:
 
 
 def get_calibration():
-    """Snapshot of the current calibration (centers + auto flag)."""
+    """Snapshot of the current calibration (centers + flags)."""
     return {
         "centers": {int(k): float(v) for k, v in _calibration["centers"].items()},
         "motor_names": dict(MOTOR_NAMES),
         "auto_movement": bool(_calibration["auto_movement"]),
+        "lip_invert_top": bool(_calibration.get("lip_invert_top", False)),
+        "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
         "available": _available,
     }
+
+
+def set_lip_invert(top=None, bottom=None) -> bool:
+    """Flip the polarity of the top or bottom lip motor. Persists.
+    Pass None to leave a flag unchanged."""
+    if top is not None:
+        _calibration["lip_invert_top"] = bool(top)
+    if bottom is not None:
+        _calibration["lip_invert_bottom"] = bool(bottom)
+    _save_calibration()
+    return True
 
 
 def set_center(motor: int, pos: float) -> bool:
@@ -400,41 +424,41 @@ def say(text: str, lip_sync: bool = True) -> bool:
 _lip_active = False
 _lip_thread = None
 
+# How far each lip travels at fully-open (offset from its calibrated centre).
+# The top lip moves less than the jaw, like real speech.
+_LIP_TOP_RANGE = 1.8
+_LIP_BOTTOM_RANGE = 3.0
+
+
+def _set_mouth(openness: float) -> None:
+    """Drive both lip motors to express a mouth openness from 0.0 (closed,
+    at calibrated rest) to 1.0 (fully open). The per-lip polarity flags in
+    calibration determine which direction is "open" on this unit, so the
+    user can flip a checkbox in the GUI if their wiring is opposite.
+    """
+    openness = _clip(openness, 0.0, 1.0)
+    top_sign = -1.0 if _calibration.get("lip_invert_top") else +1.0
+    bot_sign = -1.0 if _calibration.get("lip_invert_bottom") else +1.0
+    _move_internal(TOPLIP, center(TOPLIP) + top_sign * _LIP_TOP_RANGE * openness, speed=10)
+    _move_internal(BOTTOMLIP, center(BOTTOMLIP) + bot_sign * _LIP_BOTTOM_RANGE * openness, speed=10)
+
 
 def _lip_loop():
-    """Open/close the mouth repeatedly until lip_stop() is called.
-
-    Open: top lip rises a little, bottom lip (jaw) drops a lot.
-    Closed: both lips back to their calibrated rest — mouth actually SHUT.
-
-    The earlier bug was holding both lips at offsets from centre the whole
-    time (the "closed" state was still offset), so the mouth never truly
-    closed and the lips just quivered together. We alternate between
-    fully-open and fully-closed instead, and vary the amplitude/timing a
-    touch so it doesn't feel metronomic.
-    """
+    """Open and shut the mouth repeatedly until lip_stop() is called. The
+    motion alternates between FULLY open and FULLY closed so the mouth
+    actually shuts between syllables (the earlier bug was sitting on two
+    offsets that never returned to rest)."""
     global _lip_active
-    top_c = center(TOPLIP)
-    bot_c = center(BOTTOMLIP)
     try:
         while _lip_active and _available:
-            # Open: top lip rises (TOPLIP higher = up), jaw drops (BOTTOMLIP
-            # HIGHER = jaw down, per the Ohbot convention). Both command
-            # values go up, but physically the lips move APART — that's the
-            # mouth opening.
-            open_amt = random.uniform(2.4, 3.4)
-            _move_internal(TOPLIP, top_c + open_amt * 0.6, speed=10)
-            _move_internal(BOTTOMLIP, bot_c + open_amt, speed=10)
+            _set_mouth(random.uniform(0.78, 1.0))   # open
             time.sleep(random.uniform(0.08, 0.13))
             if not _lip_active:
                 break
-            # Closed: BOTH lips back to their calibrated rest.
-            _move_internal(TOPLIP, top_c, speed=10)
-            _move_internal(BOTTOMLIP, bot_c, speed=10)
+            _set_mouth(0.0)                          # closed
             time.sleep(random.uniform(0.07, 0.12))
     finally:
-        _move_internal(TOPLIP, top_c, speed=8)
-        _move_internal(BOTTOMLIP, bot_c, speed=8)
+        _set_mouth(0.0)
 
 
 def lip_start() -> bool:
