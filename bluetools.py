@@ -12711,7 +12711,7 @@ CHAT_HTML = """
             HF_MIN_VOICE_CHUNKS  = s <= 3 ? 5 : (s <= 7 ? 3 : 2);
         }
         applyHfSensitivity({{ hf_sens|default(5) }});
-        const HF_SILENCE_CHUNKS = 13;      // ~1.2s of silence ends the utterance
+        const HF_SILENCE_CHUNKS = 9;       // ~0.85s of silence ends the utterance (snappier)
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
         const HF_ARMED_MS = 15000;         // bare-"Blue" wait window before the message
@@ -13004,10 +13004,11 @@ def _get_whisper():
             if _WHISPER_MODEL is None:
                 from faster_whisper import WhisperModel
                 # Multilingual model (NOT a .en model) so Blue understands
-                # English, French, Russian and Greek. "small" balances CPU speed
-                # and multilingual accuracy; override with BLUE_WHISPER_MODEL
-                # ("base" = faster/less accurate, "medium" = slower/better).
-                name = (os.environ.get("BLUE_WHISPER_MODEL") or "small").strip()
+                # English, French, Russian, Greek and Danish. "base" is the speed
+                # sweet spot on CPU: ~0.6s/clip vs ~1.9s for "small", with English
+                # still perfect and multilingual solid. Override BLUE_WHISPER_MODEL:
+                # "small"/"medium" = more accurate/slower, "tiny" = fastest/least.
+                name = (os.environ.get("BLUE_WHISPER_MODEL") or "base").strip()
                 print(f"   [STT] Loading Whisper model '{name}' (first use)...")
                 _WHISPER_MODEL = WhisperModel(name, device="cpu", compute_type="int8")
                 print("   [STT] Whisper model ready.")
@@ -13045,7 +13046,9 @@ def stt():
     try:
         f.save(tmp_path)
         model = _get_whisper()
-        kwargs = {"beam_size": 1}
+        # beam_size=1 (greedy) and no cross-clip conditioning: both fastest and
+        # best for short, independent voice commands.
+        kwargs = {"beam_size": 1, "condition_on_previous_text": False}
         if wake:
             kwargs["hotwords"] = "Blue"
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
