@@ -128,6 +128,16 @@ def _load_calibration():
                         _calibration[k] = float(_clip(float(data[k]), 0, 10))
                     except Exception:
                         pass
+            if isinstance(data.get("custom_expressions"), dict):
+                cust = {}
+                for nm, pose in data["custom_expressions"].items():
+                    if not isinstance(pose, dict):
+                        continue
+                    try:
+                        cust[nm] = {int(k): float(v) for k, v in pose.items()}
+                    except Exception:
+                        continue
+                _calibration["custom_expressions"] = cust
     except Exception as e:
         _log(f"calibration load skipped: {e!r}")
 
@@ -142,6 +152,10 @@ def _save_calibration():
             "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
             "idle_frequency": float(_calibration.get("idle_frequency", 7)),
             "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
+            "custom_expressions": {
+                nm: {str(k): float(v) for k, v in pose.items()}
+                for nm, pose in (_calibration.get("custom_expressions") or {}).items()
+            },
         }
         with open(_CALIB_PATH, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
@@ -165,6 +179,9 @@ def get_calibration():
         "idle_frequency": float(_calibration.get("idle_frequency", 7)),
         "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
         "available": _available,
+        "current_pose": current_pose(),
+        "builtin_expressions": sorted(_EXPRESSIONS.keys()),
+        "custom_expressions": dict(_calibration.get("custom_expressions") or {}),
     }
 
 
@@ -298,18 +315,30 @@ def reset() -> bool:
 
 # ---- Low-level move --------------------------------------------------------
 
+# Last commanded position per motor — read by current_pose() so "save the
+# current pose as an expression" knows what was sent. Updated in _move_internal.
+_last_pos = {m: _DEFAULT_CENTERS[m] for m in ALL_MOTORS}
+
+
 def _move_internal(motor: int, pos: float, speed: float = 5.0) -> bool:
     """Write to a motor; assumes init() already ran and we want the raw pos.
     Does not bump the busy timer (used by the idle loop too)."""
     if not _available:
         return False
     try:
+        pos_c = _clip(pos, _MIN_POS, _MAX_POS)
         with _lock:
-            _ohbot.move(int(motor), _clip(pos, _MIN_POS, _MAX_POS), _clip(speed, 1.0, 10.0))
+            _ohbot.move(int(motor), pos_c, _clip(speed, 1.0, 10.0))
+        _last_pos[int(motor)] = float(pos_c)
         return True
     except Exception as e:
         _log(f"move({motor},{pos},{speed}) error: {e!r}")
         return False
+
+
+def current_pose():
+    """Snapshot of the last commanded position per motor."""
+    return {int(k): float(v) for k, v in _last_pos.items()}
 
 
 def _move(motor: int, pos: float, speed: float = 5.0) -> bool:
@@ -423,6 +452,76 @@ def expression(mood: str, speed: float = 5.0) -> bool:
         time.sleep(0.25)
         _move_internal(LIDBLINK, center(LIDBLINK), speed=10)
     return True
+
+
+# ---- Custom expressions (user-saved poses) --------------------------------
+
+def list_expressions():
+    """All available expression names: built-in + custom (user-saved)."""
+    return {
+        "builtin": sorted(_EXPRESSIONS.keys()),
+        "custom": sorted((_calibration.get("custom_expressions") or {}).keys()),
+    }
+
+
+def save_expression(name, positions=None) -> bool:
+    """Save a named pose. If positions is None, captures whatever each motor
+    was last commanded to. Names that collide with built-ins are rejected."""
+    name = (name or "").strip()
+    if not name or name.lower() in _EXPRESSIONS:
+        return False
+    pose_src = positions if positions else current_pose()
+    pose = {}
+    for k, v in pose_src.items():
+        try:
+            m = int(k)
+            if m not in ALL_MOTORS:
+                continue
+            pose[m] = float(_clip(float(v), _MIN_POS, _MAX_POS))
+        except Exception:
+            continue
+    cust = dict(_calibration.get("custom_expressions") or {})
+    cust[name] = pose
+    _calibration["custom_expressions"] = cust
+    _save_calibration()
+    return True
+
+
+def delete_expression(name) -> bool:
+    cust = dict(_calibration.get("custom_expressions") or {})
+    if name in cust:
+        del cust[name]
+        _calibration["custom_expressions"] = cust
+        _save_calibration()
+        return True
+    return False
+
+
+def apply_expression(name, speed: float = 5.0) -> bool:
+    """Apply ANY named expression (built-in or custom). Custom poses are
+    absolute positions; built-ins are relative to calibrated centres."""
+    if not init():
+        return False
+    nm = (name or "").strip()
+    if nm.lower() in _EXPRESSIONS:
+        return expression(nm)
+    cust = (_calibration.get("custom_expressions") or {}).get(nm)
+    if not cust:
+        return False
+    _mark_busy(0.8)
+    for motor, pos in cust.items():
+        _move_internal(int(motor), float(pos), speed)
+    return True
+
+
+def reconnect() -> bool:
+    """Force a clean disconnect and reconnect to the board — useful after
+    closing/reopening the Ohbot app, or if the serial link went stale."""
+    global _initialized, _available
+    close()
+    _initialized = False
+    _available = False
+    return init()
 
 
 def eye_color(r: int, g: int, b: int) -> bool:

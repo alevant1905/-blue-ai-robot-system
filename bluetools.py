@@ -12808,9 +12808,27 @@ HEAD_HTML = """<!DOCTYPE html>
         .toggle { display:inline-flex; align-items:center; gap:10px; cursor:pointer; margin-left:14px; }
         .toggle input { width:18px; height:18px; cursor:pointer; }
         .hint { font-size:0.82em; color:var(--slate); margin-top:8px; }
+        /* 2D drag-pads for head + eyes */
+        .pads-row { display:flex; flex-wrap:wrap; gap:22px; align-items:flex-start; justify-content:center; }
+        .pad-block { display:flex; flex-direction:column; align-items:center; gap:8px; }
+        .pad-block .lbl { font-size:0.82em; color:var(--slate); font-family:'IBM Plex Mono', monospace; letter-spacing:0.05em; }
+        .pad { position:relative; width:188px; height:188px; background:var(--cream); border:2px solid var(--sage); border-radius:16px; touch-action:none; user-select:none; cursor:grab; }
+        .pad:active { cursor:grabbing; }
+        .pad .knob { position:absolute; width:32px; height:32px; background:var(--forest); border-radius:50%; left:50%; top:50%; transform:translate(-50%,-50%); pointer-events:none; box-shadow:0 2px 8px rgba(26,46,26,0.25); }
+        .pad .cx, .pad .cy { position:absolute; background:var(--ink); opacity:0.14; pointer-events:none; }
+        .pad .cx { left:0; right:0; top:50%; height:1px; }
+        .pad .cy { top:0; bottom:0; left:50%; width:1px; }
+        .pad-axes { display:flex; justify-content:space-between; width:188px; font-size:0.72em; color:var(--slate); font-family:'IBM Plex Mono', monospace; }
+        /* Custom expression chips */
+        .chip-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .expr-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; background:#eef4ee; border:1px solid var(--sage); border-radius:20px; font-size:0.92em; color:var(--ink); cursor:pointer; }
+        .expr-chip:hover { background:#dfecdf; }
+        .expr-chip .x { display:inline-block; width:18px; height:18px; line-height:16px; text-align:center; border-radius:50%; background:rgba(0,0,0,0.08); color:var(--ink); font-size:0.82em; }
+        .expr-chip .x:hover { background:rgba(0,0,0,0.18); }
         @media (max-width: 560px) {
             .row { grid-template-columns: 90px 1fr 50px; }
             .row button.primary { grid-column: 1 / -1; }
+            .pad, .pad-axes { width: 160px; } .pad { height: 160px; }
         }
     </style>
 </head>
@@ -12824,12 +12842,33 @@ HEAD_HTML = """<!DOCTYPE html>
     <div class="card">
         <h2>Status</h2>
         <span id="status" class="status off">Checking…</span>
+        <button class="btn" id="reconnectBtn" style="margin-left:10px;">Reconnect</button>
         <label class="toggle"><input type="checkbox" id="autoToggle"><span>Thoughtful idle movement</span></label>
-        <div class="hint">If "Not connected," close the Ohbot desktop app, restart Blue, then refresh this page.</div>
+        <div class="hint">If "Not connected," close the Ohbot desktop app, then click Reconnect (no full restart needed).</div>
         <div id="idleBox" style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--line);">
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How often</span><input type="range" id="idleFreq" min="0" max="10" step="0.5" value="7"><span class="val" id="vIdleFreq">7</span></div>
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How big</span><input type="range" id="idleAmp" min="0" max="10" step="0.5" value="5"><span class="val" id="vIdleAmp">5</span></div>
             <div class="hint" style="margin-top:4px;">"How often" sets how frequently a small motion happens (0 quiet → 10 nearly constant). "How big" scales each motion (0 subtle → 10 expressive).</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Live direction</h2>
+        <div class="sub">Drag inside the squares — left pad steers Blue's <b>head</b> (turn + nod), right pad steers his <b>eyes</b> (look + tilt). Tap <b>Snap to neutral</b> to recentre both.</div>
+        <div class="pads-row">
+            <div class="pad-block">
+                <div class="lbl">HEAD</div>
+                <div id="padHead" class="pad"><div class="cx"></div><div class="cy"></div><div class="knob"></div></div>
+                <div class="pad-axes"><span>← turn →</span><span>↑ nod ↓</span></div>
+            </div>
+            <div class="pad-block">
+                <div class="lbl">EYES</div>
+                <div id="padEyes" class="pad"><div class="cx"></div><div class="cy"></div><div class="knob"></div></div>
+                <div class="pad-axes"><span>← look →</span><span>↑ tilt ↓</span></div>
+            </div>
+        </div>
+        <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; justify-content:center;">
+            <button class="btn" id="snapNeutralBtn">Snap to neutral</button>
         </div>
     </div>
 
@@ -12846,6 +12885,14 @@ HEAD_HTML = """<!DOCTYPE html>
     <div class="card">
         <h2>Expression &amp; motion</h2>
         <div class="actions" id="actBox"></div>
+        <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);">
+            <div class="sub" style="margin-bottom:8px;">Your saved poses. Move Blue with the pads or sliders into a pose, then save it.</div>
+            <div class="chip-row" id="customExpr"></div>
+            <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+                <button class="btn primary" id="savePoseBtn">Save current pose as…</button>
+                <button class="btn" id="demoBtn">Run demo (every motion)</button>
+            </div>
+        </div>
     </div>
 
     <div class="card">
@@ -12955,12 +13002,17 @@ function setColour(r, g, b) {
     postJSON('/head/eye-color', {r, g, b});
 }
 
+let CURRENT_STATE = null;
+
 async function loadState() {
     const s = await getJSON('/head/state');
+    CURRENT_STATE = s;
     const status = document.getElementById('status');
     if (s && s.available) { status.className = 'status on'; status.textContent = 'Connected'; }
     else { status.className = 'status off'; status.textContent = 'Not connected'; }
     buildMotors(s && s.centers);
+    buildCustomExpressions(s && s.custom_expressions);
+    centerPads(s && s.centers);
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
     document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
     document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
@@ -13011,6 +13063,111 @@ document.getElementById('restoreBtn').addEventListener('click', async () => {
 
 buildActions(); buildSwatches();
 wireColour('R'); wireColour('G'); wireColour('B');
+
+// ---- 2D drag-pads for head + eyes ----
+const PAD_RANGE = 2.5;  // motor units of swing from centre in each direction
+function makePad(opts) {
+    const pad = document.getElementById(opts.padId);
+    const knob = pad.querySelector('.knob');
+    let dragging = false, pending = null;
+    function center() {
+        const c = (CURRENT_STATE && CURRENT_STATE.centers) || {};
+        return { xc: (c[opts.xMotor] != null ? c[opts.xMotor] : 5),
+                 yc: (c[opts.yMotor] != null ? c[opts.yMotor] : 5) };
+    }
+    function applyAt(clientX, clientY) {
+        const r = pad.getBoundingClientRect();
+        let nx = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        let ny = Math.max(0, Math.min(1, (clientY - r.top) / r.height));
+        knob.style.left = (nx * 100) + '%';
+        knob.style.top = (ny * 100) + '%';
+        const c = center();
+        const sx = opts.xInvert ? -1 : 1, sy = opts.yInvert ? -1 : 1;
+        const xPos = Math.max(0, Math.min(10, c.xc + sx * (nx - 0.5) * 2 * PAD_RANGE));
+        const yPos = Math.max(0, Math.min(10, c.yc + sy * (ny - 0.5) * 2 * PAD_RANGE));
+        if (pending) { pending.x = xPos; pending.y = yPos; return; }
+        pending = { x: xPos, y: yPos };
+        (async function drain() {
+            while (pending) {
+                const xp = pending.x, yp = pending.y;
+                await postJSON('/head/move', {motor: opts.xMotor, pos: xp});
+                await postJSON('/head/move', {motor: opts.yMotor, pos: yp});
+                pending = null;
+            }
+        })();
+    }
+    pad.addEventListener('pointerdown', e => { dragging = true; pad.setPointerCapture(e.pointerId); applyAt(e.clientX, e.clientY); });
+    pad.addEventListener('pointermove', e => { if (dragging) applyAt(e.clientX, e.clientY); });
+    const up = () => { dragging = false; };
+    pad.addEventListener('pointerup', up); pad.addEventListener('pointercancel', up); pad.addEventListener('pointerleave', up);
+}
+
+function centerPads() {
+    document.querySelectorAll('.pad .knob').forEach(k => { k.style.left = '50%'; k.style.top = '50%'; });
+}
+
+// Head pad: x = HeadTurn (right on pad → physically right → lower HEADTURN value, so xInvert=true),
+//           y = HeadNod (up on pad → head up → higher HEADNOD, so yInvert=true).
+makePad({ padId: 'padHead', xMotor: 1, yMotor: 0, xInvert: true, yInvert: true });
+// Eye pad: x = EyeTurn (same convention as HeadTurn), y = EyeTilt (higher = up).
+makePad({ padId: 'padEyes', xMotor: 2, yMotor: 6, xInvert: true, yInvert: true });
+
+document.getElementById('snapNeutralBtn').addEventListener('click', async () => {
+    await postJSON('/head/reset', {});
+    centerPads();
+});
+
+// ---- Custom expressions ----
+function buildCustomExpressions(map) {
+    const cont = document.getElementById('customExpr'); cont.innerHTML = '';
+    const names = Object.keys(map || {}).sort();
+    if (!names.length) {
+        cont.innerHTML = '<span class="hint">No saved poses yet — move Blue, then click "Save current pose as…".</span>';
+        return;
+    }
+    for (const name of names) {
+        const chip = document.createElement('span'); chip.className = 'expr-chip';
+        const lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = name;
+        const x = document.createElement('span'); x.className = 'x'; x.title = 'Delete'; x.textContent = '×';
+        chip.appendChild(lbl); chip.appendChild(x);
+        lbl.addEventListener('click', () => postJSON('/head/expression', {name}));
+        x.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm('Delete the pose "' + name + '"?')) return;
+            await postJSON('/head/expression-delete', {name});
+            loadState();
+        });
+        cont.appendChild(chip);
+    }
+}
+
+document.getElementById('savePoseBtn').addEventListener('click', async () => {
+    const name = (prompt('Name this pose:') || '').trim();
+    if (!name) return;
+    const r = await postJSON('/head/expression-save', {name});
+    if (r && r.ok === false) {
+        alert('Could not save: ' + (r.error || 'unknown'));
+        return;
+    }
+    loadState();
+});
+
+// ---- Demo + reconnect ----
+document.getElementById('demoBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('demoBtn');
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Running demo…';
+    try { await postJSON('/head/demo', {}); } finally {
+        setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 22000);
+    }
+});
+
+document.getElementById('reconnectBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('reconnectBtn');
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Reconnecting…';
+    try { await postJSON('/head/reconnect', {}); }
+    finally { btn.disabled = false; btn.textContent = orig; loadState(); }
+});
+
 loadState();
 </script>
 </body>
@@ -13106,6 +13263,79 @@ def head_restore_defaults():
         blue_head.set_center(m, c)
     blue_head.reset()
     return jsonify({"ok": True, "centers": blue_head.get_calibration()["centers"]})
+
+
+@app.route('/head/reconnect', methods=['POST'])
+def head_reconnect():
+    ok = blue_head.reconnect()
+    return jsonify({"ok": bool(ok), "available": blue_head.is_available()})
+
+
+@app.route('/head/expression', methods=['POST'])
+def head_expression_apply():
+    """Apply a named expression (built-in or custom)."""
+    d = request.get_json(silent=True) or {}
+    return jsonify({"ok": bool(blue_head.apply_expression(d.get('name', ''))),
+                    "name": d.get('name', '')})
+
+
+@app.route('/head/expression-save', methods=['POST'])
+def head_expression_save():
+    """Save a named pose. If `positions` is omitted, captures the current pose."""
+    d = request.get_json(silent=True) or {}
+    name = (d.get('name') or '').strip()
+    positions = d.get('positions') or None
+    if positions is not None and not isinstance(positions, dict):
+        return jsonify({"ok": False, "error": "positions must be an object"}), 400
+    ok = blue_head.save_expression(name, positions)
+    if not ok:
+        return jsonify({"ok": False, "error": "empty name or collides with a built-in"}), 400
+    return jsonify({"ok": True, "expressions": blue_head.list_expressions()})
+
+
+@app.route('/head/expression-delete', methods=['POST'])
+def head_expression_delete():
+    d = request.get_json(silent=True) or {}
+    ok = blue_head.delete_expression((d.get('name') or '').strip())
+    return jsonify({"ok": bool(ok), "expressions": blue_head.list_expressions()})
+
+
+@app.route('/head/demo', methods=['POST'])
+def head_demo():
+    """Run through every built-in motion + expression once so the user can
+    verify everything works."""
+    import time as _t, threading as _th
+    sequence = [
+        ("action", "look_left"), ("action", "look_right"),
+        ("action", "look_up"), ("action", "look_down"), ("action", "look_center"),
+        ("action", "nod_yes"), ("action", "shake_no"),
+        ("action", "blink"), ("action", "wink"),
+        ("expression", "happy"), ("expression", "sad"),
+        ("expression", "surprised"), ("expression", "curious"),
+        ("expression", "neutral"),
+    ]
+    def _run():
+        try:
+            for kind, name in sequence:
+                if kind == "action":
+                    if name.startswith("look_"):
+                        blue_head.look(name[len("look_"):])
+                    elif name == "nod_yes":
+                        blue_head.nod_yes(2)
+                    elif name == "shake_no":
+                        blue_head.shake_no(2)
+                    elif name == "blink":
+                        blue_head.blink(1)
+                    elif name == "wink":
+                        blue_head.expression("wink")
+                else:
+                    blue_head.expression(name)
+                _t.sleep(1.4)
+            blue_head.reset()
+        except Exception as e:
+            log.warning(f"[HEAD] demo error: {e}")
+    _th.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route('/head/idle-config', methods=['POST'])
