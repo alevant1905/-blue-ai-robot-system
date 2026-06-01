@@ -10089,7 +10089,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex") -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False) -> Dict:
     """Process conversation with tool support."""
     conversation_messages = messages.copy()
 
@@ -10136,6 +10136,19 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         if _profile:
             speaker_note += _profile + "\n"
         system_msg = {"role": "system", "content": (system_msg.get("content", "") + speaker_note)}
+
+    # Spoken turns: force brevity. This both shortens what Blue says aloud and,
+    # because the local model generates fewer tokens, makes him start talking
+    # noticeably sooner — the main remaining source of voice latency.
+    if voice and isinstance(system_msg, dict):
+        voice_note = (
+            "\nSPOKEN REPLY: This message was spoken aloud and your answer will be "
+            "read aloud. Reply in ONE or two short sentences — conversational and "
+            "direct. No lists, no markdown, no headings, no emoji. Get to the point "
+            "in the first sentence.\n"
+        )
+        system_msg = {"role": "system", "content": (system_msg.get("content", "") + voice_note)}
+
     _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
     existing0 = conversation_messages[0] if conversation_messages else None
     has_injected = (
@@ -12309,9 +12322,16 @@ CHAT_HTML = """
         });
         sendBtn.addEventListener('click', send);
 
+        // Set true right before a voice-originated send() so the server knows
+        // to keep the reply short (spoken replies should be brief — and fewer
+        // tokens = faster generation = Blue starts talking sooner). Consumed
+        // (reset) inside send().
+        let pendingVoice = false;
+
         async function send() {
             if (busy) return;
             primeAudio();
+            const isVoiceTurn = pendingVoice; pendingVoice = false;
             const text = inputEl.value.trim();
             const atts = pending.slice();
             if (!text && !atts.length) return;
@@ -12342,7 +12362,7 @@ CHAT_HTML = """
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
-                    body: JSON.stringify({ messages: apiMessages })
+                    body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -12706,7 +12726,7 @@ CHAT_HTML = """
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);
                 const said = (data && data.text || '').trim();
-                if (said) { inputEl.value = said; send(); }
+                if (said) { inputEl.value = said; pendingVoice = true; send(); }
                 else { addBubble('blue', 'I did not catch that \\u2014 tap the mic and try again.'); }
             } catch (e) {
                 addBubble('blue', 'I could not hear that just now. Tap the mic and try again.');
@@ -13047,6 +13067,7 @@ CHAT_HTML = """
             // no follow-up window: every new turn starts with "Blue".
             setHfStatus('replying');
             inputEl.value = message;
+            pendingVoice = true;
             send().finally(function () {
                 if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
             });
@@ -15667,10 +15688,14 @@ def chat_completions():
     try:
         data = request.json
         messages = data.get("messages", [])
+        # Voice turns (hands-free / tap-to-talk) want SHORT spoken replies:
+        # fewer tokens generate faster (so Blue starts talking sooner) and are
+        # nicer to listen to. The chat page sets this flag for voice messages.
+        voice_turn = bool(data.get("voice"))
 
         print(f"")
         print(f"{'='*60}")
-        print(f"[MSG] Received request from Ohbot")
+        print(f"[MSG] Received request from Ohbot{' (voice)' if voice_turn else ''}")
 
         # Who's chatting? Determined by the device the request came from
         # (see _identify_user_from_request): the iPad is Vilda; the MacBook,
@@ -15741,7 +15766,12 @@ def chat_completions():
                         messages = _splice_context_after_system(messages, historical_context[-6:])
 
         # Process with tools (pre-check result passed to avoid double selector run)
-        response = process_with_tools(messages, _pre_selection=_quick_result, user_name=user_name)
+        import time as _t_llm
+        _llm_t0 = _t_llm.time()
+        response = process_with_tools(messages, _pre_selection=_quick_result,
+                                      user_name=user_name, voice=voice_turn)
+        print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
+              f"{' (zero-LLM)' if _is_zero_llm else ''}")
 
         # SAVE ASSISTANT RESPONSE TO DATABASE
         if response:
