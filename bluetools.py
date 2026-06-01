@@ -12752,11 +12752,12 @@ CHAT_HTML = """
         // transcript that actually matches BI_STOP does. So we can capture
         // eagerly at near-normal speaking volume; echo cancellation keeps Blue's
         // own voice from transcribing to a stop-word.
-        const BI_THRESHOLD_FACTOR = 1.3;   // just above the normal voice threshold
-        const BI_THRESHOLD_MIN = 0.022;    // absolute floor (normal speech, not a shout)
+        const BI_THRESHOLD_FACTOR = 1.05;  // barely above the normal voice threshold
+        const BI_THRESHOLD_MIN = 0.014;    // low floor — a normal "stop", not a shout
         const BI_VOICE_START = 1;          // react on the first loud chunk
-        const BI_SILENCE_END = 6;          // ~0.55s of quiet ends the barge-in clip
-        const BI_MAX_CHUNKS = 40;          // ~3.7s cap
+        const BI_SILENCE_END = 4;          // ~0.37s of quiet ends the barge-in clip
+        const BI_MAX_CHUNKS = 14;          // ~1.3s cap — transcribe quickly even if
+                                           // Blue's echo keeps the mic from going quiet
         // What counts as "stop". Whisper may render it with punctuation/case.
         const BI_STOP = /\\b(stop|stop it|stop talking|be quiet|quiet|shush|hush|enough|that.?s enough|never mind|nevermind|cancel)\\b/i;
         let hfProcessing = false;       // /stt in flight or send() running
@@ -12977,11 +12978,11 @@ CHAT_HTML = """
             try {
                 const blob = encodeWav(chunks, recSampleRate);
                 const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
-                fd.append('wake', '1');   // bias toward short command words
+                fd.append('hint', 'stop');   // bias Whisper toward interrupt words
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);
                 const said = ((data && data.text) || '').trim();
-                if (said && BI_STOP.test(said)) {
+                if (said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0)) {
                     // Heard "stop" — silence Blue immediately and close the mouth.
                     try { window.speechSynthesis.cancel(); } catch (e) {}
                     try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
@@ -13176,13 +13177,18 @@ def stt():
     # "Blue" — it otherwise transcribes the short leading word as "Blew/Blu/Boo"
     # and the wake match fails. hotwords nudges without forcing it into output.
     wake = (request.form.get('wake') or '') in ('1', 'true', 'yes')
+    # hint=stop is sent by barge-in while Blue is talking — bias toward interrupt
+    # words, NOT "Blue" (the old bug primed Whisper against hearing "stop").
+    hint = (request.form.get('hint') or '').strip().lower()
     try:
         f.save(tmp_path)
         model = _get_whisper()
         # beam_size=1 (greedy) and no cross-clip conditioning: both fastest and
         # best for short, independent voice commands.
         kwargs = {"beam_size": 1, "condition_on_previous_text": False}
-        if wake:
+        if hint == 'stop':
+            kwargs["hotwords"] = "stop. stop it. wait. quiet. enough. no. cancel."
+        elif wake:
             kwargs["hotwords"] = "Blue"
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
         segments, info = model.transcribe(tmp_path, **kwargs)
