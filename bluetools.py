@@ -12826,6 +12826,11 @@ HEAD_HTML = """<!DOCTYPE html>
         <span id="status" class="status off">Checking…</span>
         <label class="toggle"><input type="checkbox" id="autoToggle"><span>Thoughtful idle movement</span></label>
         <div class="hint">If "Not connected," close the Ohbot desktop app, restart Blue, then refresh this page.</div>
+        <div id="idleBox" style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--line);">
+            <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How often</span><input type="range" id="idleFreq" min="0" max="10" step="0.5" value="7"><span class="val" id="vIdleFreq">7</span></div>
+            <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How big</span><input type="range" id="idleAmp" min="0" max="10" step="0.5" value="5"><span class="val" id="vIdleAmp">5</span></div>
+            <div class="hint" style="margin-top:4px;">"How often" sets how frequently a small motion happens (0 quiet → 10 nearly constant). "How big" scales each motion (0 subtle → 10 expressive).</div>
+        </div>
     </div>
 
     <div class="card">
@@ -12959,7 +12964,35 @@ async function loadState() {
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
     document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
     document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
+    if (s && s.idle_frequency != null) {
+        document.getElementById('idleFreq').value = s.idle_frequency;
+        document.getElementById('vIdleFreq').textContent = Number(s.idle_frequency).toFixed(1);
+    }
+    if (s && s.idle_amplitude != null) {
+        document.getElementById('idleAmp').value = s.idle_amplitude;
+        document.getElementById('vIdleAmp').textContent = Number(s.idle_amplitude).toFixed(1);
+    }
 }
+
+function wireIdle(id, key) {
+    const s = document.getElementById('idle' + id), v = document.getElementById('vIdle' + id);
+    let pending = null;
+    s.addEventListener('input', () => {
+        v.textContent = Number(s.value).toFixed(1);
+        if (pending) { pending.next = s.value; return; }
+        pending = {val: s.value, next: null};
+        (async function drain(){
+            while (pending) {
+                const body = {}; body[key] = parseFloat(pending.val);
+                await postJSON('/head/idle-config', body);
+                if (pending.next != null) { pending.val = pending.next; pending.next = null; }
+                else { pending = null; }
+            }
+        })();
+    });
+}
+wireIdle('Freq', 'frequency');
+wireIdle('Amp', 'amplitude');
 
 document.getElementById('autoToggle').addEventListener('change', e => postJSON('/head/auto', {enabled: e.target.checked}));
 document.getElementById('invTop').addEventListener('change', e => postJSON('/head/lip-config', {invert_top: e.target.checked}));
@@ -13073,6 +13106,15 @@ def head_restore_defaults():
         blue_head.set_center(m, c)
     blue_head.reset()
     return jsonify({"ok": True, "centers": blue_head.get_calibration()["centers"]})
+
+
+@app.route('/head/idle-config', methods=['POST'])
+def head_idle_config():
+    """Tune the idle loop: frequency (0-10) and amplitude (0-10). Persisted."""
+    d = request.get_json(silent=True) or {}
+    blue_head.set_idle_params(frequency=d.get('frequency'), amplitude=d.get('amplitude'))
+    cal = blue_head.get_calibration()
+    return jsonify({"ok": True, "idle_frequency": cal["idle_frequency"], "idle_amplitude": cal["idle_amplitude"]})
 
 
 @app.route('/head/lip-config', methods=['POST'])

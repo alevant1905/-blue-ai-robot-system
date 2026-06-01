@@ -98,6 +98,10 @@ _calibration = {
     "auto_movement": True,
     "lip_invert_top": False,
     "lip_invert_bottom": False,
+    # Idle "thoughtful" movement, both on a 0-10 scale (user-tuneable from GUI).
+    # 5 ≈ matches the original feel; defaults skew slightly more active.
+    "idle_frequency": 7,   # how often a motion happens (0=quiet, 10=lively)
+    "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
 }
 
 
@@ -118,6 +122,12 @@ def _load_calibration():
             for k in ("lip_invert_top", "lip_invert_bottom"):
                 if k in data:
                     _calibration[k] = bool(data[k])
+            for k in ("idle_frequency", "idle_amplitude"):
+                if k in data:
+                    try:
+                        _calibration[k] = float(_clip(float(data[k]), 0, 10))
+                    except Exception:
+                        pass
     except Exception as e:
         _log(f"calibration load skipped: {e!r}")
 
@@ -130,6 +140,8 @@ def _save_calibration():
             "auto_movement": bool(_calibration["auto_movement"]),
             "lip_invert_top": bool(_calibration.get("lip_invert_top", False)),
             "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
+            "idle_frequency": float(_calibration.get("idle_frequency", 7)),
+            "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
         }
         with open(_CALIB_PATH, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
@@ -150,8 +162,34 @@ def get_calibration():
         "auto_movement": bool(_calibration["auto_movement"]),
         "lip_invert_top": bool(_calibration.get("lip_invert_top", False)),
         "lip_invert_bottom": bool(_calibration.get("lip_invert_bottom", False)),
+        "idle_frequency": float(_calibration.get("idle_frequency", 7)),
+        "idle_amplitude": float(_calibration.get("idle_amplitude", 5)),
         "available": _available,
     }
+
+
+def set_idle_params(frequency=None, amplitude=None) -> bool:
+    """Adjust the idle loop. Pass None to leave a value unchanged. Persists."""
+    if frequency is not None:
+        _calibration["idle_frequency"] = float(_clip(float(frequency), 0, 10))
+    if amplitude is not None:
+        _calibration["idle_amplitude"] = float(_clip(float(amplitude), 0, 10))
+    _save_calibration()
+    return True
+
+
+def _idle_interval_range():
+    """Map the 0-10 frequency slider to a (min, max) seconds-between-motions
+    range. 0 = quiet (rare), 5 ≈ original, 10 = nearly constant."""
+    f = _clip(float(_calibration.get("idle_frequency", 7)), 0, 10) / 10.0
+    return (0.8 + (1 - f) * 5.2, 2.5 + (1 - f) * 9.5)
+
+
+def _idle_amp_mult():
+    """Map the 0-10 amplitude slider to a motion-size multiplier.
+    0 → 0.3x (barely there), 5 → 1.0x (original), 10 → 2.0x (expressive)."""
+    a = _clip(float(_calibration.get("idle_amplitude", 5)), 0, 10)
+    return 0.3 + (a / 5.0) * 0.7 if a <= 5 else 1.0 + ((a - 5) / 5.0) * 1.0
 
 
 def set_lip_invert(top=None, bottom=None) -> bool:
@@ -504,57 +542,41 @@ def auto_enable(on: bool) -> bool:
     return True
 
 
+def _nudge(motor, offset, speed, hold_min, hold_max):
+    """Offset a motor from its calibrated rest, hold briefly, return to rest.
+    The offset is scaled by the idle amplitude slider."""
+    c = center(motor)
+    _move_internal(motor, c + offset * _idle_amp_mult(), speed=speed)
+    time.sleep(random.uniform(hold_min, hold_max))
+    _move_internal(motor, c, speed=speed)
+
+
+# Recipe table for idle motions. Blinks are listed twice because they're a
+# natural high-frequency motion; the others get one slot each. Each non-blink
+# entry is (motor, [possible offsets], speed, hold_min, hold_max). The offsets
+# get scaled by the idle amplitude slider at execution time.
+_IDLE_RECIPES = [
+    ("blink", None),
+    ("blink", None),
+    ("nudge", (HEADNOD,  [-0.8, -0.5, 0.5, 0.8], 3, 0.6, 1.1)),
+    ("nudge", (HEADTURN, [-1.0, -0.6, 0.6, 1.0], 3, 0.8, 1.4)),
+    ("nudge", (HEADROLL, [-0.6, -0.4, 0.4, 0.6], 3, 0.8, 1.4)),
+    ("nudge", (EYETURN, [+1.5, -1.5],            6, 0.4, 0.8)),
+    ("nudge", (EYETILT, [+1.2, -1.2],            5, 0.4, 0.9)),
+]
+
+
 def _do_idle_motion():
-    """Pick one small, natural-looking motion."""
-    choice = random.choice([
-        "blink", "blink",                       # blinks are common
-        "micro_nod", "micro_turn", "micro_tilt",
-        "glance_left", "glance_right",
-        "eye_up", "eye_down",
-    ])
-    if choice == "blink":
+    """Pick one small, natural-looking motion (scaled by the amplitude slider)."""
+    kind, spec = random.choice(_IDLE_RECIPES)
+    if kind == "blink":
         c = center(LIDBLINK)
         _move_internal(LIDBLINK, 0.0, speed=10)
         time.sleep(0.10)
         _move_internal(LIDBLINK, c, speed=10)
-    elif choice == "micro_nod":
-        c = center(HEADNOD)
-        amt = random.choice([-0.8, -0.5, 0.5, 0.8])
-        _move_internal(HEADNOD, c + amt, speed=3)
-        time.sleep(random.uniform(0.6, 1.1))
-        _move_internal(HEADNOD, c, speed=3)
-    elif choice == "micro_turn":
-        c = center(HEADTURN)
-        amt = random.choice([-1.0, -0.6, 0.6, 1.0])
-        _move_internal(HEADTURN, c + amt, speed=3)
-        time.sleep(random.uniform(0.8, 1.4))
-        _move_internal(HEADTURN, c, speed=3)
-    elif choice == "micro_tilt":
-        c = center(HEADROLL)
-        amt = random.choice([-0.6, -0.4, 0.4, 0.6])
-        _move_internal(HEADROLL, c + amt, speed=3)
-        time.sleep(random.uniform(0.8, 1.4))
-        _move_internal(HEADROLL, c, speed=3)
-    elif choice == "glance_left":
-        c = center(EYETURN)
-        _move_internal(EYETURN, c + 1.5, speed=6)
-        time.sleep(random.uniform(0.4, 0.8))
-        _move_internal(EYETURN, c, speed=6)
-    elif choice == "glance_right":
-        c = center(EYETURN)
-        _move_internal(EYETURN, c - 1.5, speed=6)
-        time.sleep(random.uniform(0.4, 0.8))
-        _move_internal(EYETURN, c, speed=6)
-    elif choice == "eye_up":
-        c = center(EYETILT)
-        _move_internal(EYETILT, c + 1.2, speed=5)
-        time.sleep(random.uniform(0.4, 0.9))
-        _move_internal(EYETILT, c, speed=5)
-    elif choice == "eye_down":
-        c = center(EYETILT)
-        _move_internal(EYETILT, c - 1.2, speed=5)
-        time.sleep(random.uniform(0.4, 0.9))
-        _move_internal(EYETILT, c, speed=5)
+    else:
+        motor, choices, speed, hold_min, hold_max = spec
+        _nudge(motor, random.choice(choices), speed, hold_min, hold_max)
 
 
 def _auto_loop():
@@ -562,7 +584,8 @@ def _auto_loop():
     # Stagger the first motion so it doesn't fire the instant the server starts.
     time.sleep(random.uniform(3.0, 6.0))
     while not _auto_stop:
-        time.sleep(random.uniform(2.5, 7.0))
+        lo, hi = _idle_interval_range()
+        time.sleep(random.uniform(lo, hi))
         try:
             if not _available or not auto_enabled():
                 continue
