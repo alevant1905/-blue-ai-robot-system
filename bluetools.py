@@ -12878,18 +12878,10 @@ CHAT_HTML = """
                 await send();
             } finally {
                 hfProcessing = false;
-                if (handsFree) {
-                    // Open a brief follow-up window: the next utterance is taken
-                    // as a follow-up without needing to say "Blue" again. After
-                    // HF_ARMED_MS of silence, wake word is required again.
-                    hfWakeArmed = true;
-                    if (hfArmedTimer) clearTimeout(hfArmedTimer);
-                    hfArmedTimer = setTimeout(function () {
-                        hfWakeArmed = false;
-                        if (handsFree) setHfStatus('waiting');
-                    }, HF_ARMED_MS);
-                    setHfStatus('armed');
-                }
+                // No follow-up window — every new utterance must start with
+                // "Blue" again. The natural-pause end-of-speech detection still
+                // runs, so the user just talks until they stop.
+                if (handsFree) setHfStatus('waiting');
             }
         }
 
