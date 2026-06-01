@@ -12692,9 +12692,13 @@ CHAT_HTML = """
         let hfPreroll = [];             // last few silent chunks, prepended on voice start
         // Barge-in ("stop" while Blue is speaking) capture state.
         let biActive = false, biChunks = [], biVoice = 0, biSilence = 0, biBusy = false;
-        const BI_THRESHOLD_FACTOR = 2.0;   // higher bar than normal (echo residue)
-        const BI_THRESHOLD_MIN = 0.045;    // absolute floor — must be a deliberate voice
-        const BI_VOICE_START = 2;          // chunks above threshold to begin capture
+        // Sensitive on purpose: starting a capture does NOT stop Blue — only a
+        // transcript that actually matches BI_STOP does. So we can capture
+        // eagerly at near-normal speaking volume; echo cancellation keeps Blue's
+        // own voice from transcribing to a stop-word.
+        const BI_THRESHOLD_FACTOR = 1.3;   // just above the normal voice threshold
+        const BI_THRESHOLD_MIN = 0.022;    // absolute floor (normal speech, not a shout)
+        const BI_VOICE_START = 1;          // react on the first loud chunk
         const BI_SILENCE_END = 6;          // ~0.55s of quiet ends the barge-in clip
         const BI_MAX_CHUNKS = 40;          // ~3.7s cap
         // What counts as "stop". Whisper may render it with punctuation/case.
