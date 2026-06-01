@@ -12837,11 +12837,15 @@ CHAT_HTML = """
                 return;
             }
 
+            // STT is done — release the listening lock immediately so the mic
+            // is hot again while the LLM is composing the reply. TTS playback
+            // suspends VAD on its own via window.speechSynthesis.speaking, so
+            // Blue won't hear himself, but the user CAN say "Blue" again the
+            // moment the spinner stops.
+            hfProcessing = false;
+
             // Whisper hallucinates a small set of stock phrases on near-silence.
-            // Reject those silently — they shouldn't even be considered for the
-            // wake word or be sent as a message when armed.
             if (!said || said.length < 3 || HF_HALLUC.test(said)) {
-                hfProcessing = false;
                 if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
                 return;
             }
@@ -12858,7 +12862,6 @@ CHAT_HTML = """
                         hfWakeArmed = false;
                         if (handsFree) setHfStatus('waiting');
                     }, HF_ARMED_MS);
-                    hfProcessing = false;
                     setHfStatus('armed');
                     return;
                 }
@@ -12867,22 +12870,19 @@ CHAT_HTML = """
                 hfWakeArmed = false;
                 if (hfArmedTimer) { clearTimeout(hfArmedTimer); hfArmedTimer = null; }
             } else {
-                hfProcessing = false;
                 if (handsFree) setHfStatus('waiting');
                 return;
             }
 
+            // Fire-and-forget the chat call. The mic stays hot so the user can
+            // call "Blue" again the moment the LLM starts composing — TTS will
+            // self-suspend the VAD while Blue is actually speaking. No await,
+            // no follow-up window: every new turn starts with "Blue".
             setHfStatus('replying');
-            try {
-                inputEl.value = message;
-                await send();
-            } finally {
-                hfProcessing = false;
-                // No follow-up window — every new utterance must start with
-                // "Blue" again. The natural-pause end-of-speech detection still
-                // runs, so the user just talks until they stop.
-                if (handsFree) setHfStatus('waiting');
-            }
+            inputEl.value = message;
+            send().finally(function () {
+                if (handsFree) setHfStatus(hfWakeArmed ? 'armed' : 'waiting');
+            });
         }
 
         async function toggleHandsFree() {
