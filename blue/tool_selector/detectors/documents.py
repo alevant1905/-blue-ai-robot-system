@@ -24,6 +24,24 @@ me you it please new old here there thing things stuff topic content help know n
 """.split())
 
 
+# Academic course/reading phrasings. This user is a professor; questions like
+# "what are the readings for tomorrow", "what's due this week", "what do I read
+# for class" are answered by the syllabus/course documents — but they name no
+# title, so they used to match no tool and Blue invented excuses ("path issue")
+# or answers. Word-boundary anchored to avoid false hits ("spreading", "ready").
+_COURSE_RE = re.compile(
+    r"\breadings\b"
+    r"|\b(?:assigned|required|course|class|weekly)\s+readings?\b"
+    r"|\breading\s+(?:for|list|report|assignment|this|next|tonight|tomorrow|today|due)\b"
+    r"|\b(?:to|should\s+i|do\s+i|have\s+to|need\s+to|gotta)\s+read\b"
+    r"|\bhomework\b|\bassignments?\b|\bcoursework\b|\bsyllabus\b"
+    r"|\b(?:lecture|seminar)\s+(?:notes|reading|readings|material|materials)\b"
+    r"|\bcourse\s+(?:material|materials|outline|schedule|reading|readings)\b"
+    r"|\bdue\b(?!\s+to\b)",   # "what is due this week", "due tomorrow" — but not "due to"
+    re.I,
+)
+
+
 class DocumentsDetector(BaseDetector):
     """Detects document search and creation intents.
 
@@ -61,29 +79,41 @@ class DocumentsDetector(BaseDetector):
         try:
             with open(path, encoding="utf-8") as f:
                 idx = json.load(f)
+            name_tok_docs = []   # per-doc set of proper-noun-ish tokens (for rare set)
             for d in idx.get("documents", []):
                 fn = d.get("filename", "") or ""
                 folder = d.get("folder", "") or ""
                 stem = os.path.splitext(fn)[0]
-                words = [w for w in re.split(r"[\s_\-.]+", stem.lower()) if w]
-                toks = {w for w in words
-                        if len(w) >= 4 and w not in _GENERIC_TERMS and not w.isdigit()}
+                # Keep ORIGINAL case to tell proper nouns from sentence words.
+                raw_words = [w for w in re.split(r"[\s_\-.]+", stem) if w]
+                toks = {w.lower() for w in raw_words
+                        if len(w) >= 4 and w.lower() not in _GENERIC_TERMS and not w.isdigit()}
+                # Proper-noun-ish: starts uppercase (author surname / distinctive
+                # title word). Excludes lowercase sentence words like "happened",
+                # "future", "already" that live inside descriptive filenames and
+                # would otherwise trigger on any sentence using that common word.
+                name_toks = {w.lower() for w in raw_words
+                             if w[:1].isupper() and len(w) >= 6
+                             and w.lower() not in _GENERIC_TERMS and not w.isdigit()}
                 if folder:
-                    fwords = [w for w in re.split(r"[\s_\-./\\]+", folder.lower()) if w]
-                    for w in fwords:
-                        if len(w) >= 4 and w not in _GENERIC_TERMS and not w.isdigit():
-                            toks.add(w)
-                    fphrase = " ".join(fwords)
+                    raw_f = [w for w in re.split(r"[\s_\-./\\]+", folder) if w]
+                    for w in raw_f:
+                        if len(w) >= 4 and w.lower() not in _GENERIC_TERMS and not w.isdigit():
+                            toks.add(w.lower())
+                            if w[:1].isupper() or any(ch.isdigit() for ch in w):
+                                name_toks.add(w.lower())
+                    fphrase = " ".join(w.lower() for w in raw_f)
                     if len(fphrase) >= 4:
                         phrases.add(fphrase)
                 if toks:
                     tokens_by_doc.append(toks)
-            # Distinctive single-trigger tokens: long, non-generic, and not
-            # spread across many documents — i.e. author surnames and unusual
-            # title words (Ilyenkov, Toscano, Engestrom…). <=2 docs (not ==1) so
-            # an author appearing in two of their own works still counts.
-            counts = Counter(t for s in tokens_by_doc for t in s)
-            rare = {t for t, c in counts.items() if c <= 2 and len(t) >= 6}
+                name_tok_docs.append(name_toks)
+            # Distinctive single-trigger tokens: proper-noun-ish, long, and not
+            # spread across many documents — author surnames and unusual title
+            # words (Ilyenkov, Toscano, Engestrom…). <=2 docs (not ==1) so an
+            # author appearing in two of their own works still counts.
+            counts = Counter(t for s in name_tok_docs for t in s)
+            rare = {t for t, c in counts.items() if c <= 2}
         except Exception:
             tokens_by_doc, rare, phrases = [], set(), set()
         cls._lib_tokens_by_doc = tokens_by_doc
@@ -218,6 +248,11 @@ class DocumentsDetector(BaseDetector):
             if confidence < 0.80:
                 confidence = max(confidence, 0.75)
                 reasons.append("question about document")
+
+        # Academic course/reading queries → the syllabus & course docs.
+        if confidence < 0.8 and _COURSE_RE.search(msg_lower):
+            confidence = max(confidence, 0.8)
+            reasons.append("course/reading query")
 
         # LIBRARY-AWARE: the query names an actual document, author, or folder
         # in the library (e.g. "summarize the Three Body Problem", "what does
