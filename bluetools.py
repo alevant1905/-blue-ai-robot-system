@@ -5196,9 +5196,83 @@ def _is_expertise_query(query: str) -> bool:
     return any(p in f" {q} " for p in expertise_phrases)
 
 
+# Course/reading/schedule queries: these are answered by the syllabus's dated
+# schedule, but semantic RAG buries that one small document under chunks from
+# big books (a "readings for tomorrow" query matched Three-Body-Problem
+# acknowledgements, not the schedule). Detect them and go straight to the
+# syllabus full text instead.
+_COURSE_SCHEDULE_RE = re.compile(
+    r"\breadings\b"
+    r"|\b(?:assigned|required|course|class|weekly)\s+readings?\b"
+    r"|\breading\s+(?:for|list|report|assignment|this|next|tonight|tomorrow|today|due)\b"
+    r"|\b(?:to|should\s+i|do\s+i|have\s+to|need\s+to|gotta)\s+read\b"
+    r"|\bhomework\b|\bassignments?\b|\bcoursework\b|\bsyllabus\b|\bclass\s+schedule\b"
+    r"|\bcourse\s+(?:material|materials|outline|schedule|reading|readings)\b"
+    r"|\bdue\b(?!\s+to\b)",
+    re.I,
+)
+
+
+def _is_course_schedule_query(query: str) -> bool:
+    return bool(_COURSE_SCHEDULE_RE.search(query or ""))
+
+
+def _syllabus_schedule_text(max_docs: int = 2):
+    """Full schedule/readings text of the syllabus document(s), or None.
+
+    Returns the portion from 'Class Schedule' (or the first dated line) onward
+    so every week + its readings are present, with a header telling the model
+    to map 'today'/'tomorrow' to the right class date using the current date."""
+    try:
+        index = load_document_index()
+        docs = index.get("documents", []) if isinstance(index, dict) else []
+    except Exception:
+        return None
+    syll = [d for d in docs
+            if 'syllab' in (d.get('filename', '') or '').lower()
+            or 'syllab' in (d.get('folder', '') or '').lower()
+            or 'course outline' in (d.get('filename', '') or '').lower()]
+    if not syll:
+        return None
+    parts = []
+    for d in syll[:max_docs]:
+        fp = d.get('filepath', '')
+        if not fp or not os.path.exists(fp):
+            continue
+        try:
+            txt = extract_text_from_file(fp)
+        except Exception:
+            continue
+        if not txt:
+            continue
+        start = txt.lower().find('class schedule')
+        if start < 0:
+            m = re.search(r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\s*[:\-]',
+                          txt, re.I)
+            start = m.start() if m else 0
+        excerpt = txt[start:start + 9000]
+        parts.append(f"[{d.get('filename', 'syllabus')}] course schedule & readings:\n{excerpt}")
+    if not parts:
+        return None
+    return (
+        "Here is the schedule and readings from your course syllabus. Work out "
+        "which class date the question refers to using today's date shown above "
+        "('tomorrow' = the next calendar day), then report the readings listed "
+        "under that date:\n\n" + "\n\n".join(parts)
+    )
+
+
 def search_documents_rag(query: str, max_results: int = 3) -> str:
     """Search documents using local ChromaDB RAG first, then keyword fallback."""
     print(f"   [FIND] Searching documents for: '{query}'")
+
+    # Course/reading/schedule questions → answer from the syllabus's dated
+    # schedule directly (semantic RAG buries the small syllabus under big books).
+    if _is_course_schedule_query(query):
+        syllabus = _syllabus_schedule_text()
+        if syllabus:
+            print("   [SYLLABUS] Course/reading query — returning syllabus schedule")
+            return syllabus
 
     # Inventory requests ("what documents are in your library", "list my
     # files") must be answered by enumerating the index, NOT by semantic
