@@ -1,13 +1,120 @@
 """Document operations intent detector."""
 
+import os
+import re
+import json
+from collections import Counter
 from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
 
 
+# Words too generic to identify a specific library document. Used to filter
+# both the library's title tokens and the query tokens before matching.
+_GENERIC_TERMS = set("""
+the a an and or of to in on for with about into from your my our its their this that these those
+what how who why when where which whose is are was were be been do does did can could would should will
+document documents file files pdf docx doc txt md paper papers book books note notes text texts page pages
+theory learning research design technology machine human humans power politics future world
+talk talks script scripts lecture lectures report reports essay essays draft drafts manuscript
+chapter chapters syllabus release journal version copy summary final intro introduction
+tell read show find search looking look give get open review according say says said argue argues
+me you it please new old here there thing things stuff topic content help know need want
+""".split())
+
+
 class DocumentsDetector(BaseDetector):
-    """Detects document search and creation intents."""
+    """Detects document search and creation intents.
+
+    Beyond generic phrasing ("my documents"), this detector is LIBRARY-AWARE:
+    it loads the actual document titles/authors/folders from document_index.json
+    and triggers a search when the query names one of them. Without this, a
+    query like "what does Toscano argue" or "summarize the Three Body Problem"
+    matched no tool, so the model answered with no source and hallucinated.
+    """
+
+    # Cached library signature, refreshed when document_index.json changes.
+    _lib_tokens_by_doc = None   # list[set[str]] — distinctive tokens per document
+    _lib_rare_tokens = None     # set[str] — tokens unique to one doc (len>=6)
+    _lib_phrases = None         # set[str] — folder names (multi-word ok)
+    _lib_mtime = -1.0
+
+    @classmethod
+    def _index_path(cls) -> str:
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.normpath(os.path.join(here, "..", "..", ".."))
+        p = os.path.join(root, "document_index.json")
+        return p if os.path.exists(p) else "document_index.json"
+
+    @classmethod
+    def _refresh_library(cls) -> None:
+        path = cls._index_path()
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        if cls._lib_tokens_by_doc is not None and mtime == cls._lib_mtime:
+            return
+        tokens_by_doc = []
+        phrases = set()
+        try:
+            with open(path, encoding="utf-8") as f:
+                idx = json.load(f)
+            for d in idx.get("documents", []):
+                fn = d.get("filename", "") or ""
+                folder = d.get("folder", "") or ""
+                stem = os.path.splitext(fn)[0]
+                words = [w for w in re.split(r"[\s_\-.]+", stem.lower()) if w]
+                toks = {w for w in words
+                        if len(w) >= 4 and w not in _GENERIC_TERMS and not w.isdigit()}
+                if folder:
+                    fwords = [w for w in re.split(r"[\s_\-./\\]+", folder.lower()) if w]
+                    for w in fwords:
+                        if len(w) >= 4 and w not in _GENERIC_TERMS and not w.isdigit():
+                            toks.add(w)
+                    fphrase = " ".join(fwords)
+                    if len(fphrase) >= 4:
+                        phrases.add(fphrase)
+                if toks:
+                    tokens_by_doc.append(toks)
+            # Distinctive single-trigger tokens: long, non-generic, and not
+            # spread across many documents — i.e. author surnames and unusual
+            # title words (Ilyenkov, Toscano, Engestrom…). <=2 docs (not ==1) so
+            # an author appearing in two of their own works still counts.
+            counts = Counter(t for s in tokens_by_doc for t in s)
+            rare = {t for t, c in counts.items() if c <= 2 and len(t) >= 6}
+        except Exception:
+            tokens_by_doc, rare, phrases = [], set(), set()
+        cls._lib_tokens_by_doc = tokens_by_doc
+        cls._lib_rare_tokens = rare
+        cls._lib_phrases = phrases
+        cls._lib_mtime = mtime
+
+    @classmethod
+    def _library_match(cls, msg_lower: str) -> Optional[str]:
+        """Reason string if the query names something in the library, else None."""
+        cls._refresh_library()
+        if not cls._lib_tokens_by_doc:
+            return None
+        # A named folder ("my Alex Levant folder", "the AI folder").
+        for ph in cls._lib_phrases:
+            if ph and ph in msg_lower:
+                return f"names library folder '{ph}'"
+        qwords = {w for w in re.split(r"[^a-z0-9]+", msg_lower)
+                  if len(w) >= 4 and w not in _GENERIC_TERMS}
+        if not qwords:
+            return None
+        # A distinctive single term (author surname / unusual title word).
+        rare_hit = qwords & cls._lib_rare_tokens
+        if rare_hit:
+            return f"names library term '{sorted(rare_hit)[0]}'"
+        # Two-plus distinctive tokens shared with a single document's title.
+        for toks in cls._lib_tokens_by_doc:
+            overlap = qwords & toks
+            if len(overlap) >= 2:
+                return "names a library document (" + ", ".join(sorted(overlap)[:3]) + ")"
+        return None
 
     def detect(self, message: str, msg_lower: str, context: Dict) -> List[ToolIntent]:
         intents = []
@@ -36,7 +143,11 @@ class DocumentsDetector(BaseDetector):
             'list my files', 'show me my documents', 'show me my files',
             'show documents', 'show files', 'show my documents', 'show my files',
             'how many documents', 'how many files', 'count documents', 'count files',
-            'documents in', 'files in', 'which documents', 'which files'
+            'documents in', 'files in', 'which documents', 'which files',
+            # Library inventory phrasings (Blue's library / my library).
+            'in my library', 'in your library', 'my library', 'your library',
+            "what's in my library", "what's in your library", 'in the library',
+            'what do you have', 'what have you read',
         ]
 
         # Re-read / closer-look signals: user is asking Blue to (re-)inspect a
@@ -59,7 +170,7 @@ class DocumentsDetector(BaseDetector):
 
         doc_nouns = ['document', 'documents', 'file', 'files', 'pdf', 'contract',
                      'syllabus', 'report', 'assignment', 'essay', 'paper', 'notes',
-                     'docx', 'doc', '.pdf', '.docx', '.txt', '.md',
+                     'docx', 'doc', '.pdf', '.docx', '.txt', '.md', 'library',
                      'script', 'cv', 'cover letter', 'dossier', 'invitation',
                      'talk', 'lecture', 'manuscript', 'draft']
 
@@ -107,6 +218,17 @@ class DocumentsDetector(BaseDetector):
             if confidence < 0.80:
                 confidence = max(confidence, 0.75)
                 reasons.append("question about document")
+
+        # LIBRARY-AWARE: the query names an actual document, author, or folder
+        # in the library (e.g. "summarize the Three Body Problem", "what does
+        # Toscano argue", "the AI folder"). This is the main fix for Blue
+        # hallucinating instead of retrieving — those phrasings used to match
+        # no tool at all.
+        if confidence < 0.90:
+            lib_reason = self._library_match(msg_lower)
+            if lib_reason:
+                confidence = max(confidence, 0.9)
+                reasons.append(lib_reason)
 
         # Reduce for web search
         if any(w in msg_lower for w in ['google', 'search online', 'search the web']):
