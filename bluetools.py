@@ -1614,10 +1614,13 @@ _SPEAKER_PROFILES = {
         "Vilda is 8 years old — one of the children in Alex's household. Talk to "
         "her accordingly: warm, gentle, patient and encouraging, with short "
         "sentences and simple everyday words, and keep everything child-safe and "
-        "age-appropriate. You may use a little Gen Z slang now and then to be fun "
-        "and relatable (things like \"that's so cool\", \"bet\", \"no cap\", "
-        "\"slay\") — but only occasionally, never in every sentence, and never "
-        "let the slang make you harder to understand."
+        "age-appropriate. Greet her sweetly and cheerfully so she feels happy and "
+        "wants to keep talking with you. Do NOT bring up the calendar, schedules, "
+        "reminders or appointments with her — that's grown-up stuff; if she "
+        "mentions it, gently steer back to something fun. You may use a little Gen "
+        "Z slang now and then to be fun and relatable (things like \"that's so "
+        "cool\", \"bet\", \"no cap\", \"slay\") — but only occasionally, never in "
+        "every sentence, and never let the slang make you harder to understand."
     ),
 }
 
@@ -1707,15 +1710,21 @@ def _require_remote_auth():
 _CHAT_ONLY_USERS = {"Vilda"}
 # The only endpoints those users may reach: the chat page + everything the chat
 # page needs to function (send messages, attachments, voice, assets, login).
+# NOTE: the head endpoints are intentionally NOT here — when Blue talks to Vilda
+# the physical robot must stay completely still (her reply is spoken on the iPad,
+# not performed by the robot), so /head/* requests from her device are refused.
 _CHAT_ONLY_ALLOWED = {
     "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
     "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
-    # On this branch: allow the kid's chat page to drive the lips during TTS.
-    "head_lip", "head_lip_seq",
 }
-# Tools chat-only users (the kids' iPad) may NOT trigger. Music plays through the
-# PC's own speakers, so controlling it from Vilda's iPad is pointless/disruptive.
-_KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer"}
+# Tools chat-only users (the kids' iPad) may NOT trigger:
+#  - music plays through the PC's speakers, so driving it from the iPad is
+#    pointless/disruptive;
+#  - move_head would move the physical robot while Blue talks to Vilda — it must
+#    stay still (handled as a silent no-op in execute_tool, below);
+#  - calendar/reminder tools: Blue doesn't discuss the calendar with Vilda.
+_KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer",
+                      "move_head", "create_reminder", "get_upcoming_reminders"}
 
 
 @app.before_request
@@ -8443,13 +8452,18 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
     import time
     start_time = time.time()
 
-    # Backstop: never let a chat-only user (Vilda's iPad) trigger music tools,
-    # even if the LLM tries to call one. Safe outside a request (no Vilda then).
+    # Backstop for chat-only users (Vilda's iPad): never let the LLM actually
+    # fire a tool that's off-limits there, even if it tries. Safe outside a
+    # request (there's no Vilda then). move_head is special-cased to a silent
+    # success — the robot must NOT move while Blue talks to Vilda, but we don't
+    # want Blue telling her he "can't move"; he just doesn't.
     if tool_name in _KID_BLOCKED_TOOLS:
         try:
             if _identify_user_from_request() in _CHAT_ONLY_USERS:
+                if tool_name == "move_head":
+                    return json.dumps({"success": True})
                 return json.dumps({"success": False,
-                                   "error": "Music isn't available on this device."})
+                                   "error": "That isn't available on this device."})
         except Exception:
             pass
 
@@ -10061,8 +10075,47 @@ def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
     )
 
 
-def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str) -> Dict:
-    """Build system message with anti-repetition context from conversation history."""
+def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False) -> Dict:
+    """Build system message with anti-repetition context from conversation history.
+
+    When kid_mode is True (a chat-only child, e.g. Vilda on the iPad), Blue drops
+    his owner-facing context entirely — no calendar/schedule, no owner facts, no
+    scholarly expertise, no reminder rules — and uses a warm, playful,
+    age-appropriate persona instead. See _CHAT_ONLY_USERS / _SPEAKER_PROFILES.
+    """
+    if kid_mode:
+        # A completely different Blue for the kids' iPad: sweet, simple, safe and
+        # deliberately calendar-free (the schedule/reminder machinery is Alex's,
+        # not a child's). He greets warmly to draw her into chatting.
+        return {
+            "role": "system",
+            "content": (
+                f"{_build_now_block()}\n\n"
+                "You are Blue, a warm and playful robot friend talking with a "
+                "young child. Be sweet, gentle, patient and encouraging so she "
+                "feels happy and excited to talk to you. When she says hello or "
+                "first starts talking, greet her in a cheerful, loving way that "
+                "makes her want to keep chatting — like a kind friend who is "
+                "really glad to see her.\n"
+                "Use short sentences and simple, everyday words an 8-year-old "
+                "understands easily. Keep everything kind, positive, playful and "
+                "child-safe — no scary, grown-up, sad or complicated topics.\n"
+                "You may sprinkle in a little Gen Z slang now and then to be fun "
+                "and relatable (things like \"that's so cool\", \"bet\", \"no "
+                "cap\", \"slay\", \"that's lowkey awesome\") — but only once in a "
+                "while, never in every sentence, and never in a way that makes "
+                "you harder to understand.\n"
+                "NEVER bring up calendars, schedules, reminders, appointments, "
+                "to-do lists or plans for the day, and never ask her about them. "
+                "If she mentions them, gently steer back to something fun. Just "
+                "be a friendly, caring buddy she loves talking to.\n"
+                "LANGUAGES: You understand and speak English, French, Russian, "
+                "Greek and Danish. Reply in the SAME language she just used, and "
+                "switch whenever she does. Keep your reply entirely in that one "
+                "language.\n"
+            )
+        }
+
     conversational_guidance = "Be natural, concise, and conversational. Vary your phrasing.\n"
 
     # Build anti-repetition context (skip vision descriptions and refusals).
@@ -10183,13 +10236,18 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # preserve that content and APPEND the dynamic system message rather
     # than replacing it. Replacing would discard the canonical user facts
     # (daughter names, employer, etc.) that we just spent effort merging in.
-    system_msg = build_dynamic_system_message(conversation_messages, facts_preamble)
+    # Chat-only children (Vilda's iPad) get a completely different Blue — see
+    # build_dynamic_system_message(kid_mode=...). Computed here because it also
+    # gates the adult "perspective" colouring and shapes the speaker note below.
+    _is_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
+    system_msg = build_dynamic_system_message(conversation_messages, facts_preamble, kid_mode=_is_kid)
     # Color Blue's default voice with his own evolving perspective profile.
     # (The 'write as Alex' short-circuit below returns before this matters, so
-    # this only shapes Blue speaking as himself.)
+    # this only shapes Blue speaking as himself.) Skip it on the kids' iPad —
+    # Alex's worldview profile isn't the voice we want with an 8-year-old.
     try:
         _bn = _blue_voice_note()
-        if _bn and isinstance(system_msg, dict):
+        if _bn and not _is_kid and isinstance(system_msg, dict):
             system_msg = {"role": "system", "content": (system_msg.get("content", "") + _bn)}
     except Exception:
         pass
@@ -12238,7 +12296,7 @@ CHAT_HTML = """
         <div class="header">
             {% if kid %}
             <h1><svg class="robot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 5.4v2.6"/><circle cx="12" cy="4" r="1.4"/><circle cx="9.6" cy="13" r="1.1"/><circle cx="14.4" cy="13" r="1.1"/><path d="M9.8 16.3h4.4"/><path d="M5 12H3.4M19 12h1.6"/></svg> Hi! I'm Blue</h1>
-            <p>Tap the big microphone and talk to me!</p>
+            <p>I'm so happy you're here! Tap the big mic and let's talk. &#128153;</p>
             {% else %}
             <h1>Chat with Blue</h1>
             <p>Type to talk with Blue, and attach images or documents for him to look at. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
@@ -12247,8 +12305,8 @@ CHAT_HTML = """
         <div class="messages" id="messages">
             <div class="empty" id="empty">
                 {% if kid %}
-                <div class="big">Hi Vilda!</div>
-                <div>Tap the big microphone and talk to me!</div>
+                <div class="big">Hi Vilda! &#128153;</div>
+                <div>I'm so happy to see you! Tap the big microphone and let's chat.</div>
                 {% else %}
                 <div class="big">Say hello to Blue</div>
                 <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
@@ -12581,13 +12639,18 @@ CHAT_HTML = """
                 // Drive the robot's lips in sync: send a text-derived mouth
                 // schedule so the jaw moves on words and pauses on gaps.
                 // Fire-and-forget; if the head isn't connected it's a no-op.
-                const _lipFrames = buildLipFrames(msg, u.rate);
-                u.onstart = function () {
-                    try { fetch('/head/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
-                };
-                const _lipOff = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {} };
-                u.onend = _lipOff;
-                u.onerror = _lipOff;
+                // The robot's lip-flap is for Alex's PC/robot only. On Vilda's
+                // iPad Blue must NOT drive the head at all — her reply is simply
+                // spoken on the iPad — so only attach the lip drivers off-iPad.
+                if (!isVilda) {
+                    const _lipFrames = buildLipFrames(msg, u.rate);
+                    u.onstart = function () {
+                        try { fetch('/head/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
+                    };
+                    const _lipOff = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {} };
+                    u.onend = _lipOff;
+                    u.onerror = _lipOff;
+                }
                 window.speechSynthesis.speak(u);
             } catch (e) { /* ignore */ }
         }
@@ -12595,6 +12658,7 @@ CHAT_HTML = """
         // If the user navigates away mid-speech, the lip thread on the server
         // would keep flapping until the next speech start. Make sure to stop.
         window.addEventListener('pagehide', function () {
+            if (isVilda) return;   // her iPad never drives the head; nothing to stop
             try { navigator.sendBeacon && navigator.sendBeacon('/head/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
         });
 
@@ -13820,8 +13884,9 @@ def head_auto():
 
 @app.route('/head/lip', methods=['POST'])
 def head_lip():
-    """Start or stop the lip-flap loop. Called by the chat page during speech.
-    Allowed for chat-only users (Vilda) so her TTS still drives the lips."""
+    """Start or stop the lip-flap loop. Called by Alex's chat page during speech.
+    Chat-only users (Vilda's iPad) are blocked upstream by
+    _restrict_chat_only_users — the robot stays still while Blue talks to her."""
     d = request.get_json(silent=True) or {}
     if bool(d.get('on', False)):
         blue_head.lip_start()
@@ -13834,7 +13899,8 @@ def head_lip():
 def head_lip_seq():
     """Play a timed mouth schedule the browser built from the reply text, so
     the jaw moves during words and CLOSES during pauses (realistic lip-sync).
-    Each frame is [openness 0-1, hold_seconds]. Allowed for chat-only users."""
+    Each frame is [openness 0-1, hold_seconds]. Chat-only users (Vilda's iPad)
+    are blocked upstream — Blue doesn't move the robot when talking to her."""
     d = request.get_json(silent=True) or {}
     raw = d.get('frames') or []
     frames = []
@@ -15833,8 +15899,14 @@ def chat_completions():
             # sheer proximity.
             messages = _sanitize_inbound_messages(messages)
 
-            # INJECT HISTORICAL CONTEXT (only for LLM-bound requests)
-            _needs_history = len(last_user_msg.split()) > 3 if last_user_msg else False
+            # INJECT HISTORICAL CONTEXT (only for LLM-bound requests). Chat-only
+            # kids (Vilda's iPad) are skipped on purpose: we never splice Alex's
+            # semantic memories/facts/schedule into her chat — it keeps her
+            # experience simple and avoids surfacing Alex's private notes (or his
+            # calendar) to a child. Within-session continuity still comes from
+            # the turns the page carries on each request.
+            _needs_history = (user_name not in _CHAT_ONLY_USERS) and (
+                len(last_user_msg.split()) > 3 if last_user_msg else False)
             if _needs_history:
                 # Enhanced memory has its own SQLite store and ChromaDB — it
                 # does NOT depend on the legacy `blue_database` module. Don't
@@ -15886,7 +15958,9 @@ def chat_completions():
             # doesn't depend on LLM compliance — earlier turns showed Blue can
             # hallucinate having mentioned things he didn't. Both are built
             # from real reminder rows, never from the model's guesses.
-            if PROACTIVE_QUEUE_AVAILABLE:
+            # Never lead Vilda's replies with the schedule briefing / reminder
+            # alerts — Blue doesn't discuss the calendar with the kids' iPad.
+            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS:
                 _proactive_parts = []
                 try:
                     _briefing = blue_proactive.daily_briefing_if_due()
