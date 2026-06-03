@@ -12289,6 +12289,33 @@ CHAT_HTML = """
         body.kid .header h1 .robot { animation: kidbob 2.8s ease-in-out infinite; }
         @keyframes kidpulse { 0% { box-shadow: 0 0 0 0 rgba(255,126,179,0.40); } 70% { box-shadow: 0 0 0 16px rgba(255,126,179,0); } 100% { box-shadow: 0 0 0 0 rgba(255,126,179,0); } }
         body.kid .micbtn.big:not(.listening) { animation: kidpulse 2.4s infinite; }
+
+        /* ---- On-screen Blue face (kid mode): a friend Vilda can SEE react. ----
+           The physical robot stays still for her, so this IS "her" Blue: it
+           blinks + bobs when idle, perks up when she talks, and moves its mouth
+           while Blue reads his reply aloud. Plain HTML/CSS, iOS-12 safe. */
+        .blue-face { width: 150px; margin: 8px auto 4px; animation: bfBob 3.4s ease-in-out infinite; }
+        .bf-antenna { position: relative; width: 3px; height: 16px; margin: 0 auto -2px; background: #9cc4ff; border-radius: 3px; }
+        .bf-dot { position: absolute; top: -7px; left: 50%; width: 11px; height: 11px; margin-left: -5.5px; background: #ffd24a; border-radius: 50%; box-shadow: 0 0 7px rgba(255,210,74,0.85); }
+        .bf-head { position: relative; width: 150px; height: 128px; margin: 0 auto; border-radius: 30px; background: linear-gradient(160deg, #6cb0ff 0%, #3b82f6 100%); box-shadow: 0 9px 22px rgba(59,130,246,0.32), inset 0 -6px 14px rgba(0,0,0,0.08); transition: transform .2s; }
+        .bf-ear { position: absolute; top: 47px; width: 9px; height: 26px; background: #9cc4ff; border-radius: 6px; }
+        .bf-ear.l { left: -7px; } .bf-ear.r { right: -7px; }
+        .bf-eye { position: absolute; top: 40px; width: 30px; height: 30px; background: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; transform-origin: center; animation: bfBlink 4.6s infinite; box-shadow: inset 0 2px 3px rgba(0,0,0,0.08); }
+        .bf-eye.l { left: 30px; } .bf-eye.r { right: 30px; }
+        .bf-pupil { width: 14px; height: 14px; background: #15394d; border-radius: 50%; transition: transform .2s; }
+        .bf-cheek { position: absolute; top: 75px; width: 16px; height: 9px; background: #ff9ec4; opacity: .7; border-radius: 50%; }
+        .bf-cheek.l { left: 31px; } .bf-cheek.r { right: 31px; }
+        .bf-mouth { position: absolute; left: 50%; top: 89px; width: 40px; height: 11px; margin-left: -20px; background: #15394d; border-radius: 4px 4px 20px 20px; transition: height .12s, width .12s, border-radius .12s, margin-left .12s; }
+        @keyframes bfBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+        @keyframes bfBlink { 0%, 90%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+        @keyframes bfTalk { 0% { height: 9px; border-radius: 4px 4px 16px 16px; } 50% { height: 22px; border-radius: 50%; } 100% { height: 9px; border-radius: 4px 4px 16px 16px; } }
+        @keyframes bfPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,126,179,0.55); } 50% { box-shadow: 0 0 0 9px rgba(255,126,179,0); } }
+        .blue-face.talking .bf-mouth { animation: bfTalk .26s infinite; }
+        .blue-face.listening .bf-dot { background: #ff7eb3; animation: bfPulse 1.2s infinite; }
+        .blue-face.thinking .bf-pupil { transform: translateY(-3px); }
+        .blue-face.thinking .bf-mouth { width: 16px; margin-left: -8px; height: 8px; border-radius: 8px; }
+        .blue-face.curious .bf-head { transform: rotate(-5deg); }
+        .blue-face.curious .bf-mouth { width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; }
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
@@ -12302,6 +12329,18 @@ CHAT_HTML = """
             <p>Type to talk with Blue, and attach images or documents for him to look at. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
             {% endif %}
         </div>
+        {% if kid %}
+        <div class="blue-face" id="blueFace" aria-hidden="true">
+            <div class="bf-antenna"><span class="bf-dot"></span></div>
+            <div class="bf-head">
+                <span class="bf-ear l"></span><span class="bf-ear r"></span>
+                <div class="bf-eye l"><span class="bf-pupil"></span></div>
+                <div class="bf-eye r"><span class="bf-pupil"></span></div>
+                <span class="bf-cheek l"></span><span class="bf-cheek r"></span>
+                <div class="bf-mouth"></div>
+            </div>
+        </div>
+        {% endif %}
         <div class="messages" id="messages">
             <div class="empty" id="empty">
                 {% if kid %}
@@ -12356,6 +12395,23 @@ CHAT_HTML = """
         const attachBtn = document.getElementById('attachBtn');
         const fileInput = document.getElementById('fileInput');
         const chipsEl = document.getElementById('chips');
+
+        // On-screen Blue face (kid mode only — null elsewhere, so every call
+        // below is a harmless no-op for Alex). Gives Vilda a Blue she can SEE
+        // react, since the physical robot stays still for her. States:
+        // listening / thinking / talking / curious; no class = calm idle smile
+        // (it blinks and bobs on its own via CSS).
+        const blueFace = document.getElementById('blueFace');
+        function setFaceState(state) {
+            if (!blueFace) return;
+            blueFace.classList.remove('listening', 'thinking', 'talking', 'curious');
+            if (state) blueFace.classList.add(state);
+        }
+        function faceCuriousBriefly() {
+            if (!blueFace) return;
+            setFaceState('curious');
+            setTimeout(function () { if (blueFace.classList.contains('curious')) setFaceState(''); }, 1600);
+        }
 
         // Identify this device so the server knows who's chatting (iPad => Vilda,
         // everything else => Alex). Done in the browser because a "desktop-mode"
@@ -12489,6 +12545,7 @@ CHAT_HTML = """
             busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
             const thinking = addBubble('blue', '');
             thinking.querySelector('.bubble').innerHTML = '<span class="typing">Blue is thinking…</span>';
+            setFaceState('thinking');
 
             try {
                 const res = await fetch('/v1/chat/completions', {
@@ -12501,11 +12558,13 @@ CHAT_HTML = """
                 try { reply = data.choices[0].message.content || ''; } catch (e) { reply = ''; }
                 if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
                 thinking.querySelector('.bubble').textContent = reply;
+                setFaceState('');
                 speak(reply);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
             } catch (e) {
                 thinking.querySelector('.bubble').textContent = 'I had trouble reaching my brain just now. Is the server running?';
+                faceCuriousBriefly();
             } finally {
                 busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
                 inputEl.focus();
@@ -12636,21 +12695,27 @@ CHAT_HTML = """
                 u.lang = bcp;
                 u.rate = isVilda ? 0.95 : 1.0;
                 u.pitch = 1.0;
-                // Drive the robot's lips in sync: send a text-derived mouth
-                // schedule so the jaw moves on words and pauses on gaps.
-                // Fire-and-forget; if the head isn't connected it's a no-op.
-                // The robot's lip-flap is for Alex's PC/robot only. On Vilda's
-                // iPad Blue must NOT drive the head at all — her reply is simply
-                // spoken on the iPad — so only attach the lip drivers off-iPad.
-                if (!isVilda) {
-                    const _lipFrames = buildLipFrames(msg, u.rate);
-                    u.onstart = function () {
+                // Make Blue "talk" while he reads aloud. On Vilda's iPad this
+                // moves the ON-SCREEN face's mouth (the physical robot must stay
+                // still for her); on Alex's devices the on-screen face doesn't
+                // exist, so it just flaps the real robot's lips as before. The
+                // lip-seq is a text-derived mouth schedule (jaw moves on words,
+                // closes on gaps); fire-and-forget — a no-op if no head.
+                const _lipFrames = (!isVilda) ? buildLipFrames(msg, u.rate) : null;
+                u.onstart = function () {
+                    setFaceState('talking');
+                    if (!isVilda) {
                         try { fetch('/head/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
-                    };
-                    const _lipOff = function () { try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {} };
-                    u.onend = _lipOff;
-                    u.onerror = _lipOff;
-                }
+                    }
+                };
+                const _spokenDone = function () {
+                    setFaceState('');
+                    if (!isVilda) {
+                        try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+                    }
+                };
+                u.onend = _spokenDone;
+                u.onerror = _spokenDone;
                 window.speechSynthesis.speak(u);
             } catch (e) { /* ignore */ }
         }
@@ -12843,6 +12908,7 @@ CHAT_HTML = """
             recording = true;
             listening = true;
             micBtn.classList.add('listening');
+            setFaceState('listening');
             setHint('Listening\\u2026 tap the microphone again when you are done.');
             autoStopTimer = setTimeout(stopListening, 15000);
         }
@@ -12853,6 +12919,7 @@ CHAT_HTML = """
             if (!total) {
                 setHint(defaultHint);
                 addBubble('blue', 'I did not hear anything that time \\u2014 tap the mic, wait a second, then talk.');
+                faceCuriousBriefly();
                 return;
             }
             const blob = encodeWav(chunks, sampleRate);
@@ -12860,14 +12927,16 @@ CHAT_HTML = """
             fd.append('audio', blob, 'speech.wav');
             micBtn.disabled = true;
             setHint('Figuring out what you said\\u2026');
+            setFaceState('thinking');
             try {
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);
                 const said = (data && data.text || '').trim();
                 if (said) { inputEl.value = said; pendingVoice = true; send(); }
-                else { addBubble('blue', 'I did not catch that \\u2014 tap the mic and try again.'); }
+                else { addBubble('blue', 'I did not catch that \\u2014 tap the mic and try again.'); faceCuriousBriefly(); }
             } catch (e) {
                 addBubble('blue', 'I could not hear that just now. Tap the mic and try again.');
+                faceCuriousBriefly();
             } finally {
                 micBtn.disabled = false;
                 setHint(defaultHint);
