@@ -1714,7 +1714,7 @@ _CHAT_ONLY_USERS = {"Vilda"}
 # the physical robot must stay completely still (her reply is spoken on the iPad,
 # not performed by the robot), so /head/* requests from her device are refused.
 _CHAT_ONLY_ALLOWED = {
-    "chat_page", "chat_attach", "chat_completions", "stt", "stt_warmup",
+    "chat_page", "chat_attach", "chat_eyes", "chat_completions", "stt", "stt_warmup",
     "blue_login", "blue_logout", "static", "asset_blue_css", "asset_blue_js",
 }
 # Tools chat-only users (the kids' iPad) may NOT trigger:
@@ -3078,6 +3078,7 @@ class ImageInfo:
     hash: str
     is_camera_capture: bool
     added_at: str
+    is_ambient: bool = False   # kid "look" frame: warm/brief prompt, no face-rec dump
 
 class VisionImageQueue:
     """
@@ -3099,8 +3100,11 @@ class VisionImageQueue:
         print(f"   [VISION-QUEUE] Clearing {len(self.pending_images)} pending images")
         self.pending_images = []
 
-    def add_image(self, filepath: str, filename: str, is_camera: bool = False):
-        """Add an image to the queue to be shown."""
+    def add_image(self, filepath: str, filename: str, is_camera: bool = False,
+                  is_ambient: bool = False, force: bool = False):
+        """Add an image to the queue to be shown. `force` bypasses the
+        already-viewed dedup (a kid "look" must always present the frame, even
+        if the scene is identical to a previous one)."""
         import hashlib
         hash_md5 = hashlib.md5()
         with open(filepath, "rb") as f:
@@ -3114,14 +3118,15 @@ class VisionImageQueue:
                                   if not img.is_camera_capture]
             print(f"   [VISION-QUEUE] New camera image, cleared old camera images")
 
-        if img_hash not in self.viewed_images:
+        if force or img_hash not in self.viewed_images:
             import datetime
             self.pending_images.append(ImageInfo(
                 filename=filename,
                 filepath=filepath,
                 hash=img_hash,
                 is_camera_capture=is_camera,
-                added_at=datetime.datetime.now().isoformat()
+                added_at=datetime.datetime.now().isoformat(),
+                is_ambient=is_ambient
             ))
             print(f"   [VISION-QUEUE] Added {filename} (hash: {img_hash[:8]})")
         else:
@@ -9466,6 +9471,12 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
     if _vision_queue.has_images():
         print(f"   [VISION] Injecting {len(_vision_queue.pending_images)} image(s)")
 
+        # Kid "look" frames (Vilda's iPad camera) are marked ambient: Blue gives a
+        # warm, brief reaction instead of a forensic description, and we skip the
+        # heavy face-recognition dump for speed.
+        _is_ambient = any(getattr(img, 'is_ambient', False)
+                          for img in _vision_queue.pending_images)
+
         # Build image message
         image_parts = []
 
@@ -9486,10 +9497,21 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                     known_people = []
 
             # Build vision prompt (concise to reduce token overhead)
-            vision_prompt_parts = [
-                "[CAMERA IMAGE: Describe what you ACTUALLY see. Who, what, where, objects, lighting. "
-                "Be specific and accurate — describe only what's visible.]"
-            ]
+            if _is_ambient:
+                # Vilda tapped "look" — she wants Blue to see her, not a report.
+                vision_prompt_parts = [
+                    "[LIVE CAMERA: Vilda just asked you to look at her through her "
+                    "iPad camera. React warmly and naturally, like a friend who's "
+                    "happy to see her — say hi, notice one nice thing, and answer "
+                    "anything she asked. Keep it short, sweet and easy for an "
+                    "8-year-old. Only mention what you can ACTUALLY see; if it's "
+                    "blurry or dark, say so kindly and ask her to show you again.]"
+                ]
+            else:
+                vision_prompt_parts = [
+                    "[CAMERA IMAGE: Describe what you ACTUALLY see. Who, what, where, objects, lighting. "
+                    "Be specific and accurate — describe only what's visible.]"
+                ]
 
             # Add recognition context
             if recognition_context:
@@ -9503,6 +9525,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             _face_engine_handled = False
             if (FACE_RECOGNITION_AVAILABLE
                     and VISUAL_MEMORY_AVAILABLE
+                    and not _is_ambient
                     and os.environ.get("BLUE_FACE_RECOGNITION", "1") != "0"):
                 try:
                     _cam_path = next(
@@ -9609,7 +9632,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         # Add each image
         for img_info in _vision_queue.pending_images:
             is_camera = img_info.is_camera_capture
-            label = "[Your current view:]" if is_camera else f"Image: {img_info.filename}"
+            label = ("[Live view through Vilda's camera:]" if getattr(img_info, 'is_ambient', False)
+                     else ("[Your current view:]" if is_camera else f"Image: {img_info.filename}"))
 
             image_parts.append({"type": "text", "text": f"\n{label}"})
 
@@ -9637,6 +9661,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             _is_cam = any(img.is_camera_capture for img in _vision_queue.pending_images)
             _ref_cap = int(os.environ.get("BLUE_RECOGNITION_REFS", "3"))
             if (_is_cam and _ref_cap > 0 and VISUAL_MEMORY_AVAILABLE
+                    and not _is_ambient
                     and not locals().get("_face_engine_handled")):
                 _refs = get_visual_memory().entities_with_images("person")
                 _refs = sorted(_refs, key=lambda p: p.get("last_seen") or "",
@@ -12316,6 +12341,17 @@ CHAT_HTML = """
         .blue-face.thinking .bf-mouth { width: 16px; margin-left: -8px; height: 8px; border-radius: 8px; }
         .blue-face.curious .bf-head { transform: rotate(-5deg); }
         .blue-face.curious .bf-mouth { width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; }
+
+        /* ---- Blue's eyes: the iPad camera preview (kid mode) ---- */
+        #eyeBtn.active { background: #ff7eb3; border-color: #ff7eb3; color: #fff; }
+        .eye-panel { display: none; position: relative; max-width: 300px; margin: 8px auto 2px; }
+        .eye-panel.on { display: block; }
+        .eye-panel video { width: 100%; border-radius: 16px; border: 3px solid #ff7eb3; background: #000; display: block; transform: scaleX(-1); }
+        .eye-panel.rear video { transform: none; }
+        .eye-panel .eye-cap { text-align: center; font-size: 0.9em; color: var(--forest); margin-top: 5px; }
+        .eye-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
+        .eye-tools button { width: 36px; height: 36px; border-radius: 50%; border: none; background: rgba(0,0,0,0.45); color: #fff; font-size: 1.1em; line-height: 1; cursor: pointer; }
+        .eye-tools button:active { background: rgba(0,0,0,0.7); }
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
@@ -12361,6 +12397,11 @@ CHAT_HTML = """
                 <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to Blue" aria-label="Talk to Blue">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
+                {% if kid %}
+                <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+                {% endif %}
                 <button class="iconbtn" id="hfBtn" title="Hands-free: say 'Blue' to start" aria-label="Hands-free listening" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
                 </button>
@@ -12373,6 +12414,17 @@ CHAT_HTML = """
                 </button>
                 <button class="sendbtn" id="sendBtn">Send</button>
             </div>
+            {% if kid %}
+            <div class="eye-panel" id="eyePanel">
+                <video id="eyeVid" playsinline muted autoplay></video>
+                <div class="eye-tools">
+                    <button id="eyeFlip" title="Flip camera" aria-label="Flip camera">&#8635;</button>
+                    <button id="eyeClose" title="Close Blue's eyes" aria-label="Close camera">&times;</button>
+                </div>
+                <div class="eye-cap">Tap the eye and I'll look! &#128064;</div>
+            </div>
+            <canvas id="eyeCanvas" style="display:none"></canvas>
+            {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
@@ -13329,6 +13381,108 @@ CHAT_HTML = """
             try { fetch('/stt/warmup'); } catch (e) {}
         }
 
+        // ===== Blue's eyes: the iPad camera, on demand (kid mode only) =====
+        // Off until she taps the eye. Each tap grabs ONE frame and asks Blue to
+        // look, so normal chatting stays fast. Frames go only to the local vision
+        // model via /chat/eyes (never the cloud). iOS-12 safe: getUserMedia over
+        // HTTPS + a <canvas> snapshot (no MediaRecorder). No-op on Alex's page
+        // (no #eyeBtn there).
+        const eyeBtn = document.getElementById('eyeBtn');
+        if (eyeBtn) {
+            const eyePanel = document.getElementById('eyePanel');
+            const eyeVid = document.getElementById('eyeVid');
+            const eyeCanvas = document.getElementById('eyeCanvas');
+            const eyeFlip = document.getElementById('eyeFlip');
+            const eyeClose = document.getElementById('eyeClose');
+            let eyeStream = null, eyeFacing = 'user', eyeBusy = false;
+
+            function eyeStop() {
+                if (eyeStream) { try { eyeStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} }
+                eyeStream = null;
+                try { eyeVid.srcObject = null; } catch (e) {}
+                eyePanel.classList.remove('on');
+                eyeBtn.classList.remove('active');
+                eyeBtn.setAttribute('aria-pressed', 'false');
+            }
+
+            function eyeStart() {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    addBubble('blue', 'This tablet will not let me use the camera.');
+                    return Promise.reject('unsupported');
+                }
+                // getUserMedia must fire inside the tap gesture on iOS.
+                return navigator.mediaDevices.getUserMedia({ video: { facingMode: eyeFacing }, audio: false })
+                    .then(function (stream) {
+                        eyeStream = stream;
+                        eyeVid.srcObject = stream;
+                        eyePanel.classList.toggle('rear', eyeFacing !== 'user');
+                        eyePanel.classList.add('on');
+                        eyeBtn.classList.add('active');
+                        eyeBtn.setAttribute('aria-pressed', 'true');
+                        try { eyeVid.play(); } catch (e) {}
+                        return new Promise(function (resolve) {
+                            if (eyeVid.videoWidth > 0) { resolve(); return; }
+                            eyeVid.addEventListener('loadedmetadata', function () { resolve(); }, { once: true });
+                            setTimeout(resolve, 1200);
+                        });
+                    });
+            }
+
+            function eyeCapture() {
+                const w = eyeVid.videoWidth, h = eyeVid.videoHeight;
+                if (!w || !h) return null;
+                const scale = Math.min(1, 640 / w);
+                eyeCanvas.width = Math.round(w * scale);
+                eyeCanvas.height = Math.round(h * scale);
+                eyeCanvas.getContext('2d').drawImage(eyeVid, 0, 0, eyeCanvas.width, eyeCanvas.height);
+                return eyeCanvas.toDataURL('image/jpeg', 0.7);
+            }
+
+            function dataUrlToBlob(durl) {
+                const bin = atob(durl.split(',')[1]);
+                const arr = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+                return new Blob([arr], { type: 'image/jpeg' });
+            }
+
+            function eyeUpload(durl) {
+                const fd = new FormData();
+                fd.append('frame', dataUrlToBlob(durl), 'eyes.jpg');
+                return fetch('/chat/eyes', { method: 'POST', headers: { 'X-Blue-Device': blueDeviceTag() }, body: fd });
+            }
+
+            // Tap the eye = "Blue, look!" Starts the camera the first time, grabs
+            // a frame, then sends a turn so Blue reacts to what he sees right now.
+            function eyeLook() {
+                if (eyeBusy || busy) return;
+                eyeBusy = true;
+                primeAudio();
+                const go = eyeStream ? Promise.resolve() : eyeStart();
+                go.then(function () {
+                    const durl = eyeCapture();
+                    if (!durl) return Promise.reject('no-frame');
+                    return eyeUpload(durl);
+                }).then(function () {
+                    if (!inputEl.value.trim()) inputEl.value = 'Look, Blue!';
+                    send();
+                }).catch(function (e) {
+                    if (e && (e.name === 'NotAllowedError' || e.name === 'NotFoundError')) {
+                        addBubble('blue', 'I need permission to use the camera. Tap the eye again and choose Allow.');
+                    }
+                }).then(function () { eyeBusy = false; }, function () { eyeBusy = false; });
+            }
+
+            eyeBtn.addEventListener('click', eyeLook);
+            eyeClose.addEventListener('click', eyeStop);
+            eyeFlip.addEventListener('click', function () {
+                eyeFacing = (eyeFacing === 'user') ? 'environment' : 'user';
+                const wasOn = !!eyeStream;
+                eyeStop();
+                if (wasOn) eyeStart().catch(function () {});
+            });
+            window.addEventListener('pagehide', function () { eyeStop(); });
+        }
+
         inputEl.focus();
     </script>
 </body>
@@ -14162,6 +14316,36 @@ def chat_attach():
             results.append({"name": orig, "kind": "error", "error": str(e)})
 
     return jsonify({"attachments": results})
+
+
+@app.route('/chat/eyes', methods=['POST'])
+def chat_eyes():
+    """Vilda's iPad camera = Blue's eyes, on demand. The kid chat page POSTs a
+    single JPEG frame here when she taps 'look'; we stage it in the vision queue
+    marked AMBIENT, so call_lm_studio gives a warm, brief 'react to what you see'
+    reply (not the forensic camera description) and skips the heavy face-rec dump.
+    Frames are local-only (they go to LM Studio, never the cloud) and are NOT
+    indexed; we keep only the latest by overwriting a single file."""
+    global _vision_queue
+    user = _identify_user_from_request()
+    f = request.files.get('frame')
+    if not f:
+        return jsonify({"ok": False, "error": "no frame"}), 400
+    try:
+        os.makedirs(CAMERA_FOLDER, exist_ok=True)
+        safe_user = secure_filename(user) or 'kid'
+        saved = os.path.join(CAMERA_FOLDER, f"ipad_eyes_{safe_user}.jpg")
+        f.save(saved)
+        # is_camera clears any stale frame; force bypasses the viewed-dedup so an
+        # identical (still) scene still reaches Blue; is_ambient picks the gentle
+        # kid-look prompt.
+        _vision_queue.add_image(saved, "camera_view.jpg",
+                                is_camera=True, is_ambient=True, force=True)
+        print(f"   [EYES] staged camera frame for {user}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        print(f"   [EYES] error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ===== Calendar GUI =====
