@@ -12466,7 +12466,7 @@ CHAT_HTML = """
             <canvas id="eyeCanvas" style="display:none"></canvas>
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
-            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608d</div>
+            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608e</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
@@ -12641,6 +12641,10 @@ CHAT_HTML = """
             setFaceState('thinking');
 
             try {
+                // If Blue's eyes (iPad camera) are open, grab a fresh frame first
+                // so he can see during THIS turn — not only when the eye is tapped.
+                // No-op when the camera is closed or on Alex's page.
+                if (window.__blueEyeGrab) { try { await window.__blueEyeGrab(); } catch (e) {} }
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
@@ -13514,6 +13518,17 @@ CHAT_HTML = """
                     });
             }
 
+            // Grab+upload a frame IF the camera is open; called before every chat
+            // send (via window.__blueEyeGrab) so Blue sees during the WHOLE
+            // conversation, not just on the eye tap. No-op when the camera is shut.
+            function grabIfOpen() {
+                if (!eyeStream) return Promise.resolve(null);
+                const durl = eyeCapture();
+                if (!durl) return Promise.resolve(null);
+                return eyeUpload(durl);
+            }
+            window.__blueEyeGrab = grabIfOpen;
+
             // Tap the eye = "Blue, look!" Starts the camera the first time, grabs
             // a frame, then sends a turn so Blue reacts to what he sees right now.
             // Turns the eye pink the INSTANT it's tapped (so a tap is always
@@ -13529,10 +13544,7 @@ CHAT_HTML = """
                 primeAudio();
                 const go = eyeStream ? Promise.resolve() : eyeStart();
                 go.then(function () {
-                    const durl = eyeCapture();
-                    if (!durl) return Promise.reject(new Error('no-frame'));
-                    return eyeUpload(durl);
-                }).then(function () {
+                    // Camera is open now; send() grabs the frame via __blueEyeGrab.
                     if (!inputEl.value.trim()) inputEl.value = 'Look, Blue!';
                     send();
                 }).catch(function (e) {
@@ -13565,7 +13577,7 @@ CHAT_HTML = """
         // Build marker: if the page shows "build 0608 · js ok" the newest script
         // ran end-to-end; "build 0608" alone => script died before here (or the
         // panel HTML is missing); no marker at all => the iPad is on a cached page.
-        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608d \\u00b7 js ok'; } catch (e) {}
+        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608e \\u00b7 js ok'; } catch (e) {}
         inputEl.focus();
     </script>
 </body>
