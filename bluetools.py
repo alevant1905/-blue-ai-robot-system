@@ -12366,35 +12366,19 @@ CHAT_HTML = """
 
         /* ---- Blue's eyes: the iPad camera preview (kid mode) ---- */
         #eyeBtn.active { background: #ff7eb3; border-color: #ff7eb3; color: #fff; }
-        .eye-panel { display: none; position: relative; max-width: 300px; margin: 8px auto 2px; }
+        /* Small floating preview (picture-in-picture) so the chat text below it
+           stays fully visible. Sits just above the composer, out of the layout. */
+        .eye-panel { display: none; position: fixed; right: 12px; bottom: 124px; width: 118px; z-index: 60; }
         .eye-panel.on { display: block; }
-        .eye-panel video { width: 100%; border-radius: 16px; border: 3px solid #ff7eb3; background: #000; display: block; transform: scaleX(-1); }
+        .eye-panel video { width: 100%; border-radius: 14px; border: 2px solid #ff7eb3; background: #000; display: block; transform: scaleX(-1); box-shadow: 0 4px 16px rgba(0,0,0,0.22); }
         .eye-panel.rear video { transform: none; }
-        .eye-panel .eye-cap { text-align: center; font-size: 0.9em; color: var(--forest); margin-top: 5px; }
-        .eye-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
-        .eye-tools button { width: 36px; height: 36px; border-radius: 50%; border: none; background: rgba(0,0,0,0.45); color: #fff; font-size: 1.1em; line-height: 1; cursor: pointer; }
-        .eye-tools button:active { background: rgba(0,0,0,0.7); }
+        .eye-panel .eye-cap { display: none; }
+        .eye-tools { position: absolute; top: 5px; right: 5px; display: flex; gap: 4px; }
+        .eye-tools button { width: 26px; height: 26px; border-radius: 50%; border: none; background: rgba(0,0,0,0.55); color: #fff; font-size: 0.95em; line-height: 1; cursor: pointer; }
+        .eye-tools button:active { background: rgba(0,0,0,0.78); }
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
-    <script>
-    /* DEBUG: surface any JS error on a red bar so an iPad failure is visible
-       without a console. Separate, earlier <script> so it can catch errors in
-       the main chat script below. (Temporary — remove once the camera works.) */
-    window.onerror = function (msg, src, line, col, err) {
-        try {
-            var d = document.getElementById('__errbar');
-            if (!d) {
-                d = document.createElement('div');
-                d.id = '__errbar';
-                d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;background:#b00020;color:#fff;font:12px/1.4 monospace;padding:8px;z-index:99999;white-space:pre-wrap;';
-                (document.body || document.documentElement).appendChild(d);
-            }
-            d.textContent = 'JS ERR: ' + msg + '  @line ' + line;
-        } catch (e) {}
-        return false;
-    };
-    </script>
     <div class="container">
         <div class="header">
             {% if kid %}
@@ -12466,7 +12450,6 @@ CHAT_HTML = """
             <canvas id="eyeCanvas" style="display:none"></canvas>
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
-            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608e</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
@@ -13447,11 +13430,7 @@ CHAT_HTML = """
             const eyeClose = document.getElementById('eyeClose');
             let eyeStream = null, eyeFacing = 'user', eyeBusy = false;
 
-            // Live stage tracker -> the bottom build marker shows how far a tap
-            // gets, so a remote failure can be pinpointed without the console.
-            function eyeStatus(s) {
-                try { var b = document.getElementById('buildTag'); if (b) b.textContent = 'eye: ' + s; } catch (e) {}
-            }
+            function eyeStatus(s) { /* debug tracker removed; kept as a no-op */ }
 
             function eyeStop() {
                 if (eyeStream) { try { eyeStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} }
@@ -13574,10 +13553,6 @@ CHAT_HTML = """
           })();
         }
 
-        // Build marker: if the page shows "build 0608 · js ok" the newest script
-        // ran end-to-end; "build 0608" alone => script died before here (or the
-        // panel HTML is missing); no marker at all => the iPad is on a cached page.
-        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608e \\u00b7 js ok'; } catch (e) {}
         inputEl.focus();
     </script>
 </body>
