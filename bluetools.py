@@ -12377,6 +12377,24 @@ CHAT_HTML = """
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
+    <script>
+    /* DEBUG: surface any JS error on a red bar so an iPad failure is visible
+       without a console. Separate, earlier <script> so it can catch errors in
+       the main chat script below. (Temporary — remove once the camera works.) */
+    window.onerror = function (msg, src, line, col, err) {
+        try {
+            var d = document.getElementById('__errbar');
+            if (!d) {
+                d = document.createElement('div');
+                d.id = '__errbar';
+                d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;background:#b00020;color:#fff;font:12px/1.4 monospace;padding:8px;z-index:99999;white-space:pre-wrap;';
+                (document.body || document.documentElement).appendChild(d);
+            }
+            d.textContent = 'JS ERR: ' + msg + '  @line ' + line;
+        } catch (e) {}
+        return false;
+    };
+    </script>
     <div class="container">
         <div class="header">
             {% if kid %}
@@ -12448,7 +12466,7 @@ CHAT_HTML = """
             <canvas id="eyeCanvas" style="display:none"></canvas>
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
-            <div id="buildTag" style="text-align:center;font-size:0.66em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608</div>
+            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608c</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
@@ -13540,7 +13558,7 @@ CHAT_HTML = """
         // Build marker: if the page shows "build 0608 · js ok" the newest script
         // ran end-to-end; "build 0608" alone => script died before here (or the
         // panel HTML is missing); no marker at all => the iPad is on a cached page.
-        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608 \\u00b7 js ok'; } catch (e) {}
+        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608c \\u00b7 js ok'; } catch (e) {}
         inputEl.focus();
     </script>
 </body>
