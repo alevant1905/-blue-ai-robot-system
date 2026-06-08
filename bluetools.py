@@ -12466,7 +12466,7 @@ CHAT_HTML = """
             <canvas id="eyeCanvas" style="display:none"></canvas>
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
-            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608c</div>
+            <div id="buildTag" style="text-align:center;font-size:0.72em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608d</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
@@ -13430,6 +13430,12 @@ CHAT_HTML = """
         // (no #eyeBtn there).
         const eyeBtn = document.getElementById('eyeBtn');
         if (eyeBtn) {
+          // IIFE wrapper: on iOS 12 Safari, function declarations inside a bare
+          // `if {}` block get hoisted out of the block while `let`/`const` stay
+          // block-scoped — so the handlers couldn't see eyeBusy/eyeStream/etc.
+          // ("ReferenceError: Can't find variable: eyeBusy"). A function scope
+          // fixes the hoisting so the closures resolve correctly.
+          (function () {
             const eyePanel = document.getElementById('eyePanel');
             const eyeVid = document.getElementById('eyeVid');
             const eyeCanvas = document.getElementById('eyeCanvas');
@@ -13553,12 +13559,13 @@ CHAT_HTML = """
                 if (wasOn) eyeStart().catch(function () {});
             });
             window.addEventListener('pagehide', function () { eyeStop(); });
+          })();
         }
 
         // Build marker: if the page shows "build 0608 · js ok" the newest script
         // ran end-to-end; "build 0608" alone => script died before here (or the
         // panel HTML is missing); no marker at all => the iPad is on a cached page.
-        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608c \\u00b7 js ok'; } catch (e) {}
+        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608d \\u00b7 js ok'; } catch (e) {}
         inputEl.focus();
     </script>
 </body>
