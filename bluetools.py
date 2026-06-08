@@ -13419,6 +13419,12 @@ CHAT_HTML = """
             const eyeClose = document.getElementById('eyeClose');
             let eyeStream = null, eyeFacing = 'user', eyeBusy = false;
 
+            // Live stage tracker -> the bottom build marker shows how far a tap
+            // gets, so a remote failure can be pinpointed without the console.
+            function eyeStatus(s) {
+                try { var b = document.getElementById('buildTag'); if (b) b.textContent = 'eye: ' + s; } catch (e) {}
+            }
+
             function eyeStop() {
                 if (eyeStream) { try { eyeStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} }
                 eyeStream = null;
@@ -13430,12 +13436,15 @@ CHAT_HTML = """
 
             function eyeStart() {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    eyeStatus('no getUserMedia (need https?)');
                     addBubble('blue', "I can't use the camera here. Make sure you opened me at my secure https web address \\u2014 the same one the microphone needs.");
                     return Promise.reject(new Error('no-getUserMedia'));
                 }
+                eyeStatus('requesting camera\\u2026');
                 // getUserMedia must fire inside the tap gesture on iOS.
                 return navigator.mediaDevices.getUserMedia({ video: { facingMode: eyeFacing }, audio: false })
                     .then(function (stream) {
+                        eyeStatus('camera on');
                         eyeStream = stream;
                         eyeVid.srcObject = stream;
                         eyePanel.classList.toggle('rear', eyeFacing !== 'user');
@@ -13453,6 +13462,7 @@ CHAT_HTML = """
 
             function eyeCapture() {
                 const w = eyeVid.videoWidth, h = eyeVid.videoHeight;
+                eyeStatus('capturing ' + w + 'x' + h);
                 if (!w || !h) return null;
                 const scale = Math.min(1, 640 / w);
                 eyeCanvas.width = Math.round(w * scale);
@@ -13469,9 +13479,15 @@ CHAT_HTML = """
             }
 
             function eyeUpload(durl) {
+                eyeStatus('uploading frame\\u2026');
                 const fd = new FormData();
                 fd.append('frame', dataUrlToBlob(durl), 'eyes.jpg');
-                return fetch('/chat/eyes', { method: 'POST', headers: { 'X-Blue-Device': blueDeviceTag() }, body: fd });
+                return fetch('/chat/eyes', { method: 'POST', headers: { 'X-Blue-Device': blueDeviceTag() }, body: fd })
+                    .then(function (res) {
+                        if (!res || !res.ok) { throw new Error('upload HTTP ' + (res ? res.status : '?')); }
+                        eyeStatus('sent to Blue');
+                        return res;
+                    });
             }
 
             // Tap the eye = "Blue, look!" Starts the camera the first time, grabs
@@ -13485,6 +13501,7 @@ CHAT_HTML = """
                 if (eyeBusy) return;
                 eyeBusy = true;
                 eyeBtn.classList.add('active');
+                eyeStatus('tapped');
                 primeAudio();
                 const go = eyeStream ? Promise.resolve() : eyeStart();
                 go.then(function () {
@@ -13497,6 +13514,7 @@ CHAT_HTML = """
                 }).catch(function (e) {
                     const nm = (e && e.name && e.name !== 'Error') ? e.name
                              : ((e && e.message) ? e.message : String(e));
+                    eyeStatus('ERROR: ' + nm);
                     if (nm === 'NotAllowedError' || nm === 'SecurityError') {
                         addBubble('blue', "I'm not allowed to use the camera yet. Tap the eye and choose Allow \\u2014 a grown-up may need to switch the Camera on in Settings (Screen Time).");
                     } else if (nm === 'NotFoundError') {
