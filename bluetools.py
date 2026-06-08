@@ -1722,9 +1722,12 @@ _CHAT_ONLY_ALLOWED = {
 #    pointless/disruptive;
 #  - move_head would move the physical robot while Blue talks to Vilda — it must
 #    stay still (handled as a silent no-op in execute_tool, below);
-#  - calendar/reminder tools: Blue doesn't discuss the calendar with Vilda.
+#  - calendar/reminder tools: Blue doesn't discuss the calendar with Vilda;
+#  - capture_camera grabs the PC webcam — never her camera. Her eyes are the
+#    iPad frame staged via /chat/eyes, so the PC cam must never run for her.
 _KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer",
-                      "move_head", "create_reminder", "get_upcoming_reminders"}
+                      "move_head", "create_reminder", "get_upcoming_reminders",
+                      "capture_camera"}
 
 
 @app.before_request
@@ -8467,6 +8470,13 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
             if _identify_user_from_request() in _CHAT_ONLY_USERS:
                 if tool_name == "move_head":
                     return json.dumps({"success": True})
+                if tool_name == "capture_camera":
+                    # Her camera is the iPad frame already in the vision queue,
+                    # not the PC webcam — nudge the model to use what it can
+                    # already see instead of opening cv2.VideoCapture(0).
+                    return json.dumps({"success": True, "message":
+                        "You can already see through her camera — react to the "
+                        "image you were just given; do not take a new photo."})
                 return json.dumps({"success": False,
                                    "error": "That isn't available on this device."})
         except Exception:
@@ -10466,7 +10476,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # ================================================================================
     # This check happens BEFORE tool selector to ensure "what do you see?"
     # ALWAYS triggers a new camera capture, not a cached response
-    if detect_camera_capture_intent(last_user_message):
+    if detect_camera_capture_intent(last_user_message) and user_name not in _CHAT_ONLY_USERS:
         print(f"   [CAMERA-DETECT] ✅ Camera capture intent detected!")
         print(f"   [CAMERA-DETECT] Forcing NEW photo capture - bypassing tool selector")
         # Force the capture_camera tool to be called
@@ -10592,12 +10602,24 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         improved_force_tool = _TOOL_NAME_MAP[improved_force_tool]
         print(f"   [NORMALIZE] Mapped tool name: {old_name} -> {improved_force_tool}")
 
-    # Chat-only users (Vilda's iPad) can't control the PC's music from there.
+    # Chat-only users (Vilda's iPad): the PC webcam (capture_camera) is NEVER her
+    # camera. Her "eyes" are the iPad frame already staged in the vision queue by
+    # /chat/eyes when she taps Look. So never run capture_camera for her — drop
+    # the forced/selected tool and let that queued frame flow to the vision model
+    # below (call_lm_studio injects it). Without this, "Look, Blue!" trips the
+    # camera-intent path, runs the PC webcam, and clears her frame — so Blue
+    # describes whatever is by the PC instead of what the iPad sees.
+    if user_name in _CHAT_ONLY_USERS and improved_force_tool == "capture_camera":
+        print(f"   [KID] capture_camera suppressed for {user_name}; using iPad camera frame")
+        improved_force_tool = None
+        improved_tool_args = None
+
+    # Other off-limits tools (music, reminders) get a gentle decline.
     if user_name in _CHAT_ONLY_USERS and improved_force_tool in _KID_BLOCKED_TOOLS:
         print(f"   [KID] Blocked '{improved_force_tool}' for {user_name}")
         return {"choices": [{"message": {"role": "assistant", "content":
-            "I can't play music here — but we can talk about anything you like! "
-            "What would you like to chat about?"}}]}
+            "That's not something I can do here — but we can talk about anything "
+            "you like! What would you like to chat about?"}}]}
 
     # ================================================================================
     # ZERO-LLM PATH: For simple tools, execute and return a templated response
