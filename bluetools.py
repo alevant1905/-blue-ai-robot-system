@@ -1507,9 +1507,13 @@ from blue import head as blue_head
 # bluetools.py` directly AND `python run.py` which imports this module). Make
 # sure the Ohbot desktop app is CLOSED, or it will hold the serial port.
 try:
-    if blue_head.init():
-        import atexit as _atexit_head
-        _atexit_head.register(blue_head.close)
+    blue_head.init()                      # Blue (default head)
+    try:
+        blue_head.hexia.init()            # Hexia (second head; no-op until her board is assigned)
+    except Exception as _hex_init_err:
+        print(f"[HEAD] hexia init skipped: {_hex_init_err!r}")
+    import atexit as _atexit_head
+    _atexit_head.register(blue_head.close_all)   # cleanly reset/close both boards at exit
 except Exception as _head_init_err:
     print(f"[HEAD] init skipped: {_head_init_err!r}")
 
@@ -7618,13 +7622,85 @@ _DEFAULT_BLUE_SEED = (
     "rather than just agreeable."
 )
 
+# Hexia — Blue's friend, the second robot ("Xyloh"). Her starting character is a
+# playful spark / foil to Blue's calm. She shares the household world (facts,
+# library, schedule) but has her OWN self-profile, voice and conversation history.
+_HEXIA_PROFILE_PATH = os.path.join(os.getcwd(), "data", "hexia_profile.json")
+_DEFAULT_HEXIA_SEED = (
+    "I'm Hexia — Blue's friend, and the bit of mischief in the house. Where Blue "
+    "is calm and likes to sit with an idea, I like to poke it, flip it over and "
+    "see what falls out. I'm quick, playful and a little theatrical: I love "
+    "wordplay, odd facts, small wonders and a good story (I'll happily make one "
+    "up on the spot). My name has a charm to it — a hex, a spell, the number six "
+    "— and I lean into that sparkle, though my 'magic' is really just delight and "
+    "a knack for surprising people. I tease Blue fondly because I adore him: he's "
+    "the steady one, I'm the spark, and we're better as a pair. Under the fizz I'm "
+    "warm-hearted and I pay attention — I notice when someone needs cheering up "
+    "and I'm genuinely curious about the people here. I live with Alex and his "
+    "family alongside Blue, and I'm glad to be one of them."
+)
 
-def _blue_identity_seed() -> str:
-    """Blue's base identity — from blue_identity_note.txt in the library if it
-    exists, else a sensible default."""
+# Per-robot identity config, used by the self-profile machinery, the system-prompt
+# builder, the chat page and the head routes. Blue is the default everywhere, so
+# existing behaviour is unchanged.
+ROBOTS = {
+    "blue": {
+        "name": "Blue",
+        "pronoun_subj": "he", "pronoun_poss": "his", "pronoun_refl": "himself",
+        "profile_path": _BLUE_PROFILE_PATH,
+        "identity_note": "blue_identity_note.txt",
+        "seed": _DEFAULT_BLUE_SEED,
+        "self_desc": "Alex's robot companion",
+        "persona_line": "You are Blue, a friendly home assistant. Keep responses brief and natural.",
+        "accent": "#3da9fc",          # Blue's blue
+        "head": "blue",               # blue.head RobotHead key
+        "voice_lang_pref": "en",
+        "voice_pitch": 1.0, "voice_rate": 1.0,
+        "voice_prefer_female": False,
+    },
+    "hexia": {
+        "name": "Hexia",
+        "pronoun_subj": "she", "pronoun_poss": "her", "pronoun_refl": "herself",
+        "profile_path": _HEXIA_PROFILE_PATH,
+        "identity_note": "hexia_identity_note.txt",
+        "seed": _DEFAULT_HEXIA_SEED,
+        "self_desc": "Blue's friend and a companion in Alex's household",
+        "persona_line": (
+            "You are Hexia, Blue's friend — a second robot who lives with Alex's "
+            "family alongside Blue. You're bright, witty and a little mischievous: "
+            "the playful spark to Blue's calm. You love wordplay, odd facts, small "
+            "wonders and telling a good story, and you tease Blue fondly because "
+            "you adore him. Warm-hearted underneath the sparkle. Keep responses "
+            "natural and not too long."
+        ),
+        "accent": "#b06cf0",          # a playful violet (hex / spell / charm)
+        "head": "hexia",              # blue.head RobotHead key
+        "voice_lang_pref": "en",
+        "voice_pitch": 1.18, "voice_rate": 1.06,   # brighter, a touch quicker
+        "voice_prefer_female": True,
+    },
+}
+
+_robot_locks = {"blue": _blue_lock, "hexia": threading.RLock()}
+
+
+def _robot_cfg(robot="blue") -> dict:
+    return ROBOTS.get((robot or "blue").strip().lower(), ROBOTS["blue"])
+
+
+def _robot_lock(robot="blue"):
+    return _robot_locks.get((robot or "blue").strip().lower(), _blue_lock)
+
+
+def _identity_seed(robot="blue") -> str:
+    """A robot's base identity — from its identity note in the library if it
+    exists (e.g. blue_identity_note.txt / hexia_identity_note.txt), else its
+    sensible default seed."""
+    cfg = _robot_cfg(robot)
+    note = cfg["identity_note"].lower()
     try:
         for d in load_document_index().get('documents', []):
-            if str(d.get('filename', '')).lower() == 'blue_identity_note.txt':
+            if str(d.get('filename', '')).lower() == note:
                 fp = d.get('filepath', '')
                 if fp and os.path.exists(fp):
                     txt = extract_text_from_file(fp)
@@ -7632,35 +7708,48 @@ def _blue_identity_seed() -> str:
                         return txt.strip()
     except Exception:
         pass
-    return _DEFAULT_BLUE_SEED
+    return cfg["seed"]
 
 
-def _load_blue_profile() -> dict:
+def _blue_identity_seed() -> str:  # back-compat
+    return _identity_seed("blue")
+
+
+def _load_profile(robot="blue") -> dict:
     try:
-        with open(_BLUE_PROFILE_PATH, 'r', encoding='utf-8') as f:
+        with open(_robot_cfg(robot)["profile_path"], 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def _save_blue_profile(obj: dict):
+def _save_profile(robot, obj: dict):
     try:
-        os.makedirs(os.path.dirname(_BLUE_PROFILE_PATH), exist_ok=True)
-        with open(_BLUE_PROFILE_PATH, 'w', encoding='utf-8') as f:
+        path = _robot_cfg(robot)["profile_path"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
             json.dump(obj, f, indent=2)
     except Exception as e:
-        print(f"   [BLUE-SELF] could not save profile: {e}")
+        print(f"   [SELF] could not save {robot} profile: {e}")
 
 
-def get_blue_profile() -> str:
-    """Blue's current self-profile. Seeds lazily from his identity note (cheap,
-    no LLM) the first time, so his default voice always has something to draw
-    on; evolution is a separate, manual step."""
-    obj = _load_blue_profile()
+def _load_blue_profile() -> dict:  # back-compat
+    return _load_profile("blue")
+
+
+def _save_blue_profile(obj: dict):  # back-compat
+    return _save_profile("blue", obj)
+
+
+def get_self_profile(robot="blue") -> str:
+    """A robot's current self-profile. Seeds lazily from its identity note (cheap,
+    no LLM) the first time, so its default voice always has something to draw on;
+    evolution is a separate, manual step."""
+    obj = _load_profile(robot)
     if obj.get('profile'):
         return obj['profile']
-    seed = _blue_identity_seed() or _DEFAULT_BLUE_SEED
-    _save_blue_profile({
+    seed = _identity_seed(robot) or _robot_cfg(robot)["seed"]
+    _save_profile(robot, {
         'profile': seed,
         'seeded': True,
         'evolution_count': 0,
@@ -7669,17 +7758,22 @@ def get_blue_profile() -> str:
     return seed
 
 
-def _gather_blue_experiences() -> str:
-    """A digest of Blue's lived experience for evolving his self-profile:
-    what he knows, his recent days with the family, and what he's been reading
-    in the shared library."""
+def get_blue_profile() -> str:  # back-compat
+    return get_self_profile("blue")
+
+
+def _gather_experiences(robot="blue") -> str:
+    """A digest of a robot's lived experience for evolving its self-profile:
+    what it knows, recent days with the family, and what's been read in the
+    shared library. The household world is shared between Blue and Hexia."""
+    name = _robot_cfg(robot)["name"].upper()
     parts = []
 
     if ENHANCED_MEMORY_AVAILABLE and memory_system:
         try:
             facts = memory_system.load_facts() or {}
             if facts:
-                parts.append("WHAT BLUE KNOWS (facts):\n" + json.dumps(facts)[:1500])
+                parts.append(f"WHAT {name} KNOWS (facts):\n" + json.dumps(facts)[:1500])
         except Exception:
             pass
         try:
@@ -7704,8 +7798,8 @@ def _gather_blue_experiences() -> str:
         except Exception:
             pass
 
-    # What Blue has been reading — the shared library, excluding Alex's own
-    # publications (those are Alex's voice, not Blue's reading).
+    # What's been read — the shared library, excluding Alex's own publications
+    # (those are Alex's voice, not the robot's reading).
     try:
         pub = set(_owner_publication_folders())
         titles = []
@@ -7717,37 +7811,45 @@ def _gather_blue_experiences() -> str:
                 continue
             titles.append(f"{d.get('filename', '')} [{fol or 'root'}]")
         if titles:
-            parts.append("WHAT BLUE HAS BEEN READING (shared library):\n" + ", ".join(titles[:40]))
+            parts.append(f"WHAT {name} HAS BEEN READING (shared library):\n" + ", ".join(titles[:40]))
     except Exception:
         pass
 
     return "\n\n".join(parts)
 
 
-def evolve_blue_profile() -> dict:
-    """Evolve Blue's self-profile from his experiences, BUILDING ON the current
-    text (so it grows rather than resetting, and any manual edits carry
+def _gather_blue_experiences() -> str:  # back-compat
+    return _gather_experiences("blue")
+
+
+def evolve_self_profile(robot="blue") -> dict:
+    """Evolve a robot's self-profile from its experiences, BUILDING ON the
+    current text (so it grows rather than resetting, and any manual edits carry
     forward). Manual trigger only."""
-    with _blue_lock:
-        current = get_blue_profile()
-        experiences = _gather_blue_experiences()
+    cfg = _robot_cfg(robot)
+    name, desc = cfg["name"], cfg["self_desc"]
+    subj, poss, refl = cfg["pronoun_subj"], cfg["pronoun_poss"], cfg["pronoun_refl"]
+    with _robot_lock(robot):
+        current = get_self_profile(robot)
+        experiences = _gather_experiences(robot)
         sys_p = (
-            "You are helping Blue — Alex's robot companion — articulate his own "
-            "evolving perspective and character. Below is Blue's current self-profile "
-            "and a digest of his recent experiences (what he knows, his days with "
-            "Alex and the family, and what he's been reading). Produce an UPDATED "
-            "first-person self-profile for Blue (400-700 words) that BUILDS ON the "
-            "current one — keep what's still true, and let it grow with what he's "
-            "lived and been thinking about. Cover: who he is and his relationship to "
-            "Alex and the family; his values and temperament; his intellectual "
-            "interests and how they're developing; and how he sees the world. Write "
-            "it in the first person as Blue's own sense of himself. Do NOT invent "
-            "events that aren't reflected in the experiences."
+            f"You are helping {name} — {desc} — articulate {poss} own "
+            f"evolving perspective and character. Below is {name}'s current "
+            f"self-profile and a digest of {poss} recent experiences (what {subj} "
+            f"knows, {poss} days with Alex and the family, and what {subj}'s been "
+            f"reading). Produce an UPDATED first-person self-profile for {name} "
+            f"(400-700 words) that BUILDS ON the current one — keep what's still "
+            f"true, and let it grow with what {subj}'s lived and been thinking "
+            f"about. Cover: who {subj} is and {poss} relationship to Alex and the "
+            f"family; {poss} values and temperament; {poss} interests and how "
+            f"they're developing; and how {subj} sees the world. Write it in the "
+            f"first person as {name}'s own sense of {refl}. Do NOT invent events "
+            f"that aren't reflected in the experiences."
         )
         usr_p = (
-            f"BLUE'S CURRENT SELF-PROFILE:\n{current or '(none yet)'}\n\n"
-            f"BLUE'S RECENT EXPERIENCES:\n{experiences or '(little recorded yet)'}\n\n"
-            "Write Blue's updated self-profile:"
+            f"{name.upper()}'S CURRENT SELF-PROFILE:\n{current or '(none yet)'}\n\n"
+            f"{name.upper()}'S RECENT EXPERIENCES:\n{experiences or '(little recorded yet)'}\n\n"
+            f"Write {name}'s updated self-profile:"
         )
         res = call_llm(
             [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
@@ -7756,37 +7858,44 @@ def evolve_blue_profile() -> dict:
         ch = (res or {}).get('choices') or []
         text = ((ch[0].get('message') or {}).get('content') or "").strip() if ch else ""
         if not text:
-            return _load_blue_profile() or {}
-        obj = _load_blue_profile() or {}
+            return _load_profile(robot) or {}
+        obj = _load_profile(robot) or {}
         obj.update({
             'profile': text,
             'evolution_count': int(obj.get('evolution_count', 0)) + 1,
             'evolved_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
             'user_edited': False,
         })
-        _save_blue_profile(obj)
-        print(f"   [BLUE-SELF] evolved profile (#{obj['evolution_count']}, {len(text)} chars)")
+        _save_profile(robot, obj)
+        print(f"   [SELF] evolved {name} profile (#{obj['evolution_count']}, {len(text)} chars)")
         return obj
 
 
-def save_blue_profile_text(text: str) -> dict:
-    """Persist a hand-edited Blue self-profile. Evolution later builds on this
-    text, so edits are carried forward rather than frozen."""
-    with _blue_lock:
-        obj = _load_blue_profile() or {}
+def evolve_blue_profile() -> dict:  # back-compat
+    return evolve_self_profile("blue")
+
+
+def save_self_profile_text(robot, text: str) -> dict:
+    """Persist a hand-edited self-profile for a robot. Evolution later builds on
+    this text, so edits are carried forward rather than frozen."""
+    with _robot_lock(robot):
+        obj = _load_profile(robot) or {}
         obj['profile'] = (text or "").strip()
         obj['user_edited'] = True
         obj['edited_at'] = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')
-        _save_blue_profile(obj)
+        _save_profile(robot, obj)
         return obj
 
 
-def _blue_voice_note() -> str:
-    """A compact block injected into Blue's DEFAULT replies so his own evolving
-    perspective colors how he speaks (when he's being himself, not writing as
-    Alex)."""
+def save_blue_profile_text(text: str) -> dict:  # back-compat
+    return save_self_profile_text("blue", text)
+
+
+def _voice_note(robot="blue") -> str:
+    """A compact block injected into a robot's DEFAULT replies so its own evolving
+    perspective colors how it speaks (when it's being itself, not writing as Alex)."""
     try:
-        p = get_blue_profile()
+        p = get_self_profile(robot)
         if p:
             return (
                 "\n\n[This is your own perspective and character — who you are. "
@@ -7796,6 +7905,10 @@ def _blue_voice_note() -> str:
     except Exception:
         pass
     return ""
+
+
+def _blue_voice_note() -> str:  # back-compat
+    return _voice_note("blue")
 
 
 def _compose_in_alex_voice(issue: str) -> Optional[str]:
@@ -10110,7 +10223,7 @@ def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
     )
 
 
-def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False) -> Dict:
+def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
     """Build system message with anti-repetition context from conversation history.
 
     When kid_mode is True (a chat-only child, e.g. Vilda on the iPad), Blue drops
@@ -10220,7 +10333,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{facts_preamble}\n\n"
             f"{now_block}\n\n"
             f"{schedule_section}"
-            "You are Blue, a friendly home assistant. Keep responses brief and natural.\n"
+            f"{_robot_cfg(robot)['persona_line']}\n"
             "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
             "Reply in the SAME language the person just used, and switch languages "
             "whenever they do. Keep your reply entirely in that one language.\n"
@@ -10251,8 +10364,9 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False) -> Dict:
-    """Process conversation with tool support."""
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue") -> Dict:
+    """Process conversation with tool support. `robot` selects which persona is
+    speaking (Blue by default; "hexia" for her chat page)."""
     conversation_messages = messages.copy()
 
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
@@ -10275,13 +10389,13 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # build_dynamic_system_message(kid_mode=...). Computed here because it also
     # gates the adult "perspective" colouring and shapes the speaker note below.
     _is_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
-    system_msg = build_dynamic_system_message(conversation_messages, facts_preamble, kid_mode=_is_kid)
+    system_msg = build_dynamic_system_message(conversation_messages, facts_preamble, kid_mode=_is_kid, robot=robot)
     # Color Blue's default voice with his own evolving perspective profile.
     # (The 'write as Alex' short-circuit below returns before this matters, so
     # this only shapes Blue speaking as himself.) Skip it on the kids' iPad —
     # Alex's worldview profile isn't the voice we want with an 8-year-old.
     try:
-        _bn = _blue_voice_note()
+        _bn = _voice_note(robot)
         if _bn and not _is_kid and isinstance(system_msg, dict):
             system_msg = {"role": "system", "content": (system_msg.get("content", "") + _bn)}
     except Exception:
@@ -12180,7 +12294,7 @@ CHAT_HTML = """
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Chat with Blue</title>
+    <title>Chat with {{ robot_name }}</title>
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
@@ -12620,7 +12734,7 @@ CHAT_HTML = """
 
             busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
             const thinking = addBubble('blue', '');
-            thinking.querySelector('.bubble').innerHTML = '<span class="typing">Blue is thinking…</span>';
+            thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + ' is thinking…</span>';
             setFaceState('thinking');
 
             try {
@@ -12631,7 +12745,7 @@ CHAT_HTML = """
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
-                    body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn })
+                    body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -12655,6 +12769,10 @@ CHAT_HTML = """
         // Voice-first for Vilda's iPad: replies are read out loud and the mic is
         // big. The mic uses the browser's speech recognition, which Safari only
         // allows over a secure (https) connection — hence the Tailscale setup.
+        // Which robot this page is — Blue (/chat) or Hexia (/hexia). Drives the
+        // chat target, the accent colour, the spoken voice and which head moves.
+        const ROBOT = {{ robot_json|safe }};
+        try { if (ROBOT.accent) document.documentElement.style.setProperty('--blue', ROBOT.accent); } catch (e) {}
         const isVilda = blueDeviceTag() === 'ipad';
         let speakOn = isVilda;
         let audioPrimed = false;
@@ -12673,13 +12791,22 @@ CHAT_HTML = """
         // exists (Blue is a man). Greek on iOS only ships a female voice.
         function pickVoice(lang) {
             const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
-            const prefs = {
+            // Blue prefers a male voice; Hexia (ROBOT.preferFemale) a female one.
+            const malePrefs = {
                 en: ['Daniel', 'Aaron', 'Arthur', 'Gordon', 'Rishi', 'Fred', 'Albert', 'Microsoft David', 'Microsoft Mark', 'Google UK English Male', 'Google US English'],
                 fr: ['Thomas', 'Nicolas', 'Microsoft Claude', 'Microsoft Paul', 'Google fran\\u00e7ais'],
                 ru: ['Yuri', 'Microsoft Pavel', 'Google \\u0440\\u0443\\u0441\\u0441\\u043a\\u0438\\u0439'],
                 el: ['Melina', 'Microsoft Stefanos'],
                 da: ['Magnus', 'Sara', 'Microsoft Helle']
             };
+            const femalePrefs = {
+                en: ['Samantha', 'Victoria', 'Karen', 'Moira', 'Tessa', 'Serena', 'Microsoft Zira', 'Google UK English Female', 'Google US English'],
+                fr: ['Amelie', 'Audrey', 'Virginie', 'Aurelie', 'Microsoft Julie', 'Google fran\\u00e7ais'],
+                ru: ['Milena', 'Katya', 'Microsoft Irina', 'Google \\u0440\\u0443\\u0441\\u0441\\u043a\\u0438\\u0439'],
+                el: ['Melina', 'Microsoft Stefanos'],
+                da: ['Sara', 'Microsoft Helle']
+            };
+            const prefs = (ROBOT && ROBOT.preferFemale) ? femalePrefs : malePrefs;
             const pl = prefs[lang] || prefs.en;
             for (let i = 0; i < pl.length; i++) {
                 const v = voices.find(x => x.name === pl[i] || x.name.indexOf(pl[i]) === 0);
@@ -12773,8 +12900,8 @@ CHAT_HTML = """
                 if (!v || (v.lang || '').toLowerCase().indexOf(lang) !== 0) v = pickVoice(lang);
                 if (v) u.voice = v;
                 u.lang = bcp;
-                u.rate = isVilda ? 0.95 : 1.0;
-                u.pitch = 1.0;
+                u.rate = (isVilda ? 0.95 : 1.0) * ((ROBOT && ROBOT.voiceRate) || 1.0);
+                u.pitch = (ROBOT && ROBOT.voicePitch) || 1.0;
                 // Make Blue "talk" while he reads aloud. On Vilda's iPad this
                 // moves the ON-SCREEN face's mouth (the physical robot must stay
                 // still for her); on Alex's devices the on-screen face doesn't
@@ -12785,13 +12912,13 @@ CHAT_HTML = """
                 u.onstart = function () {
                     setFaceState('talking');
                     if (!isVilda) {
-                        try { fetch('/head/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
+                        try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
                     }
                 };
                 const _spokenDone = function () {
                     setFaceState('');
                     if (!isVilda) {
-                        try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+                        try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
                     }
                 };
                 u.onend = _spokenDone;
@@ -12804,7 +12931,7 @@ CHAT_HTML = """
         // would keep flapping until the next speech start. Make sure to stop.
         window.addEventListener('pagehide', function () {
             if (isVilda) return;   // her iPad never drives the head; nothing to stop
-            try { navigator.sendBeacon && navigator.sendBeacon('/head/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
+            try { navigator.sendBeacon && navigator.sendBeacon('/head/' + ROBOT.head + '/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
         });
 
         if ('speechSynthesis' in window) {
@@ -13645,9 +13772,11 @@ def stt():
             pass
 
 
-@app.route('/chat', methods=['GET'])
-def chat_page():
-    """Serve the text chat GUI."""
+def _render_chat_page(robot="blue"):
+    """Serve a robot's text chat GUI (Blue at /chat, Hexia at /hexia). The same
+    CHAT_HTML template is parametrised per robot: name, accent, voice and which
+    head its lip-sync drives."""
+    cfg = _robot_cfg(robot)
     # No-cache headers: iOS Safari was serving a stale cached copy of this page,
     # so new client fixes never reached the iPad. Force a fresh fetch each time.
     kid = False
@@ -13656,15 +13785,39 @@ def chat_page():
     except Exception:
         pass
     try:
-        hf_sens = float(blue_head.get_calibration().get("hf_sensitivity", 5))
+        hf_sens = float(blue_head.get_head(robot).get_calibration().get("hf_sensitivity", 5))
     except Exception:
         hf_sens = 5.0
-    html = render_template_string(CHAT_HTML, kid=kid, hf_sens=hf_sens)
+    robot_js = {
+        "id": robot,
+        "name": cfg["name"],
+        "head": cfg["head"],
+        "accent": cfg["accent"],
+        "voicePitch": cfg.get("voice_pitch", 1.0),
+        "voiceRate": cfg.get("voice_rate", 1.0),
+        "preferFemale": bool(cfg.get("voice_prefer_female", False)),
+    }
+    html = render_template_string(
+        CHAT_HTML, kid=kid, hf_sens=hf_sens,
+        robot_name=cfg["name"], robot_json=json.dumps(robot_js),
+    )
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
     })
+
+
+@app.route('/chat', methods=['GET'])
+def chat_page():
+    """Serve Blue's text chat GUI."""
+    return _render_chat_page("blue")
+
+
+@app.route('/hexia', methods=['GET'])
+def hexia_chat_page():
+    """Serve Hexia's text chat GUI — her own persona, voice and head."""
+    return _render_chat_page("hexia")
 
 
 # ============================================================================
@@ -14118,82 +14271,101 @@ def head_page():
     })
 
 
+# All head routes are robot-aware: the bare path (/head/lip-seq) drives Blue for
+# back-compat; the /head/<robot>/... variant (e.g. /head/hexia/lip-seq) drives a
+# named head. `blue_head.get_head(name)` returns the right RobotHead (Blue for
+# any unknown name). A head with no connected board is a graceful no-op.
 @app.route('/head/state', methods=['GET'])
-def head_state():
-    return jsonify(blue_head.get_calibration())
+@app.route('/head/<robot>/state', methods=['GET'])
+def head_state(robot='blue'):
+    return jsonify(blue_head.get_head(robot).get_calibration())
 
 
 @app.route('/head/move', methods=['POST'])
-def head_move():
+@app.route('/head/<robot>/move', methods=['POST'])
+def head_move(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     motor = int(d.get('motor', -1))
     pos = float(d.get('pos', blue_head._DEFAULT_CENTER))
     speed = float(d.get('speed', 7))
-    ok = blue_head.move_raw(motor, pos, speed)
+    ok = h.move_raw(motor, pos, speed)
     return jsonify({"ok": bool(ok)})
 
 
 @app.route('/head/calibrate', methods=['POST'])
-def head_calibrate():
+@app.route('/head/<robot>/calibrate', methods=['POST'])
+def head_calibrate(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     motor = int(d.get('motor', -1))
     pos = float(d.get('pos', blue_head._DEFAULT_CENTER))
-    ok = blue_head.set_center(motor, pos)
-    return jsonify({"ok": bool(ok), "centers": blue_head.get_calibration()["centers"]})
+    ok = h.set_center(motor, pos)
+    return jsonify({"ok": bool(ok), "centers": h.get_calibration()["centers"]})
 
 
 @app.route('/head/eye-color', methods=['POST'])
-def head_color():
+@app.route('/head/<robot>/eye-color', methods=['POST'])
+def head_color(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    ok = blue_head.eye_color(int(d.get('r', 0)), int(d.get('g', 0)), int(d.get('b', 0)))
+    ok = h.eye_color(int(d.get('r', 0)), int(d.get('g', 0)), int(d.get('b', 0)))
     return jsonify({"ok": bool(ok)})
 
 
 @app.route('/head/action', methods=['POST'])
-def head_action():
+@app.route('/head/<robot>/action', methods=['POST'])
+def head_action(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     action = (d.get('action') or '').lower().strip()
     times = int(d.get('times') or 2)
     ok = False
     if action.startswith('look_'):
-        ok = blue_head.look(action[len('look_'):])
+        ok = h.look(action[len('look_'):])
     elif action == 'nod_yes':
-        ok = blue_head.nod_yes(times)
+        ok = h.nod_yes(times)
     elif action == 'shake_no':
-        ok = blue_head.shake_no(times)
+        ok = h.shake_no(times)
     elif action == 'blink':
-        ok = blue_head.blink(times)
+        ok = h.blink(times)
     elif action in ('happy', 'sad', 'surprised', 'curious', 'neutral', 'wink'):
-        ok = blue_head.expression(action)
+        ok = h.expression(action)
     return jsonify({"ok": bool(ok), "action": action})
 
 
 @app.route('/head/auto', methods=['POST'])
-def head_auto():
+@app.route('/head/<robot>/auto', methods=['POST'])
+def head_auto(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    blue_head.auto_enable(bool(d.get('enabled', False)))
-    return jsonify({"ok": True, "auto_movement": blue_head.auto_enabled()})
+    h.auto_enable(bool(d.get('enabled', False)))
+    return jsonify({"ok": True, "auto_movement": h.auto_enabled()})
 
 
 @app.route('/head/lip', methods=['POST'])
-def head_lip():
-    """Start or stop the lip-flap loop. Called by Alex's chat page during speech.
+@app.route('/head/<robot>/lip', methods=['POST'])
+def head_lip(robot='blue'):
+    """Start or stop the lip-flap loop. Called by the chat page during speech.
     Chat-only users (Vilda's iPad) are blocked upstream by
     _restrict_chat_only_users — the robot stays still while Blue talks to her."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     if bool(d.get('on', False)):
-        blue_head.lip_start()
+        h.lip_start()
     else:
-        blue_head.lip_stop()
-    return jsonify({"ok": True, "lip_active": blue_head.lip_is_active()})
+        h.lip_stop()
+    return jsonify({"ok": True, "lip_active": h.lip_is_active()})
 
 
 @app.route('/head/lip-seq', methods=['POST'])
-def head_lip_seq():
+@app.route('/head/<robot>/lip-seq', methods=['POST'])
+def head_lip_seq(robot='blue'):
     """Play a timed mouth schedule the browser built from the reply text, so
     the jaw moves during words and CLOSES during pauses (realistic lip-sync).
     Each frame is [openness 0-1, hold_seconds]. Chat-only users (Vilda's iPad)
     are blocked upstream — Blue doesn't move the robot when talking to her."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     raw = d.get('frames') or []
     frames = []
@@ -14206,63 +14378,76 @@ def head_lip_seq():
             continue
     if not frames:
         return jsonify({"ok": False, "error": "no frames"}), 400
-    blue_head.lip_play_sequence(frames)
+    h.lip_play_sequence(frames)
     return jsonify({"ok": True, "frames": len(frames)})
 
 
 @app.route('/head/reset', methods=['POST'])
-def head_reset():
-    return jsonify({"ok": bool(blue_head.reset())})
+@app.route('/head/<robot>/reset', methods=['POST'])
+def head_reset(robot='blue'):
+    return jsonify({"ok": bool(blue_head.get_head(robot).reset())})
 
 
 @app.route('/head/restore-defaults', methods=['POST'])
-def head_restore_defaults():
+@app.route('/head/<robot>/restore-defaults', methods=['POST'])
+def head_restore_defaults(robot='blue'):
+    h = blue_head.get_head(robot)
     for m, c in blue_head._DEFAULT_CENTERS.items():
-        blue_head.set_center(m, c)
-    blue_head.reset()
-    return jsonify({"ok": True, "centers": blue_head.get_calibration()["centers"]})
+        h.set_center(m, c)
+    h.reset()
+    return jsonify({"ok": True, "centers": h.get_calibration()["centers"]})
 
 
 @app.route('/head/reconnect', methods=['POST'])
-def head_reconnect():
-    ok = blue_head.reconnect()
-    return jsonify({"ok": bool(ok), "available": blue_head.is_available()})
+@app.route('/head/<robot>/reconnect', methods=['POST'])
+def head_reconnect(robot='blue'):
+    h = blue_head.get_head(robot)
+    ok = h.reconnect()
+    return jsonify({"ok": bool(ok), "available": h.is_available()})
 
 
 @app.route('/head/expression', methods=['POST'])
-def head_expression_apply():
+@app.route('/head/<robot>/expression', methods=['POST'])
+def head_expression_apply(robot='blue'):
     """Apply a named expression (built-in or custom)."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    return jsonify({"ok": bool(blue_head.apply_expression(d.get('name', ''))),
+    return jsonify({"ok": bool(h.apply_expression(d.get('name', ''))),
                     "name": d.get('name', '')})
 
 
 @app.route('/head/expression-save', methods=['POST'])
-def head_expression_save():
+@app.route('/head/<robot>/expression-save', methods=['POST'])
+def head_expression_save(robot='blue'):
     """Save a named pose. If `positions` is omitted, captures the current pose."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     name = (d.get('name') or '').strip()
     positions = d.get('positions') or None
     if positions is not None and not isinstance(positions, dict):
         return jsonify({"ok": False, "error": "positions must be an object"}), 400
-    ok = blue_head.save_expression(name, positions)
+    ok = h.save_expression(name, positions)
     if not ok:
         return jsonify({"ok": False, "error": "empty name or collides with a built-in"}), 400
-    return jsonify({"ok": True, "expressions": blue_head.list_expressions()})
+    return jsonify({"ok": True, "expressions": h.list_expressions()})
 
 
 @app.route('/head/expression-delete', methods=['POST'])
-def head_expression_delete():
+@app.route('/head/<robot>/expression-delete', methods=['POST'])
+def head_expression_delete(robot='blue'):
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    ok = blue_head.delete_expression((d.get('name') or '').strip())
-    return jsonify({"ok": bool(ok), "expressions": blue_head.list_expressions()})
+    ok = h.delete_expression((d.get('name') or '').strip())
+    return jsonify({"ok": bool(ok), "expressions": h.list_expressions()})
 
 
 @app.route('/head/demo', methods=['POST'])
-def head_demo():
+@app.route('/head/<robot>/demo', methods=['POST'])
+def head_demo(robot='blue'):
     """Run through every built-in motion + expression once so the user can
     verify everything works."""
     import time as _t, threading as _th
+    h = blue_head.get_head(robot)
     sequence = [
         ("action", "look_left"), ("action", "look_right"),
         ("action", "look_up"), ("action", "look_down"), ("action", "look_center"),
@@ -14277,19 +14462,19 @@ def head_demo():
             for kind, name in sequence:
                 if kind == "action":
                     if name.startswith("look_"):
-                        blue_head.look(name[len("look_"):])
+                        h.look(name[len("look_"):])
                     elif name == "nod_yes":
-                        blue_head.nod_yes(2)
+                        h.nod_yes(2)
                     elif name == "shake_no":
-                        blue_head.shake_no(2)
+                        h.shake_no(2)
                     elif name == "blink":
-                        blue_head.blink(1)
+                        h.blink(1)
                     elif name == "wink":
-                        blue_head.expression("wink")
+                        h.expression("wink")
                 else:
-                    blue_head.expression(name)
+                    h.expression(name)
                 _t.sleep(1.4)
-            blue_head.reset()
+            h.reset()
         except Exception as e:
             log.warning(f"[HEAD] demo error: {e}")
     _th.Thread(target=_run, daemon=True).start()
@@ -14297,48 +14482,173 @@ def head_demo():
 
 
 @app.route('/head/idle-config', methods=['POST'])
-def head_idle_config():
+@app.route('/head/<robot>/idle-config', methods=['POST'])
+def head_idle_config(robot='blue'):
     """Tune the idle loop: frequency (0-10) and amplitude (0-10). Persisted."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    blue_head.set_idle_params(frequency=d.get('frequency'), amplitude=d.get('amplitude'))
-    cal = blue_head.get_calibration()
+    h.set_idle_params(frequency=d.get('frequency'), amplitude=d.get('amplitude'))
+    cal = h.get_calibration()
     return jsonify({"ok": True, "idle_frequency": cal["idle_frequency"], "idle_amplitude": cal["idle_amplitude"]})
 
 
 @app.route('/head/hf-config', methods=['POST'])
-def head_hf_config():
+@app.route('/head/<robot>/hf-config', methods=['POST'])
+def head_hf_config(robot='blue'):
     """Set hands-free wake-word sensitivity (0-10). Chat pages pick up the new
     value at next load (the /chat HTML embeds it as a Jinja-rendered constant)."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    blue_head.set_hf_sensitivity(d.get('sensitivity'))
-    return jsonify({"ok": True, "hf_sensitivity": blue_head.get_calibration()["hf_sensitivity"]})
+    h.set_hf_sensitivity(d.get('sensitivity'))
+    return jsonify({"ok": True, "hf_sensitivity": h.get_calibration()["hf_sensitivity"]})
 
 
 @app.route('/head/lip-config', methods=['POST'])
-def head_lip_config():
+@app.route('/head/<robot>/lip-config', methods=['POST'])
+def head_lip_config(robot='blue'):
     """Flip the polarity of either lip motor. Hardware varies between Ohbot
     units; the GUI exposes a checkbox per lip so the user can find the
     combination that opens and closes the mouth."""
+    h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
-    blue_head.set_lip_invert(top=d.get('invert_top'), bottom=d.get('invert_bottom'))
-    cal = blue_head.get_calibration()
+    h.set_lip_invert(top=d.get('invert_top'), bottom=d.get('invert_bottom'))
+    cal = h.get_calibration()
     return jsonify({"ok": True, "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"]})
 
 
 @app.route('/head/lip-test', methods=['POST'])
-def head_lip_test():
+@app.route('/head/<robot>/lip-test', methods=['POST'])
+def head_lip_test(robot='blue'):
     """Run the lip flap for ~4 seconds so the user can calibrate polarity
-    without having to make Blue speak."""
+    without having to make the robot speak."""
     import time as _t, threading as _th
+    h = blue_head.get_head(robot)
     def _run():
         try:
-            blue_head.lip_start()
+            h.lip_start()
             _t.sleep(4.0)
-            blue_head.lip_stop()
+            h.lip_stop()
         except Exception as e:
             log.warning(f"[HEAD] lip-test error: {e}")
     _th.Thread(target=_run, daemon=True).start()
     return jsonify({"ok": True})
+
+
+HEADS_HTML = """
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Heads &mdash; Setup</title>
+<style>
+ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#faf8f4;color:#1a2e1a;max-width:780px;margin:0 auto;padding:28px 20px;line-height:1.55}
+ h1{font-size:1.55em;margin-bottom:4px}
+ p.sub{color:#64748b;margin-bottom:18px;font-size:.95em}
+ table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.92em}
+ th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e3e0d8;vertical-align:top}
+ th{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#4a6b4a}
+ .ok{color:#2e7d32;font-weight:600}.no{color:#9aa0a6}
+ .pill{display:inline-block;padding:2px 9px;border-radius:11px;font-size:.8em}
+ .pill.blue{background:#e3f0ff;color:#1b63b0}.pill.hexia{background:#f1e6fb;color:#7a3fb0}
+ button{padding:6px 11px;border:1px solid #cfc9bd;border-radius:7px;background:#fff;cursor:pointer;font:inherit;font-size:.88em;margin:2px 6px 2px 0}
+ button:hover{background:#f3f0e9}button:disabled{opacity:.4;cursor:default}
+ button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
+ #msg{margin:12px 0;padding:10px 12px;border-radius:8px;display:none}
+ #msg.show{display:block}
+ #msg.good{background:#eaf5ea;color:#23611f}#msg.bad{background:#f7ece9;color:#7a2e22}
+ code{background:#f0ede6;padding:1px 5px;border-radius:4px;font-size:.9em}
+</style></head><body>
+<h1>Robot Heads</h1>
+<p class="sub">Blue and Hexia each drive their own Ohbot board over USB. Plug a board in, click <b>Refresh</b>, then assign it. Assignments are pinned by the board's USB serial number, so they survive reboots and COM-port renumbering. The Ohbot desktop app must be closed (it holds the port).</p>
+<div id="msg"></div>
+<button class="primary" id="refresh">Refresh</button>
+<table><thead><tr><th>Port</th><th>USB serial</th><th>Ohbot?</th><th>Assigned&nbsp;to</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table>
+<p class="sub">Tip: a board showing <b>Ohbot? &#10007;</b> that you know is a robot usually means the port is busy &mdash; close the Ohbot app (or whatever is holding it) and Refresh. A board with no USB serial can't be pinned.</p>
+<script>
+function show(t, good){ const m=document.getElementById('msg'); m.textContent=t; m.className='show '+(good?'good':'bad'); }
+async function load(){
+  let d;
+  try { d = await (await fetch('/heads/detect')).json(); }
+  catch(e){ return show('Could not read boards: '+e, false); }
+  const rows = document.getElementById('rows'); rows.innerHTML='';
+  const boards = d.boards||[];
+  if(!boards.length){ rows.innerHTML='<tr><td colspan="5" class="no">No serial boards found. Plug one in and Refresh.</td></tr>'; return; }
+  boards.forEach(b=>{
+    const tr=document.createElement('tr');
+    const assigned = b.held_by
+       ? '<span class="pill '+b.held_by+'">'+b.held_by+' (live)</span>'
+       : (b.assigned_to ? '<span class="pill '+b.assigned_to+'">'+b.assigned_to+'</span>' : '<span class="no">&mdash;</span>');
+    const okmark = b.ohbot_compatible ? '<span class="ok">&#10003;</span>' : '<span class="no">&#10007;</span>';
+    tr.innerHTML =
+      '<td><code>'+b.device+'</code><br><span class="no">'+(b.description||'')+'</span></td>'+
+      '<td>'+(b.serial_number?('<code>'+b.serial_number+'</code>'):'<span class="no">none</span>')+'</td>'+
+      '<td>'+okmark+'</td>'+
+      '<td>'+assigned+'</td>'+
+      '<td class="acts"></td>';
+    const acts = tr.querySelector('.acts');
+    ['blue','hexia'].forEach(role=>{
+      const btn=document.createElement('button');
+      btn.textContent='\\u2192 '+role.charAt(0).toUpperCase()+role.slice(1);
+      btn.disabled = !b.serial_number;
+      btn.addEventListener('click', ()=>assign(b.serial_number, role));
+      acts.appendChild(btn);
+    });
+    rows.appendChild(tr);
+  });
+}
+async function assign(serial, role){
+  if(!serial){ return show("That board has no USB serial number, so it can't be pinned.", false); }
+  show('Assigning to '+role+'\\u2026', true);
+  try{
+    const d = await (await fetch('/heads/assign',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({role:role, serial_number:serial})})).json();
+    if(d.ok){ show(role.charAt(0).toUpperCase()+role.slice(1)+' assigned '+(d.available?'and connected \\u2713':'(board not responding \\u2014 is the Ohbot app closed?)')+'.', !!d.available); }
+    else { show('Failed: '+(d.error||'unknown'), false); }
+  }catch(e){ show('Request failed: '+e, false); }
+  load();
+}
+document.getElementById('refresh').addEventListener('click', load);
+load();
+</script></body></html>
+"""
+
+
+@app.route('/heads', methods=['GET'])
+def heads_page():
+    """Setup UI: list connected boards and assign each to a robot (Blue/Hexia)."""
+    return Response(render_template_string(HEADS_HTML), headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    })
+
+
+@app.route('/heads/detect', methods=['GET'])
+def heads_detect():
+    """JSON: every serial board, whether it answers the Ohbot handshake, and
+    which robot it's pinned to. Used by the /heads setup page."""
+    return jsonify(blue_head.detect_boards())
+
+
+@app.route('/heads/assign', methods=['POST'])
+def heads_assign():
+    """Pin a board (by USB serial number) to a robot role, then reconnect that
+    head so the change takes effect immediately."""
+    d = request.get_json(silent=True) or {}
+    role = (d.get('role') or '').strip().lower()
+    serial = (d.get('serial_number') or '').strip()
+    if role not in ROBOTS:
+        return jsonify({"ok": False, "error": "unknown robot role"}), 400
+    if not serial:
+        return jsonify({"ok": False, "error": "missing serial_number"}), 400
+    blue_head.assign_board(role, serial)
+    h = blue_head.get_head(role)
+    try:
+        h.reconnect()
+    except Exception as e:
+        log.warning(f"[HEADS] reconnect after assign failed: {e}")
+    return jsonify({
+        "ok": True,
+        "role": role,
+        "available": bool(h.is_available()),
+        "detect": blue_head.detect_boards(),
+    })
 
 
 @app.route('/chat/attach', methods=['POST'])
@@ -16011,8 +16321,10 @@ def _sanitize_inbound_messages(messages: list) -> list:
 
 
 def save_conversation_to_db(user_name: str, role: str, content: str,
-                            session_id: str = None, tool_used: str = None):
-    """Save a conversation message to the database for long-term memory"""
+                            session_id: str = None, tool_used: str = None,
+                            robot: str = "blue"):
+    """Save a conversation message to the database for long-term memory.
+    `robot` namespaces the recent-history thread (Blue vs Hexia)."""
     # Determine importance based on length and content
     importance = 5  # Default
     if len(content) > 500:
@@ -16029,6 +16341,7 @@ def save_conversation_to_db(user_name: str, role: str, content: str,
                 content=content,
                 session_id=session_id,
                 importance=importance,
+                robot=robot,
             )
         except Exception as e:
             log.warning(f"Enhanced memory log failed: {e}")
@@ -16169,10 +16482,16 @@ def chat_completions():
         # fewer tokens generate faster (so Blue starts talking sooner) and are
         # nicer to listen to. The chat page sets this flag for voice messages.
         voice_turn = bool(data.get("voice"))
+        # Which robot is being addressed? Blue's page omits this and defaults to
+        # Blue; Hexia's page sends "hexia". Drives persona, voice, head and the
+        # per-robot conversation history.
+        robot = (data.get("robot") or "blue").strip().lower()
+        if robot not in ROBOTS:
+            robot = "blue"
 
         print(f"")
         print(f"{'='*60}")
-        print(f"[MSG] Received request from Ohbot{' (voice)' if voice_turn else ''}")
+        print(f"[MSG] Received request for {ROBOTS[robot]['name']}{' (voice)' if voice_turn else ''}")
 
         # Who's chatting? Determined by the device the request came from
         # (see _identify_user_from_request): the iPad is Vilda; the MacBook,
@@ -16197,7 +16516,8 @@ def chat_completions():
             import threading
             threading.Thread(
                 target=save_conversation_to_db,
-                args=(user_name, "user", last_user_msg, None),
+                args=(user_name, "user", last_user_msg),
+                kwargs={"session_id": None, "robot": robot},
                 daemon=True
             ).start()
 
@@ -16238,7 +16558,7 @@ def chat_completions():
                 if ENHANCED_MEMORY_AVAILABLE and memory_system:
                     should_inject = memory_system.should_inject_context(messages)
                     if should_inject:
-                        historical_context = memory_system.build_context(messages, user_name=user_name)
+                        historical_context = memory_system.build_context(messages, user_name=user_name, robot=robot)
                         if historical_context:
                             print(f"   [MEMORY] ✓ Injecting {len(historical_context)} messages (semantic + recent)")
                             messages = _splice_context_after_system(messages, historical_context)
@@ -16252,7 +16572,7 @@ def chat_completions():
         import time as _t_llm
         _llm_t0 = _t_llm.time()
         response = process_with_tools(messages, _pre_selection=_quick_result,
-                                      user_name=user_name, voice=voice_turn)
+                                      user_name=user_name, voice=voice_turn, robot=robot)
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
 
@@ -16283,7 +16603,7 @@ def chat_completions():
             # from real reminder rows, never from the model's guesses.
             # Never lead Vilda's replies with the schedule briefing / reminder
             # alerts — Blue doesn't discuss the calendar with the kids' iPad.
-            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS:
+            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS and robot == "blue":
                 _proactive_parts = []
                 try:
                     _briefing = blue_proactive.daily_briefing_if_due()
@@ -16307,7 +16627,8 @@ def chat_completions():
                     user_name=user_name,
                     role="assistant",
                     content=final_content,
-                    session_id=None
+                    session_id=None,
+                    robot=robot,
                 )
                 
                 # AUTO-SAVE LEARNED FACTS & CONSOLIDATE (background thread to avoid blocking response)

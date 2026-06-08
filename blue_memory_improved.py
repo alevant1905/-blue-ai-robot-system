@@ -234,7 +234,8 @@ class EnhancedMemorySystem:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 session_id TEXT,
-                importance INTEGER DEFAULT 5
+                importance INTEGER DEFAULT 5,
+                robot TEXT DEFAULT 'blue'
             )
         """)
 
@@ -303,11 +304,19 @@ class EnhancedMemorySystem:
             "WHERE first_seen IS NULL OR first_seen = ''"
         )
 
+        # Migrate: add the per-robot column so Hexia (the second robot) keeps her
+        # own recent-conversation history while sharing facts/memories with Blue.
+        # Existing rows default to 'blue', so Blue's history is unaffected.
+        existing_conv_cols = {row[1] for row in c.execute("PRAGMA table_info(conversation_log)").fetchall()}
+        if "robot" not in existing_conv_cols:
+            c.execute("ALTER TABLE conversation_log ADD COLUMN robot TEXT DEFAULT 'blue'")
+
         # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_mem_type ON memories(type)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_mem_importance ON memories(importance DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_conv_ts ON conversation_log(timestamp DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversation_log(user_name)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_robot ON conversation_log(robot)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_facts_confidence ON facts(confidence DESC)")
 
         conn.commit()
@@ -1499,7 +1508,7 @@ class EnhancedMemorySystem:
         """
         return True
 
-    def build_context(self, messages: list, user_name: str = "Alex") -> List[Dict[str, str]]:
+    def build_context(self, messages: list, user_name: str = "Alex", robot: str = "blue") -> List[Dict[str, str]]:
         """Build context messages to inject, combining core facts, semantic
         search, and recent (truly recent) conversation history.
 
@@ -1633,7 +1642,7 @@ class EnhancedMemorySystem:
 
         # 3) Recent conversation history — only if it's actually recent.
         #    Old code dumped 6 random old messages, which was just noise.
-        recent = self._get_relevant_recent_history(user_name, user_msg, limit=8)
+        recent = self._get_relevant_recent_history(user_name, user_msg, limit=8, robot=robot)
         if recent:
             now = datetime.now()
             history_lines = []
@@ -2083,7 +2092,7 @@ class EnhancedMemorySystem:
         return any(marker in c for marker in cls._ASSISTANT_REFUSAL_MARKERS)
 
     def _get_relevant_recent_history(
-        self, user_name: str, user_msg: str, limit: int = 8
+        self, user_name: str, user_msg: str, limit: int = 8, robot: str = "blue"
     ) -> List[Dict[str, Any]]:
         """Return recent conversation history that is BOTH fresh and useful.
 
@@ -2101,11 +2110,11 @@ class EnhancedMemorySystem:
             rows = conn.execute(
                 """
                 SELECT role, content, timestamp FROM conversation_log
-                WHERE user_name = ? AND timestamp >= ?
+                WHERE user_name = ? AND robot = ? AND timestamp >= ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (user_name, cutoff, limit * 3),  # over-fetch then filter
+                (user_name, (robot or "blue"), cutoff, limit * 3),  # over-fetch then filter
             ).fetchall()
             conn.close()
         except Exception:
@@ -2562,13 +2571,15 @@ class EnhancedMemorySystem:
     # ------------------------------------------------------------------ Conversation logging
 
     def log_conversation(self, user_name: str, role: str, content: str,
-                         session_id: str = None, importance: int = 5):
-        """Log a conversation message for context building."""
+                         session_id: str = None, importance: int = 5,
+                         robot: str = "blue"):
+        """Log a conversation message for context building. `robot` namespaces
+        the recent-history thread so Blue and Hexia don't cross-contaminate."""
         conn = self._conn()
         conn.execute("""
-            INSERT INTO conversation_log (timestamp, user_name, role, content, session_id, importance)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (datetime.now().isoformat(), user_name, role, content, session_id, importance))
+            INSERT INTO conversation_log (timestamp, user_name, role, content, session_id, importance, robot)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (datetime.now().isoformat(), user_name, role, content, session_id, importance, (robot or "blue")))
         conn.commit()
         conn.close()
 
