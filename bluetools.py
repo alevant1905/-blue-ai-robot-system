@@ -12448,6 +12448,7 @@ CHAT_HTML = """
             <canvas id="eyeCanvas" style="display:none"></canvas>
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
+            <div id="buildTag" style="text-align:center;font-size:0.66em;color:#c9c9c9;margin-top:6px;letter-spacing:0.03em">build 0608</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
             <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
         </div>
@@ -13429,8 +13430,8 @@ CHAT_HTML = """
 
             function eyeStart() {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    addBubble('blue', 'This tablet will not let me use the camera.');
-                    return Promise.reject('unsupported');
+                    addBubble('blue', "I can't use the camera here. Make sure you opened me at my secure https web address \\u2014 the same one the microphone needs.");
+                    return Promise.reject(new Error('no-getUserMedia'));
                 }
                 // getUserMedia must fire inside the tap gesture on iOS.
                 return navigator.mediaDevices.getUserMedia({ video: { facingMode: eyeFacing }, audio: false })
@@ -13475,22 +13476,35 @@ CHAT_HTML = """
 
             // Tap the eye = "Blue, look!" Starts the camera the first time, grabs
             // a frame, then sends a turn so Blue reacts to what he sees right now.
+            // Turns the eye pink the INSTANT it's tapped (so a tap is always
+            // visibly registered even before the camera opens), and surfaces ANY
+            // camera error as a chat bubble so a silent failure can't look like
+            // "nothing happened". Note: only gated on eyeBusy, not the chat's
+            // `busy`, so a slow reply can't make the eye feel dead.
             function eyeLook() {
-                if (eyeBusy || busy) return;
+                if (eyeBusy) return;
                 eyeBusy = true;
+                eyeBtn.classList.add('active');
                 primeAudio();
                 const go = eyeStream ? Promise.resolve() : eyeStart();
                 go.then(function () {
                     const durl = eyeCapture();
-                    if (!durl) return Promise.reject('no-frame');
+                    if (!durl) return Promise.reject(new Error('no-frame'));
                     return eyeUpload(durl);
                 }).then(function () {
                     if (!inputEl.value.trim()) inputEl.value = 'Look, Blue!';
                     send();
                 }).catch(function (e) {
-                    if (e && (e.name === 'NotAllowedError' || e.name === 'NotFoundError')) {
-                        addBubble('blue', 'I need permission to use the camera. Tap the eye again and choose Allow.');
+                    const nm = (e && e.name && e.name !== 'Error') ? e.name
+                             : ((e && e.message) ? e.message : String(e));
+                    if (nm === 'NotAllowedError' || nm === 'SecurityError') {
+                        addBubble('blue', "I'm not allowed to use the camera yet. Tap the eye and choose Allow \\u2014 a grown-up may need to switch the Camera on in Settings (Screen Time).");
+                    } else if (nm === 'NotFoundError') {
+                        addBubble('blue', "I can't find a camera on this tablet.");
+                    } else {
+                        addBubble('blue', 'My eyes would not open just now (' + nm + '). Tap the eye to try again.');
                     }
+                    eyeStop();
                 }).then(function () { eyeBusy = false; }, function () { eyeBusy = false; });
             }
 
@@ -13505,6 +13519,10 @@ CHAT_HTML = """
             window.addEventListener('pagehide', function () { eyeStop(); });
         }
 
+        // Build marker: if the page shows "build 0608 · js ok" the newest script
+        // ran end-to-end; "build 0608" alone => script died before here (or the
+        // panel HTML is missing); no marker at all => the iPad is on a cached page.
+        try { var _bt = document.getElementById('buildTag'); if (_bt) _bt.textContent = 'build 0608 \\u00b7 js ok'; } catch (e) {}
         inputEl.focus();
     </script>
 </body>
