@@ -300,6 +300,57 @@ def search(query: str, max_results: int = 3, folders=None) -> List[Dict]:
         return []
 
 
+def _filename_where(filenames):
+    """ChromaDB metadata filter scoping a query to specific documents (by
+    filename), or None for no scoping."""
+    fl = [f for f in (filenames or []) if f]
+    if not fl:
+        return None
+    return {"filename": fl[0]} if len(fl) == 1 else {"filename": {"$in": fl}}
+
+
+def search_in_documents(query: str, filenames, max_results: int = 6) -> List[Dict]:
+    """Semantic search scoped to specific library documents (by filename).
+
+    Unlike search(), this does NOT deduplicate to one chunk per document, so a
+    single selected document can contribute several relevant passages. Returns
+    up to max_results chunks, each: filename, filepath, folder, content, score,
+    chunk_index, total_chunks."""
+    collection = _get_collection()
+    if collection is None or collection.count() == 0:
+        return []
+    where = _filename_where(filenames)
+    if where is None:
+        return []
+    try:
+        n_results = min(max(int(max_results), 1), collection.count())
+        results = collection.query(
+            query_texts=[query],
+            n_results=n_results,
+            where=where,
+            include=["documents", "metadatas", "distances"],
+        )
+        if not results or not results.get("documents") or not results["documents"][0]:
+            return []
+        out = []
+        for doc_text, meta, dist in zip(
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
+        ):
+            out.append({
+                "filename": meta.get("filename", ""),
+                "filepath": meta.get("filepath", ""),
+                "folder": meta.get("folder", ""),
+                "content": doc_text,
+                "score": 1.0 - dist,
+                "chunk_index": meta.get("chunk_index"),
+                "total_chunks": meta.get("total_chunks"),
+            })
+        return out
+    except Exception as e:
+        print(f"   [RAG] search_in_documents error: {e}")
+        return []
+
+
 def search_expertise(
     query: str, max_chunks: int = 8, max_per_doc: int = 3, folders=None
 ) -> List[Dict]:

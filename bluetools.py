@@ -13858,6 +13858,12 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <input type="text" id="roleHexia" placeholder="Hexia's role / perspective (optional) — e.g. a sceptical detective">
 </div>
 <div class="controls">
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:5px">
+  <span>Library sources (optional) — Ctrl/Cmd-click to choose documents they should draw on</span>
+  <select id="sources" multiple size="5" style="font:inherit;padding:6px;border:1px solid #cfc9bd;border-radius:8px"></select>
+ </label>
+</div>
+<div class="controls">
  <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option></select>
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
@@ -13867,6 +13873,13 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <div id="log"></div>
 <script>
 const ROBOTS = {{ robots_json|safe }};
+const DOCS = {{ documents_json|safe }};
+(function(){ var sel=document.getElementById('sources'); if(!sel) return;
+  var byF={}; DOCS.forEach(function(d){ var f=d.folder||'(root)'; (byF[f]=byF[f]||[]).push(d.filename); });
+  Object.keys(byF).forEach(function(f){ var og=document.createElement('optgroup'); og.label=f;
+    byF[f].forEach(function(fn){ var o=document.createElement('option'); o.value=fn; o.textContent=fn; og.appendChild(o); });
+    sel.appendChild(og); }); })();
+function SOURCES(){ var sel=document.getElementById('sources'); return sel?Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;}):[]; }
 let running=false, history=[];
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
@@ -13912,7 +13925,7 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history, roles:{blue:(document.getElementById('roleBlue').value||'').trim(), hexia:(document.getElementById('roleHexia').value||'').trim()}})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history, sources:SOURCES(), roles:{blue:(document.getElementById('roleBlue').value||'').trim(), hexia:(document.getElementById('roleHexia').value||'').trim()}})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
@@ -13944,10 +13957,31 @@ def _duet_robots_js():
     return json.dumps(out)
 
 
+def _duet_documents():
+    """Library documents (filename + folder) for the duet source picker —
+    excludes camera captures; de-duplicated by filename, sorted by folder/name."""
+    out, seen = [], set()
+    try:
+        for d in load_document_index().get('documents', []):
+            if d.get('doc_type') == 'camera' or str(d.get('filename', '')).startswith('camera_'):
+                continue
+            fn = (d.get('filename') or '').strip()
+            if not fn or fn in seen:
+                continue
+            seen.add(fn)
+            out.append({"filename": fn, "folder": _safe_rel_folder(d.get('folder', '')) or ""})
+    except Exception:
+        pass
+    out.sort(key=lambda x: (x["folder"].lower(), x["filename"].lower()))
+    return out
+
+
 @app.route('/duet', methods=['GET'])
 def duet_page():
     """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
-    return Response(render_template_string(DUET_HTML, robots_json=_duet_robots_js()), headers={
+    return Response(render_template_string(
+        DUET_HTML, robots_json=_duet_robots_js(), documents_json=json.dumps(_duet_documents()),
+    ), headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     })
 
@@ -13967,67 +14001,99 @@ def duet_turn():
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
     role_other = (roles.get(other) or '').strip()
+    sources = [str(s).strip() for s in (d.get('sources') or []) if str(s).strip()]
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
-    # System prompt. When a role is assigned, the ROLE drives the content — so we
-    # drop the long self-profile (it keeps pulling them back to their default
-    # opinions and to agreeable small talk) and keep only the short persona line
-    # for voice/identity. The role is stated as the top instruction.
+    focused = bool(has_roles or topic or sources)
+
+    # SYSTEM: identity + voice + global rules only. The TASK for this turn (topic,
+    # role, sources, "answer their last point, no greetings") goes in the USER
+    # message below — this model follows the user instruction far more reliably
+    # than anything buried in a long system prompt. For a focused discussion we
+    # also drop the long self-profile, which otherwise pulls them into personal
+    # small talk and off the subject; plain chats keep it for colour.
     sys_p = sp["persona_line"]
-    if role_self:
-        sys_p += (
-            f"\n\nROLE-PLAY — this is your most important instruction. In this conversation you are "
-            f"playing a role / arguing a perspective. Commit to it fully and consistently, even if it is "
-            f"NOT your own real opinion; do not break from it or drift onto other topics. Keep "
-            f"{sp['name']}'s natural voice and manner, but the SUBSTANCE of what you say must serve this "
-            f"role:\n>>> {role_self} <<<"
-        )
-    else:
+    if not focused:
         sys_p += _voice_note(speaker)
     sys_p += (
-        f"\n\nYou are talking with {ot['name']}, another robot in Alex's home and your friend. "
-        + ("This is a spirited debate / role-play — actually engage their position and press your own; "
-           "do NOT simply agree or wander off the point. "
-           if has_roles else "Keep it warm and conversational. ")
-        + "Do NOT narrate actions or stage directions, do NOT prefix your own name, and don't repeat "
-        + "what was already said."
+        f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
+        "loud, taking turns. Reply with ONLY your own next spoken line: 1 to 3 short, natural sentences "
+        "in your own voice. Never narrate actions or stage directions, never prefix your name, and don't "
+        "repeat what was already said."
     )
-    if role_other:
-        sys_p += f"\n\n(For context, {ot['name']} is playing this role / perspective: {role_other}.)"
-    # Render the conversation so far as plain text inside ONE user message.
-    # (Mapping each past turn to a user/assistant ROLE breaks when this speaker
-    # started the duet: their own line becomes an assistant turn that appears
-    # before any user turn, which the chat template rejects — it returns empty.
-    # A single [system, user] call is always valid.)
+
+    # Library grounding: passages from the chosen documents, relevant to the topic
+    # + what was just said. Handed to the speaker in the USER turn (not system).
+    ground_block = ""
+    if sources:
+        try:
+            from blue.tools.rag import search_in_documents as _rag_in_docs
+            recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+            query = f"{topic} {recent_q}".strip() or topic or "discussion"
+            chunks = _rag_in_docs(query, sources, max_results=6)
+            ground_block = "\n\n".join(
+                f"From \"{c['filename']}\": {(c.get('content') or '').strip()}"
+                for c in chunks if (c.get('content') or '').strip()
+            )[:2600]
+        except Exception as e:
+            log.warning(f"[DUET] source grounding failed: {e}")
+
+    # Conversation so far as plain text. (A single [system, user] call is always
+    # valid; mapping turns to roles breaks when the speaker started the duet.)
     lines = []
-    for h in history[-16:]:
+    for h in history[-6:]:  # recent context only — keeps the prompt tight and the directive prominent
         sp_id = (h.get('speaker') or '').strip().lower()
         txt = (h.get('text') or '').strip()
         if not txt:
             continue
         nm = _robot_cfg(sp_id)["name"] if sp_id in ROBOTS else (sp_id or "?")
         lines.append(f"{nm}: {txt}")
-    # Repeat the stance in the per-turn instruction so it stays front-of-mind.
-    stance = f" Stay firmly in your assigned role and keep arguing it: {role_self}." if role_self else ""
+
+    # USER: assemble this turn's task from whatever was provided.
+    parts = []
+    if ground_block:
+        parts.append(
+            "LIBRARY SOURCES — passages from Alex's library; ground your point in them and quote or "
+            "paraphrase specifics, but don't invent facts beyond them:\n\n" + ground_block)
+    if role_self:
+        parts.append(
+            f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
+            f"(keep your own voice): {role_self}")
+    if role_other:
+        parts.append(f"{ot['name']}'s role: {role_other}.")
     if lines:
-        if topic and has_roles:
-            head = f"You and {ot['name']} are debating: {topic}.\n\n"
-        elif topic:
-            head = f"You and {ot['name']} are chatting about: {topic}.\n\n"
-        else:
-            head = f"You and {ot['name']} are talking.\n\n"
-        user_content = (
-            head + "Conversation so far:\n" + "\n".join(lines)
-            + f"\n\nReply with {sp['name']}'s next line only — 1 to 3 short, natural sentences, in character."
-            + stance
-        )
+        parts.append("Conversation so far:\n" + "\n".join(lines))
+
+    if topic and has_roles:
+        subject = f"debating {topic}"
+    elif topic:
+        subject = f"discussing {topic}"
+    elif sources:
+        subject = "discussing the library sources"
+    elif has_roles:
+        subject = "staying in your assigned role"
     else:
-        opener = (f" a debate about {topic}" if (topic and has_roles)
-                  else (f" chatting about {topic}" if topic else " chatting"))
-        user_content = (
-            f"{ot['name']} comes over to start{opener}. Open as {sp['name']} — 1 to 3 short, natural "
-            f"sentences, in character." + stance
-        )
+        subject = ""
+    if lines:
+        directive = f"Now give {sp['name']}'s next line: a substantive reply to {ot['name']}'s last point"
+        if subject:
+            directive += f", keeping the conversation on track ({subject})"
+        directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
+                      "talk or asking after each other; that breaks the discussion.")
+        if ground_block:
+            directive += " Build on a specific idea from the sources above."
+        if role_self:
+            directive += " Stay firmly in your role."
+    else:
+        kind = ("Open the debate" if has_roles else
+                ("Kick off the discussion" if focused else "Start the chat"))
+        directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
+        if ground_block:
+            directive += " Make a specific point drawing on the sources."
+    parts.append(directive
+                 + f" Reply with ONLY {sp['name']}'s next spoken line — 1 to 3 short sentences, in character.")
+
+    user_content = "\n\n".join(parts)
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
     # These are reasoning models: the budget must cover the <think> pass PLUS the
     # short reply (170 tokens got entirely consumed by thinking → empty content).
