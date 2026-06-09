@@ -13847,6 +13847,12 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  .turn.hexia{align-self:flex-end;background:#f4ecfc;border:1px solid #e6d6f7}
  .turn.hexia .who{color:var(--hexiac)}
  .turn.speaking{box-shadow:0 0 0 2px currentColor}
+ .srcbox{border:1px solid #cfc9bd;border-radius:8px;padding:8px;max-height:180px;overflow:auto;background:#fff;font-size:.9em}
+ .srcbox .fold{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:#4a6b4a;margin:7px 0 3px;font-weight:600}
+ .srcbox .fold:first-child{margin-top:0}
+ .srcbox label{display:flex;gap:7px;align-items:flex-start;padding:3px 0;cursor:pointer}
+ .srcbox input{margin-top:3px;flex:none}
+ .srccount{font-size:.8em;color:#64748b}
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
 <p class="sub">Give them a topic, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
@@ -13858,14 +13864,14 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <input type="text" id="roleHexia" placeholder="Hexia's role / perspective (optional) — e.g. a sceptical detective">
 </div>
 <div class="controls">
- <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:5px">
-  <span>Blue draws on (optional) — Ctrl/Cmd-click documents</span>
-  <select id="sourcesBlue" multiple size="5" style="font:inherit;padding:6px;border:1px solid #cfe4fb;border-radius:8px"></select>
- </label>
- <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:5px">
-  <span>Hexia draws on (optional) — Ctrl/Cmd-click documents</span>
-  <select id="sourcesHexia" multiple size="5" style="font:inherit;padding:6px;border:1px solid #e6d6f7;border-radius:8px"></select>
- </label>
+ <div style="flex:1;display:flex;flex-direction:column;gap:5px">
+  <span class="muted">Blue draws on — tick any number (<span class="srccount" id="cntBlue">0</span> selected)</span>
+  <div id="sourcesBlue" class="srcbox" style="border-color:#cfe4fb"></div>
+ </div>
+ <div style="flex:1;display:flex;flex-direction:column;gap:5px">
+  <span class="muted">Hexia draws on — tick any number (<span class="srccount" id="cntHexia">0</span> selected)</span>
+  <div id="sourcesHexia" class="srcbox" style="border-color:#e6d6f7"></div>
+ </div>
 </div>
 <div class="controls">
  <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option></select>
@@ -13880,12 +13886,26 @@ const ROBOTS = {{ robots_json|safe }};
 const DOCS = {{ documents_json|safe }};
 (function(){
   var byF={}; DOCS.forEach(function(d){ var f=d.folder||'(root)'; (byF[f]=byF[f]||[]).push(d.filename); });
-  ['sourcesBlue','sourcesHexia'].forEach(function(id){ var sel=document.getElementById(id); if(!sel) return;
-    Object.keys(byF).forEach(function(f){ var og=document.createElement('optgroup'); og.label=f;
-      byF[f].forEach(function(fn){ var o=document.createElement('option'); o.value=fn; o.textContent=fn; og.appendChild(o); });
-      sel.appendChild(og); }); });
+  var counts={sourcesBlue:'cntBlue', sourcesHexia:'cntHexia'};
+  ['sourcesBlue','sourcesHexia'].forEach(function(id){
+    var box=document.getElementById(id); if(!box) return;
+    Object.keys(byF).forEach(function(f){
+      var h=document.createElement('div'); h.className='fold'; h.textContent=f; box.appendChild(h);
+      byF[f].forEach(function(fn){
+        var lab=document.createElement('label');
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.value=fn;
+        var sp=document.createElement('span'); sp.textContent=fn;
+        lab.appendChild(cb); lab.appendChild(sp); box.appendChild(lab);
+      });
+    });
+    box.addEventListener('change', function(){
+      var n=box.querySelectorAll('input:checked').length;
+      var c=document.getElementById(counts[id]); if(c) c.textContent=n;
+    });
+  });
 })();
-function selVals(id){ var sel=document.getElementById(id); return sel?Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;}):[]; }
+function selVals(id){ var box=document.getElementById(id); if(!box) return [];
+  return Array.prototype.slice.call(box.querySelectorAll('input:checked')).map(function(c){return c.value;}); }
 function SOURCES(){ return { blue: selVals('sourcesBlue'), hexia: selVals('sourcesHexia') }; }
 let running=false, history=[];
 const logEl=document.getElementById('log');
