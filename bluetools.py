@@ -13831,7 +13831,7 @@ HEAD_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Blue's Head — Tuning</title>
+    <title>{{ head_robot_name }}'s Head — Tuning</title>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
     <style>
         :root { --cream:#faf8f4; --paper:#fff; --ink:#1a2e1a; --forest:#4a6b4a; --sage:#8fae8f; --slate:#64748b; --line:rgba(143,174,143,0.32); --shadow:0 8px 24px rgba(26,46,26,0.06); }
@@ -13890,7 +13890,7 @@ HEAD_HTML = """<!DOCTYPE html>
 <body>
 <div class="wrap">
     <div class="head">
-        <h1>Blue's Head — Tuning</h1>
+        <h1>{{ head_robot_name }}'s Head — Tuning</h1>
         <a href="/">← Home</a>
     </div>
 
@@ -13941,7 +13941,7 @@ HEAD_HTML = """<!DOCTYPE html>
         <h2>Expression &amp; motion</h2>
         <div class="actions" id="actBox"></div>
         <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);">
-            <div class="sub" style="margin-bottom:8px;">Your saved poses. Move Blue with the pads or sliders into a pose, then save it.</div>
+            <div class="sub" style="margin-bottom:8px;">Your saved poses. Move {{ head_robot_name }} with the pads or sliders into a pose, then save it.</div>
             <div class="chip-row" id="customExpr"></div>
             <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
                 <button class="btn primary" id="savePoseBtn">Save current pose as…</button>
@@ -13952,7 +13952,7 @@ HEAD_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>Hands-free sensitivity</h2>
-        <div class="sub">How easily the ear button on the chat page wakes Blue. <b>Low</b> = strict (fewer false triggers, may miss soft speech). <b>High</b> = sensitive (catches quiet talkers, may trigger on background noise). After changing, reload the chat page for it to take effect.</div>
+        <div class="sub">How easily the ear button on the chat page wakes {{ head_robot_name }}. <b>Low</b> = strict (fewer false triggers, may miss soft speech). <b>High</b> = sensitive (catches quiet talkers, may trigger on background noise). After changing, reload the chat page for it to take effect.</div>
         <div class="row" style="grid-template-columns: 130px 1fr 56px;">
             <span class="name">Sensitivity</span>
             <input type="range" id="hfSens" min="0" max="10" step="0.5" value="5">
@@ -13962,7 +13962,7 @@ HEAD_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>Lip-sync polarity</h2>
-        <div class="sub">If when Blue talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
+        <div class="sub">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
         <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
         <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
         <div style="margin-top:12px;"><button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button></div>
@@ -13986,14 +13986,21 @@ const COLOURS = [
   ['Orange',10,5,0,'#fb923c'], ['Warm white',10,8,6,'#f9e3c2']
 ];
 
+// Which head this page tunes — "blue" (/head) or "hexia" (/head/hexia). Every
+// /head/* control is rewritten to that head's robot-scoped route.
+const HEAD_ROBOT = "{{ head_robot }}";
+function _hurl(url) {
+    return (typeof url === 'string' && url.indexOf('/head/') === 0)
+        ? ('/head/' + HEAD_ROBOT + url.slice(5)) : url;
+}
 async function postJSON(url, body) {
     try {
-        const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+        const r = await fetch(_hurl(url), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
         return await r.json().catch(() => null);
     } catch (e) { return null; }
 }
 async function getJSON(url) {
-    try { const r = await fetch(url); return await r.json(); } catch (e) { return null; }
+    try { const r = await fetch(_hurl(url)); return await r.json(); } catch (e) { return null; }
 }
 
 function buildMotors(centers) {
@@ -14262,13 +14269,30 @@ loadState();
 </html>"""
 
 
-@app.route('/head', methods=['GET'])
-def head_page():
-    """Serve the head tuning GUI. Chat-only users (Vilda) are bounced here by
-    _restrict_chat_only_users before this handler runs."""
-    return Response(render_template_string(HEAD_HTML), headers={
+def _render_head_page(robot="blue"):
+    """Serve the head-tuning GUI for a robot (Blue at /head, Hexia at
+    /head/hexia). Same HEAD_HTML; every control targets this robot's head."""
+    cfg = _robot_cfg(robot)
+    return Response(render_template_string(
+        HEAD_HTML, head_robot=(robot if robot in ROBOTS else "blue"),
+        head_robot_name=cfg["name"],
+    ), headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     })
+
+
+@app.route('/head', methods=['GET'])
+def head_page():
+    """Serve Blue's head tuning GUI. Chat-only users (Vilda) are bounced here by
+    _restrict_chat_only_users before this handler runs."""
+    return _render_head_page("blue")
+
+
+@app.route('/head/<robot>', methods=['GET'])
+def head_page_robot(robot):
+    """Per-robot head tuning GUI (e.g. /head/hexia). Static /head/<verb> routes
+    (state, move, …) out-rank this, so only real robot names land here."""
+    return _render_head_page(robot)
 
 
 # All head routes are robot-aware: the bare path (/head/lip-seq) drives Blue for
