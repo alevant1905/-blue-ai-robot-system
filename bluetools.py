@@ -13941,12 +13941,26 @@ function addTurn(cfg,text){ const d=document.createElement('div'); d.className='
 function speakAs(cfg,text,el){ return new Promise(resolve=>{
   const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
   const frames=buildLipFrames(text, cfg.voiceRate||1.0);
-  let done=false; const finish=()=>{ if(done)return; done=true; headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
+  let done=false, keepAlive=null;
+  const finish=()=>{ if(done)return; done=true; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
   if(el)el.classList.add('speaking'); headLip(cfg,frames);
-  if(!useTTS){ const dur=frames.reduce((s,f)=>s+f[1],0)*1000+250; setTimeout(finish, Math.min(20000,dur)); return; }
-  try{ window.speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(cleanForSpeech(text));
+  if(!useTTS){ setTimeout(finish, Math.max(1500, est+400)); return; }   // no audio: wait out the lip-flap
+  try{
+    window.speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(cleanForSpeech(text));
     const v=pickVoice(cfg); if(v)u.voice=v; u.rate=cfg.voiceRate||1.0; u.pitch=cfg.voicePitch||1.0; u.lang='en-US';
-    u.onend=finish; u.onerror=finish; window.speechSynthesis.speak(u); setTimeout(finish,22000);
+    u.onend=finish; u.onerror=finish;
+    window.speechSynthesis.speak(u);
+    // Chrome silently stops utterances after ~15s; pause+resume keeps long
+    // points going to the end instead of cutting the speaker off.
+    keepAlive=setInterval(function(){
+      if(!window.speechSynthesis.speaking){ if(keepAlive){clearInterval(keepAlive);keepAlive=null;} }
+      else { try{ window.speechSynthesis.pause(); window.speechSynthesis.resume(); }catch(e){} }
+    }, 9000);
+    // Hard safety so a stuck utterance can't hang the duet — generous and
+    // length-based so it never fires before a normal reply finishes.
+    setTimeout(finish, Math.max(20000, est*2.2 + 8000));
   }catch(e){ finish(); }
 }); }
 
