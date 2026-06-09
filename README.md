@@ -2,9 +2,53 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-11.0.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
+[![Version](https://img.shields.io/badge/version-12.0.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
 
-A comprehensive personal assistant AI system with advanced capabilities, smart home integration, and productivity tools.
+A pair of **local, private AI robot companions** — **Blue** and **Hexia** — that you can chat with, that drive real physical robot heads, and that can hold steerable conversations *with each other*. Built on a modular assistant platform with calendar, email, smart‑home, document, and recognition tools. Everything runs on your own machine — the language model, their memory, and your documents never leave the house.
+
+## 🤖 Blue & Hexia — two robots, one home
+
+The system runs **two AI companions on the same computer**:
+
+- **Blue** — calm, curious, and thoughtful; the original companion.
+- **Hexia** — Blue's playful, witty friend (an Ohbot **Xyloh** head).
+
+Each robot:
+
+- has its **own personality, voice, and conversation history**, while **sharing** the household facts and the document library;
+- can drive its **own physical Ohbot head** over USB — calibrated lip‑sync, expressions, and lifelike idle motion (two boards run at once, pinned by USB serial number so each robot keeps its own face);
+- works fully in the browser even with **no head connected** (head actions become graceful no‑ops until a board is assigned).
+
+### 🎭 Duet mode — let them talk to each other
+
+Open **`/duet`** and Blue and Hexia hold a spoken, turn‑by‑turn conversation, each in its own voice and moving its own head. You direct it:
+
+- **Topic** — what they discuss.
+- **Role / perspective** (per robot) — give each a stance to argue or a character to play, for a real debate.
+- **Tone** (per robot) — e.g. *dry and sardonic*, *bubbly and dramatic*.
+- **Slang / dialect** (per robot) — e.g. *1920s gangster slang*, *Gen Z slang*.
+- **Library sources** (per robot) — tick which documents **each** robot draws on, so they reason from **different** sources and reach genuinely different conclusions (grounded in your library via local RAG).
+- **Length** — a set number of turns, or **“until I stop.”**
+
+### 🧠 Memory & library
+
+- **Shared world, own self** — both robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
+- **Document library + RAG** — drop files in and they're indexed for semantic search; both chat and duet can ground their answers in them.
+
+### 🖥️ Web interfaces
+
+All reachable from the home hub at `http://localhost:5000/`:
+
+| Page | What it's for |
+|------|----------------|
+| `/chat` · `/hexia` | Chat with Blue / Hexia (text + voice, image & file sharing) |
+| `/duet` | Blue & Hexia converse — topic, roles, tone, slang, per‑robot sources |
+| `/head` · `/head/hexia` | Calibrate each robot's motion, expressions and lip‑sync |
+| `/heads` | Detect and assign each robot's Ohbot board (by USB serial) |
+| `/documents` | The shared document library they read and search |
+| `/calendar` · `/contacts` · `/visual` · `/perspective` | Reminders, address book, recognised faces/places, worldview |
+
+> Physical heads use [Ohbot](https://www.ohbot.co.uk/) hardware over USB via the `ohbot` Python library; the Ohbot desktop app must be closed so the server can use the serial port.
 
 ## 🌟 Features
 
@@ -328,6 +372,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 [![Star History Chart](https://api.star-history.com/svg?repos=alevant1905/blue-ai-robot-system&type=Date)](https://star-history.com/#alevant1905/blue-ai-robot-system&Date)
 
 ## 🔖 Version History
+
+### v12.0.0 (2026-06-09) - Two Robots & Duet Mode
+- Added **Hexia**, a second AI robot with her own persona, voice, head and chat page (`/hexia`)
+- **Multi-board head control** — Blue and Hexia drive separate Ohbot heads at the same time, pinned by USB serial number
+- Added **Duet mode** (`/duet`) — Blue & Hexia converse with per-robot **role/perspective, tone, slang, and library sources**, for a set number of turns or **until you stop**
+- **Per-robot library grounding** in duet via local RAG (each robot can draw on different documents)
+- Home **hub** linking every interface; per-robot head calibration (`/head/hexia`) and board setup (`/heads`)
+- "Shared world, own self" memory: shared household facts + library, separate per-robot conversation history
 
 ### v11.0.0 (2025-12-10) - Gmail Enhanced
 - Added email templates with variables

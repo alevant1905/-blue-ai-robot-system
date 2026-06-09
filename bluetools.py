@@ -12636,7 +12636,7 @@ CHAT_HTML = """
             if (emptyEl) emptyEl.style.display = 'none';
             const row = document.createElement('div');
             row.className = 'row ' + (role === 'user' ? 'user' : 'blue');
-            let inner = '<div class="who">' + (role === 'user' ? 'You' : 'Blue') + '</div>';
+            let inner = '<div class="who">' + (role === 'user' ? 'You' : ROBOT.name) + '</div>';
             let body = esc(text);
             if (attachments && attachments.length) {
                 body += attachments.map(a => '<span class="att">[' + esc(a.name) + ']</span>').join(' ');
@@ -17328,6 +17328,13 @@ def index():
             .tile .arrow {{ margin-top: 12px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest); }}
             .foot {{ text-align: center; color: var(--slate); font-family: 'IBM Plex Mono', monospace;
                 font-size: 0.72em; margin-top: 34px; letter-spacing: 0.04em; }}
+            .about {{ max-width: 760px; margin: 34px auto 0; background: var(--paper); border: 1px solid var(--line);
+                border-radius: 14px; padding: 24px 28px; box-shadow: var(--shadow); text-align: left; }}
+            .about h2 {{ font-family: 'Playfair Display', Georgia, serif; font-size: 1.25em; font-weight: 600; margin: 0 0 12px; }}
+            .about p {{ margin: 0 0 12px; color: #2e3f2e; }}
+            .about p:last-child {{ margin-bottom: 0; }}
+            .about p.lead {{ color: var(--slate); font-size: 1.05em; }}
+            .about b {{ color: var(--ink); font-weight: 600; }}
         </style>
     </head>
     <body>
@@ -17351,6 +17358,13 @@ def index():
                     <span class="chip"><span class="dot"></span>Moods <b>{len(MOOD_PRESETS)}</b></span>
                 </div>
             </div>
+            <section class="about">
+                <h2>What this is</h2>
+                <p class="lead">Two AI robot companions &mdash; <b>Blue</b> and <b>Hexia</b> &mdash; that run entirely on this computer. Nothing leaves the house: the language model, their memory, and your documents all stay local.</p>
+                <p><b>Talk to either of them.</b> Blue is calm and thoughtful; Hexia is his playful, witty friend. Chat by text or voice and share photos or files. They share what they know about the household and the document library, but each has its own personality, voice, and conversation history &mdash; and each can drive its own physical Ohbot head, lip-syncing and making expressions as it speaks.</p>
+                <p><b>Let them talk to each other &mdash; &ldquo;Duet.&rdquo;</b> Give them a topic and watch them go, or direct it: assign each robot a <b>role or perspective</b> to argue, a <b>tone</b>, the <b>slang or dialect</b> it speaks in, and even <b>which library documents each one draws on</b> (so they reason from different sources). Run for a set number of turns, or until you stop.</p>
+                <p><b>Everything else</b> is on the tiles below: calibrating each robot's head, connecting the Ohbot boards, the document library they read and search, the calendar and reminders, contacts, and the people and places they recognise.</p>
+            </section>
             <div class="tiles">
                 <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Blue</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Hexia</h2><p>Talk with Hexia, Blue's playful friend.</p><div class="arrow">Open &rarr;</div></a>
