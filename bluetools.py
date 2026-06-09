@@ -13864,6 +13864,14 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <input type="text" id="roleHexia" placeholder="Hexia's role / perspective (optional) — e.g. a sceptical detective">
 </div>
 <div class="controls">
+ <input type="text" id="toneBlue" placeholder="Blue's tone (optional) — e.g. dry and sardonic">
+ <input type="text" id="toneHexia" placeholder="Hexia's tone (optional) — e.g. bubbly and dramatic">
+</div>
+<div class="controls">
+ <input type="text" id="slangBlue" placeholder="Blue's slang / dialect (optional) — e.g. 1920s slang">
+ <input type="text" id="slangHexia" placeholder="Hexia's slang / dialect (optional) — e.g. Gen Z slang">
+</div>
+<div class="controls">
  <div style="flex:1;display:flex;flex-direction:column;gap:5px">
   <span class="muted">Blue draws on — tick any number (<span class="srccount" id="cntBlue">0</span> selected)</span>
   <div id="sourcesBlue" class="srcbox" style="border-color:#cfe4fb"></div>
@@ -13874,7 +13882,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  </div>
 </div>
 <div class="controls">
- <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option></select>
+ <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option><option value="20">20 turns</option><option value="0">until I stop</option></select>
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
  <button id="stopBtn" disabled>Stop</button>
@@ -13907,6 +13915,7 @@ const DOCS = {{ documents_json|safe }};
 function selVals(id){ var box=document.getElementById(id); if(!box) return [];
   return Array.prototype.slice.call(box.querySelectorAll('input:checked')).map(function(c){return c.value;}); }
 function SOURCES(){ return { blue: selVals('sourcesBlue'), hexia: selVals('sourcesHexia') }; }
+function fieldMap(prefix){ var g=function(id){var e=document.getElementById(id);return e?(e.value||'').trim():'';}; return { blue:g(prefix+'Blue'), hexia:g(prefix+'Hexia') }; }
 let running=false, history=[];
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
@@ -13966,16 +13975,16 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history, sources:SOURCES(), roles:{blue:(document.getElementById('roleBlue').value||'').trim(), hexia:(document.getElementById('roleHexia').value||'').trim()}})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang')})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
 }
 async function run(){
   running=true; history=[]; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
-  const turns=parseInt(document.getElementById('turns').value,10)||6;
+  let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
-  for(let i=0;i<turns && running;i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
+  for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
   stop();
 }
 function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
@@ -14042,6 +14051,10 @@ def duet_turn():
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
     role_other = (roles.get(other) or '').strip()
+    tones = d.get('tones') or {}
+    slangs = d.get('slang') or {}
+    tone_self = (tones.get(speaker) or '').strip() if isinstance(tones, dict) else ''
+    slang_self = (slangs.get(speaker) or '').strip() if isinstance(slangs, dict) else ''
     # Sources are per-robot so Blue and Hexia can draw on DIFFERENT documents
     # (→ different perspectives). Accept a {blue:[...], hexia:[...]} map; a flat
     # list is treated as shared, for back-compat.
@@ -14109,6 +14122,10 @@ def duet_turn():
             f"(keep your own voice): {role_self}")
     if role_other:
         parts.append(f"{ot['name']}'s role: {role_other}.")
+    if tone_self:
+        parts.append(f"TONE — deliver your line in this tone / manner: {tone_self}.")
+    if slang_self:
+        parts.append(f"SLANG / DIALECT — flavour your speech with: {slang_self} (use it naturally and stay understandable).")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
 
@@ -14138,6 +14155,8 @@ def duet_turn():
         directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
         if ground_block:
             directive += " Make a specific point drawing on the sources."
+    if tone_self or slang_self:
+        directive += " Keep to your requested tone and slang throughout."
     parts.append(directive
                  + f" Reply with ONLY {sp['name']}'s next spoken line — 1 to 3 short sentences, in character.")
 
