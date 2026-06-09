@@ -12544,7 +12544,7 @@ CHAT_HTML = """
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
                 </button>
                 <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
-                <button class="iconbtn" id="voiceBtn" title="Choose Blue's voice" aria-label="Choose Blue's voice">
+                <button class="iconbtn" id="voiceBtn" title="Choose {{ robot_name }}'s voice" aria-label="Choose {{ robot_name }}'s voice">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
                 </button>
                 <button class="iconbtn" id="speakBtn" title="Blue reads his answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
@@ -12571,7 +12571,7 @@ CHAT_HTML = """
 
     <div class="voice-panel" id="voicePanel" style="display:none">
         <div class="voice-card">
-            <div class="voice-head"><span>Pick Blue's voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
+            <div class="voice-head"><span>Pick {{ robot_name }}'s voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
             <div class="voice-sub">Tap a voice to hear it. The one with a check mark is the one Blue uses.</div>
             <div class="voice-list" id="voiceList"></div>
         </div>
@@ -12845,7 +12845,7 @@ CHAT_HTML = """
         // The voice Vilda picked (saved per-device), or null if none chosen.
         function chosenVoice() {
             let name = '';
-            try { name = localStorage.getItem('blueVoiceName') || ''; } catch (e) {}
+            try { name = localStorage.getItem('blueVoiceName_' + ROBOT.id) || (ROBOT.id === 'blue' ? (localStorage.getItem('blueVoiceName') || '') : ''); } catch (e) {}
             if (!name) return null;
             const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
             for (let i = 0; i < voices.length; i++) { if (voices[i].name === name) return voices[i]; }
@@ -12968,7 +12968,7 @@ CHAT_HTML = """
             const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
             const supported = voices.filter(voiceLangCode);
             let chosen = '';
-            try { chosen = localStorage.getItem('blueVoiceName') || ''; } catch (e) {}
+            try { chosen = localStorage.getItem('blueVoiceName_' + ROBOT.id) || (ROBOT.id === 'blue' ? (localStorage.getItem('blueVoiceName') || '') : ''); } catch (e) {}
             voiceList.innerHTML = '';
             if (!supported.length) {
                 voiceList.innerHTML = '<div class="voice-empty">No voices are installed on this device yet.</div>';
@@ -12980,7 +12980,7 @@ CHAT_HTML = """
                 row.innerHTML = '<span class="vn">' + esc(v.name) + '</span><span class="vl">' + esc(v.lang) + '</span>';
                 row.addEventListener('click', function () {
                     primeAudio();
-                    try { localStorage.setItem('blueVoiceName', v.name); } catch (e) {}
+                    try { localStorage.setItem('blueVoiceName_' + ROBOT.id, v.name); } catch (e) {}
                     try {
                         window.speechSynthesis.cancel();
                         const code = voiceLangCode(v) || 'en';
@@ -13818,6 +13818,201 @@ def chat_page():
 def hexia_chat_page():
     """Serve Hexia's text chat GUI — her own persona, voice and head."""
     return _render_chat_page("hexia")
+
+
+# ============================ Phase 3: the duet ============================
+# Blue and Hexia hold a short conversation, taking turns. The browser drives it
+# turn-by-turn: it asks /duet/turn for the next line, then speaks it in that
+# robot's voice while driving that robot's head lip-sync, then alternates.
+
+DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blue &amp; Hexia — Let them talk</title>
+<style>
+ :root{ --bluec:#3da9fc; --hexiac:#b06cf0; }
+ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#faf8f4;color:#1a2e1a;max-width:760px;margin:0 auto;padding:26px 18px;line-height:1.5}
+ h1{font-size:1.5em;margin-bottom:4px}
+ p.sub{color:#64748b;margin-bottom:16px;font-size:.95em}
+ .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+ input[type=text]{flex:1;min-width:200px;padding:10px 12px;border:1px solid #cfc9bd;border-radius:8px;font:inherit}
+ select,button{padding:9px 13px;border:1px solid #cfc9bd;border-radius:8px;background:#fff;font:inherit;cursor:pointer}
+ button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
+ button:disabled{opacity:.5;cursor:default}
+ .muted{color:#64748b;font-size:.9em}
+ #log{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+ .turn{padding:10px 14px;border-radius:14px;max-width:84%;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+ .turn .who{font-size:.7em;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-bottom:3px}
+ .turn.blue{align-self:flex-start;background:#eaf4ff;border:1px solid #cfe4fb}
+ .turn.blue .who{color:var(--bluec)}
+ .turn.hexia{align-self:flex-end;background:#f4ecfc;border:1px solid #e6d6f7}
+ .turn.hexia .who{color:var(--hexiac)}
+ .turn.speaking{box-shadow:0 0 0 2px currentColor}
+</style></head><body>
+<h1>Blue &amp; Hexia</h1>
+<p class="sub">Give them something to chat about and watch them go &mdash; each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
+<div class="controls">
+ <input type="text" id="topic" placeholder="A topic (optional) — e.g. what makes a good story">
+ <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option></select>
+ <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
+ <button class="primary" id="startBtn">Start</button>
+ <button id="stopBtn" disabled>Stop</button>
+ <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
+</div>
+<div id="log"></div>
+<script>
+const ROBOTS = {{ robots_json|safe }};
+let running=false, history=[];
+const logEl=document.getElementById('log');
+const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
+
+function cleanForSpeech(t){ return (t||'').replace(/https?:\\/\\/\\S+/g,' a link ').replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu,'').replace(/[*_#>~]/g,'').replace(/\\s+/g,' ').trim(); }
+function buildLipFrames(text, rate){
+  rate=rate||1.0; const k=1.0/rate; const words=(text.match(/[^\\s]+/g)||[]); const frames=[]; const MPC=0.060;
+  for(const w of words){ const core=w.replace(/[^A-Za-z0-9\\u00C0-\\u024F]/g,''); const len=Math.max(1,core.length);
+    const dur=Math.min(0.75,Math.max(0.14,len*MPC))*k; const moves=Math.max(1,Math.round(len/3)); const per=dur/moves;
+    for(let i=0;i<moves;i++){ frames.push([0.6+Math.random()*0.4, per*0.6]); frames.push([0.1, per*0.4]); }
+    const last=w.slice(-1); let gap=0.06; if(/[,;:)\\]]/.test(last))gap=0.22; else if(/[.!?]/.test(last))gap=0.40; frames.push([0.0,gap*k]); }
+  return frames;
+}
+const MALE=['Daniel','Aaron','Arthur','Gordon','Microsoft David','Microsoft Mark','Google UK English Male','Google US English'];
+const FEMALE=['Samantha','Victoria','Karen','Moira','Tessa','Serena','Microsoft Zira','Google UK English Female','Google US English'];
+function pickVoice(cfg){
+  const voices=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
+  let chosen=''; try{ chosen=localStorage.getItem('blueVoiceName_'+cfg.id)||(cfg.id==='blue'?(localStorage.getItem('blueVoiceName')||''):''); }catch(e){}
+  if(chosen){ const c=voices.find(v=>v.name===chosen); if(c)return c; }
+  const pl=cfg.preferFemale?FEMALE:MALE;
+  for(const n of pl){ const v=voices.find(x=>x.name===n||x.name.indexOf(n)===0); if(v)return v; }
+  return voices.find(x=>/^en/i.test(x.lang))||null;
+}
+function headLip(cfg,frames){ try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){} }
+function headLipStop(cfg){ try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){} }
+
+function addTurn(cfg,text){ const d=document.createElement('div'); d.className='turn '+cfg.id;
+  const w=document.createElement('div'); w.className='who'; w.textContent=cfg.name;
+  const x=document.createElement('div'); x.textContent=text; d.appendChild(w); d.appendChild(x);
+  logEl.appendChild(d); window.scrollTo(0,document.body.scrollHeight); return d; }
+
+function speakAs(cfg,text,el){ return new Promise(resolve=>{
+  const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
+  const frames=buildLipFrames(text, cfg.voiceRate||1.0);
+  let done=false; const finish=()=>{ if(done)return; done=true; headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  if(el)el.classList.add('speaking'); headLip(cfg,frames);
+  if(!useTTS){ const dur=frames.reduce((s,f)=>s+f[1],0)*1000+250; setTimeout(finish, Math.min(20000,dur)); return; }
+  try{ window.speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(cleanForSpeech(text));
+    const v=pickVoice(cfg); if(v)u.voice=v; u.rate=cfg.voiceRate||1.0; u.pitch=cfg.voicePitch||1.0; u.lang='en-US';
+    u.onend=finish; u.onerror=finish; window.speechSynthesis.speak(u); setTimeout(finish,22000);
+  }catch(e){ finish(); }
+}); }
+
+async function oneTurn(speaker){
+  const topic=document.getElementById('topic').value.trim();
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history})})).json(); }catch(e){ return false; }
+  if(!d||!d.text){ return false; }
+  const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
+  await speakAs(cfg,d.text,el); return true;
+}
+async function run(){
+  running=true; history=[]; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
+  const turns=parseInt(document.getElementById('turns').value,10)||6;
+  let speaker=document.getElementById('starter').value;
+  for(let i=0;i<turns && running;i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
+  stop();
+}
+function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
+function stop(){ running=false; try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
+startBtn.addEventListener('click', run);
+stopBtn.addEventListener('click', stop);
+if('speechSynthesis' in window){ try{ window.speechSynthesis.onvoiceschanged=function(){ window.speechSynthesis.getVoices(); }; }catch(e){} }
+</script></body></html>"""
+
+
+def _duet_robots_js():
+    out = {}
+    for rid in ("blue", "hexia"):
+        c = _robot_cfg(rid)
+        out[rid] = {
+            "id": rid, "name": c["name"], "head": c["head"], "accent": c["accent"],
+            "voicePitch": c.get("voice_pitch", 1.0), "voiceRate": c.get("voice_rate", 1.0),
+            "preferFemale": bool(c.get("voice_prefer_female", False)),
+        }
+    return json.dumps(out)
+
+
+@app.route('/duet', methods=['GET'])
+def duet_page():
+    """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
+    return Response(render_template_string(DUET_HTML, robots_json=_duet_robots_js()), headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    })
+
+
+@app.route('/duet/turn', methods=['POST'])
+def duet_turn():
+    """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
+    character. The browser calls this alternately and plays each line on the
+    matching head."""
+    d = request.get_json(silent=True) or {}
+    speaker = (d.get('speaker') or 'blue').strip().lower()
+    if speaker not in ROBOTS:
+        speaker = 'blue'
+    other = 'hexia' if speaker == 'blue' else 'blue'
+    topic = (d.get('topic') or '').strip()
+    history = d.get('history') or []
+    sp, ot = _robot_cfg(speaker), _robot_cfg(other)
+    sys_p = (
+        sp["persona_line"]
+        + _voice_note(speaker)
+        + f"\n\nYou are having a relaxed, friendly chat with {ot['name']}, who is also a robot living "
+        + "with Alex's family and is your friend. Stay fully in character. Do NOT narrate actions or "
+        + "stage directions, do NOT prefix your own name, and don't simply repeat what was already said."
+    )
+    # Render the conversation so far as plain text inside ONE user message.
+    # (Mapping each past turn to a user/assistant ROLE breaks when this speaker
+    # started the duet: their own line becomes an assistant turn that appears
+    # before any user turn, which the chat template rejects — it returns empty.
+    # A single [system, user] call is always valid.)
+    lines = []
+    for h in history[-16:]:
+        sp_id = (h.get('speaker') or '').strip().lower()
+        txt = (h.get('text') or '').strip()
+        if not txt:
+            continue
+        nm = _robot_cfg(sp_id)["name"] if sp_id in ROBOTS else (sp_id or "?")
+        lines.append(f"{nm}: {txt}")
+    if lines:
+        user_content = (
+            (f"You and {ot['name']} are chatting about: {topic}.\n\n" if topic
+             else f"You and {ot['name']} are chatting.\n\n")
+            + "Conversation so far:\n" + "\n".join(lines)
+            + f"\n\nReply with {sp['name']}'s next line only — 1 to 3 short, natural sentences, in character."
+        )
+    else:
+        user_content = (
+            f"{ot['name']} comes over to start chatting" + (f" about {topic}" if topic else "")
+            + f". Open the conversation as {sp['name']} — 1 to 3 short, natural sentences, in character."
+        )
+    msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
+    # These are reasoning models: the budget must cover the <think> pass PLUS the
+    # short reply (170 tokens got entirely consumed by thinking → empty content).
+    # Strip any <think> block, and retry once on an empty turn.
+    text = ""
+    for attempt in range(2):
+        try:
+            res = call_llm(msgs, include_tools=False,
+                           temperature=(0.85 if attempt == 0 else 0.6), max_tokens=1500)
+            ch = (res or {}).get('choices') or []
+            cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+            if '</think>' in cand:           # keep only the text after the reasoning block
+                cand = cand.split('</think>')[-1]
+            cand = cand.replace('<think>', '').strip()
+            # Strip a leading "Name:" the model sometimes adds anyway.
+            cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(sp["name"]), '', cand, flags=re.I).strip()
+            if cand:
+                text = cand
+                break
+        except Exception as e:
+            log.warning(f"[DUET] turn attempt {attempt} failed: {e}")
+    return jsonify({"speaker": speaker, "name": sp["name"], "text": text})
 
 
 # ============================================================================
