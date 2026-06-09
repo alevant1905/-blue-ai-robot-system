@@ -12496,11 +12496,11 @@ CHAT_HTML = """
     <div class="container">
         <div class="header">
             {% if kid %}
-            <h1><svg class="robot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 5.4v2.6"/><circle cx="12" cy="4" r="1.4"/><circle cx="9.6" cy="13" r="1.1"/><circle cx="14.4" cy="13" r="1.1"/><path d="M9.8 16.3h4.4"/><path d="M5 12H3.4M19 12h1.6"/></svg> Hi! I'm Blue</h1>
+            <h1><svg class="robot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 5.4v2.6"/><circle cx="12" cy="4" r="1.4"/><circle cx="9.6" cy="13" r="1.1"/><circle cx="14.4" cy="13" r="1.1"/><path d="M9.8 16.3h4.4"/><path d="M5 12H3.4M19 12h1.6"/></svg> Hi! I'm {{ robot_name }}</h1>
             <p>I'm so happy you're here! Tap the big mic and let's talk. &#128153;</p>
             {% else %}
-            <h1>Chat with Blue</h1>
-            <p>Type to talk with Blue, and attach images or documents for him to look at. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
+            <h1>Chat with {{ robot_name }}</h1>
+            <p>Type to talk with {{ robot_name }}, and attach images or documents to share. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/duet">Duet</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
             {% endif %}
         </div>
         {% if kid %}
@@ -17322,7 +17322,7 @@ def index():
                     </svg>
                     <span class="name">Blue<span class="sys">AI Robot System</span></span>
                 </div>
-                <p class="tagline">Your local, private AI companion — conversation, calendar, contacts, and memory, all on your own hardware.</p>
+                <p class="tagline">Blue &amp; Hexia — your local, private AI companions. Chat with each, tune their faces, or let them talk.</p>
                 <div class="status">
                     <span class="chip on"><span class="dot"></span>Service <b>Running</b></span>
                     <span class="chip"><span class="dot"></span>Music <b>{music_status}</b></span>
@@ -17333,12 +17333,17 @@ def index():
                 </div>
             </div>
             <div class="tiles">
-                <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Blue</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Hexia</h2><p>Talk with Hexia, Blue's playful friend.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/duet"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg></div><h2>Let them talk</h2><p>Blue &amp; Hexia converse — set the topic, roles, and library sources.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/calendar"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h2>Calendar</h2><p>Reminders and events, one-off or recurring.</p><div class="arrow">Open &rarr;</div></a>
-                <a class="tile" href="/contacts"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></div><h2>Contacts</h2><p>Blue's address book for email.</p><div class="arrow">Open &rarr;</div></a>
-                <a class="tile" href="/visual"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div><h2>Visual Memory</h2><p>People, places, and things Blue recognizes.</p><div class="arrow">Open &rarr;</div></a>
-                <a class="tile" href="/documents"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h2>Documents</h2><p>The library Blue reads and searches.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/contacts"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></div><h2>Contacts</h2><p>The shared address book for email.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/visual"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div><h2>Visual Memory</h2><p>People, places, and things they recognize.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/documents"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h2>Documents</h2><p>The library Blue &amp; Hexia read and search.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/perspective"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h2>Perspective</h2><p>How Blue understands you — and himself.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/heads"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM2 9h2M2 15h2M20 9h2M20 15h2M9 2v2M15 2v2M9 20v2M15 20v2"/></svg></div><h2>Robot heads</h2><p>Connect and assign each robot's Ohbot board.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/head"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg></div><h2>Tune Blue's head</h2><p>Calibrate Blue's motion, expressions and lip-sync.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/head/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg></div><h2>Tune Hexia's head</h2><p>Calibrate Hexia's motion, expressions and lip-sync.</p><div class="arrow">Open &rarr;</div></a>
             </div>
             <div class="foot">Running locally &middot; 100% on your own hardware</div>
         </div>
