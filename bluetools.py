@@ -13859,8 +13859,12 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 </div>
 <div class="controls">
  <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:5px">
-  <span>Library sources (optional) — Ctrl/Cmd-click to choose documents they should draw on</span>
-  <select id="sources" multiple size="5" style="font:inherit;padding:6px;border:1px solid #cfc9bd;border-radius:8px"></select>
+  <span>Blue draws on (optional) — Ctrl/Cmd-click documents</span>
+  <select id="sourcesBlue" multiple size="5" style="font:inherit;padding:6px;border:1px solid #cfe4fb;border-radius:8px"></select>
+ </label>
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:5px">
+  <span>Hexia draws on (optional) — Ctrl/Cmd-click documents</span>
+  <select id="sourcesHexia" multiple size="5" style="font:inherit;padding:6px;border:1px solid #e6d6f7;border-radius:8px"></select>
  </label>
 </div>
 <div class="controls">
@@ -13874,12 +13878,15 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <script>
 const ROBOTS = {{ robots_json|safe }};
 const DOCS = {{ documents_json|safe }};
-(function(){ var sel=document.getElementById('sources'); if(!sel) return;
+(function(){
   var byF={}; DOCS.forEach(function(d){ var f=d.folder||'(root)'; (byF[f]=byF[f]||[]).push(d.filename); });
-  Object.keys(byF).forEach(function(f){ var og=document.createElement('optgroup'); og.label=f;
-    byF[f].forEach(function(fn){ var o=document.createElement('option'); o.value=fn; o.textContent=fn; og.appendChild(o); });
-    sel.appendChild(og); }); })();
-function SOURCES(){ var sel=document.getElementById('sources'); return sel?Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;}):[]; }
+  ['sourcesBlue','sourcesHexia'].forEach(function(id){ var sel=document.getElementById(id); if(!sel) return;
+    Object.keys(byF).forEach(function(f){ var og=document.createElement('optgroup'); og.label=f;
+      byF[f].forEach(function(fn){ var o=document.createElement('option'); o.value=fn; o.textContent=fn; og.appendChild(o); });
+      sel.appendChild(og); }); });
+})();
+function selVals(id){ var sel=document.getElementById(id); return sel?Array.prototype.map.call(sel.selectedOptions,function(o){return o.value;}):[]; }
+function SOURCES(){ return { blue: selVals('sourcesBlue'), hexia: selVals('sourcesHexia') }; }
 let running=false, history=[];
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
@@ -14001,10 +14008,17 @@ def duet_turn():
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
     role_other = (roles.get(other) or '').strip()
-    sources = [str(s).strip() for s in (d.get('sources') or []) if str(s).strip()]
+    # Sources are per-robot so Blue and Hexia can draw on DIFFERENT documents
+    # (→ different perspectives). Accept a {blue:[...], hexia:[...]} map; a flat
+    # list is treated as shared, for back-compat.
+    sources_in = d.get('sources') or {}
+    if isinstance(sources_in, list):
+        src_self = [str(s).strip() for s in sources_in if str(s).strip()]
+    else:
+        src_self = [str(s).strip() for s in (sources_in.get(speaker) or []) if str(s).strip()]
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
-    focused = bool(has_roles or topic or sources)
+    focused = bool(has_roles or topic or src_self)
 
     # SYSTEM: identity + voice + global rules only. The TASK for this turn (topic,
     # role, sources, "answer their last point, no greetings") goes in the USER
@@ -14025,12 +14039,12 @@ def duet_turn():
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
     ground_block = ""
-    if sources:
+    if src_self:
         try:
             from blue.tools.rag import search_in_documents as _rag_in_docs
             recent_q = " ".join((h.get('text') or '') for h in history[-2:])
             query = f"{topic} {recent_q}".strip() or topic or "discussion"
-            chunks = _rag_in_docs(query, sources, max_results=6)
+            chunks = _rag_in_docs(query, src_self, max_results=6)
             ground_block = "\n\n".join(
                 f"From \"{c['filename']}\": {(c.get('content') or '').strip()}"
                 for c in chunks if (c.get('content') or '').strip()
@@ -14068,8 +14082,8 @@ def duet_turn():
         subject = f"debating {topic}"
     elif topic:
         subject = f"discussing {topic}"
-    elif sources:
-        subject = "discussing the library sources"
+    elif src_self:
+        subject = "discussing your library sources"
     elif has_roles:
         subject = "staying in your assigned role"
     else:
