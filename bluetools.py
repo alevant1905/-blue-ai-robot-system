@@ -14348,21 +14348,58 @@ def duet_turn():
     url_is_video = bool(url_info and url_info.get('kind') == 'video')
     focused = bool(has_roles or topic or src_self or url_text)
 
-    # SYSTEM: identity + voice + global rules only. The TASK for this turn (topic,
-    # role, sources, "answer their last point, no greetings") goes in the USER
-    # message below — this model follows the user instruction far more reliably
-    # than anything buried in a long system prompt. For a focused discussion we
-    # also drop the long self-profile, which otherwise pulls them into personal
-    # small talk and off the subject; plain chats keep it for colour.
-    sys_p = sp["persona_line"]
+    # SYSTEM: identity + memory + voice + global rules. The TASK for this turn
+    # (topic, role, sources, "answer their last point, no greetings") goes in
+    # the USER message below — this model follows the user instruction far more
+    # reliably than anything buried in a long system prompt. For a focused
+    # discussion we drop the long self-profile, which otherwise pulls them into
+    # personal small talk and off the subject; plain chats keep it for colour.
+    #
+    # The duet speaker is the SAME robot as in chat: the ground-truth household
+    # facts (who everyone is) and the current date come first, and the chat
+    # memory stores are consulted below — not a blank stage actor with only a
+    # persona line.
+    sys_p = (build_system_preamble(robot_name=sp["name"])
+             + "\n\n" + _build_now_block()
+             + "\n\n" + sp["persona_line"])
     if not focused:
         sys_p += _voice_note(speaker)
     sys_p += (
         f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
-        "loud, taking turns. Reply with ONLY your own next spoken line: 1 to 3 short, natural sentences "
+        "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
+        "and the household, and everything you remember is real — draw on it naturally when it's "
+        "relevant. Reply with ONLY your own next spoken line: 1 to 3 short, natural sentences "
         "in your own voice. Never narrate actions or stage directions, never prefix your name, and don't "
         "repeat what was already said."
     )
+
+    # Long-term memory, same stores the chat persona draws on: Alex's explicit
+    # "remember this" notes always; plus memories semantically relevant to the
+    # topic and the last couple of turns.
+    try:
+        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+            notes_block = memory_system._build_user_notes_block()
+            if notes_block:
+                sys_p += "\n\n" + notes_block
+            mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
+            if mem_query:
+                _facts_lower = sys_p.lower()
+                mem_lines = []
+                for mem in memory_system.search_memories(mem_query, top_k=4) or []:
+                    if mem.get("type") == "session":
+                        continue
+                    mc = (mem.get("content") or "").strip()
+                    if (not mc or mc.lower()[:40] in _facts_lower
+                            or memory_system._is_junk_memory(
+                                (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
+                        continue
+                    mem_lines.append(f"- {mc[:300]}")
+                if mem_lines:
+                    sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
+                              "conversation — use them naturally if helpful, don't recite them:\n"
+                              + "\n".join(mem_lines) + "\n</relevant_memories>")
+    except Exception as e:
+        log.warning(f"[DUET] memory context failed: {e}")
 
     # Link grounding: the article text / video transcript behind the pasted URL,
     # windowed to the lede + whatever matches the last couple of turns.

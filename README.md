@@ -31,6 +31,8 @@ Open **`/duet`** and Blue and Hexia hold a spoken, turn‑by‑turn conversation
 - **Library sources** (per robot) — tick which documents **each** robot draws on, so they reason from **different** sources and reach genuinely different conclusions (grounded in your library via local RAG).
 - **Length** — a set number of turns, or **“until I stop.”**
 
+The duet speakers are the **same Blue and Hexia as in chat**: each turn carries the household facts (who everyone is), the current date, your explicit “remember this” notes, and memories relevant to the topic — so they speak as themselves, not as blank stage actors.
+
 ### 🧠 Memory & library
 
 - **Shared world, own self** — both robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
@@ -373,6 +375,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 [![Star History Chart](https://api.star-history.com/svg?repos=alevant1905/blue-ai-robot-system&type=Date)](https://star-history.com/#alevant1905/blue-ai-robot-system&Date)
 
 ## 🔖 Version History
+
+### v12.2.0 (2026-06-10) - Duet: same robots as chat
+- Duet speakers now carry their **chat identity**: ground-truth household facts (who everyone is), the current date, Alex's explicit "remember this" notes, and **memories semantically relevant** to the topic and the last turns
+- They're told Alex isn't in the conversation but that everything they remember is real — so they reference the household naturally instead of acting like blank stage characters
 
 ### v12.1.1 (2026-06-10) - Chat: "yes" no longer loses the thread
 - Replying **"yes" / "sure" / "go ahead"** to Blue or Hexia's own offer ("Want me to dig deeper?") now actually continues the thread instead of getting a fresh "Hey! What's on your mind?"
