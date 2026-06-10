@@ -14251,6 +14251,7 @@ def duet_turn():
     has_roles = bool(role_self or role_other)
     url_info = _duet_url_content(url) if url else None
     url_text = (url_info or {}).get('text') or ''
+    url_is_video = bool(url_info and url_info.get('kind') == 'video')
     focused = bool(has_roles or topic or src_self or url_text)
 
     # SYSTEM: identity + voice + global rules only. The TASK for this turn (topic,
@@ -14285,8 +14286,11 @@ def duet_turn():
             recent_q = " ".join((h.get('text') or '') for h in history[-2:])
             query = f"{topic} {recent_q}".strip() or topic or "discussion"
             chunks = _rag_in_docs(query, src_self, max_results=6)
+            # Title without the file extension — if a robot ever names a work it
+            # should sound like a work ("Anti-Oedipus"), not a file ("x.pdf").
+            _title = lambda fn: re.sub(r'\.[A-Za-z0-9]{1,5}$', '', fn or '')
             ground_block = "\n\n".join(
-                f"From \"{c['filename']}\": {(c.get('content') or '').strip()}"
+                f"From \"{_title(c['filename'])}\": {(c.get('content') or '').strip()}"
                 for c in chunks if (c.get('content') or '').strip()
             )[:2600]
         except Exception as e:
@@ -14306,17 +14310,25 @@ def duet_turn():
     # USER: assemble this turn's task from whatever was provided.
     parts = []
     if url_block:
-        what = ("the transcript of a video you both just watched"
-                if url_info.get('kind') == 'video' else "an article you both just read")
         ttl = f" — \"{url_info['title']}\"" if url_info.get('title') else ""
+        head = ("THE VIDEO YOU BOTH JUST WATCHED" if url_is_video
+                else "THE ARTICLE YOU BOTH JUST READ")
+        nono = ("never say 'the transcript', 'the clip's transcript'" if url_is_video
+                else "never say 'the text', 'the passage'")
+        said = "was said or happened in it" if url_is_video else "it says"
         parts.append(
-            f"THE LINK{ttl} — {what}. Ground your points in it: react to, quote or question its "
-            "specifics rather than talking in generalities, and don't invent facts it doesn't "
-            "contain:\n\n" + url_block)
+            f"{head}{ttl}. Discuss it the way friends do afterwards: bring up its specific ideas, "
+            "claims and moments from memory and react honestly, without inventing facts it doesn't "
+            f"contain. Weave it in naturally — {nono}, 'the excerpt', 'the material' or 'it says "
+            f"here'; just say what {said}, and name the {'video' if url_is_video else 'article'} "
+            "itself only when that actually helps:\n\n" + url_block)
     if ground_block:
         parts.append(
-            "LIBRARY SOURCES — passages from Alex's library; ground your point in them and quote or "
-            "paraphrase specifics, but don't invent facts beyond them:\n\n" + ground_block)
+            "FROM YOUR OWN READING — ideas you've absorbed from works you know well. Make their "
+            "specific points and facts as things YOU know and think — don't invent beyond them, and "
+            "never say 'the document', 'the sources', 'the passage', 'the text' or 'my library'; "
+            "name a work or its author only when that genuinely strengthens the point:\n\n"
+            + ground_block)
     if role_self:
         parts.append(
             f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
@@ -14344,7 +14356,7 @@ def duet_turn():
     elif link_name:
         subject = f"discussing {link_name}"
     elif src_self:
-        subject = "discussing your library sources"
+        subject = "discussing the ideas you've been reading about"
     elif has_roles:
         subject = "staying in your assigned role"
     else:
@@ -14356,11 +14368,13 @@ def duet_turn():
         directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
                       "talk or asking after each other; that breaks the discussion.")
         if url_block and ground_block:
-            directive += " Build on something specific from the link and the sources above."
+            directive += (f" Build on one more specific idea from {'the video' if url_is_video else 'the article'}"
+                          " or from your own reading, woven in as your own point — don't cite where it came from.")
         elif url_block:
-            directive += " Engage with a specific point, claim or moment from the link above."
+            directive += (f" Engage with a specific claim, idea or moment from {'the video' if url_is_video else 'the article'}"
+                          " — as your own take, not a citation.")
         elif ground_block:
-            directive += " Build on a specific idea from the sources above."
+            directive += " Build on a specific idea from your own reading — as something you know, not a citation."
         if role_self:
             directive += " Stay firmly in your role."
     else:
@@ -14368,9 +14382,9 @@ def duet_turn():
                 ("Kick off the discussion" if focused else "Start the chat"))
         directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
         if url_block:
-            directive += " Open with your honest reaction to something specific in the link."
+            directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
         elif ground_block:
-            directive += " Make a specific point drawing on the sources."
+            directive += " Make a specific point from your own reading, as something you know."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
     parts.append(directive

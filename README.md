@@ -379,6 +379,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - The link is fetched **once** and cached; every turn is grounded in the lede plus the slice most relevant to the last exchange, so long pages and videos work
 - The page confirms what they "read/watched" (with the real title) before the first turn, and reports unusable links (no captions, paywall, dead URL) instead of starting blind
 - A bare URL typed into the topic box is treated as the link
+- Grounding is woven in **naturally** — they discuss what the video / article / their reading *says* instead of announcing "the transcript", "the text" or "the sources" (works are named only when it helps)
 
 ### v12.0.0 (2026-06-09) - Two Robots & Duet Mode
 - Added **Hexia**, a second AI robot with her own persona, voice, head and chat page (`/hexia`)
