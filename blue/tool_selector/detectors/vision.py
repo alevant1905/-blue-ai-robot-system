@@ -1,5 +1,6 @@
 """Vision and camera intent detector."""
 
+import re
 from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
@@ -211,6 +212,33 @@ class VisionDetector(BaseDetector):
             'what changed', "what's changed", "what's different",
             'what was happening', 'what happened today'
         ]
+
+        # "When did you last see Stella?" / "have you seen Nori?" — recall
+        # about a SPECIFIC person/thing. Extract what follows see/saw/seen as
+        # the search query so the tool searches observations instead of just
+        # dumping the 24h timeline.
+        person_recall_signals = [
+            'when did you last see', 'when did you see', 'last time you saw',
+            'when was the last time you saw', 'have you seen', 'last saw',
+            'who have you seen',
+        ]
+
+        if any(s in msg_lower for s in person_recall_signals):
+            params = {}
+            m = re.search(r"(?:see|saw|seen)\s+([a-z][a-z .'\-]{1,40}?)\s*[?.!]*$", msg_lower)
+            if m:
+                q = re.sub(r'^(?:the|my|our)\s+', '', m.group(1).strip())
+                q = re.sub(r'\s*(?:today|yesterday|recently|lately|'
+                           r'this (?:morning|afternoon|evening|week))$', '', q).strip()
+                if q and q not in ('me', 'anything', 'something', 'anyone', 'someone'):
+                    params['query'] = q
+            return ToolIntent(
+                tool_name='recall_visual_memory',
+                confidence=0.88,
+                priority=ToolPriority.HIGH,
+                reason='last-seen recall about a person/thing',
+                extracted_params=params
+            )
 
         if any(s in msg_lower for s in strong_recall_signals):
             return ToolIntent(

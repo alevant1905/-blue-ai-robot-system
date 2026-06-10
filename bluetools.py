@@ -3205,17 +3205,30 @@ def _save_visual_observation(description: str):
         except Exception:
             pass
 
-        # Extract known people mentioned in the description
+        # Extract known people mentioned in the description. Match the full
+        # name OR the first name, with word boundaries — "Stella Andoff" must
+        # be spotted when the model writes just "Stella", and a short name
+        # must not fire inside another word ("Sam" in "samples").
         known_people = vm.get_all_people()
         desc_lower = description.lower()
-        people_present = [p['name'] for p in known_people if p['name'].lower() in desc_lower]
+        people_present = []
+        for p in known_people:
+            full = (p.get('name') or '').strip()
+            if not full:
+                continue
+            first = full.split()[0]
+            candidates = {full} | ({first} if len(first) >= 3 else set())
+            if any(re.search(r'\b' + re.escape(nm) + r'\b', description, re.I)
+                   for nm in candidates):
+                people_present.append(full)
 
-        # Extract location from description
+        # Extract location from description (word-boundary match)
         location = None
         known_places = vm.get_all_places()
         for place in known_places:
-            if place['name'].lower() in desc_lower:
-                location = place['name']
+            pn = (place.get('name') or '').strip()
+            if pn and re.search(r'\b' + re.escape(pn) + r'\b', description, re.I):
+                location = pn
                 break
         # Fallback location keywords
         if not location:
@@ -3248,6 +3261,65 @@ def _save_visual_observation(description: str):
         print(f"[VISUAL-MEMORY] Error saving observation: {e}")
     finally:
         _last_vision_image_paths = []
+
+
+def _visual_context_block(text: str, max_entities: int = 4) -> str:
+    """Compact <visual_memory> block for people/places NAMED in `text`: who
+    they are, when last seen through the camera, how often. Lets "have you
+    seen Stella today?" be answered from memory without a fresh camera turn.
+    Empty when no known entity is mentioned, so ordinary turns cost nothing."""
+    t = (text or '').strip()
+    if not t or not VISUAL_MEMORY_AVAILABLE:
+        return ""
+    try:
+        vm = get_visual_memory()
+        lines = []
+        for kind, rows in (('person', vm.get_all_people() or []),
+                           ('place', vm.get_all_places() or [])):
+            for e in rows:
+                name = (e.get('name') or '').strip()
+                if not name:
+                    continue
+                first = name.split()[0]
+                candidates = {name} | ({first} if len(first) >= 3 else set())
+                if not any(re.search(r'\b' + re.escape(nm) + r'\b', t, re.I)
+                           for nm in candidates):
+                    continue
+                bits = []
+                rel = (e.get('relationship') or '').strip()
+                if rel:
+                    bits.append(rel)
+                age = ""
+                try:
+                    if ENHANCED_MEMORY_AVAILABLE and memory_system and e.get('last_seen'):
+                        age = memory_system._humanize_age(str(e['last_seen']))
+                except Exception:
+                    age = ""
+                if age:
+                    bits.append(f"last seen through your camera {age}")
+                elif e.get('last_seen'):
+                    bits.append(f"last seen {str(e['last_seen'])[:16]}")
+                else:
+                    bits.append("not yet seen through your camera")
+                if e.get('times_seen'):
+                    bits.append(f"seen {e['times_seen']} times")
+                desc = (e.get('typical_appearance') or e.get('description') or '').strip()
+                if desc:
+                    bits.append(desc[:90])
+                lines.append(f"- {name} ({kind}): " + "; ".join(bits))
+                if len(lines) >= max_entities:
+                    break
+            if len(lines) >= max_entities:
+                break
+        if not lines:
+            return ""
+        return ("<visual_memory>\nWhat your camera memory knows about who/what was just "
+                "mentioned (the times say when YOU last saw them on camera — someone can be "
+                "home without you having seen them):\n"
+                + "\n".join(lines) + "\n</visual_memory>")
+    except Exception as e:
+        print(f"[VISUAL-MEMORY] context block failed: {e}")
+        return ""
 
 
 def start_music_visualizer(duration_seconds: int = 300, style: str = "party") -> str:
@@ -14376,12 +14448,12 @@ def duet_turn():
     # Long-term memory, same stores the chat persona draws on: Alex's explicit
     # "remember this" notes always; plus memories semantically relevant to the
     # topic and the last couple of turns.
+    mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
     try:
         if ENHANCED_MEMORY_AVAILABLE and memory_system:
             notes_block = memory_system._build_user_notes_block()
             if notes_block:
                 sys_p += "\n\n" + notes_block
-            mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
             if mem_query:
                 _facts_lower = sys_p.lower()
                 mem_lines = []
@@ -14393,13 +14465,26 @@ def duet_turn():
                             or memory_system._is_junk_memory(
                                 (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
                         continue
-                    mem_lines.append(f"- {mc[:300]}")
+                    age = memory_system._humanize_age(mem.get("created_at"))
+                    mem_lines.append(f"- [{age}] {mc[:300]}" if age else f"- {mc[:300]}")
                 if mem_lines:
                     sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
-                              "conversation — use them naturally if helpful, don't recite them:\n"
+                              "conversation — use them naturally if helpful, don't recite them. "
+                              "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
+                              "it was remembered (see its age tag), not to now:\n"
                               + "\n".join(mem_lines) + "\n</relevant_memories>")
     except Exception as e:
         log.warning(f"[DUET] memory context failed: {e}")
+
+    # Camera memory: when the topic or recent turns name a person/place the
+    # robots have actually SEEN, tell the speaker when (both heads share the
+    # same camera log — shared eyes, shared world).
+    try:
+        vis_block = _visual_context_block(mem_query)
+        if vis_block:
+            sys_p += "\n\n" + vis_block
+    except Exception:
+        pass
 
     # Link grounding: the article text / video transcript behind the pasted URL,
     # windowed to the lede + whatever matches the last couple of turns.
@@ -17317,6 +17402,17 @@ def chat_completions():
                     if historical_context:
                         print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
                         messages = _splice_context_after_system(messages, historical_context[-6:])
+
+            # Visual memory: if the message names a person/place the camera
+            # knows, splice in when they were last seen. Gated on the name
+            # match itself rather than message length — "seen Stella?" is two
+            # words but deserves a real answer. (Kids' chat stays visual-free.)
+            if user_name not in _CHAT_ONLY_USERS and last_user_msg:
+                _vis_block = _visual_context_block(last_user_msg)
+                if _vis_block:
+                    print(f"   [VISUAL] ✓ Injecting camera-memory context")
+                    messages = _splice_context_after_system(
+                        messages, [{"role": "system", "content": _vis_block}])
 
         # Process with tools (pre-check result passed to avoid double selector run)
         import time as _t_llm

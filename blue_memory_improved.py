@@ -485,7 +485,12 @@ class EnhancedMemorySystem:
     # ------------------------------------------------------------------ Core storage
 
     def _make_id(self, content: str, subject: str = "") -> str:
-        return hashlib.md5(f"{subject}:{content}".encode()).hexdigest()[:12]
+        # Normalized (casefold + collapsed whitespace) so "AI creator" and
+        # "ai creator" produce the SAME id — case variants used to slip past
+        # the upsert and pile up as duplicate rows + duplicate vectors.
+        s = re.sub(r"\s+", " ", (subject or "").strip().casefold())
+        c = re.sub(r"\s+", " ", (content or "").strip().casefold())
+        return hashlib.md5(f"{s}:{c}".encode()).hexdigest()[:12]
 
     def _store_memory(
         self,
@@ -1404,6 +1409,22 @@ class EnhancedMemorySystem:
 
         conn.close()
 
+        # Attach created_at so callers can show how OLD each memory is —
+        # "swimming class today at 5" means nothing without when it was said.
+        if results:
+            try:
+                conn = self._conn()
+                ph = ",".join("?" * len(results))
+                rows = conn.execute(
+                    f"SELECT id, created_at FROM memories WHERE id IN ({ph})",
+                    [r["id"] for r in results]).fetchall()
+                conn.close()
+                created = {r["id"]: r["created_at"] for r in rows}
+                for r in results:
+                    r["created_at"] = created.get(r["id"])
+            except Exception:
+                pass
+
         # Re-rank: combine raw similarity with recency and access boosts.
         # A frequently-used or recently-accessed memory should beat an
         # equally-similar but stale one. We re-fetch metadata for the
@@ -1567,19 +1588,26 @@ class EnhancedMemorySystem:
                 filtered.append(mem)
 
             if filtered:
+                now_dt = datetime.now()
                 memory_lines = []
                 for mem in filtered:
                     sim_pct = int(mem["similarity"] * 100)
                     snippet = mem["content"][:300]
-                    memory_lines.append(f"- [{mem['type']}] {snippet} (relevance: {sim_pct}%)")
+                    age = self._humanize_age(mem.get("created_at"), now_dt)
+                    age_tag = f", from {age}" if age else ""
+                    memory_lines.append(f"- [{mem['type']}{age_tag}] {snippet} (relevance: {sim_pct}%)")
 
                 context_parts.append({
                     "role": "system",
                     "content": (
                         "<relevant_memories>\n"
-                        "Memories that may be relevant to the user's current message:\n"
+                        "Memories that may be relevant to the user's current message, each "
+                        "tagged with how long ago it was remembered:\n"
                         + "\n".join(memory_lines) +
-                        "\nUse these naturally if helpful — don't list them out."
+                        "\nUse these naturally if helpful — don't list them out. Words like "
+                        "\"today\", \"tonight\" or \"tomorrow\" INSIDE a memory refer to the day "
+                        "it was remembered, NOT to now — an event in a memory from weeks ago has "
+                        "long since happened."
                         "\n</relevant_memories>"
                     ),
                 })
@@ -2164,7 +2192,16 @@ class EnhancedMemorySystem:
             h = int(round(hrs))
             return "an hour ago" if h == 1 else f"{h} hours ago"
         days = int(hrs // 24)
-        return "yesterday" if days == 1 else f"{days} days ago"
+        if days == 1:
+            return "yesterday"
+        if days < 14:
+            return f"{days} days ago"
+        if days < 70:
+            return f"{days // 7} weeks ago"
+        if days < 365:
+            return f"{days // 30} months ago"
+        years = days // 365
+        return "a year ago" if years == 1 else f"{years} years ago"
 
     # ------------------------------------------------------------------ Cleanup utilities
 
@@ -2462,59 +2499,95 @@ class EnhancedMemorySystem:
             print(f"   [MEM-DECAY] Decayed {affected} old memories")
 
     def _merge_duplicate_memories(self):
-        """Find memories with the same subject and merge them."""
+        """Merge duplicate memories. Two passes:
+
+        1. Same (type, subject) — compared case-insensitively. Case variants
+           ("AI creator" vs "ai creator") used to escape the merge entirely
+           and pile up as twin rows + twin vectors.
+        2. Same (type, normalized content) under DIFFERENT subjects — synonym
+           subjects storing the same fact ('dog name' / 'pet name' / 'puppy'
+           all → "Nori"). The fact is one; keep one row.
+
+        Keeps the best row (importance, access count, recency), merges any
+        genuinely different content, carries over access counts, and removes
+        the losers from ChromaDB so search stops returning twins."""
         conn = self._conn()
-
-        # Find subjects with multiple entries of the same type
-        dupes = conn.execute("""
-            SELECT type, subject, COUNT(*) as cnt
-            FROM memories
-            GROUP BY type, subject
-            HAVING cnt > 1
-        """).fetchall()
-
         merged = 0
-        for dupe in dupes:
-            rows = conn.execute("""
-                SELECT id, content, importance, access_count, created_at
-                FROM memories
-                WHERE type = ? AND subject = ?
-                ORDER BY importance DESC, access_count DESC, created_at DESC
-            """, (dupe["type"], dupe["subject"])).fetchall()
 
+        def _norm(text):
+            return re.sub(r"\s+", " ", (text or "").strip().casefold())
+
+        def _merge_group(rows):
+            nonlocal merged
             if len(rows) <= 1:
-                continue
-
-            # Keep the best one, merge content from others
+                return
             best = rows[0]
-            contents = [best["content"]]
-            ids_to_delete = []
-
+            contents, seen_norm = [best["content"]], {_norm(best["content"])}
+            ids_to_delete, extra_access = [], 0
             for row in rows[1:]:
-                if row["content"] not in contents:
+                if _norm(row["content"]) not in seen_norm:
                     contents.append(row["content"])
+                    seen_norm.add(_norm(row["content"]))
                 ids_to_delete.append(row["id"])
-
-            # Update the best with merged content (if different)
+                extra_access += row["access_count"] or 0
             if len(contents) > 1:
                 merged_content = " | ".join(c[:200] for c in contents[:3])
+                conn.execute("UPDATE memories SET content = ? WHERE id = ?",
+                             (merged_content, best["id"]))
+                # Keep the vector in step with the merged text — the old code
+                # updated SQLite but left the stale ChromaDB doc behind.
+                try:
+                    kept = conn.execute(
+                        "SELECT type, subject, tags FROM memories WHERE id = ?",
+                        (best["id"],)).fetchone()
+                    if kept:
+                        self._index_memory(best["id"], kept["subject"], merged_content,
+                                           kept["type"], json.loads(kept["tags"] or "[]"))
+                except Exception:
+                    pass
+            if extra_access:
                 conn.execute(
-                    "UPDATE memories SET content = ? WHERE id = ?",
-                    (merged_content, best["id"]),
-                )
-
-            # Delete the duplicates
+                    "UPDATE memories SET access_count = access_count + ? WHERE id = ?",
+                    (extra_access, best["id"]))
+            collection = _get_memory_collection()
             for del_id in ids_to_delete:
                 conn.execute("DELETE FROM memories WHERE id = ?", (del_id,))
-                # Also remove from ChromaDB
-                collection = _get_memory_collection()
                 if collection:
                     try:
                         collection.delete(ids=[del_id])
                     except Exception:
                         pass
-
             merged += len(ids_to_delete)
+
+        # Pass 1: same subject, ignoring case.
+        dupes = conn.execute("""
+            SELECT type, LOWER(subject) AS subj, COUNT(*) AS cnt
+            FROM memories
+            GROUP BY type, LOWER(subject)
+            HAVING cnt > 1
+        """).fetchall()
+        for dupe in dupes:
+            rows = conn.execute("""
+                SELECT id, content, importance, access_count, created_at
+                FROM memories
+                WHERE type = ? AND LOWER(subject) = ?
+                ORDER BY importance DESC, access_count DESC, created_at DESC
+            """, (dupe["type"], dupe["subj"])).fetchall()
+            _merge_group(rows)
+
+        # Pass 2: identical content under different (synonym) subjects.
+        # Sessions are day-recaps keyed by date — never cross-merge those.
+        rows = conn.execute("""
+            SELECT id, type, subject, content, importance, access_count, created_at
+            FROM memories WHERE type != 'session'
+            ORDER BY importance DESC, access_count DESC, created_at DESC
+        """).fetchall()
+        groups = {}
+        for r in rows:
+            groups.setdefault((r["type"], _norm(r["content"])), []).append(r)
+        for (_t, _c), grp in groups.items():
+            if _c and len(grp) > 1:
+                _merge_group(grp)
 
         conn.commit()
         conn.close()

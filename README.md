@@ -376,6 +376,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔖 Version History
 
+### v12.3.0 (2026-06-10) - Better memories & visual memories
+- **Duplicate memories eliminated**: memory ids and the periodic merge are now case/whitespace-insensitive, and identical facts stored under synonym subjects ('dog name'/'pet name'/'puppy' → Nori) are merged — one-time cleanup removed 21 duplicates from the live store and their stale vectors
+- **Memories are dated**: every recalled memory carries an age tag (`[event, from 8 days ago]`) and the robots are told that "today/tomorrow" inside a memory refers to when it was remembered — no more treating a weeks-old "swimming class today at 5" as happening now
+- **Visual memory in conversation**: mentioning a person or place the camera knows injects a `<visual_memory>` block (relationship, when last seen on camera, how often) into chat **and** duet — "have you seen Stella today?" gets a real answer without a fresh camera turn
+- **"When did you last see X?"** now routes to `recall_visual_memory` with the name as the search query (instead of taking a new photo or guessing)
+- **Sighting capture is sturdier**: camera observations match people by first name with word boundaries, so "Stella" in a scene description updates the right person's last-seen
+
 ### v12.2.0 (2026-06-10) - Duet: same robots as chat
 - Duet speakers now carry their **chat identity**: ground-truth household facts (who everyone is), the current date, Alex's explicit "remember this" notes, and **memories semantically relevant** to the topic and the last turns
 - They're told Alex isn't in the conversation but that everything they remember is real — so they reference the household naturally instead of acting like blank stage characters
