@@ -1382,17 +1382,17 @@ def extract_and_save_facts(messages: list) -> bool:
     return False
 
 
-def build_system_preamble() -> str:
+def build_system_preamble(robot_name: str = "Blue") -> str:
     core = _facts_block()
     # Hardcoded user pronouns — Alex uses he/him, and the model has been
     # caught defaulting to "she" otherwise.
     pronouns = "Alex uses he/him pronouns — always refer to Alex as he/him, never as she/her."
     if core:
         return (
-            "You are Blue. Use these ground-truth facts as identity context. "
+            f"You are {robot_name}. Use these ground-truth facts as identity context. "
             "Do not contradict them. " + core + " | " + pronouns
         )
-    return "You are Blue. " + pronouns
+    return f"You are {robot_name}. " + pronouns
 
 # Load facts at import time (only if enhanced memory not available)
 try:
@@ -9340,10 +9340,18 @@ def _estimate_payload_tokens(messages, tools) -> int:
     return total + 64  # final chat-template wrap pad
 
 
-def _trim_messages_for_budget(messages, tools, budget_tokens: int):
+def _trim_messages_for_budget(messages, tools, budget_tokens: int, min_keep_tail: int = 0):
     """Drop oldest non-system messages until estimated tokens fit the budget.
 
     Always preserves leading system message(s) and the final user message.
+    `min_keep_tail` additionally protects the N most recent middle messages
+    (≈ the live conversation tail) even if the result stays over budget.
+    Without it, a fixed payload bigger than the budget (system prompt + the
+    full tools schema already exceed 6500t) silently eats the ENTIRE thread,
+    and short replies like "yes" reach the model with no context at all —
+    Blue then greets mid-conversation like it just woke up. Staying somewhat
+    over budget is fine: the n_ctx self-heal in call_lm_studio catches the
+    rare genuine overflow and retrims against the model's REAL context size.
     Returns (trimmed_messages, dropped_count).
     """
     if not messages:
@@ -9370,8 +9378,8 @@ def _trim_messages_for_budget(messages, tools, budget_tokens: int):
         candidate = head + middle + tail
         if _estimate_payload_tokens(candidate, tools) <= budget_tokens:
             return candidate, dropped
-        if not middle:
-            return candidate, dropped  # already minimal — give up gracefully
+        if len(middle) <= max(0, min_keep_tail):
+            return candidate, dropped  # protected tail / already minimal
         middle.pop(0)
         dropped += 1
 
@@ -9897,6 +9905,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         _budget = 6500
     _trimmed, _dropped = _trim_messages_for_budget(
         payload['messages'], payload.get('tools'), _budget,
+        min_keep_tail=4,   # never trim away the last ~2 exchanges
     )
     if _dropped:
         _before = len(payload['messages'])
@@ -9927,7 +9936,14 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             _retry_budget = max(256, int(_n_ctx * 0.7))
             _retrimmed, _dropped_now = _trim_messages_for_budget(
                 payload['messages'], payload.get('tools'), _retry_budget,
+                min_keep_tail=4,
             )
+            # The model's real context genuinely can't fit the protected tail:
+            # sacrifice the tail before sacrificing tools.
+            if _estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx:
+                _retrimmed, _dropped_now = _trim_messages_for_budget(
+                    payload['messages'], payload.get('tools'), _retry_budget,
+                )
 
             # Last resort: if even the minimal-message payload still overflows
             # n_ctx, drop tools entirely. The model loses tool-calling on this
@@ -10223,6 +10239,55 @@ def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
     )
 
 
+# "yes" / "sure" / "go ahead" replies: the user is answering the assistant's OWN
+# last offer ("Want me to dig deeper?"), not starting a new thread. These turns
+# need special care — see build_dynamic_system_message.
+_CONTINUATION_YES = {'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'please',
+                     'absolutely', 'definitely', 'alright', 'go', 'continue',
+                     'proceed', 'more'}
+_CONTINUATION_NO = {'no', 'nah', 'nope'}
+_CONTINUATION_TWO_WORD = {'of course', 'sounds good', 'do it', 'tell me', 'carry on',
+                          'go on', 'go ahead', 'why not', 'dig in', 'go for',
+                          'not now', 'no thanks', 'not really'}
+
+
+def _continuation_cue(text: str):
+    """Classify a short reply as accepting ('yes') or declining ('no') the
+    assistant's previous offer — or None when it's a normal message."""
+    t = (text or '').strip().lower()
+    if not t or len(t) > 40:
+        return None
+    words = re.findall(r"[a-z']+", t)
+    if not words or len(words) > 5:
+        return None
+    # A question is a new ask, not a bare go-ahead ("ok, what about cats?").
+    two = ' '.join(words[:2])
+    if '?' in t and two != 'why not':
+        return None
+    if any(w in ('what', 'who', 'when', 'where', 'how', 'which', 'why') for w in words[1:]):
+        return None
+    if words[0] in _CONTINUATION_NO or two in ('not now', 'no thanks', 'not really'):
+        return 'no'
+    if words[0] in _CONTINUATION_YES or two in _CONTINUATION_TWO_WORD:
+        return 'yes'
+    return None
+
+
+def _last_exchange(conversation_messages: List[Dict]):
+    """(last user text, the assistant text right before it) from the tail."""
+    last_user, prev_assistant = "", ""
+    for m in reversed(conversation_messages or []):
+        c = m.get('content')
+        if not isinstance(c, str):
+            continue
+        if m.get('role') == 'user' and not last_user:
+            last_user = c
+        elif m.get('role') == 'assistant' and last_user:
+            prev_assistant = c
+            break
+    return last_user, prev_assistant
+
+
 def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
     """Build system message with anti-repetition context from conversation history.
 
@@ -10300,8 +10365,36 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     if recent_assistant_responses:
         responses_list = "\n".join([f"  - \"{resp}...\"" for resp in recent_assistant_responses])
         anti_repetition_context = (
-            f"\nDon't repeat these recent responses:\n{responses_list}\n"
+            f"\nYour recent replies (do NOT re-say these word-for-word — but DO "
+            f"stay on the same topic and build on them):\n{responses_list}\n"
         )
+
+    # "yes" / "sure" / "go ahead": the user is accepting YOUR own last offer.
+    # The anti-repetition list is poison on these turns — continuing the topic
+    # looks like "repeating", so the model used to bail to a fresh greeting
+    # ("Hey! What's on your mind?") and lose the thread. Drop the list and pin
+    # the model to the offer it just made instead.
+    continuation_note = ""
+    _last_user_text, _prev_assistant_text = _last_exchange(conversation_messages)
+    _cue = _continuation_cue(_last_user_text) if _prev_assistant_text.strip() else None
+    if _cue:
+        anti_repetition_context = ""
+        _tail = _prev_assistant_text.strip()[-300:]
+        if _cue == 'yes':
+            continuation_note = (
+                "\nIMPORTANT — CONTINUE, DON'T RESTART: the user's latest message "
+                f"(\"{_last_user_text.strip()}\") says YES to your previous offer or "
+                f"question, which ended: \"...{_tail}\". Do what you offered, fully, "
+                "as your reply — same topic, picking up exactly where you left off. "
+                "Do NOT greet, do NOT ask what they need, do NOT change the subject.\n"
+            )
+        else:
+            continuation_note = (
+                "\nIMPORTANT — CONTINUE, DON'T RESTART: the user's latest message "
+                f"(\"{_last_user_text.strip()}\") declines the offer at the end of your "
+                "previous reply. Acknowledge briefly and carry the SAME conversation "
+                "forward naturally. Do NOT greet and do NOT start over.\n"
+            )
 
     expertise_block = _build_expertise_block()
     expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
@@ -10339,6 +10432,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "whenever they do. Keep your reply entirely in that one language.\n"
             f"{conversational_guidance}"
             f"{anti_repetition_context}"
+            f"{continuation_note}"
             f"{expertise_section}"
             f"{face_capability}"
             "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
@@ -10371,7 +10465,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
     # Extract facts from .ocf conversations first (only if conversation has .ocf content)
-    facts_preamble = build_system_preamble()
+    facts_preamble = build_system_preamble(robot_name=_robot_cfg(robot)["name"])
     # OPTIMIZATION: Only run OCF extraction if there are likely .ocf messages (check first few)
     _has_ocf = any('.ocf' in str(m.get('content', ''))[:200] for m in conversation_messages[:5])
     if _has_ocf:

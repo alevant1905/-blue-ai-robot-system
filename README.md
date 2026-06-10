@@ -374,6 +374,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔖 Version History
 
+### v12.1.1 (2026-06-10) - Chat: "yes" no longer loses the thread
+- Replying **"yes" / "sure" / "go ahead"** to Blue or Hexia's own offer ("Want me to dig deeper?") now actually continues the thread instead of getting a fresh "Hey! What's on your mind?"
+- Root cause #1: the token-budget trimmer could silently drop the **entire** conversation (system prompt + tool schemas alone exceed the budget); it now always protects the last two exchanges
+- Root cause #2: the anti-repetition list framed the robot's recent answers as banned content; short accept/decline replies now drop that list and get pinned to the offer the robot just made
+- Hexia's system prompt no longer opens with "You are Blue"
+
 ### v12.1.0 (2026-06-10) - Duet: Discuss a Link
 - Duet can now **discuss a pasted URL** — a web article (readable text extracted) or a **YouTube video** (captions fetched as a transcript)
 - The link is fetched **once** and cached; every turn is grounded in the lede plus the slice most relevant to the last exchange, so long pages and videos work
