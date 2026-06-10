@@ -63,6 +63,7 @@ comtypes>=1.2.0              # Required by pycaw
 # Web Scraping (Optional - for web tools)
 beautifulsoup4>=4.12.0      # HTML parsing
 ddgs>=5.0.0                 # DuckDuckGo search
+youtube-transcript-api>=1.0.0  # Duet "discuss a link": YouTube captions -> transcript
 
 # Media Control (Optional)
 pyautogui>=0.9.54           # System-wide media keys

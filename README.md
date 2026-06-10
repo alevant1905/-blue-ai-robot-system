@@ -24,6 +24,7 @@ Each robot:
 Open **`/duet`** and Blue and Hexia hold a spoken, turn‑by‑turn conversation, each in its own voice and moving its own head. You direct it:
 
 - **Topic** — what they discuss.
+- **Link** — paste a URL to a **web article or YouTube video** and they discuss what it actually says (article text / video transcript is fetched once, and each turn is grounded in the part most relevant to what was just said).
 - **Role / perspective** (per robot) — give each a stance to argue or a character to play, for a real debate.
 - **Tone** (per robot) — e.g. *dry and sardonic*, *bubbly and dramatic*.
 - **Slang / dialect** (per robot) — e.g. *1920s gangster slang*, *Gen Z slang*.
@@ -42,7 +43,7 @@ All reachable from the home hub at `http://localhost:5000/`:
 | Page | What it's for |
 |------|----------------|
 | `/chat` · `/hexia` | Chat with Blue / Hexia (text + voice, image & file sharing) |
-| `/duet` | Blue & Hexia converse — topic, roles, tone, slang, per‑robot sources |
+| `/duet` | Blue & Hexia converse — topic, link (article/YouTube), roles, tone, slang, per‑robot sources |
 | `/head` · `/head/hexia` | Calibrate each robot's motion, expressions and lip‑sync |
 | `/heads` | Detect and assign each robot's Ohbot board (by USB serial) |
 | `/documents` | The shared document library they read and search |
@@ -372,6 +373,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 [![Star History Chart](https://api.star-history.com/svg?repos=alevant1905/blue-ai-robot-system&type=Date)](https://star-history.com/#alevant1905/blue-ai-robot-system&Date)
 
 ## 🔖 Version History
+
+### v12.1.0 (2026-06-10) - Duet: Discuss a Link
+- Duet can now **discuss a pasted URL** — a web article (readable text extracted) or a **YouTube video** (captions fetched as a transcript)
+- The link is fetched **once** and cached; every turn is grounded in the lede plus the slice most relevant to the last exchange, so long pages and videos work
+- The page confirms what they "read/watched" (with the real title) before the first turn, and reports unusable links (no captions, paywall, dead URL) instead of starting blind
+- A bare URL typed into the topic box is treated as the link
 
 ### v12.0.0 (2026-06-09) - Two Robots & Duet Mode
 - Added **Hexia**, a second AI robot with her own persona, voice, head and chat page (`/hexia`)

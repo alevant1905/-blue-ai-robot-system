@@ -13855,9 +13855,12 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  .srccount{font-size:.8em;color:#64748b}
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
-<p class="sub">Give them a topic, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
+<p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
 <div class="controls">
  <input type="text" id="topic" placeholder="Topic (optional) — e.g. what makes a good story">
+</div>
+<div class="controls">
+ <input type="text" id="url" placeholder="Link (optional) — paste an article or YouTube URL for them to discuss">
 </div>
 <div class="controls">
  <input type="text" id="roleBlue" placeholder="Blue's role / perspective (optional) — e.g. argue cities beat small towns">
@@ -13975,13 +13978,26 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang')})})).json(); }catch(e){ return false; }
+  const url=document.getElementById('url').value.trim();
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang')})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
 }
 async function run(){
   running=true; history=[]; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
+  // A bare link pasted into the topic box IS the link — move it over visibly.
+  const topicEl=document.getElementById('topic'), urlEl=document.getElementById('url');
+  if(!urlEl.value.trim() && /^https?:\\/\\/\\S+$/.test(topicEl.value.trim())){ urlEl.value=topicEl.value.trim(); topicEl.value=''; }
+  const url=urlEl.value.trim();
+  if(url){
+    addNote('(reading the link…)');
+    let r=null;
+    try{ r=await (await fetch('/duet/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url})})).json(); }catch(e){}
+    if(!running){ return; }
+    if(!r||!r.ok){ addNote("(couldn't read that link"+(r&&r.error?': '+r.error:'')+" — fix it or clear the field)"); stop(); return; }
+    addNote("(they've "+(r.kind==='video'?'watched':'read')+': '+(r.title||url)+')');
+  }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
   for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
@@ -14026,6 +14042,155 @@ def _duet_documents():
     return out
 
 
+# --- Link grounding: paste a URL (a web article or a YouTube video) and the
+# duet discusses what it actually says. Fetched ONCE and cached; each turn gets
+# the lede plus the slice most relevant to what was just said, so long pages
+# stay usable in a tight prompt.
+
+_DUET_URL_CACHE: Dict[str, dict] = {}
+_DUET_URL_TTL = 3600           # re-fetch after an hour; stable within one duet
+_DUET_URL_MAX_TEXT = 20000     # keep at most this much article/transcript text
+
+_YT_ID_RE = re.compile(
+    r'(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/|embed/|live/)|youtu\.be/)'
+    r'([A-Za-z0-9_-]{11})')
+
+
+def _youtube_title(video_id: str):
+    """Video title + channel via YouTube's keyless oEmbed endpoint."""
+    from urllib.parse import quote_plus
+    try:
+        _, content = _safe_fetch_url(
+            "https://www.youtube.com/oembed?format=json&url="
+            + quote_plus(f"https://www.youtube.com/watch?v={video_id}"), timeout=8)
+        j = json.loads(content.decode('utf-8', errors='ignore'))
+        t = (j.get('title') or '').strip()
+        a = (j.get('author_name') or '').strip()
+        return f"{t} — {a}" if t and a else (t or None)
+    except Exception:
+        return None
+
+
+def _fetch_youtube_transcript(video_id: str):
+    """(text, error) — captions via youtube-transcript-api, tolerating both its
+    1.x instance API and the old 0.6 classmethods."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return None, "youtube-transcript-api is not installed (pip install youtube-transcript-api)"
+
+    def _join(snippets):
+        parts = []
+        for s in snippets:
+            t = getattr(s, 'text', None)
+            if t is None and isinstance(s, dict):
+                t = s.get('text')
+            if t:
+                parts.append(t)
+        return re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+
+    langs = ['en', 'en-US', 'en-GB']
+    try:
+        try:
+            snippets = YouTubeTranscriptApi().fetch(video_id, languages=langs)
+        except AttributeError:
+            snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+        txt = _join(snippets)
+        return (txt, None) if txt else (None, "the video's transcript is empty")
+    except Exception as e:
+        # No English captions — take whatever language the video does have.
+        try:
+            try:
+                listing = YouTubeTranscriptApi().list(video_id)
+            except AttributeError:
+                listing = YouTubeTranscriptApi.list_transcripts(video_id)
+            txt = _join(next(iter(listing)).fetch())
+            if txt:
+                return txt, None
+        except Exception:
+            pass
+        return None, f"no transcript/captions available ({e.__class__.__name__})"
+
+
+def _extract_article_text(html_raw: str):
+    """(title, text) — the main readable text of a page. Prefers <article>/<main>
+    paragraphs via bs4 (skips nav/menu cruft); falls back to the plain stripper."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_raw, 'html.parser')
+        title = (soup.title.string or '').strip() if (soup.title and soup.title.string) else None
+        for tag in soup(['script', 'style', 'noscript', 'nav', 'header', 'footer',
+                         'aside', 'form', 'iframe', 'svg', 'button', 'figure']):
+            tag.decompose()
+        root = soup.find('article') or soup.find('main') or soup.body or soup
+        paras = [p.get_text(' ', strip=True) for p in root.find_all(['p', 'h1', 'h2', 'h3'])]
+        text = '\n'.join(p for p in paras if len(p) > 30)
+        if len(text) < 400:            # paragraph-poor page: fall back to all of its text
+            text = root.get_text(' ', strip=True)
+        return title, re.sub(r'[ \t]+', ' ', text).strip()
+    except Exception:
+        return None, _clean_html_to_text(html_raw, max_chars=_DUET_URL_MAX_TEXT)
+
+
+def _duet_url_content(url: str):
+    """What the pasted link says: YouTube → transcript, anything else → article
+    text. Cached so per-turn calls don't refetch (failures retry after 2 min).
+    Returns {'kind','title','text','error'}; empty text ⇒ unusable, see error."""
+    import time as _t
+    u = (url or '').strip()
+    if not u:
+        return None
+    hit = _DUET_URL_CACHE.get(u)
+    if hit and _t.time() - hit['at'] < (_DUET_URL_TTL if hit.get('text') else 120):
+        return hit
+    info = {'kind': 'article', 'title': None, 'text': '', 'error': None, 'at': _t.time()}
+    try:
+        m = _YT_ID_RE.search(u)
+        if m:
+            info['kind'] = 'video'
+            info['title'] = _youtube_title(m.group(1))
+            txt, err = _fetch_youtube_transcript(m.group(1))
+            info['text'], info['error'] = (txt or '')[:_DUET_URL_MAX_TEXT], err
+        else:
+            ctype, content = _safe_fetch_url(u)
+            raw = content.decode('utf-8', errors='ignore')
+            if 'html' in (ctype or '').lower() or raw.lstrip()[:1] == '<':
+                info['title'], text = _extract_article_text(raw)
+                info['text'] = text[:_DUET_URL_MAX_TEXT]
+            else:
+                info['text'] = raw[:_DUET_URL_MAX_TEXT]     # plain text page / feed
+        if not info['error'] and len(info['text']) < 200:
+            info['text'] = ''
+            info['error'] = "couldn't extract readable text from that page"
+    except Exception as e:
+        info['error'] = f"couldn't fetch the link ({e.__class__.__name__}: {e})"
+    if len(_DUET_URL_CACHE) >= 8:
+        _DUET_URL_CACHE.clear()
+    _DUET_URL_CACHE[u] = info
+    return info
+
+
+def _duet_url_excerpt(text: str, query: str, lede: int = 2000, win: int = 1400) -> str:
+    """The lede plus the slice of the article/transcript most relevant to the
+    last couple of turns — lets the discussion roam across a long page without
+    ever stuffing the whole thing into the prompt."""
+    text = (text or '').strip()
+    if len(text) <= lede + win + 300:
+        return text
+    head, rest = text[:lede], text[lede:]
+    words = {w.lower() for w in re.findall(r'[A-Za-zÀ-ɏ]{4,}', query or '')}
+    best_off, best_score = -1, 1       # need ≥2 keyword hits to add a slice
+    step = max(200, win // 2)
+    for off in range(0, len(rest) - win + 1, step):
+        seg = rest[off:off + win].lower()
+        score = sum(seg.count(w) for w in words)
+        if score > best_score:
+            best_score, best_off = score, off
+    if best_off < 0:
+        return head + " …"
+    return head + "\n[…]\n" + rest[best_off:best_off + win] + (" …" if best_off + win < len(rest) else "")
+
+
 @app.route('/duet', methods=['GET'])
 def duet_page():
     """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
@@ -14034,6 +14199,22 @@ def duet_page():
     ), headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     })
+
+
+@app.route('/duet/fetch', methods=['POST'])
+def duet_fetch():
+    """Pre-read a pasted link (article text / YouTube transcript) before the
+    duet starts — warms the cache and tells the page what they 'read', or why
+    the link is unusable, instead of opening with two clueless robots."""
+    d = request.get_json(silent=True) or {}
+    url = (d.get('url') or '').strip()
+    if not url:
+        return jsonify({"ok": False, "error": "no url given"})
+    info = _duet_url_content(url) or {}
+    if not (info.get('text') or '').strip():
+        return jsonify({"ok": False, "error": info.get('error') or "couldn't read the link"})
+    return jsonify({"ok": True, "kind": info.get('kind'), "title": info.get('title') or "",
+                    "chars": len(info['text'])})
 
 
 @app.route('/duet/turn', methods=['POST'])
@@ -14047,6 +14228,9 @@ def duet_turn():
         speaker = 'blue'
     other = 'hexia' if speaker == 'blue' else 'blue'
     topic = (d.get('topic') or '').strip()
+    url = (d.get('url') or '').strip()
+    if not url and re.match(r'^https?://\S+$', topic):
+        url, topic = topic, ''     # a bare link typed into the topic box IS the link
     history = d.get('history') or []
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
@@ -14065,7 +14249,9 @@ def duet_turn():
         src_self = [str(s).strip() for s in (sources_in.get(speaker) or []) if str(s).strip()]
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
-    focused = bool(has_roles or topic or src_self)
+    url_info = _duet_url_content(url) if url else None
+    url_text = (url_info or {}).get('text') or ''
+    focused = bool(has_roles or topic or src_self or url_text)
 
     # SYSTEM: identity + voice + global rules only. The TASK for this turn (topic,
     # role, sources, "answer their last point, no greetings") goes in the USER
@@ -14082,6 +14268,13 @@ def duet_turn():
         "in your own voice. Never narrate actions or stage directions, never prefix your name, and don't "
         "repeat what was already said."
     )
+
+    # Link grounding: the article text / video transcript behind the pasted URL,
+    # windowed to the lede + whatever matches the last couple of turns.
+    url_block = ""
+    if url_text:
+        recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+        url_block = _duet_url_excerpt(url_text, f"{topic} {recent_q}".strip())
 
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
@@ -14112,6 +14305,14 @@ def duet_turn():
 
     # USER: assemble this turn's task from whatever was provided.
     parts = []
+    if url_block:
+        what = ("the transcript of a video you both just watched"
+                if url_info.get('kind') == 'video' else "an article you both just read")
+        ttl = f" — \"{url_info['title']}\"" if url_info.get('title') else ""
+        parts.append(
+            f"THE LINK{ttl} — {what}. Ground your points in it: react to, quote or question its "
+            "specifics rather than talking in generalities, and don't invent facts it doesn't "
+            "contain:\n\n" + url_block)
     if ground_block:
         parts.append(
             "LIBRARY SOURCES — passages from Alex's library; ground your point in them and quote or "
@@ -14129,10 +14330,19 @@ def duet_turn():
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
 
+    link_name = ""
+    if url_text:
+        link_name = "the video" if url_info.get('kind') == 'video' else "the article"
+        if url_info.get('title'):
+            link_name += f" \"{url_info['title']}\""
     if topic and has_roles:
         subject = f"debating {topic}"
     elif topic:
         subject = f"discussing {topic}"
+    elif link_name and has_roles:
+        subject = f"debating {link_name}"
+    elif link_name:
+        subject = f"discussing {link_name}"
     elif src_self:
         subject = "discussing your library sources"
     elif has_roles:
@@ -14145,7 +14355,11 @@ def duet_turn():
             directive += f", keeping the conversation on track ({subject})"
         directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
                       "talk or asking after each other; that breaks the discussion.")
-        if ground_block:
+        if url_block and ground_block:
+            directive += " Build on something specific from the link and the sources above."
+        elif url_block:
+            directive += " Engage with a specific point, claim or moment from the link above."
+        elif ground_block:
             directive += " Build on a specific idea from the sources above."
         if role_self:
             directive += " Stay firmly in your role."
@@ -14153,7 +14367,9 @@ def duet_turn():
         kind = ("Open the debate" if has_roles else
                 ("Kick off the discussion" if focused else "Start the chat"))
         directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
-        if ground_block:
+        if url_block:
+            directive += " Open with your honest reaction to something specific in the link."
+        elif ground_block:
             directive += " Make a specific point drawing on the sources."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
@@ -17362,13 +17578,13 @@ def index():
                 <h2>What this is</h2>
                 <p class="lead">Two AI robot companions &mdash; <b>Blue</b> and <b>Hexia</b> &mdash; that run entirely on this computer. Nothing leaves the house: the language model, their memory, and your documents all stay local.</p>
                 <p><b>Talk to either of them.</b> Blue is calm and thoughtful; Hexia is his playful, witty friend. Chat by text or voice and share photos or files. They share what they know about the household and the document library, but each has its own personality, voice, and conversation history &mdash; and each can drive its own physical Ohbot head, lip-syncing and making expressions as it speaks.</p>
-                <p><b>Let them talk to each other &mdash; &ldquo;Duet.&rdquo;</b> Give them a topic and watch them go, or direct it: assign each robot a <b>role or perspective</b> to argue, a <b>tone</b>, the <b>slang or dialect</b> it speaks in, and even <b>which library documents each one draws on</b> (so they reason from different sources). Run for a set number of turns, or until you stop.</p>
+                <p><b>Let them talk to each other &mdash; &ldquo;Duet.&rdquo;</b> Give them a topic and watch them go, or <b>paste a link</b> &mdash; a web article or a YouTube video &mdash; and they discuss what it actually says. Direct it further: assign each robot a <b>role or perspective</b> to argue, a <b>tone</b>, the <b>slang or dialect</b> it speaks in, and even <b>which library documents each one draws on</b> (so they reason from different sources). Run for a set number of turns, or until you stop.</p>
                 <p><b>Everything else</b> is on the tiles below: calibrating each robot's head, connecting the Ohbot boards, the document library they read and search, the calendar and reminders, contacts, and the people and places they recognise.</p>
             </section>
             <div class="tiles">
                 <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Blue</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Hexia</h2><p>Talk with Hexia, Blue's playful friend.</p><div class="arrow">Open &rarr;</div></a>
-                <a class="tile" href="/duet"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg></div><h2>Let them talk</h2><p>Blue &amp; Hexia converse — set the topic, roles, and library sources.</p><div class="arrow">Open &rarr;</div></a>
+                <a class="tile" href="/duet"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg></div><h2>Let them talk</h2><p>Blue &amp; Hexia converse — set a topic, a link to discuss, roles, and sources.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/calendar"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h2>Calendar</h2><p>Reminders and events, one-off or recurring.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/contacts"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></div><h2>Contacts</h2><p>The shared address book for email.</p><div class="arrow">Open &rarr;</div></a>
                 <a class="tile" href="/visual"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div><h2>Visual Memory</h2><p>People, places, and things they recognize.</p><div class="arrow">Open &rarr;</div></a>
