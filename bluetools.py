@@ -15636,8 +15636,10 @@ HEAD_HTML = """<!DOCTYPE html>
         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
             <button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button>
             <button class="btn" id="sweepLipBtn">Full-range lip sweep (~8 sec)</button>
+            <button class="btn" id="relaxLipBtn">Relax lip servos</button>
         </div>
         <div class="hint">The talking flap only moves each lip a small way from its saved neutral — if a lip's neutral sits where the mechanism is jammed against a stop, talking looks frozen. The sweep drives the <b>top lip</b> slowly through its whole range, then the <b>bottom lip</b>. Watch where each lip really moves, then set that lip's neutral (Calibration sliders above) inside the moving zone. A lip that stays still for the whole sweep has a loose servo arm or linkage.</div>
+        <div class="hint"><b>Relax lip servos</b> powers off just the two lip motors so a jammed mouth can be moved by hand without the motors fighting back (a stalled servo strains, buzzes and overheats). They wake again on the next lip command — talking, a lip slider, the test or sweep buttons — or a reset.</div>
     </div>
 
     <div class="card">
@@ -15828,6 +15830,13 @@ document.getElementById('sweepLipBtn').addEventListener('click', async () => {
     // background); keep the button down for its duration so taps don't overlap.
     try { await postJSON('/head/lip-sweep', {}); await new Promise(r => setTimeout(r, 8500)); }
     finally { btn.disabled = false; btn.textContent = orig; }
+});
+document.getElementById('relaxLipBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('relaxLipBtn');
+    btn.disabled = true; const orig = btn.textContent;
+    const d = await postJSON('/head/lip-relax', {});
+    btn.textContent = (d && d.ok) ? 'Lips relaxed — move them by hand' : 'Relax failed — connected?';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2500);
 });
 document.getElementById('parkBtn').addEventListener('click', async () => { await postJSON('/head/reset', {}); });
 document.getElementById('restoreBtn').addEventListener('click', async () => {
@@ -16248,6 +16257,16 @@ def head_lip_sweep(robot='blue'):
     can recalibrate the rest position into it."""
     ok = blue_head.get_head(robot).lip_sweep()
     return jsonify({"ok": bool(ok)})
+
+
+@app.route('/head/lip-relax', methods=['POST'])
+@app.route('/head/<robot>/lip-relax', methods=['POST'])
+def head_lip_relax(robot='blue'):
+    """Power off (detach) just the lip servos so a jammed mouth can be moved
+    by hand without the motors fighting back (a stalled servo holds against
+    the blockage, buzzes and overheats). The lips re-attach on the next lip
+    command — talking, lip test/sweep, a lip slider — or on reset."""
+    return jsonify({"ok": bool(blue_head.get_head(robot).lip_relax())})
 
 
 HEADS_HTML = """

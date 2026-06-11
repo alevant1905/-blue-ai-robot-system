@@ -869,6 +869,26 @@ class RobotHead:
             name=f"{self.name}-lip-sweep", daemon=True).start()
         return True
 
+    def lip_relax(self) -> bool:
+        """De-energize ONLY the lip servos (detach motors 4 & 5). For working
+        on the mouth mechanism: a jammed lip servo holds (and buzzes) against
+        the blockage and will overheat if left straining — relaxed, the lips
+        can be moved by hand to feel where the mechanism binds. They re-attach
+        automatically on the next lip command (talking, lip test/sweep, lip
+        slider) or on reset/init, which park the lips at their centres."""
+        if not self.init():
+            return False
+        self._lip_active = False
+        self._lip_token += 1            # stop any flap/sequence/sweep first
+        try:
+            with self._lock:
+                self._ohbot.detach(TOPLIP)
+                self._ohbot.detach(BOTTOMLIP)
+            return True
+        except Exception as e:
+            _log(f"[{self.name}] lip_relax error: {e!r}")
+            return False
+
     def lip_is_active(self) -> bool:
         return bool(self._lip_active)
 
@@ -1027,4 +1047,5 @@ lip_stop = blue.lip_stop
 lip_play_sequence = blue.lip_play_sequence
 lip_is_active = blue.lip_is_active
 lip_sweep = blue.lip_sweep
+lip_relax = blue.lip_relax
 current_pose = blue.current_pose
