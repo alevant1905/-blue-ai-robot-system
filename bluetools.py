@@ -15633,7 +15633,11 @@ HEAD_HTML = """<!DOCTYPE html>
         <div class="sub">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
         <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
         <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
-        <div style="margin-top:12px;"><button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button></div>
+        <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button>
+            <button class="btn" id="sweepLipBtn">Full-range lip sweep (~8 sec)</button>
+        </div>
+        <div class="hint">The talking flap only moves each lip a small way from its saved neutral — if a lip's neutral sits where the mechanism is jammed against a stop, talking looks frozen. The sweep drives the <b>top lip</b> slowly through its whole range, then the <b>bottom lip</b>. Watch where each lip really moves, then set that lip's neutral (Calibration sliders above) inside the moving zone. A lip that stays still for the whole sweep has a loose servo arm or linkage.</div>
     </div>
 
     <div class="card">
@@ -15816,6 +15820,14 @@ document.getElementById('testLipBtn').addEventListener('click', async () => {
     const btn = document.getElementById('testLipBtn');
     btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
     try { await postJSON('/head/lip-test', {}); } finally { btn.disabled = false; btn.textContent = orig; }
+});
+document.getElementById('sweepLipBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('sweepLipBtn');
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Sweeping — watch the mouth…';
+    // The route returns immediately (the sweep runs on the robot in the
+    // background); keep the button down for its duration so taps don't overlap.
+    try { await postJSON('/head/lip-sweep', {}); await new Promise(r => setTimeout(r, 8500)); }
+    finally { btn.disabled = false; btn.textContent = orig; }
 });
 document.getElementById('parkBtn').addEventListener('click', async () => { await postJSON('/head/reset', {}); });
 document.getElementById('restoreBtn').addEventListener('click', async () => {
@@ -16224,6 +16236,18 @@ def head_lip_test(robot='blue'):
             log.warning(f"[HEAD] lip-test error: {e}")
     _th.Thread(target=_run, daemon=True).start()
     return jsonify({"ok": True})
+
+
+@app.route('/head/lip-sweep', methods=['POST'])
+@app.route('/head/<robot>/lip-sweep', methods=['POST'])
+def head_lip_sweep(robot='blue'):
+    """Sweep each lip motor through its full 0-10 range, one at a time (top
+    lip first), then return to rest. Unlike the lip test — which only flaps
+    around the calibrated rest — this shows whether each lip physically
+    responds anywhere in its range, and where the live zone is, so the user
+    can recalibrate the rest position into it."""
+    ok = blue_head.get_head(robot).lip_sweep()
+    return jsonify({"ok": bool(ok)})
 
 
 HEADS_HTML = """

@@ -832,6 +832,43 @@ class RobotHead:
         self._busy_until = time.time() + 0.3
         return True
 
+    def _lip_sweep_run(self, my_token):
+        """Drive each lip through its FULL motor range, one lip at a time, then
+        return both to the calibrated rest. Diagnostic for "the lips don't
+        move": the talking flap only travels a small band around the calibrated
+        rest, so a rest parked in a mechanical dead zone (e.g. the top lip
+        pressed below its centre stop) makes speech look frozen even though
+        commands flow. The sweep shows where each lip's live zone actually is —
+        and a lip that stays still across the whole sweep has a loose servo
+        arm/linkage, not a software problem."""
+        waypoints = (0.0, 2.5, 5.0, 7.5, 10.0, 5.0)
+        try:
+            for motor in (TOPLIP, BOTTOMLIP):
+                for pos in waypoints:
+                    if self._lip_token != my_token or not self._available:
+                        return
+                    self._move_internal(motor, pos, speed=3.0)
+                    time.sleep(0.55)
+                self._move_internal(motor, self.center(motor), speed=4.0)
+                time.sleep(0.4)
+        finally:
+            if self._lip_token == my_token:
+                self._set_mouth(0.0)
+
+    def lip_sweep(self) -> bool:
+        """Start the full-range lip sweep in the background (~8 s). Supersedes
+        any running flap/sequence; a new lip action cancels the sweep."""
+        if not self.init():
+            return False
+        self._lip_token += 1
+        my = self._lip_token
+        self._lip_active = False
+        self._mark_busy(16.0)
+        threading.Thread(
+            target=self._lip_sweep_run, args=(my,),
+            name=f"{self.name}-lip-sweep", daemon=True).start()
+        return True
+
     def lip_is_active(self) -> bool:
         return bool(self._lip_active)
 
@@ -989,4 +1026,5 @@ lip_start = blue.lip_start
 lip_stop = blue.lip_stop
 lip_play_sequence = blue.lip_play_sequence
 lip_is_active = blue.lip_is_active
+lip_sweep = blue.lip_sweep
 current_pose = blue.current_pose
