@@ -376,6 +376,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔖 Version History
 
+### v12.4.1 (2026-06-10) - "Stop" actually stops him
+- Saying **"stop" while Blue talks** now interrupts him in ~half a second: the browser's own speech recognition runs for the whole time he speaks (interim results), instead of waiting for recorded clips to round-trip through Whisper
+- The Whisper barge-in path stays as the offline/fallback layer and got fixed too: it **kept listening while a clip was being transcribed** (it used to go deaf for seconds at a time — which is why "stop" was usually missed), and clips are shorter for faster verdicts
+- Two guaranteed manual outs: **tap the "Speaking…" pill** or press **Escape**
+
 ### v12.4.0 (2026-06-10) - Camera control: pan, tilt & zoom
 - **Real pan/tilt**: `capture_camera` takes a `look` direction (left/right/up/down/center) and physically turns the robot's head via the Ohbot motors before the shot — "what's to your left?" aims the head, then captures (skipped gracefully when the head isn't connected)
 - **Zoom**: 1–4× set **in the camera before capture** (the Logitech BRIO's own zoom, via DirectShow — real sensor detail, not upscaling) for centered zooms; off-center `zoom_region` anchors (left/right/top/bottom/corners) use a digital crop instead, and digital is the automatic fallback on cameras without hardware zoom. Every capture also resets the camera's zoom/pan/tilt to neutral first (a leftover pan was silently skewing photos)

@@ -13232,11 +13232,13 @@ CHAT_HTML = """
                 const _lipFrames = (!isVilda) ? buildLipFrames(msg, u.rate) : null;
                 u.onstart = function () {
                     setFaceState('talking');
+                    bargeInRecogStart();   // listen for "stop" the whole time he talks
                     if (!isVilda) {
                         try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
                     }
                 };
                 const _spokenDone = function () {
+                    bargeInRecogStop();
                     setFaceState('');
                     if (!isVilda) {
                         try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
@@ -13491,12 +13493,13 @@ CHAT_HTML = """
         const BI_THRESHOLD_MIN = 0.010;    // very low floor — a soft "stop" should land
         const BI_VOICE_START = 1;          // react on the first loud chunk
         const BI_PREROLL_MAX = 4;          // ~0.37s kept before onset (captures the "st")
-        const BI_SILENCE_END = 4;          // ~0.37s of quiet ends the barge-in clip
-        const BI_MAX_CHUNKS = 14;          // ~1.3s cap — transcribe quickly even if
-                                           // Blue's echo keeps the mic from going quiet
+        const BI_SILENCE_END = 3;          // ~0.28s of quiet ends the barge-in clip
+        const BI_MAX_CHUNKS = 9;           // ~0.84s cap — short clips = fast verdicts;
+                                           // Blue's echo rarely lets the mic go quiet
         // ONLY "stop" interrupts (per request). Lenient: matches "stop" anywhere
         // plus the closest mis-hearings Whisper produces (stahp/stawp/staap/stop).
         const BI_STOP = /\\bst[aou]+w?h?p\\b|\\bstop\\b/i;
+        let biPending = null;              // clip captured while another was at /stt
         let hfProcessing = false;       // /stt in flight or send() running
         let hfWakeArmed = false;        // user said "Blue" alone; next utterance is the message
         let hfArmedTimer = null;
@@ -13571,6 +13574,14 @@ CHAT_HTML = """
 
         const hfBtn = document.getElementById('hfBtn');
         const hfStatusEl = document.getElementById('hfStatus');
+        // Tapping the status pill while Blue talks silences him (works even if
+        // the mic mishears — a guaranteed manual out).
+        if (hfStatusEl) {
+            hfStatusEl.style.cursor = 'pointer';
+            hfStatusEl.addEventListener('click', function () {
+                if (window.speechSynthesis && window.speechSynthesis.speaking) stopSpeaking('tap');
+            });
+        }
 
         function setHfStatus(state) {
             if (!hfStatusEl) return;
@@ -13581,7 +13592,7 @@ CHAT_HTML = """
                 voicing:  'Listening to you\\u2026',
                 thinking: 'Thinking\\u2026',
                 armed:    'Yes? I\\'m listening\\u2026',
-                replying: 'Speaking\\u2026',
+                replying: 'Speaking\\u2026 say "stop" or tap here',
             };
             hfStatusEl.style.display = 'flex';
             hfStatusEl.className = 'hf-status ' + (state || '');
@@ -13683,7 +13694,9 @@ CHAT_HTML = """
         // Higher threshold than normal because echo cancellation isn't perfect;
         // we only want to react to the user clearly talking over Blue.
         function bargeInOnSamples(samples) {
-            if (biBusy) return;
+            // NOTE: keep capturing even while a clip is at /stt (biBusy) — the
+            // old early-return made Blue DEAF during each transcription, so a
+            // "stop" said while his own echo was being transcribed was lost.
             let sum = 0;
             for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
             const rms = Math.sqrt(sum / samples.length);
@@ -13717,23 +13730,76 @@ CHAT_HTML = """
             const chunks = biChunks;
             biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = [];
             if (chunks.length < 2) return;
+            if (biBusy) { biPending = chunks; return; }   // newest clip takes the queue slot
             biBusy = true;
             try {
-                const blob = encodeWav(chunks, recSampleRate);
-                const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
-                fd.append('hint', 'stop');   // bias Whisper toward interrupt words
-                const res = await fetch('/stt', { method: 'POST', body: fd });
-                const data = await res.json().catch(() => null);
-                const said = ((data && data.text) || '').trim();
-                if (said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0)) {
-                    // Heard "stop" — silence Blue immediately and close the mouth.
-                    try { window.speechSynthesis.cancel(); } catch (e) {}
-                    try { fetch('/head/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
-                    if (handsFree) setHfStatus('waiting');
+                let clip = chunks;
+                while (clip) {
+                    if (!(window.speechSynthesis && window.speechSynthesis.speaking)) break;
+                    const blob = encodeWav(clip, recSampleRate);
+                    const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
+                    fd.append('hint', 'stop');   // bias Whisper toward interrupt words
+                    const res = await fetch('/stt', { method: 'POST', body: fd });
+                    const data = await res.json().catch(() => null);
+                    const said = ((data && data.text) || '').trim();
+                    if (said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0)) {
+                        stopSpeaking('whisper');
+                        break;
+                    }
+                    clip = biPending; biPending = null;   // transcribe what arrived meanwhile
                 }
             } catch (e) { /* ignore */ }
-            finally { biBusy = false; }
+            finally { biBusy = false; biPending = null; }
         }
+
+        // ---- Stop speaking NOW — shared by every barge-in path ----
+        function stopSpeaking(source) {
+            try { window.speechSynthesis.cancel(); } catch (e) {}
+            if (!isVilda) {
+                try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+            }
+            setFaceState('');
+            biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = []; biPending = null;
+            if (handsFree) setHfStatus('waiting');
+        }
+
+        // ---- FAST barge-in: the browser's own speech recognition runs WHILE
+        // Blue talks and cancels him the moment an interim transcript contains
+        // "stop" (~half a second). The Whisper clip path above stays as the
+        // fallback — it's the only path on browsers without SpeechRecognition
+        // and when there's no internet for the recognition service.
+        const _BI_SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+        let biRecog = null, biRecogWanted = false;
+        function bargeInRecogStart() {
+            biRecogWanted = true;
+            if (!_BI_SR || biRecog) return;
+            if (!handsFree && !audioReady) return;   // mic not in use — don't surprise-prompt
+            try {
+                const r = new _BI_SR();
+                r.continuous = true; r.interimResults = true; r.lang = 'en-US';
+                r.onresult = function (ev) {
+                    if (!(window.speechSynthesis && window.speechSynthesis.speaking)) return;
+                    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+                        const t = (ev.results[i][0] && ev.results[i][0].transcript) || '';
+                        // A short utterance containing "stop": the interrupt is a
+                        // word or two, while Blue's own echoed sentences run long —
+                        // the length guard keeps him from silencing himself.
+                        if (BI_STOP.test(t) && t.trim().split(/\\s+/).length <= 6) { stopSpeaking('speech-api'); break; }
+                    }
+                };
+                r.onend = function () { biRecog = null; if (biRecogWanted && window.speechSynthesis.speaking) setTimeout(bargeInRecogStart, 80); };
+                r.onerror = function () { /* onend follows and decides on restart */ };
+                r.start(); biRecog = r;
+            } catch (e) { biRecog = null; }
+        }
+        function bargeInRecogStop() {
+            biRecogWanted = false;
+            if (biRecog) { try { biRecog.stop(); } catch (e) {} biRecog = null; }
+        }
+        // Escape always shuts him up, mic or no mic.
+        document.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Escape' && window.speechSynthesis && window.speechSynthesis.speaking) stopSpeaking('esc');
+        });
 
         async function hfFinalize() {
             hfVoicing = false;
@@ -14075,6 +14141,7 @@ def stt():
         kwargs = {"beam_size": 1, "condition_on_previous_text": False}
         if hint == 'stop':
             kwargs["hotwords"] = "stop. stop. stop!"   # bias hard toward just "stop"
+            kwargs["language"] = "en"   # sub-second clip: auto-detect is slow and flaky
         elif wake:
             kwargs["hotwords"] = "Blue"
         # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
