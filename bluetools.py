@@ -5841,6 +5841,28 @@ def _zoomed_frame(frame, zoom, region: str = "center"):
     return cv2.resize(crop, (w, h), interpolation=cv2.INTER_CUBIC), z
 
 
+def _set_camera_hardware_zoom(camera, factor: float) -> float:
+    """Zoom IN THE CAMERA, before any frame is captured. UVC convention
+    (Logitech BRIO et al.): CAP_PROP_ZOOM value 100 = 1x, 200 = 2x ... The
+    driver rejects (not clamps) out-of-range values, so read back to see what
+    actually took. Returns the achieved factor (1.0 = no hardware zoom)."""
+    import cv2
+    try:
+        if camera.get(cv2.CAP_PROP_ZOOM) <= 0:    # property unsupported
+            return 1.0
+        target = int(round(100 * max(1.0, min(4.0, factor))))
+        for v in (target, 400, 300, 250, 200, 150, 120):
+            if v > target:
+                continue
+            camera.set(cv2.CAP_PROP_ZOOM, v)
+            rb = camera.get(cv2.CAP_PROP_ZOOM)
+            if abs(rb - v) < 1:
+                return rb / 100.0
+        return 1.0
+    except Exception:
+        return 1.0
+
+
 def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center",
                          robot: str = None) -> str:
     """
@@ -5889,8 +5911,11 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
         # CRITICAL: Unique timestamp with MILLISECONDS
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-        # Open the camera
-        camera = cv2.VideoCapture(0)
+        # Open the camera via DirectShow: it exposes the BRIO's own
+        # zoom/pan/tilt controls, which the default MSMF backend rejects.
+        camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not camera.isOpened():
+            camera = cv2.VideoCapture(0)
 
         if not camera.isOpened():
             print(f"   [ERROR] Could not open camera")
@@ -5903,6 +5928,30 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+
+        # Deterministic baseline EVERY capture: neutral zoom, centered zoom
+        # window. The camera remembers PTZ between runs — a leftover pan
+        # (found at -6 once) silently skews every later photo.
+        try:
+            camera.set(cv2.CAP_PROP_ZOOM, 100)
+            camera.set(cv2.CAP_PROP_PAN, 0)
+            camera.set(cv2.CAP_PROP_TILT, 0)
+        except Exception:
+            pass
+
+        # Zoom BEFORE capture: use the camera's own zoom when the request is
+        # centered (the in-camera zoom window is center-only); off-center
+        # regions are handled by the digital crop after capture instead.
+        try:
+            want_zoom = max(1.0, min(4.0, float(zoom or 1.0)))
+        except (TypeError, ValueError):
+            want_zoom = 1.0
+        hw_zoom = 1.0
+        if want_zoom > 1.01 and ("center" in (zoom_region or "center").lower()
+                                 or "centre" in (zoom_region or "").lower()):
+            hw_zoom = _set_camera_hardware_zoom(camera, want_zoom)
+            if hw_zoom > 1.01:
+                print(f"   [CAMERA] In-camera zoom set: {hw_zoom:g}x")
 
         # Give camera MORE time to warm up and adjust (CRITICAL for quality)
         time.sleep(1.2)  # Increased from 0.8s
@@ -5923,10 +5972,15 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
                 "error": "Failed to capture image from camera."
             })
 
-        # Digital zoom into the requested part of the view.
-        frame, eff_zoom = _zoomed_frame(frame, zoom, zoom_region)
+        # Digital zoom for whatever the in-camera zoom didn't cover: the whole
+        # request when hardware zoom is unavailable or the region is
+        # off-center, or the remaining factor when it partially took.
+        frame, dig_zoom = _zoomed_frame(frame, want_zoom / hw_zoom, zoom_region)
+        eff_zoom = hw_zoom * dig_zoom
         if eff_zoom > 1.01:
-            print(f"   [CAMERA] {eff_zoom:g}x zoom on the {zoom_region or 'center'} of the view")
+            kind = ("in-camera" if dig_zoom <= 1.01 else
+                    ("in-camera + digital" if hw_zoom > 1.01 else "digital"))
+            print(f"   [CAMERA] {eff_zoom:g}x {kind} zoom on the {zoom_region or 'center'} of the view")
 
         # Generate UNIQUE filename with timestamp
         filename = f"camera_NEW_{timestamp}.jpg"
@@ -5966,7 +6020,7 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
         if aimed:
             view_bits.append("head re-centered" if aimed == "center" else f"head turned {aimed}")
         if eff_zoom > 1.01:
-            view_bits.append(f"{eff_zoom:g}x zoom on the {(zoom_region or 'center')} of the view")
+            view_bits.append(f"{eff_zoom:g}x {kind} zoom on the {(zoom_region or 'center')} of the view")
         view_note = (" (" + ", ".join(view_bits) + ")") if view_bits else ""
 
         return json.dumps({

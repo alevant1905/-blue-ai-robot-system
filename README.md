@@ -378,7 +378,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### v12.4.0 (2026-06-10) - Camera control: pan, tilt & zoom
 - **Real pan/tilt**: `capture_camera` takes a `look` direction (left/right/up/down/center) and physically turns the robot's head via the Ohbot motors before the shot — "what's to your left?" aims the head, then captures (skipped gracefully when the head isn't connected)
-- **Zoom**: digital zoom 1–4× with a `zoom_region` anchor (center/left/right/top/bottom/corners) — "zoom in on the bottom right" magnifies that part of the view before the vision model sees it
+- **Zoom**: 1–4× set **in the camera before capture** (the Logitech BRIO's own zoom, via DirectShow — real sensor detail, not upscaling) for centered zooms; off-center `zoom_region` anchors (left/right/top/bottom/corners) use a digital crop instead, and digital is the automatic fallback on cameras without hardware zoom. Every capture also resets the camera's zoom/pan/tilt to neutral first (a leftover pan was silently skewing photos)
 - Phrasings like "look up and tell me what you see", "take a closer look at the top", "zoom way in" are detected and converted to aim/zoom parameters automatically; the model can also set them itself (e.g. zooming in on detail it couldn't make out in the previous capture)
 - The capture result tells the robot how the view was aimed/zoomed so it describes the right part of the room
 
