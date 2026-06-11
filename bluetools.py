@@ -1445,8 +1445,6 @@ except Exception as e:
     print(f"[WARN] Conversation database not available: {e}")
     print("[WARN] Blue will not remember conversations across sessions")
 
-    print("[WARN] Place blue_tools_enhanced.py in the same directory to enable enhanced features")
-
 
 # ================================================================================
 # IMPROVED TOOL SELECTION SYSTEM (Integrated Version - October 2025)
