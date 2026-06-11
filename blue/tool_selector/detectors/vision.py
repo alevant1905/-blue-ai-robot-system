@@ -7,6 +7,39 @@ from ..models import ToolIntent
 from ..constants import ToolPriority
 
 
+# ---- Camera view-control extraction (shared with bluetools' fast path) ----
+# "what's on your left" / "look up and tell me what you see" → look direction;
+# "zoom in on the table" / "look closer at the bottom right" → zoom + region.
+
+_LOOK_DIR_RE = re.compile(
+    r"\b(?:look|turn(?:\s+your\s+head)?|glance|face)\s+(?:to\s+)?(?:the\s+|your\s+)?(left|right|up|down)\b")
+_SIDE_RE = re.compile(r"\b(?:on|to|at)\s+(?:your|the)\s+(left|right)\b")
+_LOOK_BACK_RE = re.compile(r"\blook\s+(?:back\s+)?(?:at\s+the\s+)?(?:center|centre|straight|forward|ahead)\b")
+_ZOOM_RE = re.compile(r"\bzoom(?:\s+(?:in|into|on|at))?\b|\bcloser look\b|\blook closer\b|\bmagnify\b|\bget closer\b")
+_ZOOM_HARD_RE = re.compile(r"\b(?:way|right|really|much) (?:in|closer)\b|\bas close as\b|\bmax(?:imum)? zoom\b")
+_ZOOM_REGION_RE = re.compile(
+    r"\b(?:zoom[^.?!]*?|closer[^.?!]*?)\b(?:on|into|at|to)\s+the\s+"
+    r"(top[- ]?left|top[- ]?right|bottom[- ]?left|bottom[- ]?right|left|right|top|bottom|middle|center|centre)\b")
+
+
+def extract_camera_view_args(msg_lower: str) -> dict:
+    """Pull camera view-control params (look / zoom / zoom_region) out of a
+    message. Empty dict when none are present (plain straight-on capture)."""
+    args = {}
+    m = _LOOK_DIR_RE.search(msg_lower) or _SIDE_RE.search(msg_lower)
+    if m:
+        args["look"] = m.group(1)
+    elif _LOOK_BACK_RE.search(msg_lower):
+        args["look"] = "center"
+    if _ZOOM_RE.search(msg_lower):
+        args["zoom"] = 4.0 if _ZOOM_HARD_RE.search(msg_lower) else 2.0
+        mr = _ZOOM_REGION_RE.search(msg_lower)
+        if mr:
+            reg = mr.group(1).replace(" ", "-")
+            args["zoom_region"] = "center" if reg in ("middle", "centre") else reg
+    return args
+
+
 class VisionDetector(BaseDetector):
     """Detects camera, image viewing, and recognition intents."""
 
@@ -56,6 +89,19 @@ class VisionDetector(BaseDetector):
         ]
         camera_keywords = ['camera', 'picture', 'photo', 'image', 'snapshot', 'capture']
         action_verbs = ['take', 'capture', 'snap', 'get', 'grab']
+        # Aim/zoom requests — the camera with view control ("what's to your
+        # left", "zoom in on the table", "look up and tell me what you see").
+        view_control_signals = [
+            "what's on your left", "what's on your right",
+            "what's to your left", "what's to your right",
+            'what is on your left', 'what is on your right',
+            'what is to your left', 'what is to your right',
+            'see on your left', 'see on your right',
+            'see to your left', 'see to your right',
+            'zoom in', 'zoom into', 'zoom on', 'look closer', 'closer look',
+            'look up and', 'look down and', 'look left and', 'look right and',
+            'look to your left and', 'look to your right and',
+        ]
 
         confidence = 0.0
         reasons = []
@@ -66,6 +112,9 @@ class VisionDetector(BaseDetector):
         elif any(s in msg_lower for s in live_view_signals):
             confidence = 0.90
             reasons.append("live-view request - capturing camera")
+        elif any(s in msg_lower for s in view_control_signals):
+            confidence = 0.88
+            reasons.append("view-control capture (aim/zoom)")
         elif any(v in msg_lower for v in action_verbs) and any(k in msg_lower for k in camera_keywords):
             confidence = 0.85
             reasons.append("action verb + camera keyword")
@@ -78,7 +127,7 @@ class VisionDetector(BaseDetector):
             confidence=confidence,
             priority=ToolPriority.HIGH,
             reason=' | '.join(reasons),
-            extracted_params={}
+            extracted_params=extract_camera_view_args(msg_lower)
         )
 
     def _detect_view_image_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:

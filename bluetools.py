@@ -362,6 +362,14 @@ def detect_camera_capture_intent(message: str) -> bool:
         'looking at right now',
         'do you see anything',
         'can you see anything',
+        # View-control phrasings: aim the head / zoom before the shot
+        'zoom in', 'zoom into', 'look closer', 'closer look',
+        "what's on your left", "what's on your right",
+        "what's to your left", "what's to your right",
+        'what is on your left', 'what is on your right',
+        'what is to your left', 'what is to your right',
+        'look up and', 'look down and', 'look left and', 'look right and',
+        'look to your left and', 'look to your right and',
     ]
 
     # Check for any trigger phrases
@@ -4233,10 +4241,26 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "capture_camera",
-            "description": "Capture a live camera view of your current surroundings. ONLY use this when user EXPLICITLY asks about what you see RIGHT NOW (e.g., 'what do you see?', 'look at me', 'what's in front of you?'). DO NOT use this for general conversation, document queries, or when user doesn't specifically ask about your current visual surroundings. This tool is for live visual perception, not for general questions.",
+            "description": "Capture a live camera view of your current surroundings. ONLY use this when user EXPLICITLY asks about what you see RIGHT NOW (e.g., 'what do you see?', 'look at me', 'what's in front of you?'). DO NOT use this for general conversation, document queries, or when user doesn't specifically ask about your current visual surroundings. You can AIM the shot: 'look' physically turns your head before capturing (use it when asked what's to your left/right/up/down, or to look back at the center), and 'zoom' (1-4) magnifies part of the view ('zoom_region' picks which part) — use zoom when asked to look closer at something or when you need detail you couldn't make out in a previous capture.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "look": {
+                        "type": "string",
+                        "enum": ["left", "right", "up", "down", "center"],
+                        "description": "Turn your head this way before capturing (real pan/tilt)"
+                    },
+                    "zoom": {
+                        "type": "number",
+                        "description": "Digital zoom factor: 1 (full view) to 4 (close-up)"
+                    },
+                    "zoom_region": {
+                        "type": "string",
+                        "enum": ["center", "left", "right", "top", "bottom",
+                                 "top-left", "top-right", "bottom-left", "bottom-right"],
+                        "description": "Which part of the view to zoom into (default center)"
+                    }
+                },
                 "required": []
             }
         }
@@ -5791,9 +5815,42 @@ def view_image(filename: str = None, query: str = None) -> str:
     })
 
 
-def capture_camera_image() -> str:
+# Which robot the current chat turn is addressed to — set by process_with_tools
+# so camera aiming moves the RIGHT head (Blue's page vs Hexia's page).
+_ACTIVE_CHAT_ROBOT = "blue"
+
+
+def _zoomed_frame(frame, zoom, region: str = "center"):
+    """Digital zoom: crop a region of the frame and scale it back up.
+    Returns (frame, effective_zoom). Region anchors: 'left'/'right' pin the
+    crop to that edge, 'top'/'bottom' likewise; combos ('top-left') work;
+    anything else means centered."""
+    import cv2
+    try:
+        z = max(1.0, min(4.0, float(zoom or 1.0)))
+    except (TypeError, ValueError):
+        z = 1.0
+    if z <= 1.01:
+        return frame, 1.0
+    h, w = frame.shape[:2]
+    cw, ch = max(2, int(w / z)), max(2, int(h / z))
+    r = (region or "center").lower()
+    x = 0 if "left" in r else (w - cw if "right" in r else (w - cw) // 2)
+    y = 0 if "top" in r else (h - ch if "bottom" in r else (h - ch) // 2)
+    crop = frame[y:y + ch, x:x + cw]
+    return cv2.resize(crop, (w, h), interpolation=cv2.INTER_CUBIC), z
+
+
+def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center",
+                         robot: str = None) -> str:
     """
     Capture a BRAND NEW image from the camera - IMPROVED VERSION.
+
+    View control:
+    - look: left/right/up/down/center — physically turns the robot's head
+      (real pan/tilt via the Ohbot motors) before the shot. Skipped silently
+      if the head isn't connected.
+    - zoom + zoom_region: digital zoom (1-4x) into a part of the view.
 
     CRITICAL IMPROVEMENTS:
     - Unique timestamp with milliseconds
@@ -5811,6 +5868,23 @@ def capture_camera_image() -> str:
         import cv2
         import datetime
         import time
+
+        # Physical pan/tilt: aim the head BEFORE opening the camera, so the
+        # motors settle while the sensor warms up.
+        aimed = ""
+        if look:
+            d = str(look).lower().strip()
+            if d in ("left", "right", "up", "down", "center", "centre",
+                     "forward", "front", "straight", "ahead"):
+                try:
+                    head = blue_head.get_head(robot or _ACTIVE_CHAT_ROBOT)
+                    if head.is_available() and head.look(d, speed=5.0):
+                        aimed = "center" if d in ("centre", "forward", "front",
+                                                  "straight", "ahead") else d
+                        print(f"   [CAMERA] Head aimed: {aimed}")
+                        time.sleep(0.7)  # let the motors finish before grabbing frames
+                except Exception as e:
+                    print(f"   [CAMERA] Head aim skipped ({e})")
 
         # CRITICAL: Unique timestamp with MILLISECONDS
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -5849,6 +5923,11 @@ def capture_camera_image() -> str:
                 "error": "Failed to capture image from camera."
             })
 
+        # Digital zoom into the requested part of the view.
+        frame, eff_zoom = _zoomed_frame(frame, zoom, zoom_region)
+        if eff_zoom > 1.01:
+            print(f"   [CAMERA] {eff_zoom:g}x zoom on the {zoom_region or 'center'} of the view")
+
         # Generate UNIQUE filename with timestamp
         filename = f"camera_NEW_{timestamp}.jpg"
         filepath = os.path.join(CAMERA_FOLDER, filename)
@@ -5883,18 +5962,29 @@ def capture_camera_image() -> str:
 
         print(f"   [VISION] Queued NEW camera image: {filename}")
 
+        view_bits = []
+        if aimed:
+            view_bits.append("head re-centered" if aimed == "center" else f"head turned {aimed}")
+        if eff_zoom > 1.01:
+            view_bits.append(f"{eff_zoom:g}x zoom on the {(zoom_region or 'center')} of the view")
+        view_note = (" (" + ", ".join(view_bits) + ")") if view_bits else ""
+
         return json.dumps({
             "success": True,
-            "message": f"📷 ✨ BRAND NEW CAMERA IMAGE captured at {datetime.datetime.now().strftime('%I:%M:%S %p')}",
+            "message": f"📷 ✨ BRAND NEW CAMERA IMAGE captured at {datetime.datetime.now().strftime('%I:%M:%S %p')}{view_note}",
             "filename": filename,
             "filepath": filepath,
             "dimensions": f"{width}x{height}",
             "timestamp": timestamp,
             "file_hash": file_hash,
+            "view": {"look": aimed or None, "zoom": eff_zoom,
+                     "zoom_region": (zoom_region or "center") if eff_zoom > 1.01 else None},
             "_instruction": (
-                f"Camera view captured at {datetime.datetime.now().strftime('%I:%M:%S %p')}. "
+                f"Camera view captured at {datetime.datetime.now().strftime('%I:%M:%S %p')}{view_note}. "
                 "You'll see what's in front of you in the next message. "
-                "Respond naturally about your surroundings."
+                + ("This view is aimed/zoomed as noted — describe what's IN it. "
+                   if view_bits else "")
+                + "Respond naturally about your surroundings."
             )
         })
 
@@ -8878,7 +8968,11 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
         return result
 
     elif tool_name == "capture_camera":
-        result = capture_camera_image()
+        result = capture_camera_image(
+            look=tool_args.get("look"),
+            zoom=tool_args.get("zoom"),
+            zoom_region=tool_args.get("zoom_region") or "center",
+        )
         print(f"   [OK] Camera capture completed")
         return result
 
@@ -10533,6 +10627,8 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
 def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue") -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page)."""
+    global _ACTIVE_CHAT_ROBOT
+    _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
     conversation_messages = messages.copy()
 
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
@@ -10762,7 +10858,12 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         # Force the capture_camera tool to be called
         # This ensures a brand new photo is taken, not reusing old context
         improved_force_tool = "capture_camera"
-        improved_tool_args = {}
+        # Carry any aim/zoom the user asked for ("what's to your left",
+        # "zoom in on the table") into the forced capture.
+        from blue.tool_selector.detectors.vision import extract_camera_view_args
+        improved_tool_args = extract_camera_view_args(last_user_message.lower())
+        if improved_tool_args:
+            print(f"   [CAMERA-DETECT] View control: {improved_tool_args}")
 
         # Skip tool selector and go straight to execution
         is_greeting = False

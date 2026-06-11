@@ -376,6 +376,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔖 Version History
 
+### v12.4.0 (2026-06-10) - Camera control: pan, tilt & zoom
+- **Real pan/tilt**: `capture_camera` takes a `look` direction (left/right/up/down/center) and physically turns the robot's head via the Ohbot motors before the shot — "what's to your left?" aims the head, then captures (skipped gracefully when the head isn't connected)
+- **Zoom**: digital zoom 1–4× with a `zoom_region` anchor (center/left/right/top/bottom/corners) — "zoom in on the bottom right" magnifies that part of the view before the vision model sees it
+- Phrasings like "look up and tell me what you see", "take a closer look at the top", "zoom way in" are detected and converted to aim/zoom parameters automatically; the model can also set them itself (e.g. zooming in on detail it couldn't make out in the previous capture)
+- The capture result tells the robot how the view was aimed/zoomed so it describes the right part of the room
+
 ### v12.3.0 (2026-06-10) - Better memories & visual memories
 - **Duplicate memories eliminated**: memory ids and the periodic merge are now case/whitespace-insensitive, and identical facts stored under synonym subjects ('dog name'/'pet name'/'puppy' → Nori) are merged — one-time cleanup removed 21 duplicates from the live store and their stale vectors
 - **Memories are dated**: every recalled memory carries an age tag (`[event, from 8 days ago]`) and the robots are told that "today/tomorrow" inside a memory refers to when it was remembered — no more treating a weeks-old "swimming class today at 5" as happening now
