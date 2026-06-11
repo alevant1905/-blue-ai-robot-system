@@ -10979,7 +10979,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue") -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "") -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page)."""
     global _ACTIVE_CHAT_ROBOT
@@ -11046,6 +11046,19 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             "in the first sentence.\n"
         )
         system_msg = {"role": "system", "content": (system_msg.get("content", "") + voice_note)}
+
+    # Fixed conversation language (the chat page's language picker). Without
+    # this, one mis-heard clip flips the reply language and the whole exchange
+    # derails; with it, Blue answers in the chosen language no matter how the
+    # words arrived.
+    if language and language in _BLUE_LANGS and isinstance(system_msg, dict):
+        _lang_name = _BLUE_LANGS[language]
+        lang_note = (
+            f"\nLANGUAGE: The conversation language is set to {_lang_name}. "
+            f"Write your ENTIRE reply in {_lang_name}, even if the user's message "
+            f"arrives in another language or mixes languages.\n"
+        )
+        system_msg = {"role": "system", "content": (system_msg.get("content", "") + lang_note)}
 
     _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
     existing0 = conversation_messages[0] if conversation_messages else None
@@ -13090,6 +13103,9 @@ CHAT_HTML = """
         .voice-row.sel .vn:after { content: ' \2713'; color: var(--forest); }
         .voice-row .vl { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); white-space: nowrap; }
         .voice-empty { padding: 18px; color: var(--slate); text-align: center; }
+        .lang-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 18px 10px; border-bottom: 1px solid var(--line); }
+        .lang-chip { border: 1px solid var(--line); background: var(--paper); border-radius: 16px; padding: 5px 12px; font-size: 0.82em; cursor: pointer; }
+        .lang-chip.sel { border-color: var(--forest); background: #eef4ee; font-weight: 600; }
         /* ---- Kid mode (Vilda's iPad): bigger, warmer, simpler ---- */
         body.kid { background: linear-gradient(160deg, #fff7ed 0%, #eef6ff 100%); }
         body.kid .container { max-width: 760px; }
@@ -13274,7 +13290,9 @@ CHAT_HTML = """
 
     <div class="voice-panel" id="voicePanel" style="display:none">
         <div class="voice-card">
-            <div class="voice-head"><span>Pick {{ robot_name }}'s voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
+            <div class="voice-head"><span>{{ robot_name }} &mdash; language &amp; voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
+            <div class="voice-sub">Which language are we speaking? Auto means {{ robot_name }} guesses from each clip; picking one makes him hear and answer in it reliably.</div>
+            <div class="lang-row" id="langRow"></div>
             <div class="voice-sub">Tap a voice to hear it. The one with a check mark is the one Blue uses.</div>
             <div class="voice-list" id="voiceList"></div>
         </div>
@@ -13474,7 +13492,8 @@ CHAT_HTML = """
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
-                    body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id })
+                    body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
+                                           language: (LANG_MODE !== 'auto' ? LANG_MODE : '') })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -13618,7 +13637,7 @@ CHAT_HTML = """
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
             if (!msg) return;
-            const lang = detectLang(msg);
+            const lang = langForSpeech(msg);
             const bcp = { en: 'en-US', fr: 'fr-FR', ru: 'ru-RU', el: 'el-GR', da: 'da-DK' }[lang] || 'en-US';
             try {
                 window.speechSynthesis.cancel();
@@ -13678,6 +13697,53 @@ CHAT_HTML = """
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
 
+        // ---- Language setting: which language Alex speaks AND Blue replies in ----
+        // 'auto' = Whisper detects per clip (constrained server-side to the
+        // family's five languages). A fixed code rides along with every /stt
+        // clip — skipping detection entirely, which is what actually makes
+        // short multilingual utterances reliable — and with every chat request
+        // so Blue answers in the same language. Saved per device, per robot.
+        const LANGS = [
+            ['auto', 'Auto'], ['en', 'English'], ['fr', 'Fran\\u00e7ais'],
+            ['ru', '\\u0420\\u0443\\u0441\\u0441\\u043a\\u0438\\u0439'],
+            ['el', '\\u0395\\u03bb\\u03bb\\u03b7\\u03bd\\u03b9\\u03ba\\u03ac'],
+            ['da', 'Dansk']
+        ];
+        let LANG_MODE = 'auto';
+        try { LANG_MODE = localStorage.getItem('blueLang_' + ROBOT.id) || 'auto'; } catch (e) {}
+        if (!LANGS.some(function (l) { return l[0] === LANG_MODE; })) LANG_MODE = 'auto';
+
+        function setLangMode(code) {
+            LANG_MODE = code;
+            try { localStorage.setItem('blueLang_' + ROBOT.id, code); } catch (e) {}
+            buildLangRow();
+        }
+
+        function buildLangRow() {
+            const row = document.getElementById('langRow');
+            if (!row) return;
+            row.innerHTML = '';
+            LANGS.forEach(function (l) {
+                const b = document.createElement('button');
+                b.className = 'lang-chip' + (l[0] === LANG_MODE ? ' sel' : '');
+                b.textContent = l[1];
+                b.addEventListener('click', function () { primeAudio(); setLangMode(l[0]); });
+                row.appendChild(b);
+            });
+        }
+
+        // The language Blue should SPEAK a reply in: the explicit setting,
+        // unless the reply's own script contradicts it — Cyrillic or Greek
+        // text never lies, whereas en/fr/da are script-ambiguous, so for
+        // those the setting beats the word-list guess in detectLang().
+        function langForSpeech(msg) {
+            const det = detectLang(msg);
+            if (LANG_MODE === 'auto') return det;
+            if (det === 'ru' || det === 'el') return det;
+            if (LANG_MODE === 'ru' || LANG_MODE === 'el') return det;
+            return LANG_MODE;
+        }
+
         // ---- Voice picker: tap a voice to hear it, tap to keep it (saved per device) ----
         const voiceBtn = document.getElementById('voiceBtn');
         const voicePanel = document.getElementById('voicePanel');
@@ -13726,7 +13792,7 @@ CHAT_HTML = """
         }
 
         if (voiceBtn) {
-            voiceBtn.addEventListener('click', function () { primeAudio(); buildVoiceList(); voicePanel.style.display = 'flex'; });
+            voiceBtn.addEventListener('click', function () { primeAudio(); buildLangRow(); buildVoiceList(); voicePanel.style.display = 'flex'; });
             voiceClose.addEventListener('click', function () { voicePanel.style.display = 'none'; });
             voicePanel.addEventListener('click', function (e) { if (e.target === voicePanel) voicePanel.style.display = 'none'; });
         }
@@ -13863,6 +13929,7 @@ CHAT_HTML = """
             const blob = encodeWav(chunks, sampleRate);
             const fd = new FormData();
             fd.append('audio', blob, 'speech.wav');
+            if (LANG_MODE !== 'auto') fd.append('language', LANG_MODE);
             micBtn.disabled = true;
             setHint('Figuring out what you said\\u2026');
             setFaceState('thinking');
@@ -13989,9 +14056,18 @@ CHAT_HTML = """
         // Fillers Whisper may stick before the name; allowed to precede the wake.
         const HF_FILLERS = ['hey','hi','hello','ok','okay','um','uh','so','well'];
         // Accepted spellings of the wake word (Whisper is inconsistent on a short
-        // leading proper noun, even with hotword biasing).
-        const HF_WAKE_WORDS = ['blue','bleu','blu','blew','bloo','blues','bews'];
+        // leading proper noun, even with hotword biasing). The Cyrillic/Greek
+        // entries matter when the language setting fixes Russian/Greek: Whisper
+        // then writes the name natively ("\\u0411\\u043b\\u044e," / "\\u039c\\u03c0\\u03bb\\u03b5") and the latin-only
+        // strip below would otherwise erase it entirely.
+        const HF_WAKE_WORDS = ['blue','bleu','blu','blew','bloo','blues','bews',
+            '\\u0431\\u043b\\u044e','\\u0431\\u043b\\u0443','\\u0431\\u043b\\u044c\\u044e','\\u0431\\u043b\\u0435',
+            '\\u03bc\\u03c0\\u03bb\\u03b5','\\u03bc\\u03c0\\u03bb\\u03bf\\u03c5'];
         function isWakeWord(w) {
+            // Unicode-aware pass first: keep latin, Cyrillic and Greek letters,
+            // drop punctuation — so "\\u0411\\u043b\\u044e," matches its list entry.
+            const wu = w.toLowerCase().replace(/[^a-z\\u00e0-\\u00ff\\u0370-\\u03ff\\u0400-\\u04ff]/g, '');
+            if (wu && HF_WAKE_WORDS.indexOf(wu) >= 0) return true;
             w = w.toLowerCase().replace(/[^a-z]/g, '');
             if (!w) return false;
             if (HF_WAKE_WORDS.indexOf(w) >= 0) return true;
@@ -14263,6 +14339,7 @@ CHAT_HTML = """
                 const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
                 // In wake mode, ask the server to bias Whisper toward "Blue".
                 if (hfMode !== 'conversation') fd.append('wake', '1');
+                if (LANG_MODE !== 'auto') fd.append('language', LANG_MODE);
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);
                 said = ((data && data.text) || '').trim();
@@ -14528,6 +14605,13 @@ import threading as _threading_stt
 _WHISPER_MODEL = None
 _WHISPER_LOCK = _threading_stt.Lock()
 
+# The household's languages — the only ones Blue ever needs to hear or speak.
+# Used to validate the chat page's explicit language setting AND to constrain
+# Whisper's auto-detect: on short clips it routinely mistakes Danish for
+# Norwegian or Russian for Ukrainian, then transcribes into the wrong language.
+_BLUE_LANGS = {"en": "English", "fr": "French", "ru": "Russian",
+               "el": "Greek", "da": "Danish"}
+
 
 def _get_whisper():
     global _WHISPER_MODEL
@@ -14578,6 +14662,13 @@ def stt():
     # hint=stop is sent by barge-in while Blue is talking — bias toward interrupt
     # words, NOT "Blue" (the old bug primed Whisper against hearing "stop").
     hint = (request.form.get('hint') or '').strip().lower()
+    # Explicit language from the chat page's language picker. Forcing it skips
+    # Whisper's per-clip detection entirely — the single biggest reliability
+    # win for short multilingual utterances (detection is what gets confused,
+    # not transcription).
+    lang_req = (request.form.get('language') or '').strip().lower()
+    if lang_req not in _BLUE_LANGS:
+        lang_req = ""
     try:
         f.save(tmp_path)
         model = _get_whisper()
@@ -14587,13 +14678,29 @@ def stt():
         if hint == 'stop':
             kwargs["hotwords"] = "stop. stop. stop!"   # bias hard toward just "stop"
             kwargs["language"] = "en"   # sub-second clip: auto-detect is slow and flaky
-        elif wake:
-            kwargs["hotwords"] = "Blue"
-        # No fixed language: Whisper auto-detects (English/French/Russian/Greek…).
+        else:
+            if wake:
+                kwargs["hotwords"] = "Blue"
+            if lang_req:
+                kwargs["language"] = lang_req
         segments, info = model.transcribe(tmp_path, **kwargs)
         text = " ".join(seg.text for seg in segments).strip()
         lang = getattr(info, "language", "") or ""
-        print(f"   [STT] ({lang}{',wake' if wake else ''}) {os.path.getsize(tmp_path)} bytes -> {text[:120]!r}")
+        # Auto mode, constrained: when Whisper detects a language outside the
+        # household's five, it's almost always a near-miss on a short clip —
+        # re-run forced to the most probable HOUSEHOLD language instead of
+        # transcribing into the wrong one. Costs one extra pass, only on a miss.
+        if "language" not in kwargs and lang and lang not in _BLUE_LANGS:
+            probs = getattr(info, "all_language_probs", None) or []
+            fam = [(code, p) for code, p in probs if code in _BLUE_LANGS]
+            if fam:
+                best = max(fam, key=lambda cp: cp[1])[0]
+                print(f"   [STT] heard '{lang}' (not a household language) -> retrying as '{best}'")
+                kwargs["language"] = best
+                segments, info = model.transcribe(tmp_path, **kwargs)
+                text = " ".join(seg.text for seg in segments).strip()
+                lang = best
+        print(f"   [STT] ({lang}{',wake' if wake else ''}{',set' if lang_req else ''}) {os.path.getsize(tmp_path)} bytes -> {text[:120]!r}")
         return jsonify({"text": text, "language": lang})
     except Exception as e:
         log.error(f"[STT] transcription failed: {e}")
@@ -18067,6 +18174,12 @@ def chat_completions():
         # fewer tokens generate faster (so Blue starts talking sooner) and are
         # nicer to listen to. The chat page sets this flag for voice messages.
         voice_turn = bool(data.get("voice"))
+        # Explicit conversation language from the chat page's language picker
+        # ('' or absent = auto). Blue is told to REPLY in it; the hearing side
+        # is biased separately (the page sends the same code with /stt clips).
+        language = (data.get("language") or "").strip().lower()
+        if language not in _BLUE_LANGS:
+            language = ""
         # Which robot is being addressed? Blue's page omits this and defaults to
         # Blue; Hexia's page sends "hexia". Drives persona, voice, head and the
         # per-robot conversation history.
@@ -18168,7 +18281,8 @@ def chat_completions():
         import time as _t_llm
         _llm_t0 = _t_llm.time()
         response = process_with_tools(messages, _pre_selection=_quick_result,
-                                      user_name=user_name, voice=voice_turn, robot=robot)
+                                      user_name=user_name, voice=voice_turn, robot=robot,
+                                      language=language)
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
 
