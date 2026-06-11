@@ -840,11 +840,20 @@ class RobotHead:
         pressed below its centre stop) makes speech look frozen even though
         commands flow. The sweep shows where each lip's live zone actually is —
         and a lip that stays still across the whole sweep has a loose servo
-        arm/linkage, not a software problem."""
-        waypoints = (0.0, 2.5, 5.0, 7.5, 10.0, 5.0)
+        arm/linkage, not a software problem.
+
+        The top lip is NOT swept below 4: with the jaw closed it rests on the
+        mouth's centre stop near mid-range (it can only dip below when the jaw
+        is wide open), so commands below that just stall the servo against the
+        stop — and a stall can ratchet a loose servo horn a spline tooth,
+        re-creating the very jam this tool diagnoses."""
+        waypoints = {
+            TOPLIP:    (4.0, 6.0, 8.0, 10.0, 5.0),
+            BOTTOMLIP: (2.0, 5.0, 7.5, 10.0, 5.0),
+        }
         try:
             for motor in (TOPLIP, BOTTOMLIP):
-                for pos in waypoints:
+                for pos in waypoints[motor]:
                     if self._lip_token != my_token or not self._available:
                         return
                     self._move_internal(motor, pos, speed=3.0)
