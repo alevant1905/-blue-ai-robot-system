@@ -13076,14 +13076,14 @@ CHAT_HTML = """
             <div class="cam-head"><span>{{ robot_name }}'s camera &mdash; live</span><button id="camClose" aria-label="Close camera preview">&times;</button></div>
             <img id="camStream" alt="Live camera view">
             <div class="cam-controls">
-                <div class="cam-pad" aria-label="Turn the head">
-                    <button data-look="up" title="Look up">&#9650;</button>
+                <div class="cam-pad" aria-label="Pan and tilt the camera">
+                    <button data-look="up" title="Pan the camera up">&#9650;</button>
                     <div>
-                        <button data-look="left" title="Look left">&#9664;</button>
-                        <button data-look="center" title="Look back at center">&#8962;</button>
-                        <button data-look="right" title="Look right">&#9654;</button>
+                        <button data-look="left" title="Pan the camera left">&#9664;</button>
+                        <button data-look="center" title="Re-center the camera">&#8962;</button>
+                        <button data-look="right" title="Pan the camera right">&#9654;</button>
                     </div>
-                    <button data-look="down" title="Look down">&#9660;</button>
+                    <button data-look="down" title="Pan the camera down">&#9660;</button>
                 </div>
                 <div class="cam-zoom" aria-label="Camera zoom">
                     <button id="camZoomOut" title="Zoom out">&minus;</button>
@@ -13091,7 +13091,7 @@ CHAT_HTML = """
                     <button id="camZoomIn" title="Zoom in">+</button>
                 </div>
             </div>
-            <div class="cam-sub">Steer and zoom, then just ask &mdash; &ldquo;what do you see?&rdquo; captures exactly this view.</div>
+            <div class="cam-sub">The arrows pan the camera lens itself (it zooms to 2&times; first &mdash; panning moves the zoom window). Line up the view, then just ask &mdash; &ldquo;what do you see?&rdquo; captures exactly this.</div>
         </div>
     </div>
     {% endif %}
@@ -13696,7 +13696,6 @@ CHAT_HTML = """
                 camBtn.classList.remove('active'); camBtn.setAttribute('aria-pressed', 'false');
             }
             function camPtz(body) {
-                body.robot = ROBOT.id;
                 fetch('/camera/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
                     .then(r => r.json())
                     .then(d => { if (d && typeof d.zoom === 'number') { camZoom = d.zoom; camShowZoom(); } })
@@ -14423,34 +14422,59 @@ def camera_stream():
 
 @app.route('/camera/ptz', methods=['POST'])
 def camera_ptz():
-    """Steer the live preview: turn the addressed robot's head and/or set the
-    camera's own zoom. The MJPEG stream shows the result immediately, and a
-    later capture takes exactly this view."""
+    """Steer the live preview CAMERA itself — not the robot's head. The BRIO
+    pans/tilts by shifting its zoom window inside the sensor, so panning only
+    shows an effect while zoomed in; a pan request at 1x zooms to 2x first.
+    Empirical BRIO mapping (verified by template-matching captures): pan + =
+    window right, tilt + = window up, range -10..10 spans the sensor.
+    The head still turns via chat ("look left") — just not from this pad."""
+    import cv2
     d = request.get_json(silent=True) or {}
-    out = {"ok": True}
     look = (d.get('look') or '').strip().lower()
-    robot = (d.get('robot') or 'blue').strip().lower()
-    if look:
+    if not _cam_hub_start():
+        return jsonify({"ok": False, "error": "camera unavailable"})
+    out = {"ok": True}
+    with _CAM_HUB["lock"]:
+        cap = _CAM_HUB["cap"]
+        if cap is None:
+            return jsonify({"ok": False, "error": "camera unavailable"})
+        if d.get('zoom') is not None:
+            try:
+                want = max(1.0, min(4.0, float(d['zoom'])))
+            except (TypeError, ValueError):
+                want = 1.0
+            _CAM_HUB["zoom"] = _set_camera_hardware_zoom(cap, want)
+            if want <= 1.01:
+                # Fully zoomed out: a leftover window offset just crops oddly.
+                try:
+                    cap.set(cv2.CAP_PROP_PAN, 0)
+                    cap.set(cv2.CAP_PROP_TILT, 0)
+                except Exception:
+                    pass
+        if look:
+            if look != 'center' and _CAM_HUB["zoom"] <= 1.01:
+                _CAM_HUB["zoom"] = _set_camera_hardware_zoom(cap, 2.0)
+            step = 2.0
+            try:
+                if look == 'center':
+                    cap.set(cv2.CAP_PROP_PAN, 0)
+                    cap.set(cv2.CAP_PROP_TILT, 0)
+                elif look in ('left', 'right'):
+                    cur = cap.get(cv2.CAP_PROP_PAN)
+                    cap.set(cv2.CAP_PROP_PAN,
+                            max(-10.0, min(10.0, cur + (step if look == 'right' else -step))))
+                elif look in ('up', 'down'):
+                    cur = cap.get(cv2.CAP_PROP_TILT)
+                    cap.set(cv2.CAP_PROP_TILT,
+                            max(-10.0, min(10.0, cur + (step if look == 'up' else -step))))
+            except Exception:
+                pass
         try:
-            h = blue_head.get_head(robot)
-            out["look"] = bool(h.is_available() and h.look(look, speed=5.0))
+            out["pan"] = cap.get(cv2.CAP_PROP_PAN)
+            out["tilt"] = cap.get(cv2.CAP_PROP_TILT)
         except Exception:
-            out["look"] = False
-    if d.get('zoom') is not None:
-        try:
-            want = max(1.0, min(4.0, float(d['zoom'])))
-        except (TypeError, ValueError):
-            want = 1.0
-        _cam_hub_start()
-        with _CAM_HUB["lock"]:
-            cap = _CAM_HUB["cap"]
-            if cap is not None:
-                z = _set_camera_hardware_zoom(cap, want) if want > 1.01 else (
-                    _set_camera_hardware_zoom(cap, 1.0))
-                _CAM_HUB["zoom"] = z
-                out["zoom"] = z
-            else:
-                out["zoom"] = None
+            pass
+        out["zoom"] = _CAM_HUB["zoom"]
     return jsonify(out)
 
 

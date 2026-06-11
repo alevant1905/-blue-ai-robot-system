@@ -377,7 +377,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔖 Version History
 
 ### v12.5.0 (2026-06-11) - See through his eyes + phone-friendly chat
-- **Live camera preview in chat**: a camera button opens a window showing exactly what the robot sees *right now* (MJPEG stream), with **head-steering arrows and live zoom** — line up the shot, then just ask "what do you see?" and the capture is exactly the previewed view (the capture reuses the preview's camera, so nothing fights over the device; it auto-releases ~12s after closing)
+- **Live camera preview in chat**: a camera button opens a window showing exactly what the robot sees *right now* (MJPEG stream), with **pan/tilt arrows that move the camera's own lens window** (BRIO digital PTZ — panning auto-zooms to 2× first, since the window only exists when zoomed) **and live zoom** — line up the shot, then just ask "what do you see?" and the capture is exactly the previewed view (the capture reuses the preview's camera, so nothing fights over the device; it auto-releases ~12s after closing). The head stays still — turn it by asking in chat ("look left")
 - Captures taken while the preview is open are also **instant** (no sensor warm-up)
 - **Mobile chat overhaul** (`/chat`, `/hexia` on iPhone): the input bar reflows — icon buttons on their own row, full-width message box + Send below; 16px input font (no more iOS auto-zoom on tap); the nav links became a swipeable row; safe-area padding above the home bar; wider message bubbles
 
