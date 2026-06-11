@@ -1737,9 +1737,11 @@ _CHAT_ONLY_ALLOWED = {
 #  - calendar/reminder tools: Blue doesn't discuss the calendar with Vilda;
 #  - capture_camera grabs the PC webcam — never her camera. Her eyes are the
 #    iPad frame staged via /chat/eyes, so the PC cam must never run for her.
+#  - email_snapshot runs that same PC webcam AND sends mail from Blue's own
+#    Gmail account — strictly an owner power.
 _KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer",
                       "move_head", "create_reminder", "get_upcoming_reminders",
-                      "capture_camera"}
+                      "capture_camera", "email_snapshot"}
 
 
 @app.before_request
@@ -4245,6 +4247,42 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "look": {
+                        "type": "string",
+                        "enum": ["left", "right", "up", "down", "center"],
+                        "description": "Turn your head this way before capturing (real pan/tilt)"
+                    },
+                    "zoom": {
+                        "type": "number",
+                        "description": "Digital zoom factor: 1 (full view) to 4 (close-up)"
+                    },
+                    "zoom_region": {
+                        "type": "string",
+                        "enum": ["center", "left", "right", "top", "bottom",
+                                 "top-left", "top-right", "bottom-left", "bottom-right"],
+                        "description": "Which part of the view to zoom into (default center)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "email_snapshot",
+            "description": "Take a BRAND NEW photo with your camera RIGHT NOW and EMAIL it as an attachment from your own Gmail account. USE THIS when the user wants a picture of what you currently see delivered by email: 'email me a photo of what you see', 'take a snapshot and send it to me', 'send me a picture of the room'. When they say 'me', leave 'to' empty — it goes to Alex. DO NOT USE for just looking/describing (use capture_camera) or for emails without a fresh photo (use send_gmail).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email address or contact name. Leave empty to send it to Alex."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Optional short message to include in the email body"
+                    },
                     "look": {
                         "type": "string",
                         "enum": ["left", "right", "up", "down", "center"],
@@ -7035,6 +7073,125 @@ def _execute_send_gmail(args: Dict[str, Any]) -> str:
         })
 
 
+def _execute_email_snapshot(args: Dict[str, Any]) -> str:
+    """Composite 'see it and send it': take a BRAND NEW camera photo and email
+    it as an attachment from Blue's own Gmail. One deterministic call — the
+    local model can't be trusted to chain capture_camera then send_gmail.
+    No recipient means Alex ('email me what you see')."""
+    import datetime as _dt
+
+    # 1) Capture. This also queues the frame in _vision_queue, so Blue sees
+    #    (and can describe) exactly the photo he just mailed.
+    capture_raw = capture_camera_image(
+        look=args.get("look"),
+        zoom=args.get("zoom"),
+        zoom_region=args.get("zoom_region") or "center",
+    )
+    try:
+        capture = json.loads(capture_raw)
+    except (TypeError, ValueError):
+        capture = {"success": False, "error": "Unreadable capture result."}
+    if not capture.get("success"):
+        return json.dumps({
+            "success": False,
+            "error": f"Could not take the snapshot: {capture.get('error', 'camera unavailable')}",
+            "_instruction": ("The camera shot failed, so NO email was sent. "
+                             "Tell the user you couldn't take the photo right now."),
+        })
+    filepath = capture.get("filepath")
+
+    # 2) Resolve the recipient: an address passes through, a contact name goes
+    #    through the address book, and a confident answer is required — Blue
+    #    must never guess and mail a stranger a photo of the house.
+    to = (args.get("to") or "").strip()
+    if to and "@" not in to:
+        resolved = None
+        if ENHANCED_TOOLS_AVAILABLE:
+            try:
+                resolved = ContactManager.resolve_email(to)
+            except Exception as e:
+                print(f"   [SNAPSHOT] contact resolve error for {to!r}: {e}")
+        if not resolved:
+            return json.dumps({
+                "success": False,
+                "error": f"No email address on file for '{to}'.",
+                "photo_saved": filepath,
+                "_instruction": (f"You took the photo (it follows in the next message) but you "
+                                 f"don't have an email address for {to}, so nothing was sent. "
+                                 f"Ask the user for the address."),
+            })
+        print(f"   [SNAPSHOT] resolved recipient {to!r} -> {resolved}")
+        to = resolved
+    if not to:
+        to = BLUE_BCC_EMAIL  # Alex's personal gmail — the "email it to me" default
+
+    # 3) Mail it, photo attached.
+    now_word = _dt.datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    view = capture.get("view") or {}
+    view_bits = []
+    if view.get("look"):
+        view_bits.append("head centered" if view["look"] == "center"
+                         else f"head turned {view['look']}")
+    try:
+        if float(view.get("zoom") or 1) > 1.01:
+            view_bits.append(f"{float(view['zoom']):g}x zoom on the {view.get('zoom_region') or 'center'}")
+    except (TypeError, ValueError):
+        pass
+    view_note = (" (" + ", ".join(view_bits) + ")") if view_bits else ""
+
+    note = (args.get("note") or "").strip()
+    subject = (args.get("subject") or "").strip() or f"Snapshot from Blue \U0001F4F7 {now_word}"
+    body_lines = [f"Hi! Here's what I'm seeing right now — taken {now_word}{view_note}."]
+    if note:
+        body_lines += ["", note]
+    body_lines += ["", "— Blue"]
+
+    send_raw = _execute_send_gmail({
+        "to": to,
+        "subject": subject,
+        "body": "\n".join(body_lines),
+        "attachments": [filepath],
+    })
+    try:
+        send_res = json.loads(send_raw)
+    except (TypeError, ValueError):
+        send_res = {"success": False, "error": "Unreadable send result."}
+
+    if not send_res.get("success"):
+        return json.dumps({
+            "success": False,
+            "error": f"Photo captured but the email failed: {send_res.get('error', 'unknown error')}",
+            "photo_saved": filepath,
+            "_instruction": ("You took the photo but could NOT send the email. Tell the user "
+                             "the email failed — do not claim it was sent."),
+        })
+    if send_res.get("attachment_errors"):
+        # The message went out but WITHOUT the photo — never claim delivery.
+        return json.dumps({
+            "success": False,
+            "error": f"Email sent but the photo failed to attach: {'; '.join(send_res['attachment_errors'])}",
+            "photo_saved": filepath,
+            "_instruction": ("An email went out but the photo could not be attached. "
+                             "Tell the user plainly so they don't wait for a photo."),
+        })
+
+    print(f"   [SNAPSHOT] \U0001F4E7 Snapshot emailed to {to}")
+    return json.dumps({
+        "success": True,
+        "message": f"\U0001F4F7\U0001F4E7 Snapshot taken and emailed to {to}",
+        "to": to,
+        "subject": subject,
+        "filename": capture.get("filename"),
+        "filepath": filepath,
+        "view": view or None,
+        "_instruction": (
+            f"You just took a fresh photo and emailed it to {to} from your own Gmail — "
+            "this is DONE. The photo follows in the next message: confirm you sent it and "
+            "briefly describe what's in it. Do NOT call send_gmail or capture_camera again."
+        ),
+    })
+
+
 def _execute_reply_gmail(args: Dict[str, Any]) -> str:
     """Reply to Gmail messages"""
     if not GMAIL_AVAILABLE:
@@ -8560,6 +8717,11 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
                 # permitted for this sender and was never actually run,
                 # force the real call instead of sending a lie.
                 claimed = detect_hallucinated_action(content)
+                # A pre-executed email_snapshot makes "photo sent" claims
+                # legitimate — never force a second send/capture for them.
+                if claimed in ("email_snapshot", "send_gmail", "reply_gmail",
+                               "capture_camera") and "email_snapshot" in executed:
+                    claimed = None
                 tool_exists = any(
                     (t.get('function', {}) or {}).get('name') == claimed
                     for t in (tools_payload or [])
@@ -9151,6 +9313,11 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             zoom_region=tool_args.get("zoom_region") or "center",
         )
         print(f"   [OK] Camera capture completed")
+        return result
+
+    elif tool_name == "email_snapshot":
+        result = _execute_email_snapshot(tool_args)
+        print(f"   [OK] Snapshot capture+email completed")
         return result
 
     elif tool_name == "recall_visual_memory":
@@ -9748,6 +9915,17 @@ def detect_hallucinated_search(response: str) -> bool:
 # have been called. If the assistant claims one of these but tool_calls is
 # empty, the response is a hallucination and we need to force-retry.
 _ACTION_CLAIM_PATTERNS = {
+    # MUST come before send_gmail: "I've emailed you the photo" is a
+    # photo-delivery claim — recovering it with plain send_gmail would mail
+    # words with no picture attached. Order matters because
+    # detect_hallucinated_action returns the FIRST matching key.
+    "email_snapshot": re.compile(
+        r"\b(?:sent|emailed|mailed|sending|emailing|mailing)\b[^.?!]{0,60}?"
+        r"\b(?:photo|picture|snapshot|pic|image)\b"
+        r"|\b(?:photo|picture|snapshot|pic|image)\b[^.?!]{0,40}?"
+        r"\b(?:sent|emailed|mailed|on its way|in your inbox)\b",
+        re.IGNORECASE,
+    ),
     "send_gmail": re.compile(
         r"\b(?:"
         # Past tense: "I sent", "I've sent", "I've emailed", "I just sent"
@@ -9900,6 +10078,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 "send_gmail": "[Use send_gmail. Extract the recipient email address and message content from the request.]",
                 "reply_gmail": "[Use reply_gmail to reply to these emails.]",
                 "capture_camera": "[Use capture_camera to see what's in front of you.]",
+                "email_snapshot": "[Use email_snapshot to take a new photo and email it. Leave 'to' empty when it's for Alex/'me'.]",
             }
 
             # Special handling for fanmail read-first workflow
@@ -10216,7 +10395,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             blocked_tools = {
                 'create_note', 'create_document', 'remember_person', 'remember_place',
                 'set_timer', 'create_task', 'get_tasks', 'complete_task',
-                'who_do_i_know', 'view_image', 'capture_camera', 'recall_visual_memory'
+                'who_do_i_know', 'view_image', 'capture_camera', 'recall_visual_memory',
+                'email_snapshot'
             }
             tools_to_use = [
                 tool for tool in TOOLS
@@ -11028,8 +11208,23 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # PRIORITY CHECK: Camera Capture (must take NEW photo every time)
     # ================================================================================
     # This check happens BEFORE tool selector to ensure "what do you see?"
-    # ALWAYS triggers a new camera capture, not a cached response
-    if detect_camera_capture_intent(last_user_message) and user_name not in _CHAT_ONLY_USERS:
+    # ALWAYS triggers a new camera capture, not a cached response.
+    # Snapshot-by-email is checked FIRST: "email me a photo of what you see"
+    # contains the plain camera triggers too, and a bare capture_camera would
+    # take the photo but never send it.
+    from blue.tool_selector.detectors.vision import (
+        extract_camera_view_args, extract_email_snapshot_args,
+        is_email_snapshot_request)
+    if (is_email_snapshot_request(last_user_message.lower())
+            and user_name not in _CHAT_ONLY_USERS):
+        print(f"   [SNAPSHOT-DETECT] ✅ Snapshot-by-email intent detected!")
+        improved_force_tool = "email_snapshot"
+        improved_tool_args = extract_email_snapshot_args(last_user_message.lower())
+        if improved_tool_args:
+            print(f"   [SNAPSHOT-DETECT] Args: {improved_tool_args}")
+        is_greeting = False
+        print(f"   [SNAPSHOT-DETECT] Tool forced: email_snapshot (will execute in iteration 1)")
+    elif detect_camera_capture_intent(last_user_message) and user_name not in _CHAT_ONLY_USERS:
         print(f"   [CAMERA-DETECT] ✅ Camera capture intent detected!")
         print(f"   [CAMERA-DETECT] Forcing NEW photo capture - bypassing tool selector")
         # Force the capture_camera tool to be called
@@ -11037,7 +11232,6 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         improved_force_tool = "capture_camera"
         # Carry any aim/zoom the user asked for ("what's to your left",
         # "zoom in on the table") into the forced capture.
-        from blue.tool_selector.detectors.vision import extract_camera_view_args
         improved_tool_args = extract_camera_view_args(last_user_message.lower())
         if improved_tool_args:
             print(f"   [CAMERA-DETECT] View control: {improved_tool_args}")
@@ -11275,8 +11469,8 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # Used for tools that need richer/contextual responses (weather, email, search).
     # ================================================================================
     _DIRECT_EXEC_TOOLS = {
-        'get_weather', 'capture_camera', 'web_search', 'read_gmail',
-        'search_documents', 'browse_website',
+        'get_weather', 'capture_camera', 'email_snapshot', 'web_search',
+        'read_gmail', 'search_documents', 'browse_website',
     }
     if (improved_force_tool and improved_force_tool in _DIRECT_EXEC_TOOLS
             and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
@@ -11316,6 +11510,16 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             # through to the iteration loop with the right pending tool.
             hallucinated_tool = detect_hallucinated_action(content)
             if hallucinated_tool and hallucinated_tool != improved_force_tool:
+                # email_snapshot already captured AND mailed the photo: "I've
+                # sent you the picture" / "I snapped a photo" is the truth.
+                # Forcing send_gmail here would fire a SECOND, attachment-less
+                # email; forcing capture_camera would re-shoot for nothing.
+                if improved_force_tool == "email_snapshot" and hallucinated_tool in (
+                        "send_gmail", "reply_gmail", "capture_camera"):
+                    if _last_vision_image_paths and content:
+                        _save_visual_observation(content)
+                    return response
+
                 # The retry is meant for COMPOUND requests ("browse + email"):
                 # one tool runs, the model narrates the second action without
                 # calling its tool, and we force it through. Narrow false-
@@ -11463,6 +11667,14 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             # off the lights", etc.). Stops the worst class of confabulation:
             # user thinks an email was sent when nothing happened.
             hallucinated_tool = detect_hallucinated_action(content)
+            # A completed email_snapshot earlier in this turn makes later
+            # "sent the photo" / "took a picture" wording TRUE — re-forcing
+            # send_gmail would mail a duplicate without the photo.
+            if hallucinated_tool in ("email_snapshot", "send_gmail",
+                                     "reply_gmail", "capture_camera") and any(
+                    m.get("role") == "tool" and m.get("name") == "email_snapshot"
+                    for m in conversation_messages):
+                hallucinated_tool = None
             if hallucinated_tool and not force_tool:
                 print(f"   [WARN] AI claimed to {hallucinated_tool} but no tool called — forcing retry")
                 # Replace the lying response with a marker that tells the

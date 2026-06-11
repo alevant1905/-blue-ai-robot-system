@@ -42,9 +42,9 @@ def extract_context(conversation_history: List[Dict]) -> Dict:
     # Track tool usage and keywords
     tool_domains = {
         'music': ['play_music', 'control_music', 'music', 'song', 'artist'],
-        'email': ['read_gmail', 'send_gmail', 'reply_gmail', 'email', 'inbox'],
+        'email': ['read_gmail', 'send_gmail', 'reply_gmail', 'email_snapshot', 'email', 'inbox'],
         'lights': ['control_lights', 'light', 'lights', 'mood', 'brightness'],
-        'camera': ['capture_camera', 'view_image', 'camera', 'picture'],
+        'camera': ['capture_camera', 'email_snapshot', 'view_image', 'camera', 'picture'],
         'document': ['search_documents', 'create_document', 'document', 'file'],
         'weather': ['get_weather', 'weather', 'forecast'],
     }

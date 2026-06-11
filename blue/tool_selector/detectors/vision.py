@@ -40,11 +40,79 @@ def extract_camera_view_args(msg_lower: str) -> dict:
     return args
 
 
+# ---- Snapshot-by-email ("take a photo of what you see and email it to me") ----
+# Both halves must be present: a delivery phrase AND a photo/live-view phrase.
+# "send an email to john" (no photo) and "take a photo" (no delivery) fall
+# through to send_gmail / capture_camera as before.
+
+_EMAIL_SNAPSHOT_MAIL_TRIGGERS = (
+    'email me', 'email it', 'email that', 'email this', 'email a ',
+    'email the ', 'email your', 'email what you', 'mail me', 'mail it',
+    'send me', 'send it to', 'send that to', 'send this to', 'send one to',
+    'by email', 'via email', 'in an email', 'over email',
+    'to my email', 'to my inbox', 'and email', 'then email',
+)
+_EMAIL_SNAPSHOT_PHOTO_TRIGGERS = (
+    'photo', 'picture', 'snapshot', 'snap of', 'snap a', 'image',
+    'what you see', "what you're seeing", 'what you are seeing',
+    'what you can see', 'what do you see', 'your view', 'your camera',
+    'through your eyes', 'in front of you',
+)
+# Questions about PAST sending ("did you send me the picture?") are not a
+# request to capture anything new.
+_EMAIL_SNAPSHOT_NOT_NOW = (
+    'did you send', 'did you email', 'have you sent', 'have you emailed',
+    'when did you send', 'when did you email',
+)
+
+
+def is_email_snapshot_request(msg_lower: str) -> bool:
+    """True when the user wants a FRESH camera shot delivered by email —
+    'email me a photo of what you see', 'take a snapshot and send it to me'."""
+    msg_lower = msg_lower.replace('e-mail', 'email').replace('e mail', 'email')
+    if any(t in msg_lower for t in _EMAIL_SNAPSHOT_NOT_NOW):
+        return False
+    return (any(t in msg_lower for t in _EMAIL_SNAPSHOT_MAIL_TRIGGERS)
+            and any(t in msg_lower for t in _EMAIL_SNAPSHOT_PHOTO_TRIGGERS))
+
+
+_SNAP_TO_ADDR_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}")
+# "email/send ... to <name>" — a contact name the executor resolves to an
+# address. Single token only; anything pronoun-ish below is "me" → default.
+_SNAP_TO_NAME_RE = re.compile(
+    r"\b(?:email|send|mail|shoot|fire)\b[^.?!]*?\bto\s+([a-z][a-z'.-]{1,30})\b")
+_SNAP_NOT_RECIPIENTS = {
+    'me', 'my', 'myself', 'us', 'you', 'your', 'yourself', 'it', 'that',
+    'this', 'the', 'him', 'her', 'them', 'blue', 'everyone', 'someone',
+    'email', 'mail', 'gmail', 'inbox', 'see', 'look', 'show',
+}
+
+
+def extract_email_snapshot_args(msg_lower: str) -> dict:
+    """Params for the email_snapshot tool: camera view control plus the
+    recipient (explicit address, or a contact name; absent means Alex)."""
+    args = extract_camera_view_args(msg_lower)
+    m = _SNAP_TO_ADDR_RE.search(msg_lower)
+    if m:
+        args["to"] = m.group(0)
+    else:
+        m = _SNAP_TO_NAME_RE.search(msg_lower)
+        if m and m.group(1) not in _SNAP_NOT_RECIPIENTS:
+            args["to"] = m.group(1)
+    return args
+
+
 class VisionDetector(BaseDetector):
     """Detects camera, image viewing, and recognition intents."""
 
     def detect(self, message: str, msg_lower: str, context: Dict) -> List[ToolIntent]:
         intents = []
+
+        # Snapshot-by-email outranks both plain capture and plain send: when
+        # the message asks for a photo DELIVERED, neither half alone is right.
+        snapshot_email_intent = self._detect_email_snapshot_intent(msg_lower, context)
+        if snapshot_email_intent:
+            intents.append(snapshot_email_intent)
 
         camera_intent = self._detect_camera_intent(msg_lower, context)
         if camera_intent:
@@ -67,6 +135,20 @@ class VisionDetector(BaseDetector):
             intents.append(recall_intent)
 
         return intents
+
+    def _detect_email_snapshot_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
+        """'Email me a photo of what you see' → the composite email_snapshot
+        tool (one deterministic capture+send; the local model can't be trusted
+        to chain capture_camera then send_gmail itself)."""
+        if not is_email_snapshot_request(msg_lower):
+            return None
+        return ToolIntent(
+            tool_name='email_snapshot',
+            confidence=0.97,
+            priority=ToolPriority.CRITICAL,
+            reason='photo of current view requested by email',
+            extracted_params=extract_email_snapshot_args(msg_lower)
+        )
 
     def _detect_camera_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
         strong_signals = [

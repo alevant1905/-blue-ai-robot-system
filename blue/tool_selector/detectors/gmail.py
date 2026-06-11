@@ -11,6 +11,7 @@ import re
 from typing import Dict, List, Optional
 
 from .base import BaseDetector
+from .vision import is_email_snapshot_request
 from ..models import ToolIntent
 from ..constants import ToolPriority
 
@@ -111,6 +112,12 @@ class GmailDetector(BaseDetector):
         context: Dict
     ) -> Optional[ToolIntent]:
         """Detect send email intent."""
+
+        # "Email me a photo of what you see" is the composite email_snapshot
+        # (VisionDetector emits it) — a plain send_gmail here would win the
+        # confidence sort and mail an empty message with no photo.
+        if is_email_snapshot_request(msg_lower):
+            return None
 
         send_signals = {
             'strong': [
