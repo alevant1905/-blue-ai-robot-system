@@ -5863,6 +5863,118 @@ def _set_camera_hardware_zoom(camera, factor: float) -> float:
         return 1.0
 
 
+# ---- Live camera hub: "see through my eyes" ------------------------------
+# While the chat page's preview is open, the hub OWNS the camera (Windows
+# gives exclusive access): it streams MJPEG to the browser, accepts live
+# zoom, and capture_camera_image takes its frames from here — so the photo
+# is exactly the view Alex was just looking at, and nothing fights over the
+# device. Auto-releases shortly after the last viewer disconnects.
+
+import threading as _cam_threading
+
+_CAM_HUB = {"cap": None, "lock": _cam_threading.Lock(), "frame": None, "jpeg": None,
+            "t_frame": 0.0, "last_pull": 0.0, "zoom": 1.0}
+_CAM_HUB_IDLE_RELEASE = 12.0   # seconds after the last viewer before letting go
+
+
+def _cam_hub_active() -> bool:
+    with _CAM_HUB["lock"]:
+        return _CAM_HUB["cap"] is not None
+
+
+def _cam_hub_start() -> bool:
+    """Open the shared camera (if not already) and start the reader thread."""
+    import cv2
+    import time as _t
+    with _CAM_HUB["lock"]:
+        _CAM_HUB["last_pull"] = _t.time()
+        if _CAM_HUB["cap"] is not None:
+            return True
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            return False
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+        try:
+            cap.set(cv2.CAP_PROP_ZOOM, 100)
+            cap.set(cv2.CAP_PROP_PAN, 0)
+            cap.set(cv2.CAP_PROP_TILT, 0)
+        except Exception:
+            pass
+        _CAM_HUB["cap"] = cap
+        _CAM_HUB["zoom"] = 1.0
+        _CAM_HUB["frame"] = None
+        _CAM_HUB["jpeg"] = None
+        _cam_threading.Thread(target=_cam_hub_loop, daemon=True).start()
+        print("   [CAM-HUB] camera opened for live preview")
+        return True
+
+
+def _cam_hub_loop():
+    import cv2
+    import time as _t
+    while True:
+        with _CAM_HUB["lock"]:
+            cap = _CAM_HUB["cap"]
+            if cap is None:
+                return
+            if _t.time() - _CAM_HUB["last_pull"] > _CAM_HUB_IDLE_RELEASE:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                _CAM_HUB["cap"] = None
+                _CAM_HUB["frame"] = None
+                _CAM_HUB["jpeg"] = None
+                print("   [CAM-HUB] idle — camera released")
+                return
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                _CAM_HUB["frame"] = frame
+                _CAM_HUB["t_frame"] = _t.time()
+                h, w = frame.shape[:2]
+                pw = 640
+                ph = max(2, int(h * pw / max(1, w)))
+                okj, buf = cv2.imencode('.jpg', cv2.resize(frame, (pw, ph)),
+                                        [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if okj:
+                    _CAM_HUB["jpeg"] = buf.tobytes()
+        _t.sleep(0.05)
+
+
+def _cam_hub_capture(zoom, zoom_region):
+    """A full-resolution frame from the live-preview camera. Applies a
+    requested centered zoom through the hub (the preview shows it too).
+    Returns (frame, hw_zoom) or (None, 1.0) when the hub isn't running."""
+    import time as _t
+    try:
+        want = max(1.0, min(4.0, float(zoom or 1.0)))
+    except (TypeError, ValueError):
+        want = 1.0
+    centered = ("center" in (zoom_region or "center").lower()
+                or "centre" in (zoom_region or "").lower())
+    with _CAM_HUB["lock"]:
+        cap = _CAM_HUB["cap"]
+        if cap is None:
+            return None, 1.0
+        _CAM_HUB["last_pull"] = _t.time()   # a capture counts as activity
+        if want > 1.01 and centered:
+            _CAM_HUB["zoom"] = _set_camera_hardware_zoom(cap, want)
+    if want > 1.01 and centered:
+        _t.sleep(0.6)                       # let the sensor reach the new zoom
+    deadline = _t.time() + 2.0
+    while _t.time() < deadline:
+        with _CAM_HUB["lock"]:
+            fr, tf, hz = _CAM_HUB["frame"], _CAM_HUB["t_frame"], _CAM_HUB["zoom"]
+        if fr is not None and tf >= _t.time() - 0.4:
+            return fr.copy(), max(1.0, hz)
+        _t.sleep(0.05)
+    return None, 1.0
+
+
 def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center",
                          robot: str = None) -> str:
     """
@@ -5911,66 +6023,77 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
         # CRITICAL: Unique timestamp with MILLISECONDS
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-        # Open the camera via DirectShow: it exposes the BRIO's own
-        # zoom/pan/tilt controls, which the default MSMF backend rejects.
-        camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        if not camera.isOpened():
-            camera = cv2.VideoCapture(0)
-
-        if not camera.isOpened():
-            print(f"   [ERROR] Could not open camera")
-            return json.dumps({
-                "success": False,
-                "error": "Could not access camera. Make sure a camera is connected and not in use by another application."
-            })
-
-        # Set high quality
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-
-        # Deterministic baseline EVERY capture: neutral zoom, centered zoom
-        # window. The camera remembers PTZ between runs — a leftover pan
-        # (found at -6 once) silently skews every later photo.
-        try:
-            camera.set(cv2.CAP_PROP_ZOOM, 100)
-            camera.set(cv2.CAP_PROP_PAN, 0)
-            camera.set(cv2.CAP_PROP_TILT, 0)
-        except Exception:
-            pass
-
-        # Zoom BEFORE capture: use the camera's own zoom when the request is
-        # centered (the in-camera zoom window is center-only); off-center
-        # regions are handled by the digital crop after capture instead.
         try:
             want_zoom = max(1.0, min(4.0, float(zoom or 1.0)))
         except (TypeError, ValueError):
             want_zoom = 1.0
+
+        # Live preview open? Take the shot FROM it: the hub owns the device
+        # (Windows gives exclusive access), and what's on the preview screen —
+        # including any zoom/steering done there — is exactly what's captured.
+        frame = None
         hw_zoom = 1.0
-        if want_zoom > 1.01 and ("center" in (zoom_region or "center").lower()
-                                 or "centre" in (zoom_region or "").lower()):
-            hw_zoom = _set_camera_hardware_zoom(camera, want_zoom)
-            if hw_zoom > 1.01:
-                print(f"   [CAMERA] In-camera zoom set: {hw_zoom:g}x")
+        if _cam_hub_active():
+            frame, hw_zoom = _cam_hub_capture(zoom, zoom_region)
+            if frame is not None:
+                print(f"   [CAMERA] frame taken from the live preview (hub, {hw_zoom:g}x)")
 
-        # Give camera MORE time to warm up and adjust (CRITICAL for quality)
-        time.sleep(1.2)  # Increased from 0.8s
+        if frame is None:
+            # Open the camera via DirectShow: it exposes the BRIO's own
+            # zoom/pan/tilt controls, which the default MSMF backend rejects.
+            camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not camera.isOpened():
+                camera = cv2.VideoCapture(0)
 
-        # Discard first few frames (often lower quality)
-        for _ in range(3):
-            camera.read()
-            time.sleep(0.1)
+            if not camera.isOpened():
+                print(f"   [ERROR] Could not open camera")
+                return json.dumps({
+                    "success": False,
+                    "error": "Could not access camera. Make sure a camera is connected and not in use by another application."
+                })
 
-        # NOW capture the actual frame we'll use
-        ret, frame = camera.read()
-        camera.release()
+            # Set high quality
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)
 
-        if not ret or frame is None:
-            print(f"   [ERROR] Failed to capture frame")
-            return json.dumps({
-                "success": False,
-                "error": "Failed to capture image from camera."
-            })
+            # Deterministic baseline EVERY capture: neutral zoom, centered zoom
+            # window. The camera remembers PTZ between runs — a leftover pan
+            # (found at -6 once) silently skews every later photo.
+            try:
+                camera.set(cv2.CAP_PROP_ZOOM, 100)
+                camera.set(cv2.CAP_PROP_PAN, 0)
+                camera.set(cv2.CAP_PROP_TILT, 0)
+            except Exception:
+                pass
+
+            # Zoom BEFORE capture: use the camera's own zoom when the request is
+            # centered (the in-camera zoom window is center-only); off-center
+            # regions are handled by the digital crop after capture instead.
+            if want_zoom > 1.01 and ("center" in (zoom_region or "center").lower()
+                                     or "centre" in (zoom_region or "").lower()):
+                hw_zoom = _set_camera_hardware_zoom(camera, want_zoom)
+                if hw_zoom > 1.01:
+                    print(f"   [CAMERA] In-camera zoom set: {hw_zoom:g}x")
+
+            # Give camera MORE time to warm up and adjust (CRITICAL for quality)
+            time.sleep(1.2)  # Increased from 0.8s
+
+            # Discard first few frames (often lower quality)
+            for _ in range(3):
+                camera.read()
+                time.sleep(0.1)
+
+            # NOW capture the actual frame we'll use
+            ret, frame = camera.read()
+            camera.release()
+
+            if not ret or frame is None:
+                print(f"   [ERROR] Failed to capture frame")
+                return json.dumps({
+                    "success": False,
+                    "error": "Failed to capture image from camera."
+                })
 
         # Digital zoom for whatever the in-camera zoom didn't cover: the whole
         # request when hardware zoom is unavailable or the region is
@@ -12614,7 +12737,7 @@ CHAT_HTML = """
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Chat with {{ robot_name }}</title>
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
@@ -12637,14 +12760,33 @@ CHAT_HTML = """
             background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
             box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
         }
-        /* Phone: full-screen chat, input bar above the URL bar (100dvh). */
+        /* Phone: full-screen chat, input bar above the URL bar (100dvh).
+           The input row REFLOWS: icon buttons get their own row, and the
+           textarea + Send share a full-width row below — on an iPhone the
+           old single row squeezed the textarea to nothing. */
         @media (max-width: 640px) {
             body { padding: 0; }
             .container { height: 100dvh; max-width: 100%; border: none; border-radius: 0; }
-            .header { padding: 16px 16px 12px; }
-            .messages { padding: 16px; }
-            .composer { padding: 12px 14px 16px; }
+            .header { padding: 10px 14px 8px; }
+            .header::before { width: 40px; height: 2px; margin-bottom: 8px; }
+            .header h1 { font-size: 1.22em; }
+            .header p { font-size: 0.85em; }
+            .navlinks { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+                        scrollbar-width: none; padding-bottom: 2px; }
+            .navlinks::-webkit-scrollbar { display: none; }
+            .messages { padding: 14px; gap: 14px; }
+            .row { max-width: 92%; }
+            .composer { padding: 10px 10px calc(12px + env(safe-area-inset-bottom)); }
+            .input-bar { flex-wrap: wrap; gap: 8px; }
+            .iconbtn { width: 42px; height: 42px; font-size: 1.05em; }
+            .iconbtn svg { width: 20px; height: 20px; }
+            /* iOS zooms the page on focus when an input's font is < 16px. */
+            textarea { order: 10; flex: 1 1 calc(100% - 90px); font-size: 16px;
+                       min-height: 44px; max-height: 120px; padding: 11px 12px; }
+            .sendbtn { order: 11; height: 44px; padding: 0 16px; }
             .hint { display: none; }
+            .cam-card { max-width: 100%; }
+            .voice-card { max-height: 82vh; }
         }
         .header { padding: 24px 30px 20px; border-bottom: 1px solid var(--line); }
         .header::before {
@@ -12811,6 +12953,30 @@ CHAT_HTML = """
         .eye-tools { position: absolute; top: 5px; right: 5px; display: flex; gap: 4px; }
         .eye-tools button { width: 26px; height: 26px; border-radius: 50%; border: none; background: rgba(0,0,0,0.55); color: #fff; font-size: 0.95em; line-height: 1; cursor: pointer; }
         .eye-tools button:active { background: rgba(0,0,0,0.78); }
+
+        /* ---- Robot camera live preview ("see through my eyes") ---- */
+        .navlinks { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 6px; font-size: 0.92em; }
+        .navlinks a { color: var(--forest); text-decoration: none; font-weight: 500; white-space: nowrap; }
+        .navlinks a:hover { color: var(--ink); text-decoration: underline; }
+        #camBtn.active { background: var(--forest); border-color: var(--forest); color: #fff; }
+        .cam-panel { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(26,46,26,0.45);
+                     display: flex; align-items: center; justify-content: center; padding: 14px; z-index: 70; }
+        .cam-card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+                    width: 100%; max-width: 560px; display: flex; flex-direction: column; overflow: hidden; }
+        .cam-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
+                    border-bottom: 1px solid var(--line); font-family: 'Playfair Display', Georgia, serif; font-size: 1.1em; color: var(--ink); }
+        .cam-head button { background: none; border: none; font-size: 1.6em; line-height: 1; color: var(--slate); cursor: pointer; padding: 0 4px; }
+        .cam-card img { width: 100%; display: block; background: #000; min-height: 180px; max-height: 52vh; object-fit: contain; }
+        .cam-controls { display: flex; align-items: center; justify-content: space-evenly; gap: 12px; padding: 12px 10px 6px; flex-wrap: wrap; }
+        .cam-pad { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .cam-pad > div { display: flex; gap: 4px; }
+        .cam-pad button, .cam-zoom button { width: 44px; height: 44px; border-radius: 9px; border: 1px solid var(--sage);
+                    background: var(--paper); color: var(--forest); font-size: 1.05em; cursor: pointer; }
+        .cam-pad button:active, .cam-zoom button:active { background: var(--cream); border-color: var(--forest); }
+        .cam-zoom { display: flex; align-items: center; gap: 10px; }
+        .cam-zoom span { font-family: 'IBM Plex Mono', monospace; min-width: 48px; text-align: center; color: var(--ink); }
+        .cam-zoom button { font-size: 1.4em; }
+        .cam-sub { padding: 4px 14px 12px; color: var(--slate); font-size: 0.8em; text-align: center; }
     </style>
 </head>
 <body{% if kid %} class="kid"{% endif %}>
@@ -12821,7 +12987,8 @@ CHAT_HTML = """
             <p>I'm so happy you're here! Tap the big mic and let's talk. &#128153;</p>
             {% else %}
             <h1>Chat with {{ robot_name }}</h1>
-            <p>Type to talk with {{ robot_name }}, and attach images or documents to share. &nbsp;<a href="/">← Home</a> &nbsp; <a href="/duet">Duet</a> &nbsp; <a href="/calendar">Calendar</a> &nbsp; <a href="/contacts">Contacts</a> &nbsp; <a href="/visual">Visual Memory</a> &nbsp; <a href="/documents">Documents</a></p>
+            <p>Type to talk with {{ robot_name }}, and attach images or documents to share.</p>
+            <div class="navlinks"><a href="/">&larr; Home</a><a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
             {% endif %}
         </div>
         {% if kid %}
@@ -12856,6 +13023,11 @@ CHAT_HTML = """
                 <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to Blue" aria-label="Talk to Blue">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
+                {% if not kid %}
+                <button class="iconbtn" id="camBtn" title="See through {{ robot_name }}'s camera" aria-label="Live camera preview" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3.2L9 5.5h6L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.4"/></svg>
+                </button>
+                {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -12897,6 +13069,32 @@ CHAT_HTML = """
             <div class="voice-list" id="voiceList"></div>
         </div>
     </div>
+
+    {% if not kid %}
+    <div class="cam-panel" id="camPanel" style="display:none">
+        <div class="cam-card">
+            <div class="cam-head"><span>{{ robot_name }}'s camera &mdash; live</span><button id="camClose" aria-label="Close camera preview">&times;</button></div>
+            <img id="camStream" alt="Live camera view">
+            <div class="cam-controls">
+                <div class="cam-pad" aria-label="Turn the head">
+                    <button data-look="up" title="Look up">&#9650;</button>
+                    <div>
+                        <button data-look="left" title="Look left">&#9664;</button>
+                        <button data-look="center" title="Look back at center">&#8962;</button>
+                        <button data-look="right" title="Look right">&#9654;</button>
+                    </div>
+                    <button data-look="down" title="Look down">&#9660;</button>
+                </div>
+                <div class="cam-zoom" aria-label="Camera zoom">
+                    <button id="camZoomOut" title="Zoom out">&minus;</button>
+                    <span id="camZoomVal">1&times;</span>
+                    <button id="camZoomIn" title="Zoom in">+</button>
+                </div>
+            </div>
+            <div class="cam-sub">Steer and zoom, then just ask &mdash; &ldquo;what do you see?&rdquo; captures exactly this view.</div>
+        </div>
+    </div>
+    {% endif %}
 
     <script>
         const messagesEl = document.getElementById('messages');
@@ -13474,6 +13672,44 @@ CHAT_HTML = """
         }
 
         micBtn.addEventListener('click', startListening);
+
+        // ======================================================================
+        // ---- Robot camera live preview: see through the camera BEFORE a
+        // capture. Steer the head, set the zoom — then "what do you see?"
+        // photographs exactly the previewed view (capture reuses the preview's
+        // camera while the panel is open).
+        const camBtn = document.getElementById('camBtn');
+        const camPanel = document.getElementById('camPanel');
+        if (camBtn && camPanel) {
+            const camImg = document.getElementById('camStream');
+            const camVal = document.getElementById('camZoomVal');
+            let camZoom = 1.0;
+            function camShowZoom() { camVal.textContent = (Math.round(camZoom * 10) / 10) + '\\u00d7'; }
+            function camOpen() {
+                camPanel.style.display = 'flex';
+                camImg.src = '/camera/stream?ts=' + Date.now();
+                camBtn.classList.add('active'); camBtn.setAttribute('aria-pressed', 'true');
+            }
+            function camShut() {
+                camPanel.style.display = 'none';
+                camImg.removeAttribute('src');   // drops the MJPEG connection
+                camBtn.classList.remove('active'); camBtn.setAttribute('aria-pressed', 'false');
+            }
+            function camPtz(body) {
+                body.robot = ROBOT.id;
+                fetch('/camera/ptz', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+                    .then(r => r.json())
+                    .then(d => { if (d && typeof d.zoom === 'number') { camZoom = d.zoom; camShowZoom(); } })
+                    .catch(() => {});
+            }
+            camBtn.addEventListener('click', () => { (camPanel.style.display === 'none') ? camOpen() : camShut(); });
+            document.getElementById('camClose').addEventListener('click', camShut);
+            camPanel.addEventListener('click', (e) => { if (e.target === camPanel) camShut(); });
+            camPanel.querySelectorAll('[data-look]').forEach(b => b.addEventListener('click', () => camPtz({ look: b.getAttribute('data-look') })));
+            document.getElementById('camZoomIn').addEventListener('click', () => camPtz({ zoom: Math.min(4, camZoom + 0.5) }));
+            document.getElementById('camZoomOut').addEventListener('click', () => camPtz({ zoom: Math.max(1, camZoom - 0.5) }));
+            camShowZoom();
+        }
 
         // ======================================================================
         // Hands-free mode: continuous listening, wake on "Blue", auto-stop on
@@ -14158,6 +14394,64 @@ def stt():
             os.remove(tmp_path)
         except Exception:
             pass
+
+
+@app.route('/camera/stream')
+def camera_stream():
+    """MJPEG live view of the robot camera — the chat page's 'see through my
+    eyes' preview. Holding this open keeps the camera hub alive; it releases
+    itself shortly after the last viewer disconnects."""
+    if not _cam_hub_start():
+        return jsonify({"error": "camera unavailable"}), 503
+    import time as _t
+
+    def gen():
+        while True:
+            with _CAM_HUB["lock"]:
+                _CAM_HUB["last_pull"] = _t.time()
+                jpeg = _CAM_HUB["jpeg"]
+                alive = _CAM_HUB["cap"] is not None
+            if not alive:
+                break
+            if jpeg:
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
+            _t.sleep(0.12)
+
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame',
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.route('/camera/ptz', methods=['POST'])
+def camera_ptz():
+    """Steer the live preview: turn the addressed robot's head and/or set the
+    camera's own zoom. The MJPEG stream shows the result immediately, and a
+    later capture takes exactly this view."""
+    d = request.get_json(silent=True) or {}
+    out = {"ok": True}
+    look = (d.get('look') or '').strip().lower()
+    robot = (d.get('robot') or 'blue').strip().lower()
+    if look:
+        try:
+            h = blue_head.get_head(robot)
+            out["look"] = bool(h.is_available() and h.look(look, speed=5.0))
+        except Exception:
+            out["look"] = False
+    if d.get('zoom') is not None:
+        try:
+            want = max(1.0, min(4.0, float(d['zoom'])))
+        except (TypeError, ValueError):
+            want = 1.0
+        _cam_hub_start()
+        with _CAM_HUB["lock"]:
+            cap = _CAM_HUB["cap"]
+            if cap is not None:
+                z = _set_camera_hardware_zoom(cap, want) if want > 1.01 else (
+                    _set_camera_hardware_zoom(cap, 1.0))
+                _CAM_HUB["zoom"] = z
+                out["zoom"] = z
+            else:
+                out["zoom"] = None
+    return jsonify(out)
 
 
 def _render_chat_page(robot="blue"):

@@ -376,6 +376,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔖 Version History
 
+### v12.5.0 (2026-06-11) - See through his eyes + phone-friendly chat
+- **Live camera preview in chat**: a camera button opens a window showing exactly what the robot sees *right now* (MJPEG stream), with **head-steering arrows and live zoom** — line up the shot, then just ask "what do you see?" and the capture is exactly the previewed view (the capture reuses the preview's camera, so nothing fights over the device; it auto-releases ~12s after closing)
+- Captures taken while the preview is open are also **instant** (no sensor warm-up)
+- **Mobile chat overhaul** (`/chat`, `/hexia` on iPhone): the input bar reflows — icon buttons on their own row, full-width message box + Send below; 16px input font (no more iOS auto-zoom on tap); the nav links became a swipeable row; safe-area padding above the home bar; wider message bubbles
+
 ### v12.4.1 (2026-06-10) - "Stop" actually stops him
 - Saying **"stop" while Blue talks** now interrupts him in ~half a second: the browser's own speech recognition runs for the whole time he speaks (interim results), instead of waiting for recorded clips to round-trip through Whisper
 - The Whisper barge-in path stays as the offline/fallback layer and got fixed too: it **kept listening while a clip was being transcribed** (it used to go deaf for seconds at a time — which is why "stop" was usually missed), and clips are shorter for faster verdicts
