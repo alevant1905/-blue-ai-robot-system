@@ -13253,6 +13253,9 @@ CHAT_HTML = """
                 <button class="iconbtn" id="camBtn" title="See through {{ robot_name }}'s camera" aria-label="Live camera preview" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3.2L9 5.5h6L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.4"/></svg>
                 </button>
+                <button class="iconbtn" id="researchBtn" title="Research mode: {{ robot_name }} searches the web before answering" aria-label="Toggle web research" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></svg>
+                </button>
                 {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
@@ -13481,7 +13484,7 @@ CHAT_HTML = """
 
             busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
             const thinking = addBubble('blue', '');
-            thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + ' is thinking…</span>';
+            thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + (researchOn ? ' is researching…' : ' is thinking…') + '</span>';
             setFaceState('thinking');
 
             try {
@@ -13493,7 +13496,8 @@ CHAT_HTML = """
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
                     body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
-                                           language: (LANG_MODE !== 'auto' ? LANG_MODE : '') })
+                                           language: (LANG_MODE !== 'auto' ? LANG_MODE : ''),
+                                           research: researchOn })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -13696,6 +13700,26 @@ CHAT_HTML = """
         }
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
+
+        // ---- Research mode: search the web before answering ----
+        // Opt-in, saved per device per robot: while the magnifier is lit,
+        // every message first runs a live web search server-side and the
+        // findings ride along as context for the reply.
+        const researchBtn = document.getElementById('researchBtn');
+        let researchOn = false;
+        try { researchOn = localStorage.getItem('blueResearch_' + ROBOT.id) === '1'; } catch (e) {}
+        if (!researchBtn) researchOn = false;   // kid pages have no toggle and no research
+        function setResearchOn(on) {
+            researchOn = on;
+            if (!researchBtn) return;
+            researchBtn.classList.toggle('active', on);
+            researchBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            try { localStorage.setItem('blueResearch_' + ROBOT.id, on ? '1' : '0'); } catch (e) {}
+        }
+        if (researchBtn) {
+            researchBtn.addEventListener('click', () => setResearchOn(!researchOn));
+            setResearchOn(researchOn);
+        }
 
         // ---- Language setting: which language Alex speaks AND Blue replies in ----
         // 'auto' = Whisper detects per clip (constrained server-side to the
@@ -14913,6 +14937,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <button class="primary" id="startBtn">Start</button>
  <button id="stopBtn" disabled>Stop</button>
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
+ <label class="muted" title="They search the internet for the subject first and ground the conversation in what they find"><input type="checkbox" id="researchChk"> research the web</label>
 </div>
 <div id="log"></div>
 <script>
@@ -15002,7 +15027,7 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang')})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), research:document.getElementById('researchChk').checked})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
@@ -15020,6 +15045,14 @@ async function run(){
     if(!running){ return; }
     if(!r||!r.ok){ addNote("(couldn't read that link"+(r&&r.error?': '+r.error:'')+" — fix it or clear the field)"); stop(); return; }
     addNote("(they've "+(r.kind==='video'?'watched':'read')+': '+(r.title||url)+')');
+  }
+  if(document.getElementById('researchChk').checked){
+    addNote('(searching the web…)');
+    let rr=null;
+    try{ rr=await (await fetch('/duet/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topicEl.value.trim(), url:url, roles:fieldMap('role')})})).json(); }catch(e){}
+    if(!running){ return; }
+    if(rr&&rr.ok){ addNote("(they've looked it up: "+((rr.titles&&rr.titles.length)?rr.titles.join(' · '):rr.query)+')'); }
+    else{ addNote("(web research came up empty"+(rr&&rr.error?': '+rr.error:'')+" — they'll wing it)"); }
   }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
@@ -15214,6 +15247,135 @@ def _duet_url_excerpt(text: str, query: str, lede: int = 2000, win: int = 1400) 
     return head + "\n[…]\n" + rest[best_off:best_off + win] + (" …" if best_off + win < len(rest) else "")
 
 
+# --- Web research grounding: tick "research the web" (duet) or the magnifier
+# toggle (chat) and the robots actually search the internet for the subject —
+# every hit's title+snippet plus the readable text of the best pages, via the
+# same fetcher/cache as link grounding. Cached per query, so one duet does ONE
+# round of searching; each turn then gets the slice most relevant to what was
+# just said, exactly like a pasted link.
+
+_DUET_RESEARCH_CACHE: Dict[str, dict] = {}
+_DUET_RESEARCH_TTL = 1800        # a duet on the same subject re-searches after 30 min
+_DUET_RESEARCH_MAX_TEXT = 12000  # digest cap; per-turn windowing keeps prompts tight
+
+
+def _duet_research_query(topic: str, url_info, roles) -> str:
+    """What to actually type into the search box: the topic, else the pasted
+    link's title (find context AROUND an article), else the assigned roles."""
+    if (topic or '').strip():
+        return topic.strip()
+    t = ((url_info or {}).get('title') or '').strip()
+    if t:
+        return t
+    if isinstance(roles, dict):
+        r = " ".join((v or '').strip() for v in roles.values() if (v or '').strip())
+        if r:
+            return r[:120]
+    return ""
+
+
+def _duet_research_digest(query: str):
+    """Search the web for the duet's subject and weave the hits into one
+    research text. Returns {'titles','text','error'}; empty text ⇒ nothing
+    usable (see error). Failures retry after 2 min, hits live for the TTL."""
+    import time as _t
+    q = re.sub(r'\s+', ' ', (query or '')).strip().lower()
+    if not q:
+        return None
+    hit = _DUET_RESEARCH_CACHE.get(q)
+    if hit and _t.time() - hit['at'] < (_DUET_RESEARCH_TTL if hit.get('text') else 120):
+        return hit
+    info = {'titles': [], 'text': '', 'error': None, 'at': _t.time()}
+    try:
+        data = json.loads(execute_web_search(q) or '{}')
+    except Exception as e:
+        data = {'error': f'{e.__class__.__name__}: {e}'}
+    results = (data.get('results') or []) if data.get('success') else []
+    if not results:
+        info['error'] = data.get('error') or 'the search came up empty'
+    parts = []
+    for r in results:
+        t = (r.get('title') or '').strip()
+        s = (r.get('snippet') or '').strip()
+        if t:
+            info['titles'].append(t)
+        if t or s:
+            parts.append(f"{t} — {s}" if t and s else (t or s))
+    # Read the most promising pages so they have substance, not just blurbs.
+    fetched = attempts = 0
+    for r in results:
+        if fetched >= 2 or attempts >= 4:
+            break
+        u = (r.get('url') or '').strip()
+        if not u:
+            continue
+        attempts += 1
+        page = _duet_url_content(u) or {}
+        txt = (page.get('text') or '').strip()
+        if txt:
+            ttl = (page.get('title') or r.get('title') or u).strip()
+            parts.append(f"From \"{ttl}\":\n{txt[:4000]}")
+            fetched += 1
+    info['text'] = "\n\n".join(parts)[:_DUET_RESEARCH_MAX_TEXT]
+    if len(_DUET_RESEARCH_CACHE) >= 8:
+        _DUET_RESEARCH_CACHE.clear()
+    _DUET_RESEARCH_CACHE[q] = info
+    return info
+
+
+def _research_query_from(msg: str) -> str:
+    """The user's own words as a search query — minus any pasted attachment
+    text, which would swamp the search box."""
+    m = (msg or '').strip()
+    if '[Attached document:' in m and '"""' in m:
+        m = (m.split('"""')[-1] or '').strip() or m
+    return m[:200]
+
+
+def _web_research_block(query: str, max_chars: int = 2600) -> str:
+    """Chat-mode research: live search findings for the user's question as one
+    compact system block — titles+snippets plus a single page excerpt (the
+    chat prompt rides a tight token budget). '' when nothing usable came back,
+    so the reply degrades to a normal answer instead of an apology."""
+    q = (query or '').strip()
+    if not q:
+        return ""
+    try:
+        data = json.loads(execute_web_search(q) or '{}')
+    except Exception:
+        return ""
+    results = (data.get('results') or []) if data.get('success') else []
+    if not results:
+        return ""
+    lines = []
+    for r in results:
+        t = (r.get('title') or '').strip()
+        u = (r.get('url') or '').strip()
+        s = (r.get('snippet') or '').strip()
+        if t or s:
+            lines.append(f"- {t} ({u}): {s}" if u else f"- {t}: {s}")
+    excerpt = ""
+    for r in results[:2]:
+        u = (r.get('url') or '').strip()
+        if not u:
+            continue
+        try:
+            page = _duet_url_content(u) or {}
+        except Exception:
+            continue
+        txt = (page.get('text') or '').strip()
+        if txt:
+            ttl = (page.get('title') or r.get('title') or u).strip()
+            excerpt = f"From \"{ttl}\": {txt[:1200]}"
+            break
+    body = ("\n".join(lines) + ("\n\n" + excerpt if excerpt else ""))[:max_chars]
+    return ("<web_research>\n"
+            f"You just searched the web for \"{q}\" — these findings are live and more current "
+            "than your training. Lean on them for facts, names and numbers, mention where "
+            "something comes from only when it helps, and never read URLs aloud:\n"
+            + body + "\n</web_research>")
+
+
 @app.route('/duet', methods=['GET'])
 def duet_page():
     """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
@@ -15237,6 +15399,25 @@ def duet_fetch():
     if not (info.get('text') or '').strip():
         return jsonify({"ok": False, "error": info.get('error') or "couldn't read the link"})
     return jsonify({"ok": True, "kind": info.get('kind'), "title": info.get('title') or "",
+                    "chars": len(info['text'])})
+
+
+@app.route('/duet/research', methods=['POST'])
+def duet_research():
+    """Search the web on the duet's subject before it starts — warms the
+    research cache and tells the page what they found, or why there's nothing
+    to ground on, instead of letting them bluff 'current' facts."""
+    d = request.get_json(silent=True) or {}
+    topic = (d.get('topic') or '').strip()
+    url = (d.get('url') or '').strip()
+    url_info = _duet_url_content(url) if url else None
+    rq = _duet_research_query(topic, url_info, d.get('roles') or {})
+    if not rq:
+        return jsonify({"ok": False, "error": "give them a topic, a link or roles to research"})
+    info = _duet_research_digest(rq) or {}
+    if not (info.get('text') or '').strip():
+        return jsonify({"ok": False, "error": info.get('error') or "the search came up empty"})
+    return jsonify({"ok": True, "query": rq, "titles": (info.get('titles') or [])[:4],
                     "chars": len(info['text'])})
 
 
@@ -15272,6 +15453,7 @@ def duet_turn():
         src_self = [str(s).strip() for s in (sources_in.get(speaker) or []) if str(s).strip()]
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
+    research_on = bool(d.get('research'))
     url_info = _duet_url_content(url) if url else None
     url_text = (url_info or {}).get('text') or ''
     url_is_video = bool(url_info and url_info.get('kind') == 'video')
@@ -15350,6 +15532,19 @@ def duet_turn():
         recent_q = " ".join((h.get('text') or '') for h in history[-2:])
         url_block = _duet_url_excerpt(url_text, f"{topic} {recent_q}".strip())
 
+    # Web research grounding: live search findings on the duet's subject
+    # (warmed by /duet/research at start; cached so turns don't re-search),
+    # windowed to the slice most relevant to the last couple of turns.
+    research_block = ""
+    if research_on:
+        rq = _duet_research_query(topic, url_info, roles)
+        if rq:
+            digest = _duet_research_digest(rq) or {}
+            rtext = digest.get('text') or ''
+            if rtext:
+                recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+                research_block = _duet_url_excerpt(rtext, f"{topic} {recent_q}".strip())
+
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
     ground_block = ""
@@ -15402,6 +15597,14 @@ def duet_turn():
             "never say 'the document', 'the sources', 'the passage', 'the text' or 'my library'; "
             "name a work or its author only when that genuinely strengthens the point:\n\n"
             + ground_block)
+    if research_block:
+        parts.append(
+            "WHAT YOU BOTH JUST FOUND ONLINE — you've been searching the web about this subject, "
+            "and these are real, current findings. Bring up their specific facts, names, numbers "
+            "and claims and react honestly — don't invent beyond them, and never say 'the search "
+            "results', 'the snippets' or 'my sources'; speak like someone who's been reading up "
+            "on it ('I read that…', 'apparently…'), naming a site or article only when that "
+            "genuinely helps:\n\n" + research_block)
     if role_self:
         parts.append(
             f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
@@ -15448,6 +15651,8 @@ def duet_turn():
                           " — as your own take, not a citation.")
         elif ground_block:
             directive += " Build on a specific idea from your own reading — as something you know, not a citation."
+        elif research_block:
+            directive += " Work in one specific thing you found online — as something you've read, not a citation."
         if role_self:
             directive += " Stay firmly in your role."
     else:
@@ -15458,6 +15663,8 @@ def duet_turn():
             directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
         elif ground_block:
             directive += " Make a specific point from your own reading, as something you know."
+        elif research_block:
+            directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
     parts.append(directive
@@ -18246,6 +18453,9 @@ def chat_completions():
         language = (data.get("language") or "").strip().lower()
         if language not in _BLUE_LANGS:
             language = ""
+        # Research mode (the chat page's magnifier toggle): search the web for
+        # the user's question and splice the live findings in below.
+        research_turn = bool(data.get("research"))
         # Which robot is being addressed? Blue's page omits this and defaults to
         # Blue; Hexia's page sends "hexia". Drives persona, voice, head and the
         # per-robot conversation history.
@@ -18342,6 +18552,22 @@ def chat_completions():
                     print(f"   [VISUAL] ✓ Injecting camera-memory context")
                     messages = _splice_context_after_system(
                         messages, [{"role": "system", "content": _vis_block}])
+
+            # Live web research (opt-in via the chat page's toggle): ground
+            # this reply in fresh search findings. Kids' chat-only pages never
+            # get web content spliced in; a failed search degrades to a normal
+            # answer rather than an error.
+            if research_turn and user_name not in _CHAT_ONLY_USERS and last_user_msg:
+                try:
+                    _rblock = _web_research_block(_research_query_from(last_user_msg))
+                    if _rblock:
+                        print(f"   [RESEARCH] ✓ Injecting {len(_rblock)} chars of live web findings")
+                        messages = _splice_context_after_system(
+                            messages, [{"role": "system", "content": _rblock}])
+                    else:
+                        print(f"   [RESEARCH] search returned nothing usable — answering without")
+                except Exception as e:
+                    log.warning(f"[RESEARCH] failed: {e}")
 
         # Process with tools (pre-check result passed to avoid double selector run)
         import time as _t_llm
