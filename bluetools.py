@@ -15633,6 +15633,11 @@ HEAD_HTML = """<!DOCTYPE html>
         <div class="sub">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
         <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
         <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
+        <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);">
+            <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Top lip travel</span><input type="range" id="lipRngTop" min="0.2" max="3" step="0.1" value="1.8"><span class="val" id="vLipRngTop">1.8</span></div>
+            <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Jaw travel</span><input type="range" id="lipRngBot" min="0.2" max="4" step="0.1" value="3.0"><span class="val" id="vLipRngBot">3.0</span></div>
+            <div class="hint">How far each lip swings from its neutral while talking. <b>If a lip reaches a mechanical stop and sticks mid-speech, turn its travel down</b> until it never gets there; turn up for a more expressive mouth. Press Test lip-sync after each change.</div>
+        </div>
         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
             <button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button>
             <button class="btn" id="sweepLipBtn">Full-range lip sweep (~8 sec)</button>
@@ -15762,6 +15767,14 @@ async function loadState() {
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
     document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
     document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
+    if (s && s.lip_top_range != null) {
+        document.getElementById('lipRngTop').value = s.lip_top_range;
+        document.getElementById('vLipRngTop').textContent = Number(s.lip_top_range).toFixed(1);
+    }
+    if (s && s.lip_bottom_range != null) {
+        document.getElementById('lipRngBot').value = s.lip_bottom_range;
+        document.getElementById('vLipRngBot').textContent = Number(s.lip_bottom_range).toFixed(1);
+    }
     if (s && s.idle_frequency != null) {
         document.getElementById('idleFreq').value = s.idle_frequency;
         document.getElementById('vIdleFreq').textContent = Number(s.idle_frequency).toFixed(1);
@@ -15818,6 +15831,10 @@ wireIdle('Amp', 'amplitude');
 document.getElementById('autoToggle').addEventListener('change', e => postJSON('/head/auto', {enabled: e.target.checked}));
 document.getElementById('invTop').addEventListener('change', e => postJSON('/head/lip-config', {invert_top: e.target.checked}));
 document.getElementById('invBot').addEventListener('change', e => postJSON('/head/lip-config', {invert_bottom: e.target.checked}));
+document.getElementById('lipRngTop').addEventListener('input', e => { document.getElementById('vLipRngTop').textContent = Number(e.target.value).toFixed(1); });
+document.getElementById('lipRngTop').addEventListener('change', e => postJSON('/head/lip-config', {top_range: parseFloat(e.target.value)}));
+document.getElementById('lipRngBot').addEventListener('input', e => { document.getElementById('vLipRngBot').textContent = Number(e.target.value).toFixed(1); });
+document.getElementById('lipRngBot').addEventListener('change', e => postJSON('/head/lip-config', {bottom_range: parseFloat(e.target.value)}));
 document.getElementById('testLipBtn').addEventListener('click', async () => {
     const btn = document.getElementById('testLipBtn');
     btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
@@ -16219,14 +16236,20 @@ def head_hf_config(robot='blue'):
 @app.route('/head/lip-config', methods=['POST'])
 @app.route('/head/<robot>/lip-config', methods=['POST'])
 def head_lip_config(robot='blue'):
-    """Flip the polarity of either lip motor. Hardware varies between Ohbot
-    units; the GUI exposes a checkbox per lip so the user can find the
-    combination that opens and closes the mouth."""
+    """Lip-sync settings: flip the polarity of either lip motor, and/or set
+    how far each lip travels from neutral while talking. Hardware varies
+    between Ohbot units — a unit whose mouth arc is narrower than the default
+    travel stalls a lip against its mechanical stop (looks stuck), so travel
+    is per-robot and user-tunable."""
     h = blue_head.get_head(robot)
     d = request.get_json(silent=True) or {}
     h.set_lip_invert(top=d.get('invert_top'), bottom=d.get('invert_bottom'))
+    if d.get('top_range') is not None or d.get('bottom_range') is not None:
+        h.set_lip_ranges(top=d.get('top_range'), bottom=d.get('bottom_range'))
     cal = h.get_calibration()
-    return jsonify({"ok": True, "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"]})
+    return jsonify({"ok": True,
+                    "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"],
+                    "lip_top_range": cal["lip_top_range"], "lip_bottom_range": cal["lip_bottom_range"]})
 
 
 @app.route('/head/lip-test', methods=['POST'])

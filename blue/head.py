@@ -228,9 +228,17 @@ _EXPRESSIONS = {
 }
 
 # How far each lip travels at fully-open (offset from its calibrated centre).
-# The top lip moves less than the jaw, like real speech.
+# The top lip moves less than the jaw, like real speech. These are DEFAULTS:
+# each head can override them in its calibration ("lip_top_range" /
+# "lip_bottom_range") because mouths differ between units — travel that
+# overshoots a mouth's physical arc stalls the servo against a stop and the
+# lips look stuck. Turn a lip's travel down until it never reaches its stop.
 _LIP_TOP_RANGE = 1.8
 _LIP_BOTTOM_RANGE = 3.0
+# The flap never commands the absolute 0/10 ends of the motor scale — on some
+# units the last sliver of range presses the mechanism into its hard stop.
+_LIP_SOFT_MIN = 0.25
+_LIP_SOFT_MAX = 9.75
 
 # Recipe table for idle motions. Blinks are listed twice because they're a
 # natural high-frequency motion; the others get one slot each. Each non-blink
@@ -270,6 +278,9 @@ class RobotHead:
             "auto_movement": True,
             "lip_invert_top": False,
             "lip_invert_bottom": False,
+            # Per-head lip travel while talking (motor units from neutral).
+            "lip_top_range": _LIP_TOP_RANGE,
+            "lip_bottom_range": _LIP_BOTTOM_RANGE,
             # Idle "thoughtful" movement, 0-10 each (user-tuneable from GUI).
             "idle_frequency": 7,   # how often a motion happens (0=quiet, 10=lively)
             "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
@@ -313,6 +324,12 @@ class RobotHead:
                             self._calibration[k] = float(_clip(float(data[k]), 0, 10))
                         except Exception:
                             pass
+                for k in ("lip_top_range", "lip_bottom_range"):
+                    if k in data:
+                        try:
+                            self._calibration[k] = float(_clip(float(data[k]), 0.2, 5.0))
+                        except Exception:
+                            pass
                 if isinstance(data.get("custom_expressions"), dict):
                     cust = {}
                     for nm, pose in data["custom_expressions"].items():
@@ -334,6 +351,8 @@ class RobotHead:
                 "auto_movement": bool(self._calibration["auto_movement"]),
                 "lip_invert_top": bool(self._calibration.get("lip_invert_top", False)),
                 "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
+                "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
+                "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
                 "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
                 "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
                 "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -359,6 +378,8 @@ class RobotHead:
             "auto_movement": bool(self._calibration["auto_movement"]),
             "lip_invert_top": bool(self._calibration.get("lip_invert_top", False)),
             "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
+            "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
+            "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
             "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
             "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
             "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -412,6 +433,17 @@ class RobotHead:
             self._calibration["lip_invert_top"] = bool(top)
         if bottom is not None:
             self._calibration["lip_invert_bottom"] = bool(bottom)
+        self._save_calibration()
+        return True
+
+    def set_lip_ranges(self, top=None, bottom=None) -> bool:
+        """Set how far each lip travels from neutral while talking (motor
+        units). Persists. Smaller = subtler mouth; turn a lip down if it
+        reaches a mechanical stop and sticks. Pass None to leave one alone."""
+        if top is not None:
+            self._calibration["lip_top_range"] = float(_clip(float(top), 0.2, 5.0))
+        if bottom is not None:
+            self._calibration["lip_bottom_range"] = float(_clip(float(bottom), 0.2, 5.0))
         self._save_calibration()
         return True
 
@@ -760,12 +792,23 @@ class RobotHead:
     def _set_mouth(self, openness: float) -> None:
         """Drive both lip motors to a mouth openness from 0.0 (closed, at
         calibrated rest) to 1.0 (fully open). Per-lip polarity flags decide which
-        direction is "open" on this unit (flip a checkbox in the GUI if opposite)."""
+        direction is "open" on this unit (flip a checkbox in the GUI if opposite);
+        per-lip travel comes from calibration so the swing can be sized to this
+        unit's mouth. Targets are soft-clamped away from the absolute 0/10 ends
+        so the flap can never pin the mechanism against a hard stop."""
         openness = _clip(openness, 0.0, 1.0)
         top_sign = -1.0 if self._calibration.get("lip_invert_top") else +1.0
         bot_sign = -1.0 if self._calibration.get("lip_invert_bottom") else +1.0
-        self._move_internal(TOPLIP, self.center(TOPLIP) + top_sign * _LIP_TOP_RANGE * openness, speed=10)
-        self._move_internal(BOTTOMLIP, self.center(BOTTOMLIP) + bot_sign * _LIP_BOTTOM_RANGE * openness, speed=10)
+        top_rng = float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE))
+        bot_rng = float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE))
+        self._move_internal(
+            TOPLIP,
+            _clip(self.center(TOPLIP) + top_sign * top_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
+            speed=10)
+        self._move_internal(
+            BOTTOMLIP,
+            _clip(self.center(BOTTOMLIP) + bot_sign * bot_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
+            speed=10)
 
     def _lip_loop(self, my_token):
         """Continuous open/shut flap (fallback when no timed sequence is given)."""
@@ -1051,6 +1094,7 @@ auto_enabled = blue.auto_enabled
 set_idle_params = blue.set_idle_params
 set_hf_sensitivity = blue.set_hf_sensitivity
 set_lip_invert = blue.set_lip_invert
+set_lip_ranges = blue.set_lip_ranges
 lip_start = blue.lip_start
 lip_stop = blue.lip_stop
 lip_play_sequence = blue.lip_play_sequence
