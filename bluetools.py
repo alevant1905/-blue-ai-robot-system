@@ -14992,6 +14992,17 @@ let running=false, history=[];
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
 
+// iOS Safari refuses speechSynthesis unless audio was first unlocked by a real
+// tap. The duet speaks each line ASYNCHRONOUSLY (after fetching the turn), which
+// iOS doesn't count as a user gesture — so without this the iPhone shows the
+// text but stays silent. Speaking one empty utterance during the Start tap
+// unlocks audio for every automatic line that follows. (Same trick chat uses.)
+let audioPrimed=false;
+function primeAudio(){
+  if(audioPrimed || !('speechSynthesis' in window)) return;
+  try{ window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); audioPrimed=true; }catch(e){}
+}
+
 function cleanForSpeech(t){ return (t||'').replace(/https?:\\/\\/\\S+/g,' a link ').replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu,'').replace(/[*_#>~]/g,'').replace(/\\s+/g,' ').trim(); }
 function buildLipFrames(text, rate){
   rate=rate||1.0; const k=1.0/rate; const words=(text.match(/[^\\s]+/g)||[]); const frames=[]; const MPC=0.060;
@@ -15082,8 +15093,9 @@ async function run(){
 }
 function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
 function stop(){ running=false; try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
-startBtn.addEventListener('click', run);
+startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
+document.getElementById('speakChk').addEventListener('change', primeAudio);
 if('speechSynthesis' in window){ try{ window.speechSynthesis.onvoiceschanged=function(){ window.speechSynthesis.getVoices(); }; }catch(e){} }
 </script></body></html>"""
 
