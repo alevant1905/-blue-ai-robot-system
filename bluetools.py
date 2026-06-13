@@ -14927,6 +14927,10 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:4px">Hexia's voice<select id="voiceHexia"></select></label>
 </div>
 <div class="controls">
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:4px">Blue's speed<select id="rateBlue"><option value="auto">Default</option><option value="0.7">Slower</option><option value="0.85">Slow</option><option value="1.0">Normal</option><option value="1.15">Brisk</option><option value="1.3">Fast</option></select></label>
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:4px">Hexia's speed<select id="rateHexia"><option value="auto">Default</option><option value="0.7">Slower</option><option value="0.85">Slow</option><option value="1.0">Normal</option><option value="1.15">Brisk</option><option value="1.3">Fast</option></select></label>
+</div>
+<div class="controls">
  <div style="flex:1;display:flex;flex-direction:column;gap:5px">
   <span class="muted">Blue draws on — tick any number (<span class="srccount" id="cntBlue">0</span> selected)</span>
   <div id="sourcesBlue" class="srcbox" style="border-color:#cfe4fb"></div>
@@ -15039,12 +15043,22 @@ function supportedVoices(){
   const voices=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
   return voices.filter(function(v){ return /^(en|fr|ru|el|da)/i.test(v.lang||''); });
 }
+// Speaking rate for a robot: a per-device override (the speed picker) if set,
+// else the persona's configured rate. iOS Safari renders the same numeric rate
+// noticeably faster than desktop, so this lets Hexia (a touch quick by design)
+// be slowed to taste on the iPhone without changing how she sounds elsewhere.
+function voiceRateFor(id){
+  let r=''; try{ r=localStorage.getItem('blueVoiceRate_'+id)||''; }catch(e){}
+  const n=parseFloat(r);
+  if(r && !isNaN(n) && n>0) return n;
+  return (ROBOTS[id]&&ROBOTS[id].voiceRate)||1.0;
+}
 function previewVoice(id, v){
   try{
     window.speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(id==='hexia'?"Hi, I'm Hexia!":"Hi, I'm Blue!");
     const cfg=ROBOTS[id]||{}; if(v){ u.voice=v; u.lang=v.lang||'en-US'; } else { u.lang='en-US'; }
-    u.rate=cfg.voiceRate||1.0; u.pitch=cfg.voicePitch||1.0;
+    u.rate=voiceRateFor(id); u.pitch=cfg.voicePitch||1.0;
     window.speechSynthesis.speak(u);
   }catch(e){}
 }
@@ -15066,6 +15080,27 @@ function buildVoicePickers(){
     };
   });
 }
+// The voice currently in effect for a robot (saved pick, else the auto choice).
+function chosenVoiceFor(id){
+  let nm=''; try{ nm=localStorage.getItem('blueVoiceName_'+id)||''; }catch(e){}
+  if(nm){ const v=supportedVoices().find(function(x){ return x.name===nm; }); if(v) return v; }
+  return pickVoice(ROBOTS[id]);
+}
+// Speed pickers (one per robot): a per-device speaking-rate override saved under
+// blueVoiceRate_<id> and read by voiceRateFor(). "Default" clears the override.
+function wireRatePickers(){
+  [['blue','rateBlue'],['hexia','rateHexia']].forEach(function(pair){
+    const id=pair[0], sel=document.getElementById(pair[1]); if(!sel) return;
+    let saved=''; try{ saved=localStorage.getItem('blueVoiceRate_'+id)||''; }catch(e){}
+    sel.value = saved || 'auto';
+    if(!sel.value) sel.value='auto';      // saved value not among the options
+    sel.onchange=function(){
+      primeAudio();
+      try{ if(sel.value && sel.value!=='auto'){ localStorage.setItem('blueVoiceRate_'+id, sel.value); } else { localStorage.removeItem('blueVoiceRate_'+id); } }catch(e){}
+      previewVoice(id, chosenVoiceFor(id));
+    };
+  });
+}
 function headLip(cfg,frames){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){} }
 function headLipStop(cfg){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){} }
 
@@ -15076,7 +15111,8 @@ function addTurn(cfg,text){ const d=document.createElement('div'); d.className='
 
 function speakAs(cfg,text,el){ return new Promise(resolve=>{
   const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
-  const frames=buildLipFrames(text, cfg.voiceRate||1.0);
+  const rate=voiceRateFor(cfg.id);
+  const frames=buildLipFrames(text, rate);
   const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
   let done=false, keepAlive=null;
   const finish=()=>{ if(done)return; done=true; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
@@ -15085,7 +15121,7 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
   try{
     window.speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(cleanForSpeech(text));
-    const v=pickVoice(cfg); if(v)u.voice=v; u.rate=cfg.voiceRate||1.0; u.pitch=cfg.voicePitch||1.0; u.lang='en-US';
+    const v=pickVoice(cfg); if(v)u.voice=v; u.rate=rate; u.pitch=cfg.voicePitch||1.0; u.lang='en-US';
     u.onend=finish; u.onerror=finish;
     window.speechSynthesis.speak(u);
     // Chrome silently stops utterances after ~15s; pause+resume keeps long
@@ -15153,6 +15189,7 @@ if('speechSynthesis' in window){
     refreshVoices();
   }, 600);
 } else { buildVoicePickers(); }
+wireRatePickers();
 </script></body></html>"""
 
 
