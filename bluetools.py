@@ -14903,6 +14903,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
 <p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
+<p class="sub" id="devNote" style="margin-top:-8px;display:none"></p>
 <div class="controls">
  <input type="text" id="topic" placeholder="Topic (optional) — e.g. what makes a good story">
 </div>
@@ -14943,6 +14944,26 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <script>
 const ROBOTS = {{ robots_json|safe }};
 const DOCS = {{ documents_json|safe }};
+
+// This page can run on the PC (where the heads are plugged in over USB) or on a
+// phone/laptop elsewhere in the house. Only the PC browser should drive the
+// physical heads; on iPhone/MacBook/iPad we just play the voices on that device
+// and leave the heads still. Same UA+touch test the chat page uses (a
+// desktop-mode iPad masquerades as a Mac, so touch points disambiguate it).
+function blueDeviceTag(){
+  const ua=navigator.userAgent||''; const touch=(navigator.maxTouchPoints||0)>1;
+  if(/iPad/.test(ua)||(/Macintosh/.test(ua)&&touch)) return 'ipad';
+  if(/iPhone|iPod/.test(ua)) return 'iphone';
+  if(/Android/.test(ua)) return 'android';
+  if(/Macintosh|Mac OS X/.test(ua)) return 'mac';
+  if(/Windows/.test(ua)) return 'windows';
+  return 'other';
+}
+const DRIVES_HEADS = (blueDeviceTag()==='windows');
+if(!DRIVES_HEADS){
+  const dn=document.getElementById('devNote');
+  if(dn){ dn.textContent="On this device you'll just hear Blue and Hexia speak — the heads on the PC stay still. Open this page on the PC if you want the heads to move."; dn.style.display='block'; }
+}
 (function(){
   var byF={}; DOCS.forEach(function(d){ var f=d.folder||'(root)'; (byF[f]=byF[f]||[]).push(d.filename); });
   var counts={sourcesBlue:'cntBlue', sourcesHexia:'cntHexia'};
@@ -14990,8 +15011,8 @@ function pickVoice(cfg){
   for(const n of pl){ const v=voices.find(x=>x.name===n||x.name.indexOf(n)===0); if(v)return v; }
   return voices.find(x=>/^en/i.test(x.lang))||null;
 }
-function headLip(cfg,frames){ try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){} }
-function headLipStop(cfg){ try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){} }
+function headLip(cfg,frames){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){} }
+function headLipStop(cfg){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){} }
 
 function addTurn(cfg,text){ const d=document.createElement('div'); d.className='turn '+cfg.id;
   const w=document.createElement('div'); w.className='who'; w.textContent=cfg.name;
