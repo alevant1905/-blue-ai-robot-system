@@ -14923,6 +14923,10 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <input type="text" id="slangHexia" placeholder="Hexia's slang / dialect (optional) — e.g. Gen Z slang">
 </div>
 <div class="controls">
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:4px">Blue's voice<select id="voiceBlue"></select></label>
+ <label class="muted" style="flex:1;display:flex;flex-direction:column;gap:4px">Hexia's voice<select id="voiceHexia"></select></label>
+</div>
+<div class="controls">
  <div style="flex:1;display:flex;flex-direction:column;gap:5px">
   <span class="muted">Blue draws on — tick any number (<span class="srccount" id="cntBlue">0</span> selected)</span>
   <div id="sourcesBlue" class="srcbox" style="border-color:#cfe4fb"></div>
@@ -15022,6 +15026,46 @@ function pickVoice(cfg){
   for(const n of pl){ const v=voices.find(x=>x.name===n||x.name.indexOf(n)===0); if(v)return v; }
   return voices.find(x=>/^en/i.test(x.lang))||null;
 }
+
+// Voice pickers (one per robot): the device's installed voices, so you can give
+// Blue and Hexia distinct, better-sounding voices than the auto pick — handy on
+// iPhone, where the default female voice isn't great. The choice is saved per
+// device under the SAME key pickVoice() reads (blueVoiceName_<id>), so it
+// applies here and on each robot's chat page; "Automatic" clears it and falls
+// back to the preferred-voice list. iOS loads voices late, so we rebuild on
+// voiceschanged. (To add higher-quality voices on iPhone: Settings >
+// Accessibility > Spoken Content > Voices — they then show up here.)
+function supportedVoices(){
+  const voices=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
+  return voices.filter(function(v){ return /^(en|fr|ru|el|da)/i.test(v.lang||''); });
+}
+function previewVoice(id, v){
+  try{
+    window.speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(id==='hexia'?"Hi, I'm Hexia!":"Hi, I'm Blue!");
+    const cfg=ROBOTS[id]||{}; if(v){ u.voice=v; u.lang=v.lang||'en-US'; } else { u.lang='en-US'; }
+    u.rate=cfg.voiceRate||1.0; u.pitch=cfg.voicePitch||1.0;
+    window.speechSynthesis.speak(u);
+  }catch(e){}
+}
+function buildVoicePickers(){
+  const voices=supportedVoices();
+  [['blue','voiceBlue'],['hexia','voiceHexia']].forEach(function(pair){
+    const id=pair[0], sel=document.getElementById(pair[1]); if(!sel) return;
+    let saved=''; try{ saved=localStorage.getItem('blueVoiceName_'+id)||''; }catch(e){}
+    sel.innerHTML='';
+    const auto=document.createElement('option'); auto.value=''; auto.textContent='Automatic'; sel.appendChild(auto);
+    voices.forEach(function(v){
+      const o=document.createElement('option'); o.value=v.name; o.textContent=v.name+' ('+v.lang+')';
+      if(v.name===saved) o.selected=true; sel.appendChild(o);
+    });
+    sel.onchange=function(){
+      primeAudio();
+      try{ if(sel.value){ localStorage.setItem('blueVoiceName_'+id, sel.value); } else { localStorage.removeItem('blueVoiceName_'+id); } }catch(e){}
+      previewVoice(id, supportedVoices().find(function(x){ return x.name===sel.value; }) || pickVoice(ROBOTS[id]));
+    };
+  });
+}
 function headLip(cfg,frames){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){} }
 function headLipStop(cfg){ if(!DRIVES_HEADS) return; try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){} }
 
@@ -15096,7 +15140,19 @@ function stop(){ running=false; try{ window.speechSynthesis.cancel(); }catch(e){
 startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
 document.getElementById('speakChk').addEventListener('change', primeAudio);
-if('speechSynthesis' in window){ try{ window.speechSynthesis.onvoiceschanged=function(){ window.speechSynthesis.getVoices(); }; }catch(e){} }
+function refreshVoices(){ try{ window.speechSynthesis.getVoices(); }catch(e){} buildVoicePickers(); }
+if('speechSynthesis' in window){
+  try{ window.speechSynthesis.onvoiceschanged=refreshVoices; }catch(e){}
+  refreshVoices();
+  // iOS Safari often loads voices late and may never fire voiceschanged; poll
+  // briefly until the lists actually fill, then stop (so it can't clobber a
+  // selection the moment voices appear).
+  let _vtries=0; const _vpoll=setInterval(function(){
+    const sel=document.getElementById('voiceHexia');
+    if((sel && sel.children.length>1) || ++_vtries>6){ clearInterval(_vpoll); return; }
+    refreshVoices();
+  }, 600);
+} else { buildVoicePickers(); }
 </script></body></html>"""
 
 
