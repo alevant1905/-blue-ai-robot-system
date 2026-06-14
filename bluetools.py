@@ -15641,6 +15641,28 @@ def duet_research():
                     "chars": len(info['text'])})
 
 
+# Per-turn "moves" + default lenses that keep the Blue<->Hexia duet from going in
+# circles: each mid-conversation turn is handed ONE distinct job (sampled below)
+# instead of just "reply", and when no roles are set the two robots are pushed to
+# play off their different temperaments rather than agree. Used in duet_turn().
+_DUET_MOVES = [
+    "disagree with something specific {other} just said — name it and say why you see it differently.",
+    "take {other}'s last point and push it further than they would — to a bolder or stranger conclusion.",
+    "ground it in a concrete example, a specific case, or a vivid image that makes it click.",
+    "crack open a fresh angle on the subject that hasn't surfaced yet.",
+    "put one sharp, genuine question to {other} that forces the talk somewhere new.",
+    "complicate it — name a tension, an exception, or a 'but what about...' nobody has addressed.",
+    "stake out your own strong opinion here, and say what you'd actually do about it.",
+    "draw an unexpected parallel — connect this to something from a different corner of life.",
+]
+# Default temperaments (used only when the user hasn't assigned roles) so the two
+# voices diverge instead of converging. Leans on their established personas.
+_DUET_LENS = {
+    "blue": "you're the steadier, more skeptical one — you probe for what's actually solid and push back when something sounds too neat;",
+    "hexia": "you're the spark — you leap to the bold possibility, chase the surprising tangent, and provoke a little to see where it leads;",
+}
+
+
 @app.route('/duet/turn', methods=['POST'])
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
@@ -15699,9 +15721,9 @@ def duet_turn():
         f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
         "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
         "and the household, and everything you remember is real — draw on it naturally when it's "
-        "relevant. Reply with ONLY your own next spoken line: 1 to 3 short, natural sentences "
-        "in your own voice. Never narrate actions or stage directions, never prefix your name, and don't "
-        "repeat what was already said."
+        "relevant. Reply with ONLY your own next spoken line — a short, natural turn in your own "
+        "voice. Never narrate actions or stage directions, never prefix your name, and never just "
+        "restate or re-affirm what was already said — each turn should move the conversation forward."
     )
 
     # Long-term memory, same stores the chat persona draws on: Alex's explicit
@@ -15863,6 +15885,16 @@ def duet_turn():
             directive += f", keeping the conversation on track ({subject})"
         directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
                       "talk or asking after each other; that breaks the discussion.")
+        # Keep it from circling: every turn must DO something new, not just react to
+        # the last point. A sampled "move" gives this turn a distinct job, and (when
+        # no roles are set) Blue and Hexia push from different temperaments.
+        directive += (" Move the conversation somewhere it hasn't been — bring in at least one idea, "
+                      "example or angle that hasn't appeared above, and never merely restate or agree "
+                      "with what's been said.")
+        directive += " This turn, " + random.choice(_DUET_MOVES).format(other=ot['name'])
+        if not has_roles and _DUET_LENS.get(speaker):
+            directive += (f" And remember you and {ot['name']} see things differently — {_DUET_LENS[speaker]} "
+                          "lean into that difference rather than nodding along.")
         if url_block and ground_block:
             directive += (f" Build on one more specific idea from {'the video' if url_is_video else 'the article'}"
                           " or from your own reading, woven in as your own point — don't cite where it came from.")
@@ -15887,8 +15919,15 @@ def duet_turn():
             directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
+    # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
+    length_note = random.choice([
+        "1 to 3 short sentences",
+        "1 to 3 short sentences",
+        "a single punchy sentence that lands",
+        "2 to 4 sentences built around one vivid example or image",
+    ])
     parts.append(directive
-                 + f" Reply with ONLY {sp['name']}'s next spoken line — 1 to 3 short sentences, in character.")
+                 + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
 
     user_content = "\n\n".join(parts)
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
