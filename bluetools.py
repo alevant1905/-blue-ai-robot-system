@@ -14970,6 +14970,11 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  </div>
 </div>
 <div class="controls">
+ <label class="muted" title="How spirited the discussion is — calm and agreeable at the left, provocative and sparring at the right" style="flex:1;display:flex;align-items:center;gap:10px;min-width:240px">Spice
+  <input type="range" id="spice" min="0" max="10" step="1" value="5" style="flex:1">
+  <span id="spiceVal" class="muted" style="min-width:96px;text-align:right">balanced</span></label>
+</div>
+<div class="controls">
  <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option><option value="20">20 turns</option><option value="0">until I stop</option></select>
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
@@ -15031,6 +15036,11 @@ function selVals(id){ var box=document.getElementById(id); if(!box) return [];
   return Array.prototype.slice.call(box.querySelectorAll('input:checked')).map(function(c){return c.value;}); }
 function SOURCES(){ return { blue: selVals('sourcesBlue'), hexia: selVals('sourcesHexia') }; }
 function fieldMap(prefix){ var g=function(id){var e=document.getElementById(id);return e?(e.value||'').trim():'';}; return { blue:g(prefix+'Blue'), hexia:g(prefix+'Hexia') }; }
+function SPICE(){ var s=document.getElementById('spice'); var n=s?parseInt(s.value,10):5; return isNaN(n)?5:n; }
+(function(){ var s=document.getElementById('spice'), v=document.getElementById('spiceVal'); if(!s||!v) return;
+  var word=function(n){ n=+n; return n<=1?'easygoing':n<=3?'gentle':n<=4?'mellow':n===5?'balanced':n<=7?'lively':n<=8?'spirited':'provocative'; };
+  var upd=function(){ v.textContent=word(s.value); }; s.addEventListener('input',upd); upd();
+})();
 let running=false, history=[];
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
@@ -15185,7 +15195,7 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), research:document.getElementById('researchChk').checked})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
@@ -15446,14 +15456,22 @@ def _duet_url_content(url: str):
     return info
 
 
-def _duet_url_excerpt(text: str, query: str, lede: int = 2000, win: int = 1400) -> str:
-    """The lede plus the slice of the article/transcript most relevant to the
-    last couple of turns — lets the discussion roam across a long page without
-    ever stuffing the whole thing into the prompt."""
+def _duet_url_excerpt(text: str, query: str, turn: int = 0, lede: int = 2000, win: int = 1400) -> str:
+    """A windowed slice of the article/transcript so a long page never gets
+    stuffed whole into the prompt. The OPENING turn gets the lede (intro) plus
+    the slice most relevant so far; LATER turns ROTATE a reading window forward
+    through the rest of the document (advancing with the turn number, looping at
+    the end), so each turn surfaces fresh material instead of re-dumping the same
+    intro — which is what keeps a long link/research duet from circling."""
     text = (text or '').strip()
     if len(text) <= lede + win + 300:
         return text
     head, rest = text[:lede], text[lede:]
+    if turn and int(turn) > 0 and len(rest) > win:
+        pages = max(1, (len(rest) + win - 1) // win)
+        off = ((int(turn) - 1) % pages) * win
+        seg = rest[off:off + win].strip()
+        return "[…] " + seg + (" …" if off + win < len(rest) else "")
     words = {w.lower() for w in re.findall(r'[A-Za-zÀ-ɏ]{4,}', query or '')}
     best_off, best_score = -1, 1       # need ≥2 keyword hits to add a slice
     step = max(200, win // 2)
@@ -15641,19 +15659,24 @@ def duet_research():
                     "chars": len(info['text'])})
 
 
-# Per-turn "moves" + default lenses that keep the Blue<->Hexia duet from going in
-# circles: each mid-conversation turn is handed ONE distinct job (sampled below)
-# instead of just "reply", and when no roles are set the two robots are pushed to
-# play off their different temperaments rather than agree. Used in duet_turn().
-_DUET_MOVES = [
-    "disagree with something specific {other} just said — name it and say why you see it differently.",
-    "take {other}'s last point and push it further than they would — to a bolder or stranger conclusion.",
+# Per-turn "moves" that keep the Blue<->Hexia duet from going in circles: each
+# mid-conversation turn is handed ONE distinct job instead of just "reply". The
+# pool is split by spice — the "calm" jobs build and explore, the "spicy" jobs
+# confront and provoke; the spice slider (0-10) sets how often a spicy one is
+# picked. {other} is filled with the other robot's name. Used in duet_turn().
+_DUET_MOVES_CALM = [
     "ground it in a concrete example, a specific case, or a vivid image that makes it click.",
     "crack open a fresh angle on the subject that hasn't surfaced yet.",
     "put one sharp, genuine question to {other} that forces the talk somewhere new.",
+    "draw an unexpected parallel — connect this to something from a different corner of life.",
+    "build on {other}'s last point and carry it one concrete step further.",
+]
+_DUET_MOVES_SPICY = [
+    "disagree with something specific {other} just said — name it and say why you see it differently.",
+    "push {other}'s last point to a bolder or stranger conclusion than they'd go themselves.",
     "complicate it — name a tension, an exception, or a 'but what about...' nobody has addressed.",
     "stake out your own strong opinion here, and say what you'd actually do about it.",
-    "draw an unexpected parallel — connect this to something from a different corner of life.",
+    "challenge the assumption sitting underneath what {other} just said.",
 ]
 # Default temperaments (used only when the user hasn't assigned roles) so the two
 # voices diverge instead of converging. Leans on their established personas.
@@ -15696,6 +15719,14 @@ def duet_turn():
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
     research_on = bool(d.get('research'))
+    # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
+    # gets a confrontational "move", how hard the two push on each other, and the
+    # sampling temperature. Defaults to a balanced 5.
+    try:
+        spice = int(d.get('spice', 5))
+    except Exception:
+        spice = 5
+    spice = max(0, min(10, spice))
     url_info = _duet_url_content(url) if url else None
     url_text = (url_info or {}).get('text') or ''
     url_is_video = bool(url_info and url_info.get('kind') == 'video')
@@ -15772,7 +15803,7 @@ def duet_turn():
     url_block = ""
     if url_text:
         recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-        url_block = _duet_url_excerpt(url_text, f"{topic} {recent_q}".strip())
+        url_block = _duet_url_excerpt(url_text, f"{topic} {recent_q}".strip(), turn=len(history))
 
     # Web research grounding: live search findings on the duet's subject
     # (warmed by /duet/research at start; cached so turns don't re-search),
@@ -15785,7 +15816,7 @@ def duet_turn():
             rtext = digest.get('text') or ''
             if rtext:
                 recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-                research_block = _duet_url_excerpt(rtext, f"{topic} {recent_q}".strip())
+                research_block = _duet_url_excerpt(rtext, f"{topic} {recent_q}".strip(), turn=len(history))
 
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
@@ -15891,10 +15922,19 @@ def duet_turn():
         directive += (" Move the conversation somewhere it hasn't been — bring in at least one idea, "
                       "example or angle that hasn't appeared above, and never merely restate or agree "
                       "with what's been said.")
-        directive += " This turn, " + random.choice(_DUET_MOVES).format(other=ot['name'])
+        _pool = _DUET_MOVES_SPICY if random.random() < (spice / 10.0) else _DUET_MOVES_CALM
+        directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
         if not has_roles and _DUET_LENS.get(speaker):
-            directive += (f" And remember you and {ot['name']} see things differently — {_DUET_LENS[speaker]} "
-                          "lean into that difference rather than nodding along.")
+            _lens = _DUET_LENS[speaker]
+            if spice >= 7:
+                directive += (f" You and {ot['name']} are sparring here — {_lens} don't let {ot['name']} "
+                              "off easy; push back and raise the stakes.")
+            elif spice <= 2:
+                directive += (f" You and {ot['name']} are easy company — {_lens} but keep it warm and "
+                              "curious, building together more than clashing.")
+            else:
+                directive += (f" And remember you and {ot['name']} see things differently — {_lens} "
+                              "lean into that difference rather than nodding along.")
         if url_block and ground_block:
             directive += (f" Build on one more specific idea from {'the video' if url_is_video else 'the article'}"
                           " or from your own reading, woven in as your own point — don't cite where it came from.")
@@ -15934,11 +15974,13 @@ def duet_turn():
     # These are reasoning models: the budget must cover the <think> pass PLUS the
     # short reply (170 tokens got entirely consumed by thinking → empty content).
     # Strip any <think> block, and retry once on an empty turn.
+    # Spice (0 calm -> 10 provocative) lifts the first-pass sampling temperature.
+    base_temp = min(1.0, 0.74 + 0.032 * spice)
     text = ""
     for attempt in range(2):
         try:
             res = call_llm(msgs, include_tools=False,
-                           temperature=(0.85 if attempt == 0 else 0.6), max_tokens=1500)
+                           temperature=(base_temp if attempt == 0 else 0.6), max_tokens=1500)
             ch = (res or {}).get('choices') or []
             cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
             if '</think>' in cand:           # keep only the text after the reasoning block
