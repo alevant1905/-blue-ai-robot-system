@@ -13272,6 +13272,9 @@ CHAT_HTML = """
                 <button class="iconbtn" id="speakBtn" title="Blue reads his answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg>
                 </button>
+                <button class="iconbtn" id="connHeadBtn" title="Drive {{ robot_name }}'s head from this device's USB-C port" aria-label="Connect a USB-C head" aria-pressed="false" style="display:none">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="7" rx="1.5"/><path d="M11 9.5v3"/><path d="M13 9.5v3"/><path d="M8 12.5h8v3.5a4 4 0 0 1-8 0z"/><path d="M12 20v2"/></svg>
+                </button>
                 <button class="sendbtn" id="sendBtn">Send</button>
             </div>
             {% if kid %}
@@ -13327,6 +13330,7 @@ CHAT_HTML = """
     </div>
     {% endif %}
 
+    <script src="/js/ohbot-heads.js"></script>
     <script>
         const messagesEl = document.getElementById('messages');
         const emptyEl = document.getElementById('empty');
@@ -13664,14 +13668,14 @@ CHAT_HTML = """
                 u.onstart = function () {
                     setFaceState('talking');
                     bargeInRecogStart();   // listen for "stop" the whole time he talks
-                    if (!isVilda) {
+                    if (!isVilda && !localHeadLip(ROBOT.head, _lipFrames)) {
                         try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: _lipFrames }) }); } catch (e) {}
                     }
                 };
                 const _spokenDone = function () {
                     bargeInRecogStop();
                     setFaceState('');
-                    if (!isVilda) {
+                    if (!isVilda && !localHeadLipStop(ROBOT.head)) {
                         try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
                     }
                 };
@@ -13685,6 +13689,7 @@ CHAT_HTML = """
         // would keep flapping until the next speech start. Make sure to stop.
         window.addEventListener('pagehide', function () {
             if (isVilda) return;   // her iPad never drives the head; nothing to stop
+            if (localHeadLipStop(ROBOT.head)) return;   // a head on THIS device — stop it locally
             try { navigator.sendBeacon && navigator.sendBeacon('/head/' + ROBOT.head + '/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
         });
 
@@ -13700,6 +13705,30 @@ CHAT_HTML = """
         }
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
+
+        // Local USB-C head (Web Serial), same engine as duet: drive a head plugged
+        // into THIS device straight from the page. Only on a capable non-PC device
+        // (Chrome + https) for Alex; the PC keeps using the server, and the kid's
+        // iPad / Safari stay voice-only. The shared /js/ohbot-heads.js provides
+        // WEBSERIAL_OK / DRIVES_HEADS / LOCAL_DRIVERS / connectHead / disconnectHead.
+        (function () {
+            const btn = document.getElementById('connHeadBtn');
+            if (!btn || !(WEBSERIAL_OK && !DRIVES_HEADS && !isVilda)) return;
+            btn.style.display = '';
+            function paint() {
+                const on = !!LOCAL_DRIVERS[ROBOT.head];
+                btn.classList.toggle('active', on);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                btn.title = on ? 'Head connected on this device — tap to release'
+                               : "Drive the head from this device's USB-C port";
+            }
+            window.onLocalHeadsChanged = paint;
+            btn.addEventListener('click', function () {
+                primeAudio();
+                if (LOCAL_DRIVERS[ROBOT.head]) disconnectHead(ROBOT.head); else connectHead(ROBOT.head);
+            });
+            paint();
+        })();
 
         // ---- Research mode: search the web before answering ----
         // Opt-in, saved per device per robot: while the magnifier is lit,
@@ -14300,7 +14329,7 @@ CHAT_HTML = """
         // ---- Stop speaking NOW — shared by every barge-in path ----
         function stopSpeaking(source) {
             try { window.speechSynthesis.cancel(); } catch (e) {}
-            if (!isVilda) {
+            if (!isVilda && !localHeadLipStop(ROBOT.head)) {
                 try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
             }
             setFaceState('');
@@ -14970,32 +14999,14 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  </div>
 </div>
 <div id="log"></div>
+<script src="/js/ohbot-heads.js"></script>
 <script>
 const ROBOTS = {{ robots_json|safe }};
 const DOCS = {{ documents_json|safe }};
 
-// This page can run on the PC (where the heads are plugged in over USB) or on a
-// phone/laptop elsewhere in the house. Only the PC browser should drive the
-// physical heads; on iPhone/MacBook/iPad we just play the voices on that device
-// and leave the heads still. Same UA+touch test the chat page uses (a
-// desktop-mode iPad masquerades as a Mac, so touch points disambiguate it).
-function blueDeviceTag(){
-  const ua=navigator.userAgent||''; const touch=(navigator.maxTouchPoints||0)>1;
-  if(/iPad/.test(ua)||(/Macintosh/.test(ua)&&touch)) return 'ipad';
-  if(/iPhone|iPod/.test(ua)) return 'iphone';
-  if(/Android/.test(ua)) return 'android';
-  if(/Macintosh|Mac OS X/.test(ua)) return 'mac';
-  if(/Windows/.test(ua)) return 'windows';
-  return 'other';
-}
-const DRIVES_HEADS = (blueDeviceTag()==='windows');
-// Heads plugged into THIS device (e.g. the MacBook) are driven straight from the
-// page over Web Serial — see OhbotSerialDriver + initLocalHeads() near the end.
-// LOCAL_DRIVERS[head] holds a live driver once connected and, when set, takes
-// over the PC-server path for that head. Web Serial needs Chrome/Edge on a
-// secure (https) origin — the Tailscale URL — so it's absent on Safari/plain-http.
-const LOCAL_DRIVERS = {blue:null, hexia:null};
-const WEBSERIAL_OK = ('serial' in navigator) && !!window.isSecureContext;
+// blueDeviceTag / DRIVES_HEADS / WEBSERIAL_OK / LOCAL_DRIVERS and the whole
+// OhbotSerialDriver + connect helpers come from /js/ohbot-heads.js (loaded
+// above), shared with the chat and calibration pages.
 (function(){
   var byF={}; DOCS.forEach(function(d){ var f=d.folder||'(root)'; (byF[f]=byF[f]||[]).push(d.filename); });
   var counts={sourcesBlue:'cntBlue', sourcesHexia:'cntHexia'};
@@ -15125,18 +15136,16 @@ function wireRatePickers(){
     };
   });
 }
-// Drive a head's lips. A head plugged into THIS device (Web Serial) wins; else
-// the PC browser POSTs to the server (which owns the USB heads); else (a remote
-// device with no local head) we stay silent and just play the voice.
+// Drive a head's lips. A head plugged into THIS device (Web Serial, via the
+// shared localHeadLip) wins; else the PC browser POSTs to the server; else (a
+// remote device with no local head) we stay silent and just play the voice.
 function headLip(cfg,frames){
-  const drv=LOCAL_DRIVERS[cfg.head];
-  if(drv){ drv.playLipSequence(frames); return; }
+  if(localHeadLip(cfg.head, frames)) return;
   if(!DRIVES_HEADS) return;
   try{ fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}); }catch(e){}
 }
 function headLipStop(cfg){
-  const drv=LOCAL_DRIVERS[cfg.head];
-  if(drv){ drv.lipStop(); return; }
+  if(localHeadLipStop(cfg.head)) return;
   if(!DRIVES_HEADS) return;
   try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){}
 }
@@ -15228,186 +15237,11 @@ if('speechSynthesis' in window){
 } else { buildVoicePickers(); }
 wireRatePickers();
 
-/* ===== Heads plugged into THIS device, driven over Web Serial (Chrome/Edge) =====
-   A faithful JS port of the slice of the `ohbot` library + blue/head.py that the
-   PC uses, so heads on the MacBook's USB-C ports lip-sync and idle exactly like
-   they do on the PC. Per-head calibration is pulled from /head/<head>/state. */
-const _ENC = new TextEncoder();
-function _clip(v,lo,hi){ v=Number(v); if(isNaN(v)) v=lo; return v<lo?lo:(v>hi?hi:v); }
-function _rand(a,b){ return a + Math.random()*(b-a); }
-function _sleepS(s){ return new Promise(function(res){ setTimeout(res, Math.max(0, s*1000)); }); }
-
-// Motor channels + per-motor scaling from ohbotData/MotorDefinitionsv21.omd
-// (min/max as the library derives them: int(raw/1000*180)). Every Ohbot motor
-// takes the plain servo path — the .omd defines no MotorType, so the library's
-// matrix (FE/FL/FB) branches never fire.
-const HEADNOD=0, HEADTURN=1, EYETURN=2, LIDBLINK=3, TOPLIP=4, BOTTOMLIP=5, EYETILT=6, HEADROLL=7;
-const _MOTOR_MIN = {0:25,1:0,2:68,3:6,4:0,5:0,6:93,7:72};
-const _MOTOR_MAX = {0:126,1:180,2:140,3:54,4:99,5:99,6:165,7:108};
-const _MOTOR_REV = {0:true,1:false,2:false,3:false,4:true,5:true,6:false,7:true};
-// Idle recipes mirror blue/head.py _IDLE_RECIPES.
-const _IDLE_RECIPES = [
-  ['blink',null],['blink',null],
-  ['nudge',[HEADNOD,[-0.8,-0.5,0.5,0.8],3,0.6,1.1]],
-  ['nudge',[HEADTURN,[-1.0,-0.6,0.6,1.0],3,0.8,1.4]],
-  ['nudge',[HEADROLL,[-0.6,-0.4,0.4,0.6],3,0.8,1.4]],
-  ['nudge',[EYETURN,[1.5,-1.5],6,0.4,0.8]],
-  ['nudge',[EYETILT,[1.2,-1.2],5,0.4,0.9]]
-];
-
-class OhbotSerialDriver {
-  constructor(port, calib){
-    this.port=port; this.calib=calib||{};
-    this.writer=port.writable.getWriter();
-    this._chain=Promise.resolve();
-    this.attached={};
-    this.lipToken=0; this.lipActive=false; this.busyUntil=0; this.closed=false;
-  }
-  // Serialize writes through a promise chain (mirrors the library's `writing`
-  // flag) so commands never interleave on the wire.
-  _write(s){
-    const self=this;
-    this._chain=this._chain.then(function(){
-      if(self.closed || !self.writer) return;
-      return self.writer.write(_ENC.encode(s)).catch(function(){});
-    });
-    return this._chain;
-  }
-  center(m){
-    const c=(this.calib&&this.calib.centers)?this.calib.centers[m]:undefined;
-    if(c===undefined||c===null||isNaN(Number(c))) return (m===LIDBLINK?8:5);
-    return Number(c);
-  }
-  _cal(k,dflt){ const v=this.calib?this.calib[k]:undefined; return (v===undefined||v===null)?dflt:v; }
-  // Exact reproduction of ohbot.move() for the servo path.
-  move(m,pos,spd){
-    pos=_clip(pos,0,10); spd=_clip(spd,0,10);
-    if(m===BOTTOMLIP && pos<5) pos = 5 - (5-pos)/2;
-    if(_MOTOR_REV[m]) pos = 10 - pos;
-    if(!this.attached[m]){ this.attached[m]=true; this._write('a0'+m+'\\n'); }
-    const absPos=Math.trunc((_MOTOR_MAX[m]-_MOTOR_MIN[m])/10*pos + _MOTOR_MIN[m]);
-    const s=25*spd; const sstr=(s===Math.trunc(s))?(s+'.0'):String(s);
-    this._write('m0'+m+','+absPos+','+sstr+'\\n');
-  }
-  eyeColour(r,g,b){
-    r=Math.trunc(255/10*_clip(r,0,10)); g=Math.trunc(255/10*_clip(g,0,10)); b=Math.trunc(255/10*_clip(b,0,10));
-    this._write('l00,'+r+','+g+','+b+'\\n'); this._write('l01,'+r+','+g+','+b+'\\n');
-  }
-  // ---- mouth + lip sequence (mirrors blue/head.py _set_mouth / _lip_seq_loop) ----
-  _setMouth(openness){
-    openness=_clip(openness,0,1);
-    const topSign=this._cal('lip_invert_top',false)?-1:1;
-    const botSign=this._cal('lip_invert_bottom',false)?-1:1;
-    const topRng=Number(this._cal('lip_top_range',1.8));
-    const botRng=Number(this._cal('lip_bottom_range',3.0));
-    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), 10);
-    this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), 10);
-  }
-  playLipSequence(frames){
-    if(!frames||!frames.length) return;
-    this.lipToken++; const my=this.lipToken; this.lipActive=true;
-    const self=this;
-    (async function(){
-      for(let i=0;i<frames.length;i++){
-        if(self.closed || self.lipToken!==my) break;
-        const op=_clip(frames[i][0],0,1), hold=_clip(frames[i][1],0.01,1.5);
-        self._setMouth(op); await _sleepS(hold);
-      }
-      if(self.lipToken===my){ self._setMouth(0); self.lipActive=false; }
-    })();
-  }
-  lipStop(){ this.lipToken++; this.lipActive=false; this._setMouth(0); }
-  nod(){
-    const c=this.center(HEADNOD); this.busyUntil=Date.now()+1500; const self=this;
-    (async function(){
-      for(let i=0;i<2;i++){ self.move(HEADNOD,c-2,7); await _sleepS(0.35); self.move(HEADNOD,c+2,7); await _sleepS(0.35); }
-      self.move(HEADNOD,c,6);
-    })();
-  }
-  // ---- idle motion (mirrors blue/head.py _auto_loop) ----
-  _intervalRange(){
-    const f=_clip(this._cal('idle_frequency',7),0,10)/10;
-    let lo=0.8+(1-f)*5.2, hi=2.5+(1-f)*9.5;
-    if(this.lipActive){ lo=Math.max(0.35,lo*0.45); hi=Math.max(1.2,hi*0.45); }
-    return [lo,hi];
-  }
-  _ampMult(){
-    const a=_clip(this._cal('idle_amplitude',5),0,10);
-    const base=(a<=5)?(0.3+(a/5)*0.7):(1.0+((a-5)/5)*1.0);
-    return this.lipActive?base*0.7:base;
-  }
-  _autoEnabled(){ return this._cal('auto_movement',true)!==false; }
-  async _doIdleMotion(){
-    const r=_IDLE_RECIPES[Math.floor(Math.random()*_IDLE_RECIPES.length)];
-    if(r[0]==='blink'){
-      const c=this.center(LIDBLINK); this.move(LIDBLINK,0,10); await _sleepS(0.10); this.move(LIDBLINK,c,10);
-    } else {
-      const sp=r[1], motor=sp[0], choices=sp[1], speed=sp[2], hmin=sp[3], hmax=sp[4];
-      const c=this.center(motor), off=choices[Math.floor(Math.random()*choices.length)];
-      this.move(motor, c+off*this._ampMult(), speed); await _sleepS(_rand(hmin,hmax)); this.move(motor, c, speed);
-    }
-  }
-  async _autoLoop(){
-    await _sleepS(_rand(3,6));   // don't fire the instant we connect
-    while(!this.closed){
-      const rg=this._intervalRange(); await _sleepS(_rand(rg[0],rg[1]));
-      if(this.closed) break;
-      try{
-        if(this.lipActive){ await this._doIdleMotion(); }                 // gesture along while talking
-        else if(this._autoEnabled() && Date.now()>=this.busyUntil){ await this._doIdleMotion(); }
-      }catch(e){}
-    }
-  }
-  async start(){
-    this.closed=false;
-    await _sleepS(1.2);   // let the board finish booting if opening reset it
-    this.eyeColour(0,0,0);
-    this.attached={};
-    for(let m=0;m<8;m++) this.move(m, this.center(m), 4);   // park at calibrated centres
-    this._autoLoop();
-  }
-  async close(){
-    this.lipToken++; this.lipActive=false;
-    try{ this._setMouth(0); }catch(e){}
-    this.closed=true;
-    try{ await this._chain; }catch(e){}
-    try{ if(this.writer) this.writer.releaseLock(); }catch(e){}
-    try{ await this.port.close(); }catch(e){}
-    this.writer=null;
-  }
-}
-
-function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
-async function _fetchCalib(headName){
-  try{ const r=await fetch('/head/'+headName+'/state'); if(r.ok){ const j=await r.json(); if(j&&typeof j==='object') return j; } }catch(e){}
-  return _defaultCalib();
-}
-async function connectHead(headName){
-  if(!WEBSERIAL_OK) return;
-  let port;
-  try{ port=await navigator.serial.requestPort(); }catch(e){ return; }   // user dismissed the picker
-  try{ await port.open({baudRate:19200}); }
-  catch(e){ addNote("(couldn't open that USB port for "+headName+": "+(e&&e.message?e.message:e)+")"); return; }
-  const calib=await _fetchCalib(headName);
-  let drv;
-  try{ drv=new OhbotSerialDriver(port, calib); await drv.start(); }
-  catch(e){ addNote("(couldn't start "+headName+"'s head: "+(e&&e.message?e.message:e)+")"); try{ await port.close(); }catch(_e){} return; }
-  if(LOCAL_DRIVERS[headName]){ try{ await LOCAL_DRIVERS[headName].close(); }catch(_e){} }
-  LOCAL_DRIVERS[headName]=drv;
-  renderHeadPanel();
-}
-async function disconnectHead(headName){
-  const drv=LOCAL_DRIVERS[headName]; if(!drv) return;
-  LOCAL_DRIVERS[headName]=null;
-  try{ await drv.close(); }catch(e){}
-  renderHeadPanel();
-}
-function testNod(headName){ const drv=LOCAL_DRIVERS[headName]; if(drv) drv.nod(); }
-async function _reparkFor(headName){
-  const drv=LOCAL_DRIVERS[headName]; if(!drv) return;
-  drv.calib=await _fetchCalib(headName); drv.attached={};
-  for(let m=0;m<8;m++) drv.move(m, drv.center(m), 4);
-}
+/* The Web Serial Ohbot driver, the device gates (DRIVES_HEADS / WEBSERIAL_OK /
+   LOCAL_DRIVERS) and the connect/disconnect/testNod/_reparkFor helpers now live
+   in the shared /js/ohbot-heads.js (loaded above), so the duet, chat and
+   calibration pages drive local USB-C heads identically. This page keeps only
+   its own 2-head panel wiring below (swap is duet-only). */
 async function swapHeads(){
   const a=LOCAL_DRIVERS.blue, b=LOCAL_DRIVERS.hexia;
   LOCAL_DRIVERS.blue=b; LOCAL_DRIVERS.hexia=a;
@@ -15426,6 +15260,10 @@ function renderHeadPanel(){
 }
 function setDevNote(html, show){ const dn=document.getElementById('devNote'); if(!dn) return; dn.innerHTML=html||''; dn.style.display=show?'block':'none'; }
 function initLocalHeads(){
+  // Let the shared connect helpers repaint THIS page's panel and route their
+  // errors into the duet log.
+  window.onLocalHeadsChanged = renderHeadPanel;
+  window.onLocalHeadsNote = function(m){ addNote('('+m+')'); };
   if(DRIVES_HEADS) return;   // the PC drives the heads via the server, unchanged
   const panel=document.getElementById('usbHeads');
   if(WEBSERIAL_OK){
@@ -15445,7 +15283,6 @@ function initLocalHeads(){
     setDevNote("On this device you'll just hear Blue and Hexia speak. To move heads plugged into this device, "+why+" and a USB connect panel will appear here.", true);
   }
 }
-window.addEventListener('beforeunload', function(){ try{ if(LOCAL_DRIVERS.blue) LOCAL_DRIVERS.blue.lipStop(); if(LOCAL_DRIVERS.hexia) LOCAL_DRIVERS.hexia.lipStop(); }catch(e){} });
 initLocalHeads();
 </script></body></html>"""
 
@@ -16156,6 +15993,7 @@ HEAD_HTML = """<!DOCTYPE html>
         <h2>Status</h2>
         <span id="status" class="status off">Checking…</span>
         <button class="btn" id="reconnectBtn" style="margin-left:10px;">Reconnect</button>
+        <button class="btn" id="connHeadBtn" style="margin-left:10px; display:none;">Connect head (USB-C)</button>
         <label class="toggle"><input type="checkbox" id="autoToggle"><span>Thoughtful idle movement</span></label>
         <div class="hint">If "Not connected," close the Ohbot desktop app, then click Reconnect (no full restart needed).</div>
         <div id="idleBox" style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--line);">
@@ -16246,6 +16084,7 @@ HEAD_HTML = """<!DOCTYPE html>
     </div>
 </div>
 
+<script src="/js/ohbot-heads.js"></script>
 <script>
 const MOTORS = [[0,'HeadNod'],[1,'HeadTurn'],[7,'HeadRoll'],[2,'EyeTurn'],[6,'EyeTilt'],[3,'LidBlink'],[4,'TopLip'],[5,'BottomLip']];
 const ACTIONS = ['nod_yes','shake_no','blink','wink','look_left','look_right','look_up','look_down','look_center','happy','sad','surprised','curious','neutral'];
@@ -16262,11 +16101,25 @@ function _hurl(url) {
     return (typeof url === 'string' && url.indexOf('/head/') === 0)
         ? ('/head/' + HEAD_ROBOT + url.slice(5)) : url;
 }
-async function postJSON(url, body) {
+async function _serverPOST(url, body) {
     try {
         const r = await fetch(_hurl(url), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
         return await r.json().catch(() => null);
     } catch (e) { return null; }
+}
+async function postJSON(url, body) {
+    body = body || {};
+    // A head plugged into THIS device (Web Serial) takes over from the server:
+    // movement/test verbs run on it directly; persistence verbs still POST to the
+    // server (saving into the shared calibration), then we refresh the local
+    // head's copy so the change takes effect. Reads (getJSON) still hit the server.
+    if (LOCAL_DRIVERS[HEAD_ROBOT]) {
+        if (localHeadControl(HEAD_ROBOT, url, body)) return { ok: true, local: true };
+        const res = await _serverPOST(url, body);
+        if (url !== '/head/reconnect') { try { LOCAL_DRIVERS[HEAD_ROBOT].calib = await _fetchCalib(HEAD_ROBOT); } catch (e) {} }
+        return res;
+    }
+    return await _serverPOST(url, body);
 }
 async function getJSON(url) {
     try { const r = await fetch(_hurl(url)); return await r.json(); } catch (e) { return null; }
@@ -16349,7 +16202,8 @@ async function loadState() {
     const s = await getJSON('/head/state');
     CURRENT_STATE = s;
     const status = document.getElementById('status');
-    if (s && s.available) { status.className = 'status on'; status.textContent = 'Connected'; }
+    if (LOCAL_DRIVERS[HEAD_ROBOT]) { status.className = 'status on'; status.textContent = 'Connected (this device, USB-C)'; }
+    else if (s && s.available) { status.className = 'status on'; status.textContent = 'Connected'; }
     else { status.className = 'status off'; status.textContent = 'Not connected'; }
     buildMotors(s && s.centers);
     buildCustomExpressions(s && s.custom_expressions);
@@ -16560,6 +16414,32 @@ document.getElementById('reconnectBtn').addEventListener('click', async () => {
 });
 
 loadState();
+
+// Local USB-C head (Web Serial): tune a head plugged into THIS device. The
+// movement controls drive it directly (see postJSON above); the save/config
+// controls still persist to the shared calibration on the server, then refresh
+// the local head's copy. Shown only on a capable non-PC device (Chrome + https);
+// the PC keeps tuning the server-driven board as before.
+(function () {
+    const btn = document.getElementById('connHeadBtn');
+    if (!btn || !(WEBSERIAL_OK && !DRIVES_HEADS)) return;
+    btn.style.display = '';
+    function paint() {
+        const on = !!LOCAL_DRIVERS[HEAD_ROBOT];
+        btn.classList.toggle('active', on);
+        btn.textContent = on ? 'Release head' : 'Connect head (USB-C)';
+        const st = document.getElementById('status');
+        if (st) {
+            if (on) { st.className = 'status on'; st.textContent = 'Connected (this device, USB-C)'; }
+            else { st.className = 'status off'; st.textContent = 'Not connected'; }
+        }
+    }
+    window.onLocalHeadsChanged = paint;
+    btn.addEventListener('click', function () {
+        if (LOCAL_DRIVERS[HEAD_ROBOT]) disconnectHead(HEAD_ROBOT); else connectHead(HEAD_ROBOT);
+    });
+    paint();
+})();
 </script>
 </body>
 </html>"""
@@ -16595,6 +16475,320 @@ def head_page_robot(robot):
 # back-compat; the /head/<robot>/... variant (e.g. /head/hexia/lip-seq) drives a
 # named head. `blue_head.get_head(name)` returns the right RobotHead (Blue for
 # any unknown name). A head with no connected board is a graceful no-op.
+# Shared Web Serial head driver — loaded by /duet, the chat pages and /head so a
+# non-PC device (e.g. the MacBook) can drive Ohbot heads plugged into ITS OWN
+# USB-C ports straight from the browser, replicating the slice of the `ohbot`
+# library + blue/head.py the PC uses. Served raw (no Jinja); the doubled
+# backslashes are Python escaping so the browser receives real JS "\n".
+OHBOT_HEADS_JS = """
+/* Web Serial Ohbot driver shared across the duet, chat and calibration pages.
+   A faithful JS port of the ohbot wire protocol + blue/head.py behaviour, so a
+   head plugged into THIS device's USB-C port lip-syncs, idles, emotes and
+   calibrates exactly like it does on the PC. Calibration per head is pulled from
+   /head/<head>/state. Needs Chrome/Edge on a secure (https) origin. */
+var _ENC = new TextEncoder();
+function _clip(v,lo,hi){ v=Number(v); if(isNaN(v)) v=lo; return v<lo?lo:(v>hi?hi:v); }
+function _rand(a,b){ return a + Math.random()*(b-a); }
+function _sleepS(s){ return new Promise(function(res){ setTimeout(res, Math.max(0, s*1000)); }); }
+
+// Motor channels + per-motor scaling from ohbotData/MotorDefinitionsv21.omd
+// (min/max as the library derives them: int(raw/1000*180)). Every Ohbot motor
+// takes the plain servo path.
+var HEADNOD=0, HEADTURN=1, EYETURN=2, LIDBLINK=3, TOPLIP=4, BOTTOMLIP=5, EYETILT=6, HEADROLL=7;
+var _MOTOR_MIN = {0:25,1:0,2:68,3:6,4:0,5:0,6:93,7:72};
+var _MOTOR_MAX = {0:126,1:180,2:140,3:54,4:99,5:99,6:165,7:108};
+var _MOTOR_REV = {0:true,1:false,2:false,3:false,4:true,5:true,6:false,7:true};
+var _IDLE_RECIPES = [
+  ['blink',null],['blink',null],
+  ['nudge',[HEADNOD,[-0.8,-0.5,0.5,0.8],3,0.6,1.1]],
+  ['nudge',[HEADTURN,[-1.0,-0.6,0.6,1.0],3,0.8,1.4]],
+  ['nudge',[HEADROLL,[-0.6,-0.4,0.4,0.6],3,0.8,1.4]],
+  ['nudge',[EYETURN,[1.5,-1.5],6,0.4,0.8]],
+  ['nudge',[EYETILT,[1.2,-1.2],5,0.4,0.9]]
+];
+// Built-in expression poses (offsets from calibrated centres) — mirror head.py.
+var _EXPRESSIONS = {
+  neutral:{1:0,0:0,4:0,5:0,3:0,2:0,6:0},
+  happy:{0:1.0,4:3.0,5:-3.0,3:0},
+  sad:{0:-2.0,4:-3.0,5:3.0,3:-4.0},
+  surprised:{0:2.0,4:0,5:4.0,3:2.0},
+  curious:{1:1.5,0:1.0,7:1.0,2:1.0,3:0},
+  wink:{3:-8.0}
+};
+var _LOOK_OFFSETS = { left:[HEADTURN,3.0], right:[HEADTURN,-3.0], up:[HEADNOD,3.0], down:[HEADNOD,-2.5] };
+
+class OhbotSerialDriver {
+  constructor(port, calib){
+    this.port=port; this.calib=calib||{};
+    this.writer=port.writable.getWriter();
+    this._chain=Promise.resolve();
+    this.lipToken=0; this.lipActive=false; this.busyUntil=0; this.closed=false;
+  }
+  // Serialize writes through a promise chain (mirrors the library's `writing`
+  // flag) so commands never interleave on the wire.
+  _write(s){
+    var self=this;
+    this._chain=this._chain.then(function(){
+      if(self.closed || !self.writer) return;
+      return self.writer.write(_ENC.encode(s)).catch(function(){});
+    });
+    return this._chain;
+  }
+  center(m){
+    var c=(this.calib&&this.calib.centers)?this.calib.centers[m]:undefined;
+    if(c===undefined||c===null||isNaN(Number(c))) return (m===LIDBLINK?8:5);
+    return Number(c);
+  }
+  _cal(k,dflt){ var v=this.calib?this.calib[k]:undefined; return (v===undefined||v===null)?dflt:v; }
+  // Exact reproduction of ohbot.move() for the servo path.
+  move(m,pos,spd){
+    m=Number(m); pos=_clip(pos,0,10); spd=_clip(spd,0,10);
+    if(m===BOTTOMLIP && pos<5) pos = 5 - (5-pos)/2;
+    if(_MOTOR_REV[m]) pos = 10 - pos;
+    // Always (re)attach before moving: a board reset detaches every servo and we
+    // can't see that over Web Serial, so a cached "attached" would make later
+    // moves no-ops (this is what broke Hexia). Attach is idempotent.
+    this._write('a0'+m+'\\n');
+    var absPos=Math.trunc((_MOTOR_MAX[m]-_MOTOR_MIN[m])/10*pos + _MOTOR_MIN[m]);
+    var s=25*spd; var sstr=(s===Math.trunc(s))?(s+'.0'):String(s);
+    this._write('m0'+m+','+absPos+','+sstr+'\\n');
+  }
+  eyeColour(r,g,b){
+    r=Math.trunc(255/10*_clip(r,0,10)); g=Math.trunc(255/10*_clip(g,0,10)); b=Math.trunc(255/10*_clip(b,0,10));
+    this._write('l00,'+r+','+g+','+b+'\\n'); this._write('l01,'+r+','+g+','+b+'\\n');
+  }
+  // ---- mouth + lip sequence (mirror blue/head.py _set_mouth / _lip_seq_loop) ----
+  _setMouth(openness){
+    openness=_clip(openness,0,1);
+    var topSign=this._cal('lip_invert_top',false)?-1:1;
+    var botSign=this._cal('lip_invert_bottom',false)?-1:1;
+    var topRng=Number(this._cal('lip_top_range',1.8));
+    var botRng=Number(this._cal('lip_bottom_range',3.0));
+    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), 10);
+    this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), 10);
+  }
+  playLipSequence(frames){
+    if(!frames||!frames.length) return;
+    this.lipToken++; var my=this.lipToken; this.lipActive=true; var self=this;
+    (async function(){
+      for(var i=0;i<frames.length;i++){
+        if(self.closed || self.lipToken!==my) break;
+        var op=_clip(frames[i][0],0,1), hold=_clip(frames[i][1],0.01,1.5);
+        self._setMouth(op); await _sleepS(hold);
+      }
+      if(self.lipToken===my){ self._setMouth(0); self.lipActive=false; }
+    })();
+  }
+  lipStop(){ this.lipToken++; this.lipActive=false; this._setMouth(0); }
+  // ---- named actions (mirror blue/head.py) ----
+  look(d, speed){
+    d=(d||'').toLowerCase().trim(); speed=speed||4; this.busyUntil=Date.now()+1000;
+    if(['center','centre','forward','front','straight','ahead'].indexOf(d)>=0){
+      this.move(HEADTURN,this.center(HEADTURN),speed); this.move(HEADNOD,this.center(HEADNOD),speed); return true;
+    }
+    var spec=_LOOK_OFFSETS[d]; if(!spec) return false;
+    this.move(spec[0], this.center(spec[0])+spec[1], speed); return true;
+  }
+  nodYes(times){
+    times=Math.max(1,Math.min(5,times||2)); var c=this.center(HEADNOD); this.busyUntil=Date.now()+(times*750+500); var self=this;
+    (async function(){ for(var i=0;i<times;i++){ self.move(HEADNOD,c-2,7); await _sleepS(0.35); self.move(HEADNOD,c+2,7); await _sleepS(0.35); } self.move(HEADNOD,c,6); })();
+    return true;
+  }
+  nod(){ return this.nodYes(2); }
+  shakeNo(times){
+    times=Math.max(1,Math.min(5,times||2)); var c=this.center(HEADTURN); this.busyUntil=Date.now()+(times*750+500); var self=this;
+    (async function(){ for(var i=0;i<times;i++){ self.move(HEADTURN,c-2,7); await _sleepS(0.35); self.move(HEADTURN,c+2,7); await _sleepS(0.35); } self.move(HEADTURN,c,6); })();
+    return true;
+  }
+  blink(times){
+    times=Math.max(1,Math.min(5,times||1)); var c=this.center(LIDBLINK); this.busyUntil=Date.now()+(times*400+200); var self=this;
+    (async function(){ for(var i=0;i<times;i++){ self.move(LIDBLINK,0,10); await _sleepS(0.10); self.move(LIDBLINK,c,10); await _sleepS(0.18); } })();
+    return true;
+  }
+  expression(name, speed){
+    name=(name||'').toLowerCase().trim(); var pose=_EXPRESSIONS[name]; if(!pose) return false;
+    speed=speed||5; this.busyUntil=Date.now()+800; var self=this;
+    for(var k in pose){ var m=Number(k); this.move(m, this.center(m)+pose[k], speed); }
+    if(name==='wink'){ (async function(){ await _sleepS(0.25); self.move(LIDBLINK,self.center(LIDBLINK),10); })(); }
+    return true;
+  }
+  applyExpression(name, speed){
+    var nm=(name||'').trim();
+    if(_EXPRESSIONS[nm.toLowerCase()]) return this.expression(nm, speed);
+    var cust=(this.calib.custom_expressions||{})[nm]; if(!cust) return false;
+    speed=speed||5; this.busyUntil=Date.now()+800;
+    for(var k in cust){ this.move(Number(k), Number(cust[k]), speed); }
+    return true;
+  }
+  action(name, times){
+    name=(name||'').toLowerCase().trim(); times=times||2;
+    if(name.indexOf('look_')===0) return this.look(name.slice(5));
+    if(name==='nod_yes') return this.nodYes(times);
+    if(name==='shake_no') return this.shakeNo(times);
+    if(name==='blink') return this.blink(times);
+    if(['happy','sad','surprised','curious','neutral','wink'].indexOf(name)>=0) return this.expression(name);
+    return false;
+  }
+  lipRelax(){ this.lipToken++; this.lipActive=false; this._write('d0'+TOPLIP+'\\n'); this._write('d0'+BOTTOMLIP+'\\n'); return true; }
+  lipTest(){
+    this.lipToken++; var my=this.lipToken; this.lipActive=true; this.busyUntil=Date.now()+3000; var self=this;
+    (async function(){
+      var t0=Date.now();
+      while(self.lipActive && self.lipToken===my && !self.closed && Date.now()-t0<2500){
+        self._setMouth(0.85+Math.random()*0.15); await _sleepS(0.08+Math.random()*0.05);
+        if(self.lipToken!==my) break;
+        self._setMouth(0.0); await _sleepS(0.07+Math.random()*0.05);
+      }
+      if(self.lipToken===my){ self._setMouth(0); self.lipActive=false; }
+    })();
+    return true;
+  }
+  lipSweep(){
+    this.lipToken++; var my=this.lipToken; this.lipActive=false; this.busyUntil=Date.now()+16000; var self=this;
+    var wp={4:[4,6,8,10,5],5:[2,5,7.5,10,5]};
+    (async function(){
+      var motors=[TOPLIP,BOTTOMLIP];
+      for(var mi=0;mi<motors.length;mi++){ var motor=motors[mi];
+        for(var pi=0;pi<wp[motor].length;pi++){ if(self.lipToken!==my||self.closed) return; self.move(motor,wp[motor][pi],3); await _sleepS(0.55); }
+        self.move(motor,self.center(motor),4); await _sleepS(0.4);
+      }
+      if(self.lipToken===my) self._setMouth(0);
+    })();
+    return true;
+  }
+  reset(){ this.lipToken++; this.lipActive=false; this.busyUntil=Date.now()+800; this.eyeColour(0,0,0); for(var m=0;m<8;m++) this.move(m,this.center(m),4); return true; }
+  // ---- idle motion (mirror blue/head.py _auto_loop) ----
+  _intervalRange(){
+    var f=_clip(this._cal('idle_frequency',7),0,10)/10;
+    var lo=0.8+(1-f)*5.2, hi=2.5+(1-f)*9.5;
+    if(this.lipActive){ lo=Math.max(0.35,lo*0.45); hi=Math.max(1.2,hi*0.45); }
+    return [lo,hi];
+  }
+  _ampMult(){
+    var a=_clip(this._cal('idle_amplitude',5),0,10);
+    var base=(a<=5)?(0.3+(a/5)*0.7):(1.0+((a-5)/5)*1.0);
+    return this.lipActive?base*0.7:base;
+  }
+  _autoEnabled(){ return this._cal('auto_movement',true)!==false; }
+  async _doIdleMotion(){
+    var r=_IDLE_RECIPES[Math.floor(Math.random()*_IDLE_RECIPES.length)];
+    if(r[0]==='blink'){
+      var c=this.center(LIDBLINK); this.move(LIDBLINK,0,10); await _sleepS(0.10); this.move(LIDBLINK,c,10);
+    } else {
+      var sp=r[1], motor=sp[0], choices=sp[1], speed=sp[2], hmin=sp[3], hmax=sp[4];
+      var cc=this.center(motor), off=choices[Math.floor(Math.random()*choices.length)];
+      this.move(motor, cc+off*this._ampMult(), speed); await _sleepS(_rand(hmin,hmax)); this.move(motor, cc, speed);
+    }
+  }
+  async _autoLoop(){
+    await _sleepS(_rand(3,6));   // don't fire the instant we connect
+    while(!this.closed){
+      var rg=this._intervalRange(); await _sleepS(_rand(rg[0],rg[1]));
+      if(this.closed) break;
+      try{
+        if(this.lipActive){ await this._doIdleMotion(); }
+        else if(this._autoEnabled() && Date.now()>=this.busyUntil){ await this._doIdleMotion(); }
+      }catch(e){}
+    }
+  }
+  async start(){
+    this.closed=false;
+    await _sleepS(1.2);   // let the board finish booting if opening reset it
+    this.eyeColour(0,0,0);
+    for(var m=0;m<8;m++) this.move(m, this.center(m), 4);   // park at calibrated centres
+    this._autoLoop();
+  }
+  async close(){
+    this.lipToken++; this.lipActive=false;
+    try{ this._setMouth(0); }catch(e){}
+    this.closed=true;
+    try{ await this._chain; }catch(e){}
+    try{ if(this.writer) this.writer.releaseLock(); }catch(e){}
+    try{ await this.port.close(); }catch(e){}
+    this.writer=null;
+  }
+}
+
+// Device + capability gates (shared by every page that can drive heads).
+function blueDeviceTag(){
+  var ua=navigator.userAgent||''; var touch=(navigator.maxTouchPoints||0)>1;
+  if(/iPad/.test(ua)||(/Macintosh/.test(ua)&&touch)) return 'ipad';
+  if(/iPhone|iPod/.test(ua)) return 'iphone';
+  if(/Android/.test(ua)) return 'android';
+  if(/Macintosh|Mac OS X/.test(ua)) return 'mac';
+  if(/Windows/.test(ua)) return 'windows';
+  return 'other';
+}
+var DRIVES_HEADS = (blueDeviceTag()==='windows');
+var WEBSERIAL_OK = ('serial' in navigator) && !!window.isSecureContext;
+var LOCAL_DRIVERS = {blue:null, hexia:null};
+
+function _localHeadsNote(msg){ if(window.onLocalHeadsNote){ try{ window.onLocalHeadsNote(msg); return; }catch(e){} } try{ console.warn('[heads] '+msg); }catch(e){} }
+function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
+async function _fetchCalib(headName){
+  try{ var r=await fetch('/head/'+headName+'/state'); if(r.ok){ var j=await r.json(); if(j&&typeof j==='object') return j; } }catch(e){}
+  return _defaultCalib();
+}
+async function _reparkFor(headName){
+  var drv=LOCAL_DRIVERS[headName]; if(!drv) return;
+  drv.calib=await _fetchCalib(headName);
+  for(var m=0;m<8;m++) drv.move(m, drv.center(m), 4);
+}
+async function connectHead(headName){
+  if(!WEBSERIAL_OK) return;
+  var port;
+  try{ port=await navigator.serial.requestPort(); }catch(e){ return; }   // user dismissed the picker
+  try{ await port.open({baudRate:19200}); }
+  catch(e){ _localHeadsNote("couldn't open that USB port for "+headName+": "+(e&&e.message?e.message:e)); return; }
+  var calib=await _fetchCalib(headName);
+  var drv;
+  try{ drv=new OhbotSerialDriver(port, calib); await drv.start(); }
+  catch(e){ _localHeadsNote("couldn't start "+headName+"'s head: "+(e&&e.message?e.message:e)); try{ await port.close(); }catch(_e){} return; }
+  if(LOCAL_DRIVERS[headName]){ try{ await LOCAL_DRIVERS[headName].close(); }catch(_e){} }
+  LOCAL_DRIVERS[headName]=drv;
+  if(window.onLocalHeadsChanged) window.onLocalHeadsChanged();
+}
+async function disconnectHead(headName){
+  var drv=LOCAL_DRIVERS[headName]; if(!drv) return;
+  LOCAL_DRIVERS[headName]=null;
+  try{ await drv.close(); }catch(e){}
+  if(window.onLocalHeadsChanged) window.onLocalHeadsChanged();
+}
+function testNod(headName){ var drv=LOCAL_DRIVERS[headName]; if(drv) drv.nod(); }
+
+// Lip dispatch used by duet + chat: returns true if a locally-connected head
+// handled it (the caller then skips the PC-server POST).
+function localHeadLip(headName, frames){ var d=LOCAL_DRIVERS[headName]; if(!d) return false; d.playLipSequence(frames); return true; }
+function localHeadLipStop(headName){ var d=LOCAL_DRIVERS[headName]; if(!d) return false; d.lipStop(); return true; }
+// Movement/test verbs used by the calibration page. Returns true if handled
+// locally (skip the server); false for persistence/read verbs (hit the server).
+function localHeadControl(headName, url, body){
+  var d=LOCAL_DRIVERS[headName]; if(!d) return false; body=body||{};
+  if(url==='/head/move'){ d.move(body.motor, body.pos, body.speed!=null?body.speed:7); return true; }
+  if(url==='/head/action'){ d.action(body.action, body.times); return true; }
+  if(url==='/head/eye-color'){ d.eyeColour(body.r||0, body.g||0, body.b||0); return true; }
+  if(url==='/head/lip-test'){ d.lipTest(); return true; }
+  if(url==='/head/lip-sweep'){ d.lipSweep(); return true; }
+  if(url==='/head/lip-relax'){ d.lipRelax(); return true; }
+  if(url==='/head/reset'){ d.reset(); return true; }
+  if(url==='/head/demo'){ d.nodYes(2); return true; }
+  if(url==='/head/expression'){ d.applyExpression(body.name); return true; }
+  return false;
+}
+window.addEventListener('beforeunload', function(){ try{ for(var k in LOCAL_DRIVERS){ if(LOCAL_DRIVERS[k]) LOCAL_DRIVERS[k].lipStop(); } }catch(e){} });
+"""
+
+
+@app.route('/js/ohbot-heads.js', methods=['GET'])
+def ohbot_heads_js():
+    """The shared Web Serial head driver (see OHBOT_HEADS_JS). Served raw, no
+    cache, so a server restart always ships fresh JS to /duet, chat and /head."""
+    return Response(OHBOT_HEADS_JS, headers={
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    })
+
+
 @app.route('/head/state', methods=['GET'])
 @app.route('/head/<robot>/state', methods=['GET'])
 def head_state(robot='blue'):
