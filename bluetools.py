@@ -13256,6 +13256,9 @@ CHAT_HTML = """
                 <button class="iconbtn" id="researchBtn" title="Research mode: {{ robot_name }} searches the web before answering" aria-label="Toggle web research" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></svg>
                 </button>
+                <button class="iconbtn" id="wikiBtn" title="Consult Wikipedia: {{ robot_name }} reads the encyclopedia on your topic before answering" aria-label="Toggle Wikipedia consult" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4.5 5v13c3.5-.5 6 0 7.5 1.5 1.5-1.5 4-2 7.5-1.5V5C16 4.5 13.5 5 12 6.5z"/><path d="M12 6.5v13"/></svg>
+                </button>
                 {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
@@ -13488,7 +13491,7 @@ CHAT_HTML = """
 
             busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
             const thinking = addBubble('blue', '');
-            thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + (researchOn ? ' is researching…' : ' is thinking…') + '</span>';
+            thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + (researchOn ? ' is researching…' : (wikiOn ? ' is checking Wikipedia…' : ' is thinking…')) + '</span>';
             setFaceState('thinking');
 
             try {
@@ -13501,7 +13504,7 @@ CHAT_HTML = """
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
                     body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
                                            language: (LANG_MODE !== 'auto' ? LANG_MODE : ''),
-                                           research: researchOn })
+                                           research: researchOn, wiki: wikiOn })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -13748,6 +13751,26 @@ CHAT_HTML = """
         if (researchBtn) {
             researchBtn.addEventListener('click', () => setResearchOn(!researchOn));
             setResearchOn(researchOn);
+        }
+
+        // ---- Wikipedia consult: read the encyclopedia before answering ----
+        // Opt-in, saved per device per robot: while the book is lit, every
+        // message first pulls the best-matching Wikipedia article server-side
+        // and its summary rides along as context. Independent of web research.
+        const wikiBtn = document.getElementById('wikiBtn');
+        let wikiOn = false;
+        try { wikiOn = localStorage.getItem('blueWiki_' + ROBOT.id) === '1'; } catch (e) {}
+        if (!wikiBtn) wikiOn = false;   // kid pages have no toggle
+        function setWikiOn(on) {
+            wikiOn = on;
+            if (!wikiBtn) return;
+            wikiBtn.classList.toggle('active', on);
+            wikiBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            try { localStorage.setItem('blueWiki_' + ROBOT.id, on ? '1' : '0'); } catch (e) {}
+        }
+        if (wikiBtn) {
+            wikiBtn.addEventListener('click', () => setWikiOn(!wikiOn));
+            setWikiOn(wikiOn);
         }
 
         // ---- Language setting: which language Alex speaks AND Blue replies in ----
@@ -14981,6 +15004,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <button id="stopBtn" disabled>Stop</button>
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
  <label class="muted" title="They search the internet for the subject first and ground the conversation in what they find"><input type="checkbox" id="researchChk"> research the web</label>
+ <label class="muted" title="They read the best-matching Wikipedia article on the subject first and ground the conversation in it"><input type="checkbox" id="wikiChk"> consult Wikipedia</label>
 </div>
 <div id="usbHeads" class="controls" style="display:none;flex-direction:column;align-items:stretch;gap:10px;border:1px dashed #cfc9bd;border-radius:10px;padding:12px;background:#fff">
  <div class="muted" style="font-weight:600;color:#1a2e1a">Heads on this device (USB-C)</div>
@@ -15195,7 +15219,7 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   await speakAs(cfg,d.text,el); return true;
@@ -15221,6 +15245,14 @@ async function run(){
     if(!running){ return; }
     if(rr&&rr.ok){ addNote("(they've looked it up: "+((rr.titles&&rr.titles.length)?rr.titles.join(' · '):rr.query)+')'); }
     else{ addNote("(web research came up empty"+(rr&&rr.error?': '+rr.error:'')+" — they'll wing it)"); }
+  }
+  if(document.getElementById('wikiChk').checked){
+    addNote('(reading Wikipedia…)');
+    let wr=null;
+    try{ wr=await (await fetch('/duet/wikipedia',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topicEl.value.trim(), url:url, roles:fieldMap('role')})})).json(); }catch(e){}
+    if(!running){ return; }
+    if(wr&&wr.ok){ addNote("(they've read up on Wikipedia: "+((wr.titles&&wr.titles.length)?wr.titles.join(' · '):wr.query)+')'); }
+    else{ addNote("(no Wikipedia match"+(wr&&wr.error?': '+wr.error:'')+" — they'll wing it)"); }
   }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
@@ -15614,6 +15646,98 @@ def _web_research_block(query: str, max_chars: int = 2600) -> str:
             + body + "\n</web_research>")
 
 
+# --- Wikipedia grounding: the "consult Wikipedia" button (chat) / checkbox
+# (duet). Unlike the open-web search above, this pulls the encyclopedic intro of
+# the best-matching article(s) for the subject — clean, structured background
+# rather than a scatter of snippets. Same shape as the research helpers: one
+# cached lookup per subject, then chat wraps a compact slice and the duet windows
+# it per turn. Picks the Wikipedia edition for the conversation's language.
+
+_WIKI_CACHE: Dict[str, dict] = {}
+_WIKI_TTL = 1800                 # re-consult the same subject after 30 min
+_WIKI_MAX_TEXT = 9000            # digest cap; per-turn windowing keeps prompts tight
+_WIKI_LANGS = {'en', 'fr', 'ru', 'el', 'da'}   # household languages WITH a Wikipedia edition
+# Wikipedia requires a descriptive User-Agent (it 403s blank/generic ones).
+_WIKI_UA = {'User-Agent': 'BlueRobot/1.0 (home assistant; alevantresearch@gmail.com)'}
+
+
+def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2):
+    """Look the subject up on Wikipedia and return the intro of the best-matching
+    article(s) as one text. {'titles','text','urls','error','at'}; empty text ⇒
+    nothing usable (see error). Two HTTP calls — search, then one batched extract
+    fetch — cached per (lang, query) so a duet consults once; failures retry
+    after 2 min, hits live for the TTL."""
+    import time as _t
+    import requests
+    lang = lang if lang in _WIKI_LANGS else 'en'
+    q = re.sub(r'\s+', ' ', (query or '')).strip()
+    if not q:
+        return None
+    key = f"{lang}:{q.lower()}"
+    hit = _WIKI_CACHE.get(key)
+    if hit and _t.time() - hit['at'] < (_WIKI_TTL if hit.get('text') else 120):
+        return hit
+    info = {'titles': [], 'text': '', 'urls': [], 'error': None, 'at': _t.time()}
+    base = f"https://{lang}.wikipedia.org/w/api.php"
+    titles = []
+    try:
+        s = requests.get(base, params={'action': 'query', 'list': 'search',
+                                       'srsearch': q[:200], 'srlimit': 4, 'format': 'json'},
+                         headers=_WIKI_UA, timeout=10).json()
+        titles = [h.get('title') for h in (s.get('query', {}).get('search') or []) if h.get('title')]
+    except Exception as e:
+        info['error'] = f'{e.__class__.__name__}: {e}'
+    if not titles and not info['error']:
+        info['error'] = 'nothing on Wikipedia matched that'
+    arts = []
+    if titles:
+        try:
+            e = requests.get(base, params={'action': 'query', 'prop': 'extracts|info',
+                                           'exintro': 1, 'explaintext': 1, 'exlimit': 'max',
+                                           'inprop': 'url', 'redirects': 1,
+                                           'titles': '|'.join(titles[:4]), 'format': 'json'},
+                             headers=_WIKI_UA, timeout=10).json()
+            for pg in (e.get('query', {}).get('pages') or {}).values():
+                ex = (pg.get('extract') or '').strip()
+                if ex:
+                    arts.append({'title': (pg.get('title') or '').strip(),
+                                 'url': (pg.get('fullurl') or '').strip(), 'text': ex})
+        except Exception as ee:
+            info['error'] = info['error'] or f'{ee.__class__.__name__}: {ee}'
+    # Longest intro first = the substantive article, not a stub or a disambiguation
+    # page that happened to match the search words.
+    arts.sort(key=lambda a: len(a['text']), reverse=True)
+    parts = []
+    for a in arts[:max(1, max_articles)]:
+        info['titles'].append(a['title'])
+        if a['url']:
+            info['urls'].append(a['url'])
+        parts.append(f"From Wikipedia — \"{a['title']}\":\n{a['text']}")
+    if not parts and not info['error']:
+        info['error'] = 'the Wikipedia articles had no readable summary'
+    info['text'] = "\n\n".join(parts)[:_WIKI_MAX_TEXT]
+    if len(_WIKI_CACHE) >= 16:
+        _WIKI_CACHE.clear()
+    _WIKI_CACHE[key] = info
+    return info
+
+
+def _wikipedia_block(query: str, lang: str = 'en', max_chars: int = 2600) -> str:
+    """Chat-mode Wikipedia grounding: the best article's encyclopedic intro as a
+    compact <wikipedia> system block. '' when nothing usable came back, so the
+    reply degrades to a normal answer instead of an apology."""
+    info = _wikipedia_digest(query, lang=lang) or {}
+    body = (info.get('text') or '').strip()
+    if not body:
+        return ""
+    return ("<wikipedia>\n"
+            f"You just looked \"{(query or '').strip()}\" up on Wikipedia — this is the encyclopedia's "
+            "own summary, more reliable for facts, names, dates and definitions than your memory. Lean "
+            "on it, weave it in as something you read, mention Wikipedia only when it helps, and never "
+            "read URLs aloud:\n"
+            + body[:max_chars] + "\n</wikipedia>")
+
+
 @app.route('/duet', methods=['GET'])
 def duet_page():
     """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
@@ -15656,6 +15780,25 @@ def duet_research():
     if not (info.get('text') or '').strip():
         return jsonify({"ok": False, "error": info.get('error') or "the search came up empty"})
     return jsonify({"ok": True, "query": rq, "titles": (info.get('titles') or [])[:4],
+                    "chars": len(info['text'])})
+
+
+@app.route('/duet/wikipedia', methods=['POST'])
+def duet_wikipedia():
+    """Consult Wikipedia on the duet's subject before it starts — warms the cache
+    and tells the page which article(s) they read, or why there's nothing to
+    ground on, instead of letting them bluff the encyclopedia's facts."""
+    d = request.get_json(silent=True) or {}
+    topic = (d.get('topic') or '').strip()
+    url = (d.get('url') or '').strip()
+    url_info = _duet_url_content(url) if url else None
+    wq = _duet_research_query(topic, url_info, d.get('roles') or {})
+    if not wq:
+        return jsonify({"ok": False, "error": "give them a topic, a link or roles to look up"})
+    info = _wikipedia_digest(wq) or {}
+    if not (info.get('text') or '').strip():
+        return jsonify({"ok": False, "error": info.get('error') or "nothing on Wikipedia matched"})
+    return jsonify({"ok": True, "query": wq, "titles": (info.get('titles') or [])[:4],
                     "chars": len(info['text'])})
 
 
@@ -15719,6 +15862,7 @@ def duet_turn():
     sp, ot = _robot_cfg(speaker), _robot_cfg(other)
     has_roles = bool(role_self or role_other)
     research_on = bool(d.get('research'))
+    wiki_on = bool(d.get('wiki'))
     # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
     # gets a confrontational "move", how hard the two push on each other, and the
     # sampling temperature. Defaults to a balanced 5.
@@ -15818,6 +15962,19 @@ def duet_turn():
                 recent_q = " ".join((h.get('text') or '') for h in history[-2:])
                 research_block = _duet_url_excerpt(rtext, f"{topic} {recent_q}".strip(), turn=len(history))
 
+    # Wikipedia grounding: the encyclopedic intro of the best-matching article on
+    # the duet's subject (warmed by /duet/wikipedia at start; cached so turns
+    # don't re-consult), windowed to the slice most relevant to the last turns.
+    wiki_block = ""
+    if wiki_on:
+        wq = _duet_research_query(topic, url_info, roles)
+        if wq:
+            wdigest = _wikipedia_digest(wq) or {}
+            wtext = wdigest.get('text') or ''
+            if wtext:
+                recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+                wiki_block = _duet_url_excerpt(wtext, f"{topic} {recent_q}".strip(), turn=len(history))
+
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
     ground_block = ""
@@ -15878,6 +16035,13 @@ def duet_turn():
             "results', 'the snippets' or 'my sources'; speak like someone who's been reading up "
             "on it ('I read that…', 'apparently…'), naming a site or article only when that "
             "genuinely helps:\n\n" + research_block)
+    if wiki_block:
+        parts.append(
+            "WHAT YOU BOTH JUST READ ON WIKIPEDIA — you looked this subject up in the encyclopedia, "
+            "and this is its own summary. Bring up its specific facts, names, dates and definitions "
+            "and react honestly — don't invent beyond it, and never say 'the article', 'the extract' "
+            "or 'the entry'; speak like someone who read up on it ('I read that…', 'apparently…'), "
+            "naming Wikipedia only when that genuinely helps:\n\n" + wiki_block)
     if role_self:
         parts.append(
             f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
@@ -15945,6 +16109,8 @@ def duet_turn():
             directive += " Build on a specific idea from your own reading — as something you know, not a citation."
         elif research_block:
             directive += " Work in one specific thing you found online — as something you've read, not a citation."
+        elif wiki_block:
+            directive += " Work in one specific thing you read on Wikipedia — as something you know, not a citation."
         if role_self:
             directive += " Stay firmly in your role."
     else:
@@ -15957,6 +16123,8 @@ def duet_turn():
             directive += " Make a specific point from your own reading, as something you know."
         elif research_block:
             directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
+        elif wiki_block:
+            directive += " Open with a specific fact or definition you read on Wikipedia, in your own words."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
     # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
@@ -19114,6 +19282,9 @@ def chat_completions():
         # Research mode (the chat page's magnifier toggle): search the web for
         # the user's question and splice the live findings in below.
         research_turn = bool(data.get("research"))
+        # Wikipedia consult (the chat page's book toggle): read the encyclopedia's
+        # summary of the subject and splice it in below. Independent of research.
+        wiki_turn = bool(data.get("wiki"))
         # Which robot is being addressed? Blue's page omits this and defaults to
         # Blue; Hexia's page sends "hexia". Drives persona, voice, head and the
         # per-robot conversation history.
@@ -19226,6 +19397,23 @@ def chat_completions():
                         print(f"   [RESEARCH] search returned nothing usable — answering without")
                 except Exception as e:
                     log.warning(f"[RESEARCH] failed: {e}")
+
+            # Wikipedia consult (the chat page's book toggle): ground this reply
+            # in the encyclopedia's own summary of the subject, in the
+            # conversation's language. Same gating as web research — kids' pages
+            # never get it; a miss degrades to a normal answer rather than an error.
+            if wiki_turn and user_name not in _CHAT_ONLY_USERS and last_user_msg:
+                try:
+                    _wblock = _wikipedia_block(_research_query_from(last_user_msg),
+                                               lang=language or 'en')
+                    if _wblock:
+                        print(f"   [WIKI] ✓ Injecting {len(_wblock)} chars of Wikipedia summary")
+                        messages = _splice_context_after_system(
+                            messages, [{"role": "system", "content": _wblock}])
+                    else:
+                        print(f"   [WIKI] no usable article — answering without")
+                except Exception as e:
+                    log.warning(f"[WIKI] failed: {e}")
 
         # Process with tools (pre-check result passed to avoid double selector run)
         import time as _t_llm
