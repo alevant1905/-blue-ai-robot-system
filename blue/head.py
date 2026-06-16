@@ -240,6 +240,12 @@ _LIP_BOTTOM_RANGE = 3.0
 _LIP_SOFT_MIN = 0.25
 _LIP_SOFT_MAX = 9.75
 
+# Servo speed (1-10) for the talking flap. Fast (10) by default; a head whose
+# servo power can't sustain the flap current browns out and stalls mid-flap, so
+# this is per-head — turning it down eases each move so peak current stays under
+# that head's limit (the mouth just moves a little more gently, same range).
+_LIP_FLAP_SPEED = 10.0
+
 # Recipe table for idle motions. Blinks are listed twice because they're a
 # natural high-frequency motion; the others get one slot each. Each non-blink
 # entry is (motor, [possible offsets], speed, hold_min, hold_max). The offsets
@@ -281,6 +287,9 @@ class RobotHead:
             # Per-head lip travel while talking (motor units from neutral).
             "lip_top_range": _LIP_TOP_RANGE,
             "lip_bottom_range": _LIP_BOTTOM_RANGE,
+            # Per-head servo speed for the talking flap (1-10). Lower it for a
+            # head whose servo power can't sustain a fast flap (it browns out).
+            "lip_speed": _LIP_FLAP_SPEED,
             # Idle "thoughtful" movement, 0-10 each (user-tuneable from GUI).
             "idle_frequency": 7,   # how often a motion happens (0=quiet, 10=lively)
             "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
@@ -330,6 +339,11 @@ class RobotHead:
                             self._calibration[k] = float(_clip(float(data[k]), 0.2, 5.0))
                         except Exception:
                             pass
+                if "lip_speed" in data:
+                    try:
+                        self._calibration["lip_speed"] = float(_clip(float(data["lip_speed"]), 1.0, 10.0))
+                    except Exception:
+                        pass
                 if isinstance(data.get("custom_expressions"), dict):
                     cust = {}
                     for nm, pose in data["custom_expressions"].items():
@@ -353,6 +367,7 @@ class RobotHead:
                 "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
                 "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
                 "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
+                "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
                 "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
                 "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
                 "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -380,6 +395,7 @@ class RobotHead:
             "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
             "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
             "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
+            "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
             "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
             "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
             "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -444,6 +460,17 @@ class RobotHead:
             self._calibration["lip_top_range"] = float(_clip(float(top), 0.2, 5.0))
         if bottom is not None:
             self._calibration["lip_bottom_range"] = float(_clip(float(bottom), 0.2, 5.0))
+        self._save_calibration()
+        return True
+
+    def set_lip_speed(self, speed) -> bool:
+        """Set the servo speed (1-10) used for the talking flap. Persists. Turn
+        this down for a head whose servo power can't sustain a fast flap — a
+        gentler move draws less peak current and won't brown the servo out
+        (the mouth just moves a touch more slowly, same travel)."""
+        if speed is None:
+            return False
+        self._calibration["lip_speed"] = float(_clip(float(speed), 1.0, 10.0))
         self._save_calibration()
         return True
 
@@ -801,14 +828,15 @@ class RobotHead:
         bot_sign = -1.0 if self._calibration.get("lip_invert_bottom") else +1.0
         top_rng = float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE))
         bot_rng = float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE))
+        flap_spd = float(_clip(self._calibration.get("lip_speed", _LIP_FLAP_SPEED), 1.0, 10.0))
         self._move_internal(
             TOPLIP,
             _clip(self.center(TOPLIP) + top_sign * top_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
-            speed=10)
+            speed=flap_spd)
         self._move_internal(
             BOTTOMLIP,
             _clip(self.center(BOTTOMLIP) + bot_sign * bot_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
-            speed=10)
+            speed=flap_spd)
 
     def _lip_loop(self, my_token):
         """Continuous open/shut flap (fallback when no timed sequence is given)."""

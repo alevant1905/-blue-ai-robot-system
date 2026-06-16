@@ -16314,6 +16314,8 @@ HEAD_HTML = """<!DOCTYPE html>
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Top lip travel</span><input type="range" id="lipRngTop" min="0.2" max="3" step="0.1" value="1.8"><span class="val" id="vLipRngTop">1.8</span></div>
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Jaw travel</span><input type="range" id="lipRngBot" min="0.2" max="4" step="0.1" value="3.0"><span class="val" id="vLipRngBot">3.0</span></div>
             <div class="hint">How far each lip swings from its neutral while talking. <b>If a lip reaches a mechanical stop and sticks mid-speech, turn its travel down</b> until it never gets there; turn up for a more expressive mouth. Press Test lip-sync after each change.</div>
+            <div class="row" style="grid-template-columns: 130px 1fr 56px; margin-top:8px;"><span class="name">Lip speed</span><input type="range" id="lipSpeed" min="1" max="10" step="0.5" value="10"><span class="val" id="vLipSpeed">10</span></div>
+            <div class="hint">How fast the lips move while talking (10 = snappiest). Turn it down if a lip servo can't keep up with a fast flap; turn it up for crisper speech.</div>
         </div>
         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
             <button class="btn primary" id="testLipBtn">Test lip-sync (4 sec)</button>
@@ -16468,6 +16470,10 @@ async function loadState() {
         document.getElementById('lipRngBot').value = s.lip_bottom_range;
         document.getElementById('vLipRngBot').textContent = Number(s.lip_bottom_range).toFixed(1);
     }
+    if (s && s.lip_speed != null) {
+        document.getElementById('lipSpeed').value = s.lip_speed;
+        document.getElementById('vLipSpeed').textContent = Number(s.lip_speed).toFixed(1);
+    }
     if (s && s.idle_frequency != null) {
         document.getElementById('idleFreq').value = s.idle_frequency;
         document.getElementById('vIdleFreq').textContent = Number(s.idle_frequency).toFixed(1);
@@ -16528,6 +16534,8 @@ document.getElementById('lipRngTop').addEventListener('input', e => { document.g
 document.getElementById('lipRngTop').addEventListener('change', e => postJSON('/head/lip-config', {top_range: parseFloat(e.target.value)}));
 document.getElementById('lipRngBot').addEventListener('input', e => { document.getElementById('vLipRngBot').textContent = Number(e.target.value).toFixed(1); });
 document.getElementById('lipRngBot').addEventListener('change', e => postJSON('/head/lip-config', {bottom_range: parseFloat(e.target.value)}));
+document.getElementById('lipSpeed').addEventListener('input', e => { document.getElementById('vLipSpeed').textContent = Number(e.target.value).toFixed(1); });
+document.getElementById('lipSpeed').addEventListener('change', e => postJSON('/head/lip-config', {flap_speed: parseFloat(e.target.value)}));
 document.getElementById('testLipBtn').addEventListener('click', async () => {
     const btn = document.getElementById('testLipBtn');
     btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
@@ -16813,8 +16821,9 @@ class OhbotSerialDriver {
     var botSign=this._cal('lip_invert_bottom',false)?-1:1;
     var topRng=Number(this._cal('lip_top_range',1.8));
     var botRng=Number(this._cal('lip_bottom_range',3.0));
-    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), 10);
-    this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), 10);
+    var flapSpd=_clip(Number(this._cal('lip_speed',10)),1,10);
+    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), flapSpd);
+    this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), flapSpd);
   }
   playLipSequence(frames){
     if(!frames||!frames.length) return;
@@ -16973,7 +16982,7 @@ var WEBSERIAL_OK = ('serial' in navigator) && !!window.isSecureContext;
 var LOCAL_DRIVERS = {blue:null, hexia:null};
 
 function _localHeadsNote(msg){ if(window.onLocalHeadsNote){ try{ window.onLocalHeadsNote(msg); return; }catch(e){} } try{ console.warn('[heads] '+msg); }catch(e){} }
-function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
+function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, lip_speed:10, idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
 async function _fetchCalib(headName){
   try{ var r=await fetch('/head/'+headName+'/state'); if(r.ok){ var j=await r.json(); if(j&&typeof j==='object') return j; } }catch(e){}
   return _defaultCalib();
@@ -17279,10 +17288,13 @@ def head_lip_config(robot='blue'):
     h.set_lip_invert(top=d.get('invert_top'), bottom=d.get('invert_bottom'))
     if d.get('top_range') is not None or d.get('bottom_range') is not None:
         h.set_lip_ranges(top=d.get('top_range'), bottom=d.get('bottom_range'))
+    if d.get('flap_speed') is not None:
+        h.set_lip_speed(d.get('flap_speed'))
     cal = h.get_calibration()
     return jsonify({"ok": True,
                     "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"],
-                    "lip_top_range": cal["lip_top_range"], "lip_bottom_range": cal["lip_bottom_range"]})
+                    "lip_top_range": cal["lip_top_range"], "lip_bottom_range": cal["lip_bottom_range"],
+                    "lip_speed": cal["lip_speed"]})
 
 
 @app.route('/head/lip-test', methods=['POST'])
