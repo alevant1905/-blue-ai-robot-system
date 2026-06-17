@@ -686,6 +686,28 @@ class RobotHead:
 
     # ---- Low-level move ----------------------------------------------------
 
+    def _force_reattach(self, motor: int) -> None:
+        """Clear the ohbot lib's cached attach flag so the next move() re-sends the
+        attach (a0X) command.
+
+        The lib's attach() only emits a0X when its isAttached[m] flag is False, then
+        caches True forever. But some boards (Hexia's) silently drop every servo's
+        attachment mid-session — a reset/brownout twitch the open-loop link can't
+        report back — and the lib never learns, so it keeps streaming m0X moves to a
+        detached servo: bytes leave, the servo sits dead (often after moving briefly,
+        e.g. the jaw quitting partway through a sentence). Re-attaching before EVERY
+        move (what the Web Serial driver already does with a0X) makes the servo
+        recover on the very next frame. Attach is idempotent and causes no motion, so
+        this is a no-op for a board (Blue's) that never drops attachment."""
+        oh = self._ohbot
+        ia = getattr(oh, "isAttached", None) if oh is not None else None
+        if ia is None:
+            return
+        try:
+            ia[int(motor)] = False
+        except Exception:
+            pass
+
     def _move_internal(self, motor: int, pos: float, speed: float = 5.0) -> bool:
         """Write to a motor; assumes init() ran and we want the raw pos. Does not
         bump the busy timer (used by the idle loop too)."""
@@ -694,6 +716,7 @@ class RobotHead:
         try:
             pos_c = _clip(pos, _MIN_POS, _MAX_POS)
             with self._lock:
+                self._force_reattach(int(motor))   # survive a board that drops servos
                 self._ohbot.move(int(motor), pos_c, _clip(speed, 1.0, 10.0))
             self._last_pos[int(motor)] = float(pos_c)
             return True
