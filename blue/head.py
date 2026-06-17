@@ -239,14 +239,6 @@ _LIP_BOTTOM_RANGE = 3.0
 # units the last sliver of range presses the mechanism into its hard stop.
 _LIP_SOFT_MIN = 0.25
 _LIP_SOFT_MAX = 9.75
-# With the jaw closed the top lip rests ON the mouth's centre stop near mid-range
-# and CANNOT be driven below it (only when the jaw is hauled wide open, which the
-# talking flap never does). Commands under this just stall the servo against the
-# stop, so the mouth looks frozen even though bytes are flowing — exactly what made
-# Hexia look "dead" when her top-lip neutral had been mis-saved at 0.2, parking the
-# whole flap below the stop. The flap's top-lip target is floored here so a low
-# neutral can't silently kill it again. Matches the sweep's lowest top-lip waypoint.
-_LIP_TOP_FLOOR = 4.0
 
 # Servo speed (1-10) for the talking flap. Fast (10) by default; a head whose
 # servo power can't sustain the flap current browns out and stalls mid-flap, so
@@ -837,14 +829,9 @@ class RobotHead:
         top_rng = float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE))
         bot_rng = float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE))
         flap_spd = float(_clip(self._calibration.get("lip_speed", _LIP_FLAP_SPEED), 1.0, 10.0))
-        # Floor the (non-inverted) top lip at the centre stop so a too-low neutral
-        # can't park the flap in the dead zone where the servo just stalls. Inert
-        # for a correctly-calibrated head (neutral on/above the stop). Skipped when
-        # the top lip is inverted, since that unit's live zone runs the other way.
-        top_lo = max(_LIP_SOFT_MIN, _LIP_TOP_FLOOR) if top_sign > 0 else _LIP_SOFT_MIN
         self._move_internal(
             TOPLIP,
-            _clip(self.center(TOPLIP) + top_sign * top_rng * openness, top_lo, _LIP_SOFT_MAX),
+            _clip(self.center(TOPLIP) + top_sign * top_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
             speed=flap_spd)
         self._move_internal(
             BOTTOMLIP,

@@ -16755,10 +16755,6 @@ var HEADNOD=0, HEADTURN=1, EYETURN=2, LIDBLINK=3, TOPLIP=4, BOTTOMLIP=5, EYETILT
 var _MOTOR_MIN = {0:25,1:0,2:68,3:6,4:0,5:0,6:93,7:72};
 var _MOTOR_MAX = {0:126,1:180,2:140,3:54,4:99,5:99,6:165,7:108};
 var _MOTOR_REV = {0:true,1:false,2:false,3:false,4:true,5:true,6:false,7:true};
-// Top lip can't be driven below the mouth's centre stop (~mid-range) with the jaw
-// closed — under it the servo stalls and the mouth looks frozen. Floor the flap's
-// top-lip target so a too-low saved neutral can't silently kill it (mirror head.py).
-var _LIP_TOP_FLOOR = 4.0;
 var _IDLE_RECIPES = [
   ['blink',null],['blink',null],
   ['nudge',[HEADNOD,[-0.8,-0.5,0.5,0.8],3,0.6,1.1]],
@@ -16826,8 +16822,7 @@ class OhbotSerialDriver {
     var topRng=Number(this._cal('lip_top_range',1.8));
     var botRng=Number(this._cal('lip_bottom_range',3.0));
     var flapSpd=_clip(Number(this._cal('lip_speed',10)),1,10);
-    var topLo=(topSign>0)?Math.max(0.25,_LIP_TOP_FLOOR):0.25;
-    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, topLo, 9.75), flapSpd);
+    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), flapSpd);
     this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), flapSpd);
   }
   playLipSequence(frames){
