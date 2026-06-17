@@ -1118,18 +1118,21 @@ class RobotHead:
     def _auto_loop(self):
         """Background thread: subtle motions to keep the head looking alive.
           * idle (no speech) — runs when auto_enabled() and not mid-explicit-move.
-          * speaking — runs whenever the lip-flap is active, even if auto idle is
-            off, and bypasses _busy_until (the lip thread bumps it 120s)."""
+          * speaking — gestures along more often while the lip-flap is active
+            (bypasses _busy_until, which the lip thread bumps 120s).
+        BOTH honour the auto_movement toggle: turning idle motion OFF keeps the head
+        still even while talking, so a lip test/calibration moves ONLY the lips (the
+        head/eye gestures were otherwise mistaken for the lip "not working")."""
         time.sleep(random.uniform(3.0, 6.0))  # don't fire the instant the server starts
         while not self._auto_stop:
             lo, hi = self._idle_interval_range()
             time.sleep(random.uniform(lo, hi))
             try:
-                if not self._available:
-                    continue
+                if not self._available or not self.auto_enabled():
+                    continue   # idle motion off -> head stays still, even while talking
                 if self._lip_active:
-                    self._do_idle_motion()  # talking: gesture along, regardless of toggle
-                elif self.auto_enabled() and time.time() >= self._busy_until:
+                    self._do_idle_motion()  # talking: gesture along (interval already tightened)
+                elif time.time() >= self._busy_until:
                     self._do_idle_motion()
             except Exception as e:
                 _log(f"[{self.name}] idle motion error: {e!r}")
