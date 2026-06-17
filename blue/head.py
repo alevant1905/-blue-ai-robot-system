@@ -290,6 +290,11 @@ class RobotHead:
             # Per-head servo speed for the talking flap (1-10). Lower it for a
             # head whose servo power can't sustain a fast flap (it browns out).
             "lip_speed": _LIP_FLAP_SPEED,
+            # Which lip(s) the talking flap drives: "both" | "top" | "bottom"
+            # (jaw only). The lip NOT driven is detached (de-energized), so a mouth
+            # whose top lip can't move without straining the servo can talk on the
+            # jaw alone instead of buzzing against a mechanical stop. Default both.
+            "lip_drive": "both",
             # Idle "thoughtful" movement, 0-10 each (user-tuneable from GUI).
             "idle_frequency": 7,   # how often a motion happens (0=quiet, 10=lively)
             "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
@@ -344,6 +349,9 @@ class RobotHead:
                         self._calibration["lip_speed"] = float(_clip(float(data["lip_speed"]), 1.0, 10.0))
                     except Exception:
                         pass
+                md = str(data.get("lip_drive", "")).strip().lower()
+                if md in ("both", "top", "bottom", "jaw"):
+                    self._calibration["lip_drive"] = "bottom" if md == "jaw" else md
                 if isinstance(data.get("custom_expressions"), dict):
                     cust = {}
                     for nm, pose in data["custom_expressions"].items():
@@ -368,6 +376,7 @@ class RobotHead:
                 "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
                 "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
                 "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
+                "lip_drive": str(self._calibration.get("lip_drive", "both")),
                 "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
                 "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
                 "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -396,6 +405,7 @@ class RobotHead:
             "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
             "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
             "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
+            "lip_drive": str(self._calibration.get("lip_drive", "both")),
             "idle_frequency": float(self._calibration.get("idle_frequency", 7)),
             "idle_amplitude": float(self._calibration.get("idle_amplitude", 5)),
             "hf_sensitivity": float(self._calibration.get("hf_sensitivity", 5)),
@@ -472,6 +482,50 @@ class RobotHead:
             return False
         self._calibration["lip_speed"] = float(_clip(float(speed), 1.0, 10.0))
         self._save_calibration()
+        return True
+
+    def _excluded_lip_motors(self):
+        """Lip motors the talking flap must NOT drive, per `lip_drive`. An excluded
+        lip is detached (de-energized) instead of commanded, so a lip that can't
+        move without straining its servo stays quiet rather than buzzing against a
+        stop. "both" excludes nothing; "top" drives only the top (excludes the jaw);
+        "bottom"/"jaw" drives only the jaw (excludes the top lip)."""
+        drive = str(self._calibration.get("lip_drive", "both")).lower()
+        if drive == "top":
+            return (BOTTOMLIP,)
+        if drive in ("bottom", "jaw"):
+            return (TOPLIP,)
+        return ()
+
+    def _detach_motor(self, motor: int) -> None:
+        """De-energize one servo so it holds no position and can't strain."""
+        if not self._available or self._ohbot is None:
+            return
+        try:
+            with self._lock:
+                self._ohbot.detach(int(motor))
+        except Exception as e:
+            _log(f"[{self.name}] detach({motor}) error: {e!r}")
+
+    def set_lip_drive(self, mode) -> bool:
+        """Choose which lip(s) the talking flap drives: "both", "top", or
+        "bottom"/"jaw". The non-driven lip is detached so it can't strain. Persists
+        and applies immediately when connected (parks the driven lips at their
+        neutrals, detaches the rest)."""
+        mode = str(mode or "").strip().lower()
+        if mode == "jaw":
+            mode = "bottom"
+        if mode not in ("both", "top", "bottom"):
+            return False
+        self._calibration["lip_drive"] = mode
+        self._save_calibration()
+        if self._available:
+            excl = set(self._excluded_lip_motors())
+            for m in (TOPLIP, BOTTOMLIP):
+                if m in excl:
+                    self._detach_motor(m)
+                else:
+                    self._move_internal(m, self.center(m), speed=4.0)
         return True
 
     def set_center(self, motor: int, pos: float) -> bool:
@@ -563,8 +617,12 @@ class RobotHead:
         # the saved calibration (the board's own reset puts them at 5).
         if self._available:
             self._autopin(target)
+            excl = set(self._excluded_lip_motors())
             for m in ALL_MOTORS:
-                self._move_internal(m, self.center(m), speed=3.0)
+                if m in excl:
+                    self._detach_motor(m)   # leave a strain-prone lip de-energized
+                else:
+                    self._move_internal(m, self.center(m), speed=3.0)
         self._start_auto_thread()
         return self._available
 
@@ -606,8 +664,12 @@ class RobotHead:
         try:
             with self._lock:
                 self._ohbot.reset()
+            excl = set(self._excluded_lip_motors())
             for m in ALL_MOTORS:
-                self._move_internal(m, self.center(m), speed=4.0)
+                if m in excl:
+                    self._detach_motor(m)
+                else:
+                    self._move_internal(m, self.center(m), speed=4.0)
             return True
         except Exception as e:
             _log(f"[{self.name}] reset() error: {e!r}")
@@ -829,14 +891,19 @@ class RobotHead:
         top_rng = float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE))
         bot_rng = float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE))
         flap_spd = float(_clip(self._calibration.get("lip_speed", _LIP_FLAP_SPEED), 1.0, 10.0))
-        self._move_internal(
-            TOPLIP,
-            _clip(self.center(TOPLIP) + top_sign * top_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
-            speed=flap_spd)
-        self._move_internal(
-            BOTTOMLIP,
-            _clip(self.center(BOTTOMLIP) + bot_sign * bot_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
-            speed=flap_spd)
+        # Drive only the lip(s) selected by lip_drive; an excluded lip is left
+        # detached (see lip_start / init) so it can't strain against a stop.
+        excl = set(self._excluded_lip_motors())
+        if TOPLIP not in excl:
+            self._move_internal(
+                TOPLIP,
+                _clip(self.center(TOPLIP) + top_sign * top_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
+                speed=flap_spd)
+        if BOTTOMLIP not in excl:
+            self._move_internal(
+                BOTTOMLIP,
+                _clip(self.center(BOTTOMLIP) + bot_sign * bot_rng * openness, _LIP_SOFT_MIN, _LIP_SOFT_MAX),
+                speed=flap_spd)
 
     def _lip_loop(self, my_token):
         """Continuous open/shut flap (fallback when no timed sequence is given)."""
@@ -871,6 +938,8 @@ class RobotHead:
         """Begin the continuous lip-flap (fallback path). Idempotent-ish."""
         if not self.init():
             return False
+        for m in self._excluded_lip_motors():
+            self._detach_motor(m)
         self._lip_token += 1
         my = self._lip_token
         self._lip_active = True
@@ -885,6 +954,8 @@ class RobotHead:
         Supersedes any current flap/sequence. The realistic path used in speech."""
         if not self.init() or not frames:
             return False
+        for m in self._excluded_lip_motors():
+            self._detach_motor(m)
         self._lip_token += 1
         my = self._lip_token
         self._lip_active = True
@@ -1123,6 +1194,7 @@ set_idle_params = blue.set_idle_params
 set_hf_sensitivity = blue.set_hf_sensitivity
 set_lip_invert = blue.set_lip_invert
 set_lip_ranges = blue.set_lip_ranges
+set_lip_drive = blue.set_lip_drive
 lip_start = blue.lip_start
 lip_stop = blue.lip_stop
 lip_play_sequence = blue.lip_play_sequence

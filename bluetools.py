@@ -16308,6 +16308,15 @@ HEAD_HTML = """<!DOCTYPE html>
     <div class="card">
         <h2>Lip-sync polarity</h2>
         <div class="sub">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
+        <div class="row" style="grid-template-columns: 130px 1fr; margin:6px 0 10px;">
+            <span class="name">Talking drive</span>
+            <select id="lipDrive" style="padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card,#1b1b1b);color:var(--fg,#eee);font:inherit;">
+                <option value="both">Both lips</option>
+                <option value="top">Top lip only</option>
+                <option value="bottom">Jaw only (bottom lip)</option>
+            </select>
+        </div>
+        <div class="hint">Which lip(s) move while {{ head_robot_name }} talks. The lip you <i>don't</i> pick is <b>powered off</b> so it can't strain. If one lip jams against a stop and won't move without straining, switch to <b>Jaw only</b> — the jaw alone reads clearly as talking, and the stuck lip goes quiet instead of buzzing.</div>
         <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
         <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
         <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);">
@@ -16462,6 +16471,7 @@ async function loadState() {
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
     document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
     document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
+    if (s && s.lip_drive) document.getElementById('lipDrive').value = s.lip_drive;
     if (s && s.lip_top_range != null) {
         document.getElementById('lipRngTop').value = s.lip_top_range;
         document.getElementById('vLipRngTop').textContent = Number(s.lip_top_range).toFixed(1);
@@ -16536,6 +16546,7 @@ document.getElementById('lipRngBot').addEventListener('input', e => { document.g
 document.getElementById('lipRngBot').addEventListener('change', e => postJSON('/head/lip-config', {bottom_range: parseFloat(e.target.value)}));
 document.getElementById('lipSpeed').addEventListener('input', e => { document.getElementById('vLipSpeed').textContent = Number(e.target.value).toFixed(1); });
 document.getElementById('lipSpeed').addEventListener('change', e => postJSON('/head/lip-config', {flap_speed: parseFloat(e.target.value)}));
+document.getElementById('lipDrive').addEventListener('change', e => postJSON('/head/lip-config', {drive: e.target.value}));
 document.getElementById('testLipBtn').addEventListener('click', async () => {
     const btn = document.getElementById('testLipBtn');
     btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Testing…';
@@ -16815,6 +16826,8 @@ class OhbotSerialDriver {
     this._write('l00,'+r+','+g+','+b+'\\n'); this._write('l01,'+r+','+g+','+b+'\\n');
   }
   // ---- mouth + lip sequence (mirror blue/head.py _set_mouth / _lip_seq_loop) ----
+  _excludedLips(){ var d=String(this._cal('lip_drive','both')).toLowerCase(); if(d==='top') return [BOTTOMLIP]; if(d==='bottom'||d==='jaw') return [TOPLIP]; return []; }
+  _detachExcluded(){ var e=this._excludedLips(); for(var i=0;i<e.length;i++){ try{ this._write('d0'+e[i]+'\\n'); }catch(_e){} } }
   _setMouth(openness){
     openness=_clip(openness,0,1);
     var topSign=this._cal('lip_invert_top',false)?-1:1;
@@ -16822,12 +16835,13 @@ class OhbotSerialDriver {
     var topRng=Number(this._cal('lip_top_range',1.8));
     var botRng=Number(this._cal('lip_bottom_range',3.0));
     var flapSpd=_clip(Number(this._cal('lip_speed',10)),1,10);
-    this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), flapSpd);
-    this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), flapSpd);
+    var excl=this._excludedLips();
+    if(excl.indexOf(TOPLIP)<0) this.move(TOPLIP, _clip(this.center(TOPLIP)+topSign*topRng*openness, 0.25, 9.75), flapSpd);
+    if(excl.indexOf(BOTTOMLIP)<0) this.move(BOTTOMLIP, _clip(this.center(BOTTOMLIP)+botSign*botRng*openness, 0.25, 9.75), flapSpd);
   }
   playLipSequence(frames){
     if(!frames||!frames.length) return;
-    this.lipToken++; var my=this.lipToken; this.lipActive=true; var self=this;
+    this.lipToken++; var my=this.lipToken; this.lipActive=true; this._detachExcluded(); var self=this;
     (async function(){
       for(var i=0;i<frames.length;i++){
         if(self.closed || self.lipToken!==my) break;
@@ -16889,7 +16903,7 @@ class OhbotSerialDriver {
   }
   lipRelax(){ this.lipToken++; this.lipActive=false; this._write('d0'+TOPLIP+'\\n'); this._write('d0'+BOTTOMLIP+'\\n'); return true; }
   lipTest(){
-    this.lipToken++; var my=this.lipToken; this.lipActive=true; this.busyUntil=Date.now()+3000; var self=this;
+    this.lipToken++; var my=this.lipToken; this.lipActive=true; this._detachExcluded(); this.busyUntil=Date.now()+3000; var self=this;
     (async function(){
       var t0=Date.now();
       while(self.lipActive && self.lipToken===my && !self.closed && Date.now()-t0<2500){
@@ -16982,7 +16996,7 @@ var WEBSERIAL_OK = ('serial' in navigator) && !!window.isSecureContext;
 var LOCAL_DRIVERS = {blue:null, hexia:null};
 
 function _localHeadsNote(msg){ if(window.onLocalHeadsNote){ try{ window.onLocalHeadsNote(msg); return; }catch(e){} } try{ console.warn('[heads] '+msg); }catch(e){} }
-function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, lip_speed:10, idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
+function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, lip_speed:10, lip_drive:'both', idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
 async function _fetchCalib(headName){
   try{ var r=await fetch('/head/'+headName+'/state'); if(r.ok){ var j=await r.json(); if(j&&typeof j==='object') return j; } }catch(e){}
   return _defaultCalib();
@@ -17290,11 +17304,13 @@ def head_lip_config(robot='blue'):
         h.set_lip_ranges(top=d.get('top_range'), bottom=d.get('bottom_range'))
     if d.get('flap_speed') is not None:
         h.set_lip_speed(d.get('flap_speed'))
+    if d.get('drive') is not None:
+        h.set_lip_drive(d.get('drive'))
     cal = h.get_calibration()
     return jsonify({"ok": True,
                     "lip_invert_top": cal["lip_invert_top"], "lip_invert_bottom": cal["lip_invert_bottom"],
                     "lip_top_range": cal["lip_top_range"], "lip_bottom_range": cal["lip_bottom_range"],
-                    "lip_speed": cal["lip_speed"]})
+                    "lip_speed": cal["lip_speed"], "lip_drive": cal["lip_drive"]})
 
 
 @app.route('/head/lip-test', methods=['POST'])
