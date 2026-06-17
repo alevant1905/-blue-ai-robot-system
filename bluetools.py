@@ -16844,9 +16844,17 @@ class OhbotSerialDriver {
     this.lipToken++; var my=this.lipToken; this.lipActive=true; this._detachExcluded(); var self=this;
     (async function(){
       for(var i=0;i<frames.length;i++){
-        if(self.closed || self.lipToken!==my) break;
+        if(self.closed || self.lipToken!==my || !self.lipActive) break;
         var op=_clip(frames[i][0],0,1), hold=_clip(frames[i][1],0.01,1.5);
         self._setMouth(op); await _sleepS(hold);
+      }
+      // Frame durations only ESTIMATE the TTS length; if the voice runs longer,
+      // keep flapping until lipStop (onend) so the mouth doesn't freeze mid-sentence.
+      var deadline=Date.now()+90000;
+      while(self.lipActive && self.lipToken===my && !self.closed && Date.now()<deadline){
+        self._setMouth(0.6+Math.random()*0.4); await _sleepS(0.09+Math.random()*0.05);
+        if(!self.lipActive || self.lipToken!==my) break;
+        self._setMouth(0); await _sleepS(0.07+Math.random()*0.05);
       }
       if(self.lipToken===my){ self._setMouth(0); self.lipActive=false; }
     })();

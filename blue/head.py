@@ -945,13 +945,31 @@ class RobotHead:
     def _lip_seq_loop(self, my_token, frames):
         """Play a timed mouth schedule: each frame is (openness 0-1, hold seconds).
         The browser builds these from the reply text so the jaw moves during words
-        and CLOSES during the gaps — far more lifelike than a constant flap."""
+        and CLOSES during the gaps — far more lifelike than a constant flap.
+
+        The frame durations are only an ESTIMATE of the TTS rhythm. If the actual
+        voice outlasts them (different voice/engine/rate — this is what froze
+        Hexia's mouth mid-sentence while she kept talking), keep a gentle flap going
+        after the frames until the browser's onend posts the stop, so the mouth
+        never shuts while the voice is still speaking. Capped so a missing onend
+        can't flap forever."""
         try:
             for openness, hold in frames:
                 if not self._lip_active or self._lip_token != my_token or not self._available:
                     break
                 self._set_mouth(openness)
                 time.sleep(hold)
+            else:
+                # Frames done, no stop yet → speech is running long. Flap on.
+                tail_deadline = time.time() + 90.0
+                while (self._lip_active and self._lip_token == my_token
+                       and self._available and time.time() < tail_deadline):
+                    self._set_mouth(random.uniform(0.6, 1.0))
+                    time.sleep(random.uniform(0.09, 0.14))
+                    if not self._lip_active or self._lip_token != my_token:
+                        break
+                    self._set_mouth(0.0)
+                    time.sleep(random.uniform(0.07, 0.12))
         finally:
             if self._lip_token == my_token:
                 self._set_mouth(0.0)
