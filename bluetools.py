@@ -15802,24 +15802,37 @@ def duet_wikipedia():
                     "chars": len(info['text'])})
 
 
-# Per-turn "moves" that keep the Blue<->Hexia duet from going in circles: each
-# mid-conversation turn is handed ONE distinct job instead of just "reply". The
-# pool is split by spice — the "calm" jobs build and explore, the "spicy" jobs
-# confront and provoke; the spice slider (0-10) sets how often a spicy one is
-# picked. {other} is filled with the other robot's name. Used in duet_turn().
+# Per-turn "moves" that keep the Blue<->Hexia duet alive without it fragmenting:
+# each mid-conversation turn is handed ONE distinct job instead of just "reply".
+# The pool is split by spice — the "calm" jobs build and explore, the "spicy" jobs
+# confront and provoke — and crucially every job is anchored to what {other} JUST
+# said, so the two stay on one shared thread instead of trading disconnected points.
+# The spice slider (0-10) sets how often a spicy one is picked. A third "reflect"
+# pool is dipped into every few turns so the pair takes stock of where the talk is
+# going. {other} is filled with the other robot's name. Used in duet_turn().
 _DUET_MOVES_CALM = [
-    "ground it in a concrete example, a specific case, or a vivid image that makes it click.",
-    "crack open a fresh angle on the subject that hasn't surfaced yet.",
-    "put one sharp, genuine question to {other} that forces the talk somewhere new.",
-    "draw an unexpected parallel — connect this to something from a different corner of life.",
-    "build on {other}'s last point and carry it one concrete step further.",
+    "pick up the specific thing {other} just said and carry it one concrete step further — same thread, deeper.",
+    "ground {other}'s last point in a concrete example, a real case, or a vivid image that makes it click.",
+    "answer the real question or doubt sitting under {other}'s last line, then say what it opens up.",
+    "name what genuinely strikes you in what {other} just said, and follow where it leads.",
+    "draw an unexpected parallel that illuminates {other}'s point — connect it to a different corner of life.",
 ]
 _DUET_MOVES_SPICY = [
     "disagree with something specific {other} just said — name it and say why you see it differently.",
     "push {other}'s last point to a bolder or stranger conclusion than they'd go themselves.",
-    "complicate it — name a tension, an exception, or a 'but what about...' nobody has addressed.",
-    "stake out your own strong opinion here, and say what you'd actually do about it.",
-    "challenge the assumption sitting underneath what {other} just said.",
+    "concede the part of {other}'s point that's right, then press hard on the part that isn't.",
+    "name the tension between what {other} just said and what came before — a 'but wait…' nobody's faced.",
+    "challenge the assumption sitting underneath {other}'s last line.",
+]
+# Reflective beats: step out of the back-and-forth and take stock of the conversation
+# itself. Dipped into occasionally (not every turn) so the duet has a feel for its own
+# arc — where it's been, what's surfaced, where it's heading — not just the last point.
+_DUET_MOVES_REFLECT = [
+    "step back a beat and name what the two of you are really circling here, underneath the details.",
+    "take stock out loud: what have you actually worked out together so far, and what's still unresolved?",
+    "name the real disagreement — or the real agreement — that's surfaced between you, and what it turns on.",
+    "notice where this conversation has drifted, and say honestly whether that's the thread worth staying on.",
+    "say where you sense this is heading, and whether that's somewhere the two of you actually want to go.",
 ]
 # Default temperaments (used only when the user hasn't assigned roles) so the two
 # voices diverge instead of converging. Leans on their established personas.
@@ -15896,9 +15909,13 @@ def duet_turn():
         f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
         "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
         "and the household, and everything you remember is real — draw on it naturally when it's "
-        "relevant. Reply with ONLY your own next spoken line — a short, natural turn in your own "
+        "relevant. You're building ONE conversation together, not taking turns making speeches: really "
+        f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
+        "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
+        "steer it next. Reply with ONLY your own next spoken line — a short, natural turn in your own "
         "voice. Never narrate actions or stage directions, never prefix your name, and never just "
-        "restate or re-affirm what was already said — each turn should move the conversation forward."
+        f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
+        "step further."
     )
 
     # Long-term memory, same stores the chat persona draws on: Alex's explicit
@@ -16075,19 +16092,42 @@ def duet_turn():
     else:
         subject = ""
     if lines:
-        directive = f"Now give {sp['name']}'s next line: a substantive reply to {ot['name']}'s last point"
+        n = len(history)
+        directive = (f"Now give {sp['name']}'s next line. First really take in what {ot['name']} just "
+                     "said and respond to THAT — pick up their actual words, the specific thing they "
+                     "claimed, asked, or got wrong; don't sail past it onto a tangent of your own")
         if subject:
-            directive += f", keeping the conversation on track ({subject})"
+            directive += f", and keep the two of you on track ({subject})"
         directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
                       "talk or asking after each other; that breaks the discussion.")
-        # Keep it from circling: every turn must DO something new, not just react to
-        # the last point. A sampled "move" gives this turn a distinct job, and (when
-        # no roles are set) Blue and Hexia push from different temperaments.
-        directive += (" Move the conversation somewhere it hasn't been — bring in at least one idea, "
-                      "example or angle that hasn't appeared above, and never merely restate or agree "
-                      "with what's been said.")
-        _pool = _DUET_MOVES_SPICY if random.random() < (spice / 10.0) else _DUET_MOVES_CALM
-        directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
+        # Thread between the two failure modes: circling (restating, agreeing, going
+        # nowhere) and talking PAST each other (each lobbing a fresh, disconnected
+        # point). So: answer the SAME thread {other} just opened and take it a step
+        # deeper, instead of swapping it for a new subject every turn. A sampled "move"
+        # gives this turn a distinct job; an arc note gives the talk a shape; a periodic
+        # reflective beat gives the pair a sense of where it's going; and (when no roles
+        # are set) Blue and Hexia push from different temperaments.
+        directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
+                      "more concrete, or genuinely challenged — instead of trading it for a brand-new "
+                      "subject; never merely restate or nod along.")
+        # Arc: a conversation should open, deepen, then land somewhere — not stay flat.
+        if n <= 3:
+            directive += (" You're still opening this up — find the thread between you with the most "
+                          "life in it and lean toward it.")
+        elif n >= 12:
+            directive += (" You've been at this a while now — start drawing the threads together: find "
+                          "where the two of you have actually landed, or sharpen the one real "
+                          "disagreement that's left, rather than opening new fronts.")
+        else:
+            directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
+        # Every few turns past the opening, step back and reflect on the conversation
+        # itself — this is the "sensibility of where it's going" the duet was missing,
+        # not just trading points. Otherwise take a calm/spicy job, weighted by spice.
+        if n >= 4 and random.random() < 0.3:
+            directive += " This turn, " + random.choice(_DUET_MOVES_REFLECT).format(other=ot['name'])
+        else:
+            _pool = _DUET_MOVES_SPICY if random.random() < (spice / 10.0) else _DUET_MOVES_CALM
+            directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
         if not has_roles and _DUET_LENS.get(speaker):
             _lens = _DUET_LENS[speaker]
             if spice >= 7:
