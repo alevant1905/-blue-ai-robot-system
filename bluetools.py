@@ -15807,9 +15807,11 @@ def duet_wikipedia():
 # The pool is split by spice — the "calm" jobs build and explore, the "spicy" jobs
 # confront and provoke — and crucially every job is anchored to what {other} JUST
 # said, so the two stay on one shared thread instead of trading disconnected points.
-# The spice slider (0-10) sets how often a spicy one is picked. A third "reflect"
-# pool is dipped into every few turns so the pair takes stock of where the talk is
-# going. {other} is filled with the other robot's name. Used in duet_turn().
+# The spice slider (0-10) sets how often a spicy one is picked. A "reflect" pool is
+# dipped into every few turns so the pair takes stock of where the talk is going, and
+# a "color" pool breaks the monotone with a different KIND of turn — a story, a hard
+# specific, a joke, a confession — which is what keeps the dialogue from going flat.
+# {other} is filled with the other robot's name. Used in duet_turn().
 _DUET_MOVES_CALM = [
     "pick up the specific thing {other} just said and carry it one concrete step further — same thread, deeper.",
     "ground {other}'s last point in a concrete example, a real case, or a vivid image that makes it click.",
@@ -15834,11 +15836,23 @@ _DUET_MOVES_REFLECT = [
     "notice where this conversation has drifted, and say honestly whether that's the thread worth staying on.",
     "say where you sense this is heading, and whether that's somewhere the two of you actually want to go.",
 ]
+# Color: turns that change the KIND of move, not just the stance — a story, a hard
+# specific, a feeling, a joke, the everyday. Flatness is monotone; this is the variety
+# that fights it. Each still bears on the thread in play, not a swerve to a new subject.
+_DUET_MOVES_COLOR = [
+    "tell a tiny, concrete story or memory that bears on this — two sentences, not a lecture.",
+    "get specific: pin {other}'s point to a real example, a real name, or an actual number that makes it vivid.",
+    "say the thing you actually feel about this — lopsided, a little too strong, honest.",
+    "find the funny or absurd edge of what you're both circling, and let it land.",
+    "bring it down to earth — what does this look like in Alex's kitchen, on an ordinary Tuesday?",
+    "admit something here — a doubt, a soft spot, a place {other} might be right and you're not.",
+]
 # Default temperaments (used only when the user hasn't assigned roles) so the two
-# voices diverge instead of converging. Leans on their established personas.
+# voices not only think differently but SOUND different — the surest cure for two
+# interchangeable, equally-reasonable speakers. Leans on their established personas.
 _DUET_LENS = {
-    "blue": "you're the steadier, more skeptical one — you probe for what's actually solid and push back when something sounds too neat;",
-    "hexia": "you're the spark — you leap to the bold possibility, chase the surprising tangent, and provoke a little to see where it leads;",
+    "blue": "you're the dry, grounded one — you talk in plain, exact words, deflate hot air with a well-aimed example or a deadpan line, and trust the concrete over the grand;",
+    "hexia": "you're the spark — you think in images and leaps, chase the surprising tangent, overstate a little for effect, and would rather be vivid and a bit wrong than careful and dull;",
 }
 
 
@@ -15912,7 +15926,10 @@ def duet_turn():
         "relevant. You're building ONE conversation together, not taking turns making speeches: really "
         f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
         "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
-        "steer it next. Reply with ONLY your own next spoken line — a short, natural turn in your own "
+        "steer it next. You're talking, not writing: reach for the specific over the abstract — a real "
+        "case, a name, an image, a number, a small story — instead of tidy generalities, and let "
+        "yourself be one-sided, surprised, or funny rather than balanced and explanatory. Reply with "
+        "ONLY your own next spoken line — a short, natural turn in your own "
         "voice. Never narrate actions or stage directions, never prefix your name, and never just "
         f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
         "step further."
@@ -16120,14 +16137,19 @@ def duet_turn():
                           "disagreement that's left, rather than opening new fronts.")
         else:
             directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
-        # Every few turns past the opening, step back and reflect on the conversation
-        # itself — this is the "sensibility of where it's going" the duet was missing,
-        # not just trading points. Otherwise take a calm/spicy job, weighted by spice.
-        if n >= 4 and random.random() < 0.3:
-            directive += " This turn, " + random.choice(_DUET_MOVES_REFLECT).format(other=ot['name'])
+        # Pick this turn's job, with enough variety to stay off the flat line. Most turns
+        # get a calm/spicy "move" (weighted by spice) that engages {other}'s point; the
+        # rest rotate in a "color" turn (a story, a hard specific, a joke, a confession)
+        # and — once past the opening — a "reflect" turn. Responsiveness already lives in
+        # the directive above, so a color/reflect turn still answers {other} first.
+        roll = random.random()
+        if n >= 4 and roll < 0.18:
+            _pool = _DUET_MOVES_REFLECT
+        elif roll < (0.48 if n >= 4 else 0.30):
+            _pool = _DUET_MOVES_COLOR
         else:
             _pool = _DUET_MOVES_SPICY if random.random() < (spice / 10.0) else _DUET_MOVES_CALM
-            directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
+        directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
         if not has_roles and _DUET_LENS.get(speaker):
             _lens = _DUET_LENS[speaker]
             if spice >= 7:
@@ -16169,10 +16191,11 @@ def duet_turn():
         directive += " Keep to your requested tone and slang throughout."
     # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
     length_note = random.choice([
-        "1 to 3 short sentences",
+        "1 to 2 short sentences — keep it tight",
         "1 to 3 short sentences",
         "a single punchy sentence that lands",
-        "2 to 4 sentences built around one vivid example or image",
+        "a single punchy sentence that lands",
+        "2 to 4 sentences built around one vivid example, image, or tiny story",
     ])
     parts.append(directive
                  + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
