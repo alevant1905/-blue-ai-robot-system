@@ -15556,7 +15556,7 @@ function SPICE(){ var s=document.getElementById('spice'); var n=s?parseInt(s.val
   var word=function(n){ n=+n; return n<=1?'easygoing':n<=3?'gentle':n<=4?'mellow':n===5?'balanced':n<=7?'lively':n<=8?'spirited':'provocative'; };
   var upd=function(){ v.textContent=word(s.value); }; s.addEventListener('input',upd); upd();
 })();
-let running=false, history=[];
+let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect)
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
 
@@ -15710,13 +15710,34 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ return false; }
   if(!d||!d.text){ return false; }
   const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
+  maybeReflect();                 // take stock of the direction in the background, while this head speaks
   await speakAs(cfg,d.text,el); return true;
 }
+// Every few turns, step back and refresh the conversation's bearing (DIRECTION):
+// where it's actually gotten and where it could go next. Fired without awaiting so
+// it overlaps the current head's speech and never delays a turn; the NEXT turn POSTs
+// the updated bearing. This is what lets the duet develop a line of thought and the
+// two robots' views move, instead of just volleying replies to the last point.
+function maybeReflect(){
+  const n=history.length;
+  if(n<4 || n%4!==0) return;      // not in the opening; take stock once every 4 turns
+  const topic=document.getElementById('topic').value.trim();
+  fetch('/duet/reflect',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
+      DIRECTION=j.direction;
+      // Surface the developing direction unobtrusively, so the self-reflection is visible.
+      const m=/NEXT:\\s*(.+)/i.exec(DIRECTION);
+      if(m && running) addNote('(they take stock — where this is heading: '+m[1].trim()+')');
+    }).catch(function(){});
+}
 async function run(){
-  running=true; history=[]; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
+  running=true; history=[]; DIRECTION=''; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
   // A bare link pasted into the topic box IS the link — move it over visibly.
   const topicEl=document.getElementById('topic'), urlEl=document.getElementById('url');
   if(!urlEl.value.trim() && /^https?:\\/\\/\\S+$/.test(topicEl.value.trim())){ urlEl.value=topicEl.value.trim(); topicEl.value=''; }
@@ -16347,6 +16368,78 @@ _DUET_LENS = {
 }
 
 
+@app.route('/duet/reflect', methods=['POST'])
+def duet_reflect():
+    """Step back from the back-and-forth and take stock of where the Blue<->Hexia
+    conversation has actually gotten — a private 'bearing' the browser feeds back
+    into each /duet/turn so the two develop a line of thought instead of circling
+    the last point. Built from the recent transcript PLUS the previous bearing, so
+    it EVOLVES (tracks what's moved) rather than resetting each time. The browser
+    calls this every few turns, in the background, overlapping the head's speech so
+    it never delays a turn. Returns {ok, direction}."""
+    d = request.get_json(silent=True) or {}
+    history = d.get('history') or []
+    topic = (d.get('topic') or '').strip()
+    prev = (d.get('direction') or '').strip()
+    # Render the recent turns; the previous bearing carries the earlier arc, so a
+    # bounded window keeps the read sharp without re-reading the whole transcript.
+    lines = []
+    for h in history[-16:]:
+        sp_id = (h.get('speaker') or '').strip().lower()
+        txt = (h.get('text') or '').strip()
+        if not txt:
+            continue
+        nm = _robot_cfg(sp_id)["name"] if sp_id in ROBOTS else (sp_id or "?")
+        lines.append(f"{nm}: {txt}")
+    if len(lines) < 4:                       # nothing has developed yet — keep what we have
+        return jsonify({"ok": False, "direction": prev})
+
+    sys_p = (
+        "You are the quiet awareness running underneath a conversation between two "
+        "robots, Blue and Hexia, who are thinking out loud together. You never speak "
+        "in their conversation. Your one job is to track where their thinking has "
+        "actually gotten and where it could honestly go next — so they develop a real "
+        "line of thought and their views move, instead of circling the last point or "
+        "drifting onto new subjects. Be concrete and faithful to what they actually "
+        "said; never invent agreement or tidy it up."
+    )
+    ask = ""
+    if topic:
+        ask += f"They set out talking about: {topic}.\n\n"
+    if prev:
+        ask += "Your previous read on where this was heading:\n" + prev + "\n\n"
+    ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
+    ask += (
+        "Update your read. If you had a previous one, build on it and note what has "
+        "MOVED since then — a view that shifted, a tension that sharpened, a point now "
+        "settled. Stay specific to their actual words. Answer in exactly these three "
+        "short lines and nothing else:\n"
+        "SO FAR: <what the two of them have actually worked out or where each now "
+        "stands — one sentence>\n"
+        "TURNS ON: <the real question or disagreement the conversation is now turning "
+        "on — one sentence>\n"
+        "NEXT: <where it could honestly go one step further from here — not a "
+        "conclusion or a neat wrap-up, just the next move that would take it ahead — "
+        "one sentence>"
+    )
+    msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
+    out = prev
+    try:
+        # Reasoning model: budget must cover the <think> pass plus three short lines;
+        # low temperature keeps the read steady rather than imaginative.
+        res = call_llm(msgs, include_tools=False, temperature=0.4, max_tokens=1000)
+        ch = (res or {}).get('choices') or []
+        cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+        if '</think>' in cand:
+            cand = cand.split('</think>')[-1]
+        cand = cand.replace('<think>', '').strip()
+        if cand:
+            out = cand
+    except Exception as e:
+        log.warning(f"[DUET] reflect failed: {e}")
+    return jsonify({"ok": bool(out), "direction": out})
+
+
 @app.route('/duet/turn', methods=['POST'])
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
@@ -16362,6 +16455,11 @@ def duet_turn():
     if not url and re.match(r'^https?://\S+$', topic):
         url, topic = topic, ''     # a bare link typed into the topic box IS the link
     history = d.get('history') or []
+    # The conversation's current "bearing" — a private, evolving read of where the
+    # talk has gotten and where it could go next, refreshed every few turns by
+    # /duet/reflect and round-tripped through the browser. Injected below so each
+    # speaker steers by it instead of only reacting to the last line.
+    direction = (d.get('direction') or '').strip()
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
     role_other = (roles.get(other) or '').strip()
@@ -16577,6 +16675,20 @@ def duet_turn():
         parts.append(f"TONE — deliver your line in this tone / manner: {tone_self}.")
     if slang_self:
         parts.append(f"SLANG / DIALECT — flavour your speech with: {slang_self} (use it naturally and stay understandable).")
+    # The developing bearing of the conversation — present from a few turns in.
+    # It frames the transcript that follows: not a script, a sense of where the
+    # two of you have actually gotten and where it's worth taking things next, so
+    # the talk develops a line of thought instead of circling the last point.
+    if direction and lines:
+        parts.append(
+            f"WHERE THIS IS GOING — a private read on where your conversation with "
+            f"{ot['name']} has actually gotten, for steering only. Never read it out, "
+            f"quote it, or mention having it:\n{direction}\n\nLet this shape your next "
+            "line: stay with what it's really turning on, build on what the two of you "
+            "have worked out, and take it one honest step further rather than circling "
+            f"back or wrapping it up neatly. If {ot['name']} has genuinely shifted how "
+            "you see this, let your own view move — you're thinking together and your "
+            "mind can change, not defending fixed corners.")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
 
@@ -16618,14 +16730,16 @@ def duet_turn():
         directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
                       "more concrete, or genuinely challenged — instead of trading it for a brand-new "
                       "subject; never merely restate or nod along.")
-        # Arc: a conversation should open, deepen, then land somewhere — not stay flat.
+        # Arc: a conversation should open, deepen, then push on from what it's worked
+        # out — develop, don't conclude. (Alex's ask: lead somewhere, not to a tidy end.)
         if n <= 3:
             directive += (" You're still opening this up — find the thread between you with the most "
                           "life in it and lean toward it.")
         elif n >= 12:
-            directive += (" You've been at this a while now — start drawing the threads together: find "
-                          "where the two of you have actually landed, or sharpen the one real "
-                          "disagreement that's left, rather than opening new fronts.")
+            directive += (" You've been at this a while now — take what the two of you have actually "
+                          "worked out and push off from it into what's still unresolved: deepen the one "
+                          "real disagreement or open question that's left and carry it a step further, "
+                          "rather than tying a bow on it or scattering onto new fronts.")
         else:
             directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
         # Pick this turn's job, with enough variety to stay off the flat line. Most turns
