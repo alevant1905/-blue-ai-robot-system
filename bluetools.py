@@ -5385,6 +5385,24 @@ def _syllabus_schedule_text(max_docs: int = 2):
             if 'syllab' in (d.get('filename', '') or '').lower()
             or 'syllab' in (d.get('folder', '') or '').lower()
             or 'course outline' in (d.get('filename', '') or '').lower()]
+    # Honour an active library focus (chat Context panel): only consider syllabi
+    # the user actually selected, so a course/schedule/readings question can
+    # never pull in a DIFFERENT course's syllabus. With nothing focused, behave
+    # as before (any syllabus in the library).
+    focus_docs = list(globals().get("_ACTIVE_FOCUS_DOCS") or [])
+    focus_folders = list(globals().get("_ACTIVE_FOCUS_FOLDERS") or [])
+    if focus_docs or focus_folders:
+        def _in_focus(d):
+            if (d.get('filename') or '') in focus_docs:
+                return True
+            fol = (d.get('folder') or '')
+            return any(fol == f or fol.startswith(f + '/') for f in focus_folders)
+        syll = [d for d in syll if _in_focus(d)]
+        if not syll:
+            # Focused, but no selected syllabus — don't fall back to the whole
+            # library; let the scoped document search answer instead.
+            print("   [FOCUS] course/schedule query, but no syllabus in focus — using scoped search")
+            return None
     if not syll:
         return None
     parts = []
@@ -5415,6 +5433,35 @@ def _syllabus_schedule_text(max_docs: int = 2):
     )
 
 
+def _format_doc_chunks(results: List[Dict], is_expertise: bool = False) -> str:
+    """Render RAG chunk dicts (filename/content/score/chunk_index/total_chunks)
+    as a citation-friendly answer block. Shared by the normal whole-library
+    search path and the library-focus (pinned-docs) path."""
+    formatted = []
+    for i, r in enumerate(results, 1):
+        score_pct = f"{r['score']:.0%}"
+        chunk_idx = r.get('chunk_index')
+        total_chunks = r.get('total_chunks')
+        if chunk_idx is not None and total_chunks:
+            loc = f" chunk {int(chunk_idx) + 1}/{total_chunks}"
+        else:
+            loc = ""
+        content_preview = r['content'][:800]
+        # Citation tag the model can copy inline. Putting the filename in
+        # [brackets] near the start makes it easy to weave into prose.
+        formatted.append(
+            f"[{i}] [{r['filename']}]{loc} (relevance: {score_pct})\n"
+            f"{content_preview}"
+        )
+    header = (
+        "Here are the most relevant passages from your corpus. "
+        "Cite sources inline when you quote, like [filename.pdf]:"
+        if is_expertise else
+        "Here's what I found in your documents:"
+    )
+    return f"{header}\n\n" + "\n\n".join(formatted)
+
+
 def search_documents_rag(query: str, max_results: int = 3) -> str:
     """Search documents using local ChromaDB RAG first, then keyword fallback."""
     print(f"   [FIND] Searching documents for: '{query}'")
@@ -5435,12 +5482,37 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
         print(f"   [LIST] Library inventory request — routing to local lister")
         return search_documents_local(query, max_results)
 
+    # Library focus (chat Context panel): when Alex has pinned specific
+    # documents for this conversation, answer from exactly those files
+    # (file-scoped RAG) instead of the whole library.
+    if _ACTIVE_FOCUS_DOCS:
+        try:
+            from blue.tools.rag import search_in_documents, get_stats
+            stats = get_stats()
+            if stats.get('available') and stats.get('total_chunks', 0) > 0:
+                results = search_in_documents(query, _ACTIVE_FOCUS_DOCS,
+                                              max_results=max(6, max_results))
+                if results:
+                    print(f"   [FOCUS] {len(results)} chunk(s) from "
+                          f"{len(_ACTIVE_FOCUS_DOCS)} pinned doc(s)")
+                    return _format_doc_chunks(results, is_expertise=True)
+                print("   [FOCUS] nothing relevant in the pinned doc(s)")
+                return ("I focused on the document(s) you selected ("
+                        + ", ".join(_ACTIVE_FOCUS_DOCS) + ") but didn't find "
+                        "anything relevant to that in them.")
+        except Exception as e:
+            log.warning(f"[FOCUS] doc-scoped search failed: {e}")
+
     is_expertise = _is_expertise_query(query)
 
     # Scope to an area of expertise when the request names one ("my published
-    # work" → the publications folder, a folder name, …). [] = whole library.
+    # work" → the publications folder, a folder name, …). A library-focus folder
+    # pick (Context panel) overrides the inferred scope; [] = whole library.
     try:
-        scope_folders = _infer_expertise_folders(query)
+        if _ACTIVE_FOCUS_FOLDERS:
+            scope_folders = list(_ACTIVE_FOCUS_FOLDERS)
+        else:
+            scope_folders = _infer_expertise_folders(query)
     except Exception:
         scope_folders = []
     if scope_folders:
@@ -5491,31 +5563,8 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
                     print(f"   [SINGLE-DOC] All {len(results)} chunk(s) from same file, fetching full text")
                     return search_documents_local(query, max_results)
 
-                formatted = []
-                for i, r in enumerate(results, 1):
-                    score_pct = f"{r['score']:.0%}"
-                    chunk_idx = r.get('chunk_index')
-                    total_chunks = r.get('total_chunks')
-                    if chunk_idx is not None and total_chunks:
-                        loc = f" chunk {int(chunk_idx) + 1}/{total_chunks}"
-                    else:
-                        loc = ""
-                    content_preview = r['content'][:800]
-                    # Citation tag the model can copy inline. Putting the
-                    # filename in [brackets] near the start makes it easy
-                    # for the model to weave into prose.
-                    formatted.append(
-                        f"[{i}] [{r['filename']}]{loc} (relevance: {score_pct})\n"
-                        f"{content_preview}"
-                    )
-                header = (
-                    "Here are the most relevant passages from your corpus. "
-                    "Cite sources inline when you quote, like [filename.pdf]:"
-                    if is_expertise else
-                    "Here's what I found in your documents:"
-                )
                 print(f"   [OK] ChromaDB RAG returned {len(results)} result(s)")
-                return f"{header}\n\n" + "\n\n".join(formatted)
+                return _format_doc_chunks(results, is_expertise)
             else:
                 print(f"   [WARN] ChromaDB returned no results, trying next...")
     except ImportError:
@@ -5854,6 +5903,14 @@ def view_image(filename: str = None, query: str = None) -> str:
 # Which robot the current chat turn is addressed to — set by process_with_tools
 # so camera aiming moves the RIGHT head (Blue's page vs Hexia's page).
 _ACTIVE_CHAT_ROBOT = "blue"
+
+# Library-focus selection for the current chat turn (the chat Context panel's
+# document picker). Set by process_with_tools from the request's `focus`; when
+# non-empty, Blue's document awareness (<focused_documents>) and his
+# search_documents calls are scoped to exactly these picks instead of the whole
+# library. Reset every turn so a stale selection never leaks across requests.
+_ACTIVE_FOCUS_DOCS: List[str] = []      # specific filenames
+_ACTIVE_FOCUS_FOLDERS: List[str] = []   # library folder rel-paths (POSIX)
 
 
 def _zoomed_frame(frame, zoom, region: str = "center"):
@@ -10644,6 +10701,36 @@ def _build_expertise_block() -> str:
     )
 
 
+def _build_focus_block() -> str:
+    """When Alex has pinned specific library documents/folders via the chat
+    Context panel, name exactly those and tell Blue to treat them as the
+    authoritative source for this conversation.
+
+    Returns '' when nothing is pinned — the caller then falls back to the
+    whole-library <expertise> block. The pins live in the per-turn globals
+    _ACTIVE_FOCUS_DOCS / _ACTIVE_FOCUS_FOLDERS (set by process_with_tools).
+    """
+    docs = list(globals().get("_ACTIVE_FOCUS_DOCS") or [])
+    folders = list(globals().get("_ACTIVE_FOCUS_FOLDERS") or [])
+    if not docs and not folders:
+        return ""
+    lines = [f"- folder: {f} (everything filed under it)" for f in folders]
+    lines += [f"- {d}" for d in docs]
+    return (
+        "<focused_documents>\n"
+        "For THIS conversation, Alex has focused you on ONLY the specific "
+        "library material listed below. Treat it as your single authoritative "
+        "source: answer from these items — use the search_documents tool (it is "
+        "scoped to exactly these picks) and quote them, citing inline like "
+        "[filename.pdf]. Do NOT pull in any other document, course, file, note, "
+        "or remembered material: if something is not in the focused items below, "
+        "it is out of scope right now. If his question can't be answered from "
+        "them, say so plainly rather than guessing or mixing in another source.\n"
+        + "\n".join(lines) +
+        "\n</focused_documents>"
+    )
+
+
 def _build_now_block() -> str:
     """Render the current local date/time + explicit relative-day resolutions.
 
@@ -10757,6 +10844,150 @@ def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
         + "\n".join(lines)
         + conflict_note
         + "\n</upcoming_schedule>"
+    )
+
+
+# ============================================================================
+# "Where we are" + "what we're doing" — two more situational-awareness blocks.
+# Blue is a home robot, so home is the safe default for location; Alex can set a
+# temporary override ("we're at the cottage") from the chat Context panel, which
+# is stored in data/place.json. Activity is purely inferred (never set): the
+# clock + any calendar event spanning right now. Daily rhythms are injected
+# separately as <daily_rhythms> by the memory system, so we don't repeat them.
+# ============================================================================
+_PLACE_PATH = os.path.join(os.getcwd(), "data", "place.json")
+_PLACE_DEFAULT = {"home": "home", "city": "", "current": None, "current_set_at": None}
+# How long a manual location override stays trusted before we fall back to home.
+_PLACE_OVERRIDE_TTL_HRS = 12
+
+
+def _load_place() -> Dict:
+    """Read data/place.json, tolerant of a missing or corrupt file."""
+    try:
+        with open(_PLACE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            merged = dict(_PLACE_DEFAULT)
+            merged.update({k: data[k] for k in _PLACE_DEFAULT if k in data})
+            return merged
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"[PLACE] could not read {_PLACE_PATH}: {e}")
+    return dict(_PLACE_DEFAULT)
+
+
+def _save_place(d: Dict) -> bool:
+    """Persist the place dict; never raise into the request path."""
+    try:
+        os.makedirs(os.path.dirname(_PLACE_PATH), exist_ok=True)
+        with open(_PLACE_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        return True
+    except Exception as e:
+        log.warning(f"[PLACE] could not write {_PLACE_PATH}: {e}")
+        return False
+
+
+def _place_current_fresh(place: Dict) -> Optional[str]:
+    """The override location if one is set and still within its TTL, else None.
+
+    An override has a shelf life (Alex won't always remember to clear it), so a
+    stale 'we're at the cottage' silently lapses back to home rather than
+    haunting every reply for days.
+    """
+    cur = (place.get("current") or "").strip()
+    if not cur:
+        return None
+    stamp = place.get("current_set_at")
+    if stamp:
+        try:
+            from datetime import datetime, timedelta
+            set_at = datetime.fromisoformat(stamp)
+            if datetime.now() - set_at > timedelta(hours=_PLACE_OVERRIDE_TTL_HRS):
+                return None
+        except Exception:
+            pass
+    return cur
+
+
+def _build_location_block() -> str:
+    """Render <location> — where Blue and Alex are right now.
+
+    Home by default (Blue is a home robot); a fresh manual override from the
+    chat Context panel wins. Alex chose 'home + manual override' over device
+    geolocation, so there is no tracking here.
+    """
+    place = _load_place()
+    home = (place.get("home") or "home").strip() or "home"
+    city = (place.get("city") or "").strip()
+    home_phrase = home + (f" in {city}" if city else "")
+    cur = _place_current_fresh(place)
+    if cur:
+        return (
+            "<location>\n"
+            f"You are a home robot. Right now you and Alex are at {cur} "
+            f"(away from {home_phrase}). If he asks where you are, say {cur}.\n"
+            "</location>"
+        )
+    return (
+        "<location>\n"
+        f"You are a home robot. You and Alex are at {home_phrase}.\n"
+        "</location>"
+    )
+
+
+def _build_current_activity_block() -> str:
+    """Render <current_activity> — an auto-inferred sense of what's happening
+    right now, from the clock and the calendar only.
+
+    The running conversation already tells Blue the immediate task, and daily
+    rhythms arrive separately as <daily_rhythms>, so this block deliberately
+    adds just the two things the model can't otherwise see: the part of the
+    day/week, and whether a scheduled event is in progress this very moment.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    hour = now.hour
+    day_name = now.strftime("%A")
+    if hour < 5:
+        when_phrase = f"It's the middle of the night, early {day_name}"
+    elif hour < 12:
+        when_phrase = f"It's {day_name} morning"
+    elif hour < 17:
+        when_phrase = f"It's {day_name} afternoon"
+    elif hour < 21:
+        when_phrase = f"It's {day_name} evening"
+    else:
+        when_phrase = f"It's {day_name} night"
+    day_kind = "the weekend" if now.weekday() >= 5 else "a weekday"
+
+    # Anything on the calendar spanning right now? Look back far enough to catch
+    # a long event that started earlier and is still running.
+    now_event = ""
+    if globals().get("ENHANCED_TOOLS_AVAILABLE", False):
+        try:
+            from blue_tools_enhanced import occurrences_in_window
+            occs = occurrences_in_window(now - timedelta(hours=12),
+                                         now + timedelta(minutes=1))
+            for o in occs:
+                start = o["start"]
+                end = o["end"] or start
+                if start <= now <= end:
+                    title = o["title"]
+                    until = (" until " + end.strftime("%I:%M %p").lstrip("0")
+                             if o["end"] else "")
+                    now_event = f" You're in the middle of \"{title}\"{until}."
+                    break
+        except Exception as e:
+            log.warning(f"[ACTIVITY] now-event check failed: {e}")
+
+    return (
+        "<current_activity>\n"
+        f"{when_phrase} — {day_kind}.{now_event} The immediate thing you're "
+        "doing is this conversation with Alex — stay anchored to what he's "
+        "actually asking.\n"
+        "</current_activity>"
     )
 
 
@@ -10917,10 +11148,19 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
                 "forward naturally. Do NOT greet and do NOT start over.\n"
             )
 
-    expertise_block = _build_expertise_block()
-    expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
+    # Library focus (chat Context panel) overrides the whole-library expertise
+    # dump: when Alex has pinned docs/folders for this conversation, name only
+    # those; otherwise list the full corpus as before.
+    focus_block = _build_focus_block()
+    if focus_block:
+        expertise_section = f"\n{focus_block}\n"
+    else:
+        expertise_block = _build_expertise_block()
+        expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
 
     now_block = _build_now_block()
+    location_block = _build_location_block()
+    activity_block = _build_current_activity_block()
     schedule_block = _build_upcoming_schedule_block()
     schedule_section = f"{schedule_block}\n\n" if schedule_block else ""
 
@@ -10946,6 +11186,8 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         "content": (
             f"{facts_preamble}\n\n"
             f"{now_block}\n\n"
+            f"{location_block}\n\n"
+            f"{activity_block}\n\n"
             f"{schedule_section}"
             f"{_robot_cfg(robot)['persona_line']}\n"
             "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
@@ -10979,11 +11221,21 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "") -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None) -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
-    speaking (Blue by default; "hexia" for her chat page)."""
-    global _ACTIVE_CHAT_ROBOT
+    speaking (Blue by default; "hexia" for her chat page). `focus` carries the
+    chat Context panel's library picks ({"docs": [...], "folders": [...]}),
+    scoping Blue's document awareness and searches for this turn."""
+    global _ACTIVE_CHAT_ROBOT, _ACTIVE_FOCUS_DOCS, _ACTIVE_FOCUS_FOLDERS
     _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
+    # Set the library-focus globals up front — build_dynamic_system_message and
+    # search_documents_rag both read them — and reset them every turn.
+    _focus = focus if isinstance(focus, dict) else {}
+    _ACTIVE_FOCUS_DOCS = [str(x).strip() for x in (_focus.get("docs") or []) if str(x).strip()]
+    _ACTIVE_FOCUS_FOLDERS = [str(x).strip() for x in (_focus.get("folders") or []) if str(x).strip()]
+    if _ACTIVE_FOCUS_DOCS or _ACTIVE_FOCUS_FOLDERS:
+        log.info(f"[FOCUS] {len(_ACTIVE_FOCUS_DOCS)} doc(s), "
+                 f"{len(_ACTIVE_FOCUS_FOLDERS)} folder(s) pinned for this turn")
     conversation_messages = messages.copy()
 
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
@@ -12684,6 +12936,64 @@ def download_document():
         return f"Error: {str(e)}", 500
 
 
+@app.route('/place', methods=['GET', 'POST'])
+def place_endpoint():
+    """Read or set 'where we are' — the manual location override that feeds
+    Blue's <location> awareness. Home by default; POST {"current": "the
+    cottage"} to override, or {"current": null/""} to go back home. The panel
+    may also set the home label / city via {"home": ..., "city": ...}.
+    """
+    from datetime import datetime
+    place = _load_place()
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        if 'current' in data:
+            cur = data.get('current')
+            cur = cur.strip() if isinstance(cur, str) else ""
+            place['current'] = cur or None
+            place['current_set_at'] = datetime.now().isoformat() if cur else None
+        if isinstance(data.get('home'), str) and data['home'].strip():
+            place['home'] = data['home'].strip()
+        if isinstance(data.get('city'), str):
+            place['city'] = data['city'].strip()
+        _save_place(place)
+    return jsonify({
+        "home": place.get("home") or "home",
+        "city": place.get("city") or "",
+        "current": _place_current_fresh(place),   # None once the override lapses
+    })
+
+
+@app.route('/api/library/list', methods=['GET'])
+def api_library_list():
+    """List library folders + (non-camera) documents for the chat Context
+    panel's focus picker. Mirrors the filtering in _build_expertise_block so
+    camera captures never show up as pickable 'documents'."""
+    try:
+        index = load_document_index()
+    except Exception:
+        index = {"documents": []}
+    docs = []
+    for d in index.get("documents", []):
+        fn = d.get("filename")
+        if not fn or d.get("camera_capture") or str(fn).startswith("camera_"):
+            continue
+        preview = re.sub(r"\s+", " ", (d.get("text_preview") or "")).strip()
+        if preview.startswith("[IMAGE FILE"):
+            preview = ""
+        docs.append({
+            "filename": fn,
+            "folder": d.get("folder") or "",
+            "preview": preview[:120],
+        })
+    docs.sort(key=lambda x: (x["folder"], x["filename"].lower()))
+    try:
+        folders = list_library_folders()
+    except Exception:
+        folders = []
+    return jsonify({"folders": folders, "documents": docs})
+
+
 PERSPECTIVE_HTML = """
 <!DOCTYPE html>
 <html>
@@ -13106,6 +13416,23 @@ CHAT_HTML = """
         .lang-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 18px 10px; border-bottom: 1px solid var(--line); }
         .lang-chip { border: 1px solid var(--line); background: var(--paper); border-radius: 16px; padding: 5px 12px; font-size: 0.82em; cursor: pointer; }
         .lang-chip.sel { border-color: var(--forest); background: #eef4ee; font-weight: 600; }
+        /* ---- Context & focus panel (document picker + location override) ---- */
+        .ctx-place { display: flex; gap: 6px; padding: 4px 18px 6px; }
+        .ctx-place input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 0.92em; }
+        .ctx-btn { border: 1px solid var(--forest); background: var(--forest); color: #fff; border-radius: 8px; padding: 7px 12px; font-size: 0.85em; cursor: pointer; white-space: nowrap; }
+        .ctx-btn.ghost { background: var(--paper); color: var(--slate); border-color: var(--line); }
+        .ctx-place-now { padding: 0 18px 6px; color: var(--slate); font-size: 0.8em; min-height: 1em; }
+        .ctx-list { overflow-y: auto; padding: 4px 10px; max-height: 38vh; }
+        .ctx-folder { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 6px 2px; display: block; }
+        label.ctx-folder { cursor: pointer; }
+        .ctx-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin: 4px 0; background: var(--cream); cursor: pointer; }
+        .ctx-item.sel { border-color: var(--forest); background: #eef4ee; }
+        .ctx-item input, .ctx-folder input { margin-top: 3px; flex: none; }
+        .ctx-item .ci-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .ctx-item .ci-name { font-weight: 500; color: var(--ink); font-size: 0.92em; word-break: break-word; }
+        .ctx-item .ci-prev { color: var(--slate); font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ctx-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 18px; border-top: 1px solid var(--line); }
+        .ctx-foot #ctxCount { color: var(--slate); font-size: 0.82em; }
         /* ---- Kid mode (Vilda's iPad): bigger, warmer, simpler ---- */
         body.kid { background: linear-gradient(160deg, #fff7ed 0%, #eef6ff 100%); }
         body.kid .container { max-width: 760px; }
@@ -13259,6 +13586,9 @@ CHAT_HTML = """
                 <button class="iconbtn" id="wikiBtn" title="Consult Wikipedia: {{ robot_name }} reads the encyclopedia on your topic before answering" aria-label="Toggle Wikipedia consult" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4.5 5v13c3.5-.5 6 0 7.5 1.5 1.5-1.5 4-2 7.5-1.5V5C16 4.5 13.5 5 12 6.5z"/><path d="M12 6.5v13"/></svg>
                 </button>
+                <button class="iconbtn" id="contextBtn" title="Focus {{ robot_name }} on specific library documents" aria-label="Context and document focus" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+                </button>
                 {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
@@ -13329,6 +13659,27 @@ CHAT_HTML = """
                 </div>
             </div>
             <div class="cam-sub">The arrows pan the camera lens itself (it zooms to 2&times; first &mdash; panning moves the zoom window). Line up the view, then just ask &mdash; &ldquo;what do you see?&rdquo; captures exactly this.</div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not kid %}
+    <div class="voice-panel" id="contextPanel" style="display:none">
+        <div class="voice-card">
+            <div class="voice-head"><span>{{ robot_name }} &mdash; context &amp; focus</span><button id="contextClose" aria-label="Close">&times;</button></div>
+            <div class="voice-sub">Where are we? {{ robot_name }} assumes you're home; set a place when you're somewhere else.</div>
+            <div class="ctx-place">
+                <input type="text" id="placeInput" placeholder="e.g. the cottage" autocomplete="off">
+                <button class="ctx-btn" id="placeSet">Set</button>
+                <button class="ctx-btn ghost" id="placeHome">Back home</button>
+            </div>
+            <div class="ctx-place-now" id="placeNow"></div>
+            <div class="voice-sub">Focus documents &mdash; pick what {{ robot_name }} should treat as his authoritative knowledge for this chat. Nothing checked = his whole library.</div>
+            <div class="ctx-list" id="ctxList"><div class="voice-empty">Loading your library&hellip;</div></div>
+            <div class="ctx-foot">
+                <span id="ctxCount">No documents focused</span>
+                <button class="ctx-btn ghost" id="ctxClear">Clear</button>
+            </div>
         </div>
     </div>
     {% endif %}
@@ -13504,7 +13855,7 @@ CHAT_HTML = """
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
                     body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
                                            language: (LANG_MODE !== 'auto' ? LANG_MODE : ''),
-                                           research: researchOn, wiki: wikiOn })
+                                           research: researchOn, wiki: wikiOn, focus: FOCUS })
                 });
                 const data = await res.json();
                 let reply = '';
@@ -13772,6 +14123,146 @@ CHAT_HTML = """
             wikiBtn.addEventListener('click', () => setWikiOn(!wikiOn));
             setWikiOn(wikiOn);
         }
+
+        // ---- Context & focus: where we are + which library docs to lean on ----
+        // The picker scopes Blue's specialized knowledge for the conversation;
+        // an empty selection = his whole library (unchanged behaviour). Saved
+        // per device per robot, like the other toggles. The location override
+        // lives server-side (data/place.json) so every device agrees on it.
+        const contextBtn = document.getElementById('contextBtn');
+        const contextPanel = document.getElementById('contextPanel');
+        let FOCUS = { docs: [], folders: [] };
+        try { FOCUS = JSON.parse(localStorage.getItem('blueFocus_' + ROBOT.id)) || FOCUS; } catch (e) {}
+        if (!FOCUS || typeof FOCUS !== 'object') FOCUS = { docs: [], folders: [] };
+        FOCUS.docs = Array.isArray(FOCUS.docs) ? FOCUS.docs : [];
+        FOCUS.folders = Array.isArray(FOCUS.folders) ? FOCUS.folders : [];
+
+        function focusCount() { return FOCUS.docs.length + FOCUS.folders.length; }
+        function paintContextBtn() {
+            if (!contextBtn) return;
+            const n = focusCount();
+            contextBtn.classList.toggle('active', n > 0);
+            contextBtn.setAttribute('aria-pressed', n > 0 ? 'true' : 'false');
+            contextBtn.title = n > 0 ? (n + ' library item(s) focused — tap to change')
+                                     : 'Focus ' + ROBOT.name + ' on specific library documents';
+        }
+        function updateCtxCount() {
+            const el = document.getElementById('ctxCount');
+            if (!el) return;
+            if (focusCount() === 0) { el.textContent = 'No documents focused'; return; }
+            const parts = [];
+            if (FOCUS.docs.length) parts.push(FOCUS.docs.length + ' doc' + (FOCUS.docs.length > 1 ? 's' : ''));
+            if (FOCUS.folders.length) parts.push(FOCUS.folders.length + ' folder' + (FOCUS.folders.length > 1 ? 's' : ''));
+            el.textContent = parts.join(', ') + ' focused';
+        }
+        function saveFocus() {
+            try { localStorage.setItem('blueFocus_' + ROBOT.id, JSON.stringify(FOCUS)); } catch (e) {}
+            paintContextBtn();
+            updateCtxCount();
+        }
+        function renderCtxList(data) {
+            const list = document.getElementById('ctxList');
+            if (!list) return;
+            const docs = (data && data.documents) || [];
+            if (!docs.length) {
+                list.innerHTML = '<div class="voice-empty">Your library is empty. Add documents on the Library page first.</div>';
+                updateCtxCount();
+                return;
+            }
+            const groups = {};
+            docs.forEach(function (d) {
+                const f = d.folder || '';
+                if (!groups[f]) groups[f] = [];
+                groups[f].push(d);
+            });
+            let html = '';
+            Object.keys(groups).sort().forEach(function (f) {
+                if (f !== '') {
+                    const fchecked = FOCUS.folders.indexOf(f) >= 0 ? 'checked' : '';
+                    html += '<label class="ctx-folder"><input type="checkbox" class="ctx-fchk" data-folder="'
+                          + esc(f) + '" ' + fchecked + '> ' + esc(f) + '</label>';
+                } else {
+                    html += '<div class="ctx-folder">Library root</div>';
+                }
+                groups[f].forEach(function (d) {
+                    const checked = FOCUS.docs.indexOf(d.filename) >= 0;
+                    html += '<label class="ctx-item' + (checked ? ' sel' : '') + '">'
+                          + '<input type="checkbox" class="ctx-dchk" data-doc="' + esc(d.filename) + '" '
+                          + (checked ? 'checked' : '') + '>'
+                          + '<span class="ci-main"><span class="ci-name">' + esc(d.filename) + '</span>'
+                          + (d.preview ? ('<span class="ci-prev">' + esc(d.preview) + '</span>') : '')
+                          + '</span></label>';
+                });
+            });
+            list.innerHTML = html;
+            list.querySelectorAll('.ctx-dchk').forEach(function (cb) {
+                cb.addEventListener('change', function () {
+                    const name = cb.getAttribute('data-doc');
+                    const i = FOCUS.docs.indexOf(name);
+                    if (cb.checked && i < 0) FOCUS.docs.push(name);
+                    else if (!cb.checked && i >= 0) FOCUS.docs.splice(i, 1);
+                    const item = cb.closest('.ctx-item');
+                    if (item) item.classList.toggle('sel', cb.checked);
+                    saveFocus();
+                });
+            });
+            list.querySelectorAll('.ctx-fchk').forEach(function (cb) {
+                cb.addEventListener('change', function () {
+                    const f = cb.getAttribute('data-folder');
+                    const i = FOCUS.folders.indexOf(f);
+                    if (cb.checked && i < 0) FOCUS.folders.push(f);
+                    else if (!cb.checked && i >= 0) FOCUS.folders.splice(i, 1);
+                    saveFocus();
+                });
+            });
+            updateCtxCount();
+        }
+        function loadPlace() {
+            fetch('/place').then(function (r) { return r.json(); }).then(function (p) {
+                const now = document.getElementById('placeNow');
+                const inp = document.getElementById('placeInput');
+                if (!now) return;
+                if (p.current) {
+                    now.textContent = 'Right now: ' + p.current + '. Tap "Back home" to reset.';
+                    if (inp) inp.value = p.current;
+                } else {
+                    now.textContent = 'Right now: at ' + (p.home || 'home') + (p.city ? (' in ' + p.city) : '') + '.';
+                    if (inp) inp.value = '';
+                }
+            }).catch(function () {});
+        }
+        function setPlace(val) {
+            fetch('/place', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ current: val }) })
+                .then(function (r) { return r.json(); }).then(loadPlace).catch(function () {});
+        }
+        function loadCtxLibrary() {
+            fetch('/api/library/list').then(function (r) { return r.json(); })
+                .then(renderCtxList).catch(function () {
+                    const list = document.getElementById('ctxList');
+                    if (list) list.innerHTML = '<div class="voice-empty">Could not load your library.</div>';
+                });
+        }
+        if (contextBtn && contextPanel) {
+            contextBtn.addEventListener('click', function () {
+                primeAudio();
+                loadPlace();
+                loadCtxLibrary();
+                updateCtxCount();
+                contextPanel.style.display = 'flex';
+            });
+            document.getElementById('contextClose').addEventListener('click', function () { contextPanel.style.display = 'none'; });
+            contextPanel.addEventListener('click', function (e) { if (e.target === contextPanel) contextPanel.style.display = 'none'; });
+            const pinp = document.getElementById('placeInput');
+            const pset = document.getElementById('placeSet');
+            const phome = document.getElementById('placeHome');
+            if (pset) pset.addEventListener('click', function () { setPlace(pinp ? pinp.value.trim() : ''); });
+            if (pinp) pinp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); setPlace(pinp.value.trim()); } });
+            if (phome) phome.addEventListener('click', function () { setPlace(''); });
+            const cclear = document.getElementById('ctxClear');
+            if (cclear) cclear.addEventListener('click', function () { FOCUS = { docs: [], folders: [] }; saveFocus(); loadCtxLibrary(); });
+        }
+        paintContextBtn();
 
         // ---- Language setting: which language Alex speaks AND Blue replies in ----
         // 'auto' = Whisper detects per clip (constrained server-side to the
@@ -19390,6 +19881,11 @@ def chat_completions():
         robot = (data.get("robot") or "blue").strip().lower()
         if robot not in ROBOTS:
             robot = "blue"
+        # Library focus (the chat Context panel's document picker): scope Blue's
+        # specialized knowledge + document searches to these picks for this turn.
+        focus = data.get("focus")
+        if not isinstance(focus, dict):
+            focus = {}
 
         print(f"")
         print(f"{'='*60}")
@@ -19461,6 +19957,24 @@ def chat_completions():
                     should_inject = memory_system.should_inject_context(messages)
                     if should_inject:
                         historical_context = memory_system.build_context(messages, user_name=user_name, robot=robot)
+                        # Library focus active: drop the cross-conversation
+                        # SEMANTIC recall blocks so a past chat about a different
+                        # course/topic can't bleed into a focused conversation.
+                        # Identity facts, explicit notes, daily rhythms and the
+                        # current thread's recent history are kept.
+                        if historical_context and (focus.get("docs") or focus.get("folders")):
+                            _FOCUS_DROP = ("<relevant_memories>", "<proactive_hint>",
+                                           "<earlier_sessions>", "<remembered_days>",
+                                           "<connections>")
+                            _before = len(historical_context)
+                            historical_context = [
+                                m for m in historical_context
+                                if not any(tag in (m.get("content") or "") for tag in _FOCUS_DROP)
+                            ]
+                            _dropped = _before - len(historical_context)
+                            if _dropped:
+                                print(f"   [FOCUS] dropped {_dropped} cross-conversation recall "
+                                      f"block(s) to stay on the focused material")
                         if historical_context:
                             print(f"   [MEMORY] ✓ Injecting {len(historical_context)} messages (semantic + recent)")
                             messages = _splice_context_after_system(messages, historical_context)
@@ -19519,7 +20033,7 @@ def chat_completions():
         _llm_t0 = _t_llm.time()
         response = process_with_tools(messages, _pre_selection=_quick_result,
                                       user_name=user_name, voice=voice_turn, robot=robot,
-                                      language=language)
+                                      language=language, focus=focus)
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
 
