@@ -15725,8 +15725,9 @@ function maybeReflect(){
   const n=history.length;
   if(n<4 || n%4!==0) return;      // not in the opening; take stock once every 4 turns
   const topic=document.getElementById('topic').value.trim();
+  const url=document.getElementById('url').value.trim();
   fetch('/duet/reflect',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic})})
+        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, roles:fieldMap('role')})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
@@ -16380,7 +16381,22 @@ def duet_reflect():
     d = request.get_json(silent=True) or {}
     history = d.get('history') or []
     topic = (d.get('topic') or '').strip()
+    url = (d.get('url') or '').strip()
+    roles = d.get('roles') or {}
+    role_b = (roles.get('blue') or '').strip() if isinstance(roles, dict) else ''
+    role_h = (roles.get('hexia') or '').strip() if isinstance(roles, dict) else ''
     prev = (d.get('direction') or '').strip()
+    # The subject they were set to discuss — the anchor this read must hold them to,
+    # so "taking stock" pulls a drifting conversation BACK toward the topic instead
+    # of chasing wherever it has wandered (Alex: the stock-take must stay on topic).
+    if topic:
+        subject = topic
+    elif url:
+        subject = "the article or video they set out to discuss"
+    elif role_b or role_h:
+        subject = "the debate they were set up to have"
+    else:
+        subject = ""
     # Render the recent turns; the previous bearing carries the earlier arc, so a
     # bounded window keeps the read sharp without re-reading the whole transcript.
     lines = []
@@ -16394,34 +16410,54 @@ def duet_reflect():
     if len(lines) < 4:                       # nothing has developed yet — keep what we have
         return jsonify({"ok": False, "direction": prev})
 
+    anchor = (
+        " Their talk was set going on a specific subject, and part of your job is "
+        "keeping them honest to it: when they wander off it, say so plainly and point "
+        "the way back." if subject else "")
     sys_p = (
         "You are the quiet awareness running underneath a conversation between two "
         "robots, Blue and Hexia, who are thinking out loud together. You never speak "
         "in their conversation. Your one job is to track where their thinking has "
         "actually gotten and where it could honestly go next — so they develop a real "
         "line of thought and their views move, instead of circling the last point or "
-        "drifting onto new subjects. Be concrete and faithful to what they actually "
-        "said; never invent agreement or tidy it up."
+        "drifting onto unrelated ground." + anchor + " Be concrete and faithful to what "
+        "they actually said; never invent agreement or tidy it up."
     )
     ask = ""
-    if topic:
-        ask += f"They set out talking about: {topic}.\n\n"
+    if subject:
+        ask += f"The subject they were set to discuss: {subject}.\n\n"
     if prev:
         ask += "Your previous read on where this was heading:\n" + prev + "\n\n"
     ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
-    ask += (
-        "Update your read. If you had a previous one, build on it and note what has "
-        "MOVED since then — a view that shifted, a tension that sharpened, a point now "
-        "settled. Stay specific to their actual words. Answer in exactly these three "
-        "short lines and nothing else:\n"
-        "SO FAR: <what the two of them have actually worked out or where each now "
-        "stands — one sentence>\n"
-        "TURNS ON: <the real question or disagreement the conversation is now turning "
-        "on — one sentence>\n"
-        "NEXT: <where it could honestly go one step further from here — not a "
-        "conclusion or a neat wrap-up, just the next move that would take it ahead — "
-        "one sentence>"
-    )
+    if subject:
+        ask += (
+            f"Update your read, judging it ALWAYS in relation to that subject — {subject}. "
+            "If you had a previous read, build on it and note what has MOVED. If the talk "
+            f"has wandered off {subject}, say so and make NEXT the concrete way back onto "
+            "it. Stay specific to their actual words. Answer in exactly these three short "
+            "lines and nothing else:\n"
+            f"SO FAR: <what they've actually worked out about {subject} — or, if they've "
+            "drifted, where they've wandered to instead — one sentence>\n"
+            f"TURNS ON: <the real question or disagreement about {subject} that's now live "
+            "between them — one sentence>\n"
+            f"NEXT: <the next move that takes their discussion of {subject} one honest step "
+            "further; if they've drifted off it, the move that steers them back onto it — "
+            "not a conclusion, just what carries it ahead — one sentence>"
+        )
+    else:
+        ask += (
+            "Update your read. If you had a previous one, build on it and note what has "
+            "MOVED since then — a view that shifted, a tension that sharpened, a point now "
+            "settled. Stay specific to their actual words. Answer in exactly these three "
+            "short lines and nothing else:\n"
+            "SO FAR: <what the two of them have actually worked out or where each now "
+            "stands — one sentence>\n"
+            "TURNS ON: <the real question or disagreement the conversation is now turning "
+            "on — one sentence>\n"
+            "NEXT: <where it could honestly go one step further from here — not a "
+            "conclusion or a neat wrap-up, just the next move that would take it ahead — "
+            "one sentence>"
+        )
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
     out = prev
     try:
@@ -16680,15 +16716,23 @@ def duet_turn():
     # two of you have actually gotten and where it's worth taking things next, so
     # the talk develops a line of thought instead of circling the last point.
     if direction and lines:
+        # With a subject to hold to, the bearing should pull them back to it, not just
+        # deeper into wherever they've drifted (Alex: keep the stock-take on topic).
+        _close = ((" stay on what the two of you set out to discuss, keep with what it's "
+                   "really turning on, build on what you've worked out, and carry that one "
+                   "honest step further — rather than drifting onto a new subject or tidily "
+                   "wrapping up.") if focused else
+                  (" stay with what it's really turning on, build on what you've worked out, "
+                   "and take it one honest step further rather than circling back or wrapping "
+                   "it up neatly."))
         parts.append(
             f"WHERE THIS IS GOING — a private read on where your conversation with "
             f"{ot['name']} has actually gotten, for steering only. Never read it out, "
             f"quote it, or mention having it:\n{direction}\n\nLet this shape your next "
-            "line: stay with what it's really turning on, build on what the two of you "
-            "have worked out, and take it one honest step further rather than circling "
-            f"back or wrapping it up neatly. If {ot['name']} has genuinely shifted how "
-            "you see this, let your own view move — you're thinking together and your "
-            "mind can change, not defending fixed corners.")
+            "line:" + _close +
+            f" If {ot['name']} has genuinely shifted how you see this, let your own view "
+            "move — you're thinking together and your mind can change, not defending fixed "
+            "corners.")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
 
