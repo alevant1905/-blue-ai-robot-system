@@ -57,11 +57,25 @@ class ScholarDetector(BaseDetector):
 
         return intents
 
+    # Verbs that mean "get me the CONTENT", not just the metadata.
+    READ_VERBS = ['read', 'summarize', 'summarise', 'analyze', 'analyse',
+                  'full text', 'fulltext', 'download', 'what does it say',
+                  'what does it argue', 'go through']
+
     def _detect_doi_lookup(self, message: str, msg_lower: str) -> Optional[ToolIntent]:
         m = self.DOI_RE.search(message)
         if not m:
             return None
         doi = m.group(0).rstrip('.,;)')
+        # "read/summarize <DOI>" wants the article's content, not its record.
+        if any(v in msg_lower for v in self.READ_VERBS):
+            return ToolIntent(
+                tool_name='read_paper',
+                confidence=0.95,
+                priority=ToolPriority.MEDIUM,
+                reason='DOI + read/summarize verb',
+                extracted_params={'doi': doi}
+            )
         return ToolIntent(
             tool_name='get_paper',
             confidence=0.95,

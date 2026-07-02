@@ -4,9 +4,7 @@ Blue Robot Scholarly Research Tools
 Serious academic search for Alex's research and teaching, wired to the
 Wilfrid Laurier University library.
 
-Design: Blue NEVER stores or uses Alex's Laurier password. Automated logins
-can't survive Duo MFA, and the library's database licenses prohibit
-credentialed scraping. Instead:
+How access works:
 
   1. SEARCH runs against sources that need no credentials:
        - Omni, Laurier's Primo VE discovery layer (public guest API) —
@@ -14,23 +12,35 @@ credentialed scraping. Instead:
        - OpenAlex — rich scholarly metadata: abstracts, citation counts,
          open-access links.
        - Crossref — DOI-authoritative metadata (fallback + lookups).
-  2. FULL TEXT comes via the library proxy: every result carries a
-     https://libproxy.wlu.ca/login?url=… link. Alex clicks it, signs in
-     with his own Laurier account, and lands on the licensed full text.
-  3. OPEN ACCESS PDFs are resolved through Unpaywall where a legal free
-     copy exists, so many papers need no sign-in at all.
+  2. FULL TEXT (read_paper) is fetched one article at a time, on demand:
+       - a legal open-access copy via Unpaywall first (no sign-in), then
+       - through the Laurier library proxy (libproxy.wlu.ca) using Alex's
+         own library credentials, so Blue can actually read and
+         synthesize licensed articles.
+  3. CREDENTIALS live ONLY on this machine: wlu_credentials.json in the
+     project root (gitignored, like gmail_credentials.json) or env vars.
+     If the proxy login is fronted by single-sign-on/Duo MFA, a browser
+     session cookie can be pasted in instead of a password.
+
+Fair-use guardrails, deliberately: read_paper fetches ONE article per
+call, everything is rate-limited and cached, and there is no bulk/crawl
+mode — this is Alex's personal, on-demand research access, exactly what
+the library account is for. Every result still carries the proxy link
+for reading in the browser.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import threading
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote, quote_plus
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 import requests
 
@@ -543,7 +553,9 @@ def execute_scholar_search(args: dict) -> str:
             "item ALWAYS give the 'laurier_access' link (full text — Alex signs in "
             "with his Laurier account) and the 'open_access_pdf' link when present "
             "(free legal PDF, no sign-in). Mention citation counts for impact. "
-            "Offer the omni_search_url for browsing more results in the Laurier library."
+            "Offer the omni_search_url for browsing more results in the Laurier "
+            "library, and offer to READ any of these in full (read_paper tool "
+            "with the result's doi) to summarize or synthesize them."
         ),
     }, ensure_ascii=False)
     _set_cached(cache_key, payload)
@@ -682,9 +694,468 @@ def execute_get_paper(args: dict) -> str:
     return payload
 
 
+# ================================================================================
+# LAURIER LIBRARY PROXY SESSION (EZproxy)
+# ================================================================================
+
+# https://libproxy.wlu.ca/login — derived from the prefix so one env var
+# retargets everything if the library ever moves hosts.
+_PROXY_LOGIN_URL = WLU_PROXY_PREFIX.split("?", 1)[0]
+_PROXY_HOST = urlsplit(_PROXY_LOGIN_URL).netloc
+
+# Local credential store, gitignored like gmail_credentials.json.
+# Shape: {"user": "...", "pass": "...", "cookie": "..."} — any subset.
+_CRED_FILE = Path(__file__).resolve().parents[2] / "wlu_credentials.json"
+
+_PROXY_SESSION_TTL = 90 * 60  # EZproxy sessions idle out; re-login after this
+_proxy_session: Optional[requests.Session] = None
+_proxy_session_ts = 0.0
+
+# Hosts/markers that mean the login page handed us off to campus SSO —
+# a password POST can't get through that (Duo MFA), so we bail with guidance.
+_SSO_MARKER_RE = re.compile(
+    r"microsoftonline|duosecurity|duo\.com|okta|adfs|shibboleth|/idp/|"
+    r"login\.wlu\.ca|cas\.|onelogin|azuread", re.I)
+
+
+class LibraryAuthError(Exception):
+    """code is one of: no-creds, sso, bad-creds, login-failed."""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+def _load_credentials() -> dict:
+    creds: Dict[str, str] = {}
+    try:
+        with open(_CRED_FILE, encoding="utf-8") as f:
+            data = json.load(f) or {}
+        for k in ("user", "pass", "cookie"):
+            if data.get(k):
+                creds[k] = str(data[k]).strip()
+    except Exception:
+        pass
+    for env, key in (("WLU_LIBRARY_USER", "user"),
+                     ("WLU_LIBRARY_PASS", "pass"),
+                     ("WLU_PROXY_COOKIE", "cookie")):
+        v = os.getenv(env)
+        if v:
+            creds[key] = v.strip()
+    return creds
+
+
+def library_account_status() -> str:
+    creds = _load_credentials()
+    if creds.get("cookie"):
+        return "configured (browser session cookie)"
+    if creds.get("user") and creds.get("pass"):
+        return "configured (username/password)"
+    return "not configured"
+
+
+def _auth_guidance(code: str) -> str:
+    setup = (
+        f"Put your Laurier library sign-in in {_CRED_FILE.name} in the Blue "
+        'project folder (it is gitignored, never leaves this machine): '
+        '{"user": "your Laurier username", "pass": "your password"}. '
+        "Env vars WLU_LIBRARY_USER / WLU_LIBRARY_PASS also work."
+    )
+    cookie_help = (
+        f"Sign in once at {_PROXY_LOGIN_URL} in your browser, copy the "
+        "'ezproxy' cookie value (DevTools > Application > Cookies), and add "
+        f'it to {_CRED_FILE.name} as {{"cookie": "..."}} or set '
+        "WLU_PROXY_COOKIE. Blue will reuse that session."
+    )
+    if code == "no-creds":
+        return f"No Laurier library credentials are set up yet. {setup}"
+    if code == "sso":
+        return (
+            "The Laurier proxy login redirects to campus single-sign-on "
+            f"(Duo MFA), which a password alone can't get through. {cookie_help}"
+        )
+    if code == "bad-creds":
+        return (
+            "The Laurier proxy rejected the stored sign-in. Double-check the "
+            f"username/password in {_CRED_FILE.name} (alumni/community "
+            "accounts use library barcode + PIN). If your login now goes "
+            f"through Duo, use the cookie method instead: {cookie_help}"
+        )
+    return f"Couldn't sign in to the Laurier library proxy. {cookie_help}"
+
+
+def _parse_login_form(html: str) -> Tuple[str, Dict[str, str], Optional[str], Optional[str]]:
+    """Return (action, hidden_fields, user_field_name, pass_field_name)."""
+    forms = re.findall(r"(?is)<form\b[^>]*>.*?</form>", html or "")
+    # Prefer the form that actually has a password box.
+    forms.sort(key=lambda f: ("password" not in f.lower()))
+    if not forms:
+        return "", {}, None, None
+    form = forms[0]
+    m = re.search(r'(?i)action\s*=\s*["\']([^"\']*)["\']', form)
+    action = m.group(1) if m else ""
+    fields: Dict[str, str] = {}
+    user_field = pass_field = None
+    for tag in re.findall(r"(?i)<input\b[^>]*>", form):
+        attrs = dict(re.findall(r'(\w+)\s*=\s*["\']([^"\']*)["\']', tag))
+        name = attrs.get("name")
+        if not name:
+            continue
+        itype = (attrs.get("type") or "text").lower()
+        if itype == "password" or re.search(r"pass|pin", name, re.I):
+            pass_field = pass_field or name
+        elif re.search(r"^user|user(name)?$|login|barcode|^id$", name, re.I) and itype in ("text", "email"):
+            user_field = user_field or name
+        elif itype in ("hidden", "submit"):
+            fields[name] = attrs.get("value", "")
+    return action, fields, user_field, pass_field
+
+
+def _new_proxy_session() -> requests.Session:
+    """Log in to the Laurier EZproxy and return an authenticated session."""
+    creds = _load_credentials()
+    session = requests.Session()
+    session.headers.update({"User-Agent": _OMNI_HEADERS["User-Agent"]})
+
+    # A pasted browser cookie skips login entirely (and survives Duo/SSO).
+    if creds.get("cookie"):
+        raw = creds["cookie"]
+        for part in raw.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                name, val = part.split("=", 1)
+                session.cookies.set(name.strip(), val.strip(), domain=_PROXY_HOST)
+            else:
+                session.cookies.set("ezproxy", part, domain=_PROXY_HOST)
+        return session
+
+    if not (creds.get("user") and creds.get("pass")):
+        raise LibraryAuthError("no-creds")
+
+    resp = session.get(_PROXY_LOGIN_URL, timeout=SCHOLAR_TIMEOUT_SEC, allow_redirects=True)
+    if _SSO_MARKER_RE.search(resp.url) or _SSO_MARKER_RE.search(resp.text[:8000] or ""):
+        raise LibraryAuthError("sso", resp.url)
+
+    action, fields, user_field, pass_field = _parse_login_form(resp.text)
+    fields[user_field or "user"] = creds["user"]
+    fields[pass_field or "pass"] = creds["pass"]
+    post_url = urljoin(resp.url, action or _PROXY_LOGIN_URL)
+    resp2 = session.post(post_url, data=fields, timeout=SCHOLAR_TIMEOUT_SEC, allow_redirects=True)
+
+    if any(c.name.lower().startswith("ezproxy") for c in session.cookies):
+        return session
+    if _SSO_MARKER_RE.search(resp2.url):
+        raise LibraryAuthError("sso", resp2.url)
+    if resp2.status_code in (401, 403) or re.search(
+            r"(?i)invalid|incorrect|denied|failed", resp2.text[:4000] or ""):
+        raise LibraryAuthError("bad-creds")
+    raise LibraryAuthError("login-failed", f"HTTP {resp2.status_code}")
+
+
+def _get_proxy_session(force_new: bool = False) -> requests.Session:
+    global _proxy_session, _proxy_session_ts
+    with _LOCK:
+        if (not force_new and _proxy_session is not None
+                and time.time() - _proxy_session_ts < _PROXY_SESSION_TTL):
+            return _proxy_session
+    session = _new_proxy_session()
+    with _LOCK:
+        _proxy_session = session
+        _proxy_session_ts = time.time()
+    return session
+
+
+# ================================================================================
+# FULL-TEXT RETRIEVAL
+# ================================================================================
+
+_MAX_FETCH_BYTES = 20_000_000  # PDFs of scanned book chapters get big
+_READ_MAX_CHARS_DEFAULT = int(os.getenv("SCHOLAR_READ_MAX_CHARS", "12000"))
+
+# <meta name="citation_pdf_url" content="..."> — the near-universal way
+# publishers advertise the PDF (it's what Google Scholar indexes).
+_CITATION_PDF_RES = [
+    re.compile(r'(?is)<meta[^>]+name\s*=\s*["\']citation_pdf_url["\'][^>]*content\s*=\s*["\']([^"\']+)["\']'),
+    re.compile(r'(?is)<meta[^>]+content\s*=\s*["\']([^"\']+)["\'][^>]*name\s*=\s*["\']citation_pdf_url["\']'),
+]
+
+_PAYWALL_MARKERS = [
+    "purchase access", "buy this article", "get access", "access options",
+    "institutional login", "log in via your institution", "sign in to continue",
+    "purchase pdf", "rent this article", "add to cart",
+]
+
+
+def _bounded_get(getter, url: str, timeout: int = 30,
+                 max_bytes: int = _MAX_FETCH_BYTES) -> Tuple[str, str, bytes]:
+    """GET with a byte cap. Returns (final_url, content_type, body)."""
+    resp = getter(url, timeout=timeout, stream=True, allow_redirects=True)
+    resp.raise_for_status()
+    content = b""
+    for chunk in resp.iter_content(chunk_size=65536):
+        if chunk:
+            content += chunk
+            if len(content) > max_bytes:
+                break
+    return resp.url, (resp.headers.get("content-type") or ""), content
+
+
+def _pdf_to_text(data: bytes, max_chars: int) -> Optional[str]:
+    try:
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        pages = []
+        total = 0
+        for page in reader.pages:
+            t = page.extract_text() or ""
+            pages.append(t)
+            total += len(t)
+            if total >= max_chars * 3:  # a little slack, trimmed later
+                break
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(pages)).strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _looks_like_pdf(ctype: str, body: bytes) -> bool:
+    return "pdf" in (ctype or "").lower() or body[:5] == b"%PDF-"
+
+
+def _extract_fulltext(getter, url: str, max_chars: int) -> Optional[dict]:
+    """Fetch url and pull readable article text out of PDF or HTML.
+
+    Returns {"text", "final_url", "format", "pdf_bytes"?} or None.
+    """
+    final_url, ctype, body = _bounded_get(getter, url)
+
+    if _looks_like_pdf(ctype, body):
+        text = _pdf_to_text(body, max_chars)
+        if text:
+            return {"text": text, "final_url": final_url, "format": "pdf",
+                    "pdf_bytes": body}
+        return None
+
+    html = body.decode("utf-8", errors="ignore")
+
+    # Landing page? Hunt for the advertised PDF and fetch that instead.
+    for pat in _CITATION_PDF_RES:
+        m = pat.search(html)
+        if m:
+            pdf_url = urljoin(final_url, m.group(1))
+            try:
+                pdf_final, pdf_ctype, pdf_body = _bounded_get(getter, pdf_url)
+                if _looks_like_pdf(pdf_ctype, pdf_body):
+                    text = _pdf_to_text(pdf_body, max_chars)
+                    if text:
+                        return {"text": text, "final_url": pdf_final,
+                                "format": "pdf", "pdf_bytes": pdf_body}
+            except Exception:
+                pass
+            break
+
+    # Fall back to the page's own text (many journals serve full HTML).
+    from .web import _clean_html_to_text
+    text = _clean_html_to_text(html, max_chars=max_chars)
+    if text and len(text) > 200:
+        return {"text": text, "final_url": final_url, "format": "html"}
+    return None
+
+
+def _save_to_library(title: str, doi: Optional[str], fulltext: dict) -> Optional[str]:
+    """Drop the fetched article into Blue's document library under Papers/."""
+    try:
+        from .documents import DOCUMENTS_FOLDER, ensure_unique_path
+        papers_dir = os.path.join(DOCUMENTS_FOLDER, "Papers")
+        os.makedirs(papers_dir, exist_ok=True)
+        slug = re.sub(r"[^A-Za-z0-9 _-]+", "", title or (doi or "paper")).strip()
+        slug = re.sub(r"\s+", "_", slug)[:80] or "paper"
+        if fulltext.get("format") == "pdf" and fulltext.get("pdf_bytes"):
+            path = ensure_unique_path(papers_dir, f"{slug}.pdf")
+            with open(path, "wb") as f:
+                f.write(fulltext["pdf_bytes"])
+        else:
+            path = ensure_unique_path(papers_dir, f"{slug}.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                if doi:
+                    f.write(f"{title}\nDOI: {doi}\nSource: {fulltext.get('final_url')}\n\n")
+                f.write(fulltext["text"])
+        # Best-effort immediate semantic indexing; the startup rescan of
+        # DOCUMENTS_FOLDER will pick it up regardless.
+        try:
+            from .rag import index_document
+            index_document(path, os.path.basename(path), folder="Papers")
+        except Exception:
+            pass
+        return path
+    except Exception:
+        return None
+
+
+def execute_read_paper(args: dict) -> str:
+    """Fetch ONE article's full text so Blue can actually read it."""
+    args = args or {}
+    doi = _clean_doi(args.get("doi") or "")
+    url = (args.get("url") or "").strip()
+    title_query = (args.get("title") or "").strip()
+    max_chars = max(2000, min(int(args.get("max_chars") or _READ_MAX_CHARS_DEFAULT), 60000))
+    save = bool(args.get("save"))
+
+    if not doi and not url and not title_query:
+        return json.dumps({
+            "success": False,
+            "error": "Provide a DOI, a URL, or a paper title to read."
+        })
+
+    with _LOCK:
+        if not _budget_ok():
+            return json.dumps({
+                "success": False,
+                "error": "[RATE LIMIT] Too many scholarly fetches this minute. Wait ~60 seconds and try again."
+            })
+        _record_call()
+
+    # Resolve a bare title to a DOI so we have something fetchable + citable.
+    if not doi and not url:
+        try:
+            hits = _crossref_search(title_query, 1)
+            if hits and hits[0].get("doi"):
+                doi = hits[0]["doi"]
+        except Exception:
+            pass
+        if not doi:
+            return json.dumps({
+                "success": False,
+                "error": f"Couldn't resolve '{title_query}' to a DOI. Run search_scholar first and read from a result.",
+            }, ensure_ascii=False)
+
+    # Metadata for citing what we read (best-effort).
+    title, authors, year, venue = title_query or None, [], None, None
+    if doi:
+        try:
+            cr = _crossref_by_doi(doi)
+            if cr:
+                norm = _normalize_crossref(cr, 1)
+                title = norm.get("title") or title
+                authors = norm.get("authors") or []
+                year = norm.get("year")
+                venue = norm.get("venue")
+        except Exception:
+            pass
+
+    target = url or _doi_url(doi)
+    fulltext = None
+    access_route = None
+    notes: List[str] = []
+
+    # 1) Legal open-access copy — no sign-in needed at all.
+    if doi:
+        oa_url = _unpaywall_pdf(doi)
+        if oa_url:
+            try:
+                plain = requests.Session()
+                plain.headers.update({"User-Agent": _OMNI_HEADERS["User-Agent"]})
+                fulltext = _extract_fulltext(plain.get, oa_url, max_chars)
+                if fulltext:
+                    access_route = "open_access"
+            except Exception:
+                notes.append("Open-access copy found but couldn't be fetched.")
+
+    # 2) Licensed copy through the Laurier proxy with Alex's credentials.
+    if fulltext is None:
+        try:
+            session = _get_proxy_session()
+            try:
+                fulltext = _extract_fulltext(session.get, proxy_link(target), max_chars)
+            except requests.exceptions.HTTPError:
+                # Session may have idled out server-side; one fresh login retry.
+                session = _get_proxy_session(force_new=True)
+                fulltext = _extract_fulltext(session.get, proxy_link(target), max_chars)
+            if fulltext:
+                access_route = "laurier_proxy"
+        except LibraryAuthError as e:
+            notes.append(_auth_guidance(e.code))
+        except Exception as e:
+            notes.append(f"Laurier proxy fetch failed ({e.__class__.__name__}).")
+
+    if fulltext is None:
+        return json.dumps({
+            "success": False,
+            "error": "Couldn't retrieve the full text of this article.",
+            "title": title,
+            "doi": doi,
+            "library_account": library_account_status(),
+            "notes": notes,
+            "laurier_access": proxy_link(target),
+            "_instruction": (
+                "Tell Alex plainly why the full text couldn't be fetched "
+                "(see notes — if credentials are missing or blocked by SSO, "
+                "relay the setup steps verbatim) and give the laurier_access "
+                "link so he can read it in the browser."
+            ),
+        }, ensure_ascii=False)
+
+    text = fulltext["text"]
+    truncated = len(text) >= max_chars
+    text_lower = text[:4000].lower()
+    paywall_suspected = (
+        access_route == "laurier_proxy"
+        and fulltext.get("format") == "html"
+        and (len(text) < 1500 or any(m in text_lower for m in _PAYWALL_MARKERS))
+    )
+    if paywall_suspected:
+        notes.append(
+            "This looks like it may be only the abstract/paywall page, not "
+            "the full article — the proxy session may not be signed in."
+        )
+
+    saved_to = None
+    if save and not paywall_suspected:
+        saved_to = _save_to_library(title or title_query, doi, fulltext)
+        if saved_to:
+            notes.append(f"Saved into Blue's library: {saved_to}")
+
+    payload = json.dumps({
+        "success": True,
+        "title": title,
+        "authors": authors,
+        "year": year,
+        "venue": venue,
+        "doi": doi,
+        "access_route": access_route,
+        "format": fulltext.get("format"),
+        "source_url": fulltext.get("final_url"),
+        "text_chars": len(text),
+        "truncated": truncated,
+        "paywall_suspected": paywall_suspected,
+        "saved_to": saved_to,
+        "notes": notes,
+        "text": text,
+        "_instruction": (
+            "You now have the article's text — do serious scholarly work with "
+            "it: lay out the argument, methods, and findings; quote sparingly "
+            "and mark quotes clearly; distinguish the authors' claims from "
+            "your commentary; and cite it (authors, year, venue, DOI). "
+            + ("NOTE: the text was truncated at the character limit; say so "
+               "if asked about later sections. " if truncated else "")
+            + ("WARNING: this may be just the abstract/paywall page — check "
+               "the notes and be upfront about it. " if paywall_suspected else "")
+        ),
+    }, ensure_ascii=False)
+    return payload
+
+
 __all__ = [
     'execute_scholar_search',
     'execute_get_paper',
+    'execute_read_paper',
+    'library_account_status',
     'proxy_link',
     'omni_search_url',
     'WLU_PROXY_PREFIX',

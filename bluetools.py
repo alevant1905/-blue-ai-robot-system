@@ -147,9 +147,13 @@ except ImportError:
 # Scholarly research — academic journal search wired to the Laurier library
 # (Omni discovery + OpenAlex/Crossref/Unpaywall; full text via libproxy links)
 try:
-    from blue.tools.scholar import execute_scholar_search, execute_get_paper
+    from blue.tools.scholar import (
+        execute_scholar_search, execute_get_paper, execute_read_paper,
+        library_account_status,
+    )
     SCHOLAR_AVAILABLE = True
-    print("[OK] Scholar tools loaded - Laurier library & academic journal search ready!")
+    print(f"[OK] Scholar tools loaded - Laurier library search ready! "
+          f"(library account: {library_account_status()})")
 except ImportError as e:
     SCHOLAR_AVAILABLE = False
     print(f"[WARN] Scholar tools not available: {e}")
@@ -3931,6 +3935,23 @@ TOOLS = [
                 "properties": {
                     "doi": {"type": "string", "description": "The paper's DOI, e.g. 10.1080/10749039.2016.1188352"},
                     "title": {"type": "string", "description": "Exact or near-exact paper title (used if no DOI)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_paper",
+            "description": "READ the FULL TEXT of ONE academic article so you can summarize, analyze, or synthesize it. Fetches a legal open-access copy when one exists, otherwise retrieves the licensed copy through the Wilfrid Laurier University library proxy using Alex's library account. USE THIS after search_scholar/get_paper when Alex wants the actual content of a paper ('read it', 'summarize that article', 'what does the paper argue'). Fetches one article per call — do research by reading a few key papers, not by mass-downloading.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doi": {"type": "string", "description": "The article's DOI (preferred — from search_scholar/get_paper results)"},
+                    "url": {"type": "string", "description": "Direct article URL if no DOI is available"},
+                    "title": {"type": "string", "description": "Paper title (used to resolve a DOI if neither doi nor url given)"},
+                    "max_chars": {"type": "integer", "description": "Max characters of article text to return (default 12000)"},
+                    "save": {"type": "boolean", "description": "Also save the article into Blue's document library (Papers folder) for future RAG citation"}
                 }
             }
         }
@@ -8701,6 +8722,20 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
         print(f"   [OK] Paper lookup completed")
         return result
 
+    elif tool_name == "read_paper":
+        if not SCHOLAR_AVAILABLE:
+            return json.dumps({"error": "Scholarly search is not available."})
+        result = execute_read_paper(tool_args)
+        try:
+            _rp = json.loads(result)
+            if _rp.get("success"):
+                print(f"   [OK] Paper read via {_rp.get('access_route')} ({_rp.get('text_chars')} chars)")
+            else:
+                print(f"   [WARN] Paper fetch failed: {_rp.get('error')}")
+        except Exception:
+            pass
+        return result
+
     elif tool_name == "run_javascript":
         try:
             import js2py
@@ -10571,6 +10606,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _DIRECT_EXEC_TOOLS = {
         'get_weather', 'capture_camera', 'web_search', 'read_gmail',
         'search_documents', 'browse_website', 'search_scholar', 'get_paper',
+        'read_paper',
     }
     if (improved_force_tool and improved_force_tool in _DIRECT_EXEC_TOOLS
             and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
@@ -15112,6 +15148,7 @@ if __name__ == "__main__":
     print("   • web_search 🔍")
     print("   • search_scholar (academic journals + Laurier library) 🎓")
     print("   • get_paper (DOI/title lookup, citations, full-text links) 📖")
+    print("   • read_paper (fetch & read full text via Laurier account) 📚")
     print("   • run_javascript 💻")
     print("   • create_document (save files) 📝")
     print("   • browse_website (fetch URLs) 🌐")
@@ -15666,6 +15703,12 @@ for alias in ["scholar_search", "academic_search", "search_journals",
               "search_academic", "library_search"]:
     if alias not in KNOWN_TOOL_ALIASES["search_scholar"]:
         KNOWN_TOOL_ALIASES["search_scholar"].append(alias)
+
+KNOWN_TOOL_ALIASES.setdefault("read_paper", [])
+for alias in ["read_article", "fetch_paper", "get_full_text", "fetch_article",
+              "download_paper", "read_fulltext"]:
+    if alias not in KNOWN_TOOL_ALIASES["read_paper"]:
+        KNOWN_TOOL_ALIASES["read_paper"].append(alias)
 
 # ---- Add Gmail tool aliases ----
 KNOWN_TOOL_ALIASES.setdefault("read_gmail", [])

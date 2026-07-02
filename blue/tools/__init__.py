@@ -60,7 +60,8 @@ _LAZY_MAP = {
         "SEARCH_RESULTS_PER_QUERY",
     ),
     "scholar": (
-        "execute_scholar_search", "execute_get_paper", "proxy_link",
+        "execute_scholar_search", "execute_get_paper", "execute_read_paper",
+        "library_account_status", "proxy_link",
         "omni_search_url", "WLU_PROXY_PREFIX", "OMNI_HOST", "OMNI_VID",
         "SCHOLAR_MAX_PER_MINUTE", "SCHOLAR_CACHE_TTL_SEC",
         "SCHOLAR_RESULTS_PER_QUERY",

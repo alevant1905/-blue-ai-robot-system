@@ -49,8 +49,8 @@ Blue AI Robot System is a modular, extensible platform that provides:
 ### 🎓 Scholarly Research
 - **Academic Journal Search** - Peer-reviewed literature via OpenAlex, Crossref, and Omni (the Wilfrid Laurier University library's discovery system)
 - **Paper Lookup** - DOI/title lookup with abstracts, citation counts, and APA citations
-- **Laurier Full-Text Access** - Every result carries a `libproxy.wlu.ca` link; sign in with your own Laurier account for licensed full text (Blue never stores your library password)
-- **Open Access PDFs** - Legal free copies resolved through Unpaywall
+- **Full-Text Reading** - Blue fetches and reads articles: legal open-access copies via Unpaywall, or licensed copies through the Laurier library proxy using your library account (one article at a time, on demand)
+- **Save to Library** - Fetched papers can be dropped into Blue's document library (`Papers/`) and indexed for RAG citation later
 
 ### ⚙️ System Control
 - **Clipboard Management** - Copy/paste automation
@@ -233,6 +233,35 @@ export BLUE_CONTACTS_DB="path/to/contacts.db"
 5. Download as `gmail_credentials.json`
 6. Place in project root
 7. Run Blue - it will prompt for authorization
+
+### Laurier Library Setup (full-text access)
+
+Searching journals needs no setup. To let Blue *read* licensed full text
+through the library proxy, give it your library sign-in — it stays on your
+machine (`wlu_credentials.json` is gitignored) and is used one article at a
+time, on demand:
+
+1. Create `wlu_credentials.json` in the project root:
+```json
+{
+  "user": "your Laurier username",
+  "pass": "your password"
+}
+```
+2. If your library login goes through campus single-sign-on with Duo MFA,
+   a password alone can't get through. Sign in once in your browser at
+   https://libproxy.wlu.ca/login, copy the `ezproxy` cookie value
+   (DevTools → Application → Cookies), and use that instead:
+```json
+{
+  "cookie": "ezproxy=PASTE_VALUE_HERE"
+}
+```
+3. Env vars `WLU_LIBRARY_USER` / `WLU_LIBRARY_PASS` / `WLU_PROXY_COOKIE`
+   override the file.
+
+Blue fetches single articles you ask about — it does not bulk-download,
+which the library's database licenses prohibit.
 
 ### Philips Hue Setup
 
