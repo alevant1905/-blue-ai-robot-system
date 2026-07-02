@@ -239,7 +239,16 @@ export BLUE_CONTACTS_DB="path/to/contacts.db"
 Searching journals needs no setup. To let Blue *read* licensed full text
 through the library proxy, give it your library sign-in — it stays on your
 machine (`wlu_credentials.json` is gitignored) and is used one article at a
-time, on demand:
+time, on demand.
+
+**Easiest way — run the interactive setup:**
+```bash
+python setup_library.py
+```
+It asks for your sign-in, writes the credentials file for you, and tests
+the login immediately.
+
+**Or set it up by hand:**
 
 1. Create `wlu_credentials.json` in the project root:
 ```json
