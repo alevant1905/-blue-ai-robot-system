@@ -11,6 +11,7 @@ from .gmail import GmailDetector
 from .lights import LightsDetector
 from .documents import DocumentsDetector
 from .web import WebDetector
+from .scholar import ScholarDetector
 from .vision import VisionDetector
 from .weather import WeatherDetector
 from .calendar import CalendarDetector
@@ -34,6 +35,7 @@ __all__ = [
     'LightsDetector',
     'DocumentsDetector',
     'WebDetector',
+    'ScholarDetector',
     'VisionDetector',
     'WeatherDetector',
     'CalendarDetector',

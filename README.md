@@ -46,6 +46,12 @@ Blue AI Robot System is a modular, extensible platform that provides:
 - **Web Search** - Integrated search capabilities
 - **Document Management** - RAG-based document search
 
+### 🎓 Scholarly Research
+- **Academic Journal Search** - Peer-reviewed literature via OpenAlex, Crossref, and Omni (the Wilfrid Laurier University library's discovery system)
+- **Paper Lookup** - DOI/title lookup with abstracts, citation counts, and APA citations
+- **Laurier Full-Text Access** - Every result carries a `libproxy.wlu.ca` link; sign in with your own Laurier account for licensed full text (Blue never stores your library password)
+- **Open Access PDFs** - Legal free copies resolved through Unpaywall
+
 ### ⚙️ System Control
 - **Clipboard Management** - Copy/paste automation
 - **Screenshots** - Capture and manage screenshots
@@ -203,6 +209,14 @@ export LM_STUDIO_MODEL="your-model-name"
 
 # Gmail
 export GMAIL_USER_EMAIL="your.email@gmail.com"
+
+# Scholarly research (all optional — defaults target Wilfrid Laurier University)
+export WLU_PROXY_PREFIX="https://libproxy.wlu.ca/login?url="  # library off-campus proxy
+export OMNI_HOST="ocul-wlu.primo.exlibrisgroup.com"           # Omni/Primo VE discovery host
+export OMNI_VID="01OCUL_WLU:WLU_DEF"                          # Primo view ID
+export OMNI_INST="01OCUL_WLU"                                 # Primo institution code
+export OMNI_SCOPE="MyInst_and_CI"                             # search profile scope
+export UNPAYWALL_EMAIL="your.email@gmail.com"                 # polite-pool contact for OpenAlex/Crossref/Unpaywall
 
 # Database Locations (optional)
 export BLUE_CALENDAR_DB="path/to/calendar.db"
