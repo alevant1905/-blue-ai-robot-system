@@ -15512,31 +15512,39 @@ def hexia_chat_page():
 DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blue &amp; Hexia — Let them talk</title>
+<link rel="stylesheet" href="/assets/blue.css">
+<script src="/assets/blue.js" defer></script>
 <style>
- :root{ --bluec:#3da9fc; --hexiac:#b06cf0; }
- body{font-family:-apple-system,'Segoe UI',sans-serif;background:#faf8f4;color:#1a2e1a;max-width:760px;margin:0 auto;padding:26px 18px;line-height:1.5}
+ :root{ --bluec:#3da9fc; --hexiac:#b06cf0;
+   --cream:#faf8f4; --paper:#ffffff; --ink:#1a2e1a; --forest:#4a6b4a;
+   --sage:#8fae8f; --slate:#64748b; --blue:#3b82f6; --gold:#d4af37;
+   --line:#cfc9bd; --shadow:0 1px 3px rgba(0,0,0,.06); }
+ body{font-family:-apple-system,'Segoe UI',sans-serif;background:var(--cream);color:var(--ink);max-width:760px;margin:0 auto;padding:26px 18px;line-height:1.5}
  h1{font-size:1.5em;margin-bottom:4px}
- p.sub{color:#64748b;margin-bottom:16px;font-size:.95em}
+ p.sub{color:var(--slate);margin-bottom:16px;font-size:.95em}
  .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
- input[type=text]{flex:1;min-width:200px;padding:10px 12px;border:1px solid #cfc9bd;border-radius:8px;font:inherit}
- select,button{padding:9px 13px;border:1px solid #cfc9bd;border-radius:8px;background:#fff;font:inherit;cursor:pointer}
+ input[type=text]{flex:1;min-width:200px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font:inherit}
+ select,button{padding:9px 13px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font:inherit;cursor:pointer;color:var(--ink)}
  button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
  button:disabled{opacity:.5;cursor:default}
- .muted{color:#64748b;font-size:.9em}
+ .muted{color:var(--slate);font-size:.9em}
  #log{display:flex;flex-direction:column;gap:10px;margin-top:12px}
- .turn{padding:10px 14px;border-radius:14px;max-width:84%;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+ .turn{padding:10px 14px;border-radius:14px;max-width:84%;box-shadow:var(--shadow)}
  .turn .who{font-size:.7em;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-bottom:3px}
  .turn.blue{align-self:flex-start;background:#eaf4ff;border:1px solid #cfe4fb}
  .turn.blue .who{color:var(--bluec)}
  .turn.hexia{align-self:flex-end;background:#f4ecfc;border:1px solid #e6d6f7}
  .turn.hexia .who{color:var(--hexiac)}
  .turn.speaking{box-shadow:0 0 0 2px currentColor}
- .srcbox{border:1px solid #cfc9bd;border-radius:8px;padding:8px;max-height:180px;overflow:auto;background:#fff;font-size:.9em}
- .srcbox .fold{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:#4a6b4a;margin:7px 0 3px;font-weight:600}
+ .srcbox{border:1px solid var(--line);border-radius:8px;padding:8px;max-height:180px;overflow:auto;background:var(--paper);font-size:.9em}
+ .srcbox .fold{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);margin:7px 0 3px;font-weight:600}
  .srcbox .fold:first-child{margin-top:0}
  .srcbox label{display:flex;gap:7px;align-items:flex-start;padding:3px 0;cursor:pointer}
  .srcbox input{margin-top:3px;flex:none}
- .srccount{font-size:.8em;color:#64748b}
+ .srccount{font-size:.8em;color:var(--slate)}
+ /* Midnight: the robots' identity bubbles become glass tints. */
+ :root:not([data-theme="light"]) .turn.blue{background:rgba(61,169,252,.12);border-color:rgba(61,169,252,.35)}
+ :root:not([data-theme="light"]) .turn.hexia{background:rgba(176,108,240,.12);border-color:rgba(176,108,240,.35)}
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
 <p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
@@ -16983,6 +16991,8 @@ HEAD_HTML = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ head_robot_name }}'s Head — Tuning</title>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/blue.css">
+    <script src="/assets/blue.js" defer></script>
     <style>
         :root { --cream:#faf8f4; --paper:#fff; --ink:#1a2e1a; --forest:#4a6b4a; --sage:#8fae8f; --slate:#64748b; --line:rgba(143,174,143,0.32); --shadow:0 8px 24px rgba(26,46,26,0.06); }
         * { box-sizing:border-box; margin:0; padding:0; }
@@ -18171,23 +18181,35 @@ HEADS_HTML = """
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Robot Heads &mdash; Setup</title>
+<link rel="stylesheet" href="/assets/blue.css">
+<script src="/assets/blue.js" defer></script>
 <style>
- body{font-family:-apple-system,'Segoe UI',sans-serif;background:#faf8f4;color:#1a2e1a;max-width:780px;margin:0 auto;padding:28px 20px;line-height:1.55}
+ :root{ --cream:#faf8f4; --paper:#ffffff; --ink:#1a2e1a; --forest:#4a6b4a;
+   --sage:#8fae8f; --slate:#64748b; --blue:#3b82f6; --gold:#d4af37;
+   --line:#e3e0d8; --shadow:0 1px 3px rgba(0,0,0,.06); }
+ body{font-family:-apple-system,'Segoe UI',sans-serif;background:var(--cream);color:var(--ink);max-width:780px;margin:0 auto;padding:28px 20px;line-height:1.55}
  h1{font-size:1.55em;margin-bottom:4px}
- p.sub{color:#64748b;margin-bottom:18px;font-size:.95em}
+ p.sub{color:var(--slate);margin-bottom:18px;font-size:.95em}
  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.92em}
- th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e3e0d8;vertical-align:top}
- th{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:#4a6b4a}
+ th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+ th{font-size:.72em;text-transform:uppercase;letter-spacing:.08em;color:var(--forest)}
  .ok{color:#2e7d32;font-weight:600}.no{color:#9aa0a6}
  .pill{display:inline-block;padding:2px 9px;border-radius:11px;font-size:.8em}
  .pill.blue{background:#e3f0ff;color:#1b63b0}.pill.hexia{background:#f1e6fb;color:#7a3fb0}
- button{padding:6px 11px;border:1px solid #cfc9bd;border-radius:7px;background:#fff;cursor:pointer;font:inherit;font-size:.88em;margin:2px 6px 2px 0}
- button:hover{background:#f3f0e9}button:disabled{opacity:.4;cursor:default}
+ button{padding:6px 11px;border:1px solid var(--line);border-radius:7px;background:var(--paper);cursor:pointer;font:inherit;font-size:.88em;margin:2px 6px 2px 0;color:var(--ink)}
+ button:hover{background:var(--mg-glass2,#f3f0e9)}button:disabled{opacity:.4;cursor:default}
  button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
  #msg{margin:12px 0;padding:10px 12px;border-radius:8px;display:none}
  #msg.show{display:block}
  #msg.good{background:#eaf5ea;color:#23611f}#msg.bad{background:#f7ece9;color:#7a2e22}
  code{background:#f0ede6;padding:1px 5px;border-radius:4px;font-size:.9em}
+ /* Midnight: status colors and pills become glass tints. */
+ :root:not([data-theme="light"]) .ok{color:#4ade80}
+ :root:not([data-theme="light"]) .no{color:var(--slate)}
+ :root:not([data-theme="light"]) .pill.blue{background:rgba(61,169,252,.14);color:#7fc4ff}
+ :root:not([data-theme="light"]) .pill.hexia{background:rgba(176,108,240,.14);color:#c9a1f5}
+ :root:not([data-theme="light"]) #msg.good{background:rgba(74,222,128,.12);color:#4ade80}
+ :root:not([data-theme="light"]) #msg.bad{background:rgba(248,113,113,.12);color:#f87171}
 </style></head><body>
 <h1>Robot Heads</h1>
 <p class="sub">Blue and Hexia each drive their own Ohbot board over USB. Plug a board in, click <b>Refresh</b>, then assign it. Assignments are pinned by the board's USB serial number, so they survive reboots and COM-port renumbering. The Ohbot desktop app must be closed (it holds the port).</p>
@@ -19541,26 +19563,163 @@ def visual_capture():
 # ===== Shared theme assets (polish + dark mode + identity) =====
 
 BLUE_CSS = r"""
-/* Shared polish + theming for Blue AI Robot System.
-   Every page defines the same CSS variables (--cream, --ink, --paper, ...),
-   so dark mode only has to flip those variables here, plus fix the few
-   strong-background elements that hardcode white text. */
+/* ============================================================================
+   Blue AI Robot System — "Midnight Glass" design system.
+
+   Every page defines the same CSS variables (--cream, --ink, --paper, ...)
+   with the old light "cream" values inline. This sheet makes MIDNIGHT the
+   default by overriding those variables (and the handful of hardcoded
+   surfaces) under `:root:not([data-theme="light"])`, which out-specifies the
+   pages' own `:root` blocks. Choosing the light theme (the floating toggle,
+   or kid mode) simply sets data-theme="light" — every rule here stands down
+   and the pages' original cream styling shows through untouched.
+   ========================================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
        text-rendering: optimizeLegibility; scroll-behavior: smooth; }
-::selection { background: rgba(212,175,55,0.28); }
 *:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
 * { scrollbar-width: thin; scrollbar-color: var(--sage) transparent; }
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-thumb { background: var(--sage); border-radius: 7px;
     border: 3px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--forest); background-clip: content-box; }
+::selection { background: rgba(96,165,250,0.35); }
+:root[data-theme="light"] ::selection { background: rgba(212,175,55,0.28); }
 
-/* Floating light/dark toggle, injected on every page by blue.js */
+/* ===== MIDNIGHT GLASS (default theme) ================================== */
+:root:not([data-theme="light"]) {
+    /* Legacy palette names, remapped so every page flips at once. */
+    --cream:#070d1a;                    /* page background       */
+    --paper:rgba(17,28,50,0.72);        /* glass card surface    */
+    --ink:#e8eefb;                      /* main text             */
+    --forest:#7fb2ff;                   /* old green accent → blue */
+    --sage:#3d5580;                     /* soft accent / scrollbars */
+    --slate:#8fa3c7;                    /* secondary text        */
+    --blue:#60a5fa; --gold:#fbbf24;
+    --line:rgba(148,184,255,0.16);
+    --shadow:0 14px 40px rgba(0,0,0,0.45);
+    /* New tokens for this sheet's own components. */
+    --mg-cyan:#5eead4; --mg-violet:#a78bfa;
+    --mg-grad:linear-gradient(135deg,#2563eb,#0891b2);
+    --mg-glass:rgba(148,184,255,0.06); --mg-glass2:rgba(148,184,255,0.11);
+    color-scheme: dark;
+}
+:root:not([data-theme="light"]) body {
+    background:
+        radial-gradient(1100px 650px at 82% -10%, #14264d 0%, transparent 60%),
+        radial-gradient(900px 600px at -12% 38%, #0e2a33 0%, transparent 55%),
+        #070d1a fixed;
+    color: var(--ink);
+}
+/* Display face: Space Grotesk replaces the serif on midnight. */
+:root:not([data-theme="light"]) h1,
+:root:not([data-theme="light"]) h2,
+:root:not([data-theme="light"]) h3,
+:root:not([data-theme="light"]) .wordmark .name,
+:root:not([data-theme="light"]) .tile h2,
+:root:not([data-theme="light"]) .about h2 {
+    font-family: 'Space Grotesk', 'IBM Plex Sans', -apple-system, sans-serif !important;
+    letter-spacing: -0.02em;
+}
+:root:not([data-theme="light"]) .wordmark .name {
+    background: linear-gradient(90deg,#dbeafe,#5eead4);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+:root:not([data-theme="light"]) .wordmark .sys { color: var(--slate); }
+/* Glass surfaces: cards & panels blur what's behind them. */
+:root:not([data-theme="light"]) .tile,
+:root:not([data-theme="light"]) .card,
+:root:not([data-theme="light"]) .about,
+:root:not([data-theme="light"]) .modal,
+:root:not([data-theme="light"]) .panel,
+:root:not([data-theme="light"]) .day-panel,
+:root:not([data-theme="light"]) .stat-card,
+:root:not([data-theme="light"]) .chip {
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+}
+:root:not([data-theme="light"]) .tile:hover {
+    border-color: rgba(94,234,212,0.4);
+    box-shadow: 0 18px 44px rgba(0,0,0,0.55);
+}
+/* Strong-background elements (were forest green): electric gradient + glow. */
+:root:not([data-theme="light"]) .btn-primary,
+:root:not([data-theme="light"]) .btn-save,
+:root:not([data-theme="light"]) .sendbtn,
+:root:not([data-theme="light"]) .file-input-label,
+:root:not([data-theme="light"]) .upload-btn,
+:root:not([data-theme="light"]) .download-btn,
+:root:not([data-theme="light"]) .newfolder-form button,
+:root:not([data-theme="light"]) button.primary,
+:root:not([data-theme="light"]) .tree a.active,
+:root:not([data-theme="light"]) .cell.today .num,
+:root:not([data-theme="light"]) .tab.active,
+:root:not([data-theme="light"]) .row.user .bubble,
+:root:not([data-theme="light"]) .tile-cta {
+    background: var(--mg-grad) !important; color: #f4f9ff !important;
+    border-color: transparent !important;
+}
+:root:not([data-theme="light"]) .btn-primary:hover,
+:root:not([data-theme="light"]) .sendbtn:hover:not(:disabled),
+:root:not([data-theme="light"]) .file-input-label:hover,
+:root:not([data-theme="light"]) .upload-btn:hover:not(:disabled),
+:root:not([data-theme="light"]) button.primary:hover,
+:root:not([data-theme="light"]) .newfolder-form button:hover {
+    background: linear-gradient(135deg,#3b82f6,#06b6d4) !important;
+    box-shadow: 0 6px 22px rgba(37,99,235,0.45);
+}
+/* Light accent chips → glass surfaces so their text stays legible. */
+:root:not([data-theme="light"]) .avatar,
+:root:not([data-theme="light"]) .photo,
+:root:not([data-theme="light"]) .ev,
+:root:not([data-theme="light"]) .c-rel,
+:root:not([data-theme="light"]) .badge,
+:root:not([data-theme="light"]) .ticon,
+:root:not([data-theme="light"]) .empty-state-icon {
+    background: var(--mg-glass2) !important; color: var(--forest);
+}
+:root:not([data-theme="light"]) .upload-section { background: var(--mg-glass) !important; }
+:root:not([data-theme="light"]) .chip .dot,
+:root:not([data-theme="light"]) .chip i { box-shadow: 0 0 8px currentColor; }
+/* Home "about" prose hardcodes a dark green — lift it on midnight. */
+:root:not([data-theme="light"]) .about p { color: #b9c6e2; }
+:root:not([data-theme="light"]) .about p.lead { color: var(--slate); }
+/* Document manager stat cards hardcode a pale gradient with white numbers. */
+:root:not([data-theme="light"]) .stat-card {
+    background: var(--mg-grad) !important; color: #f4f9ff !important;
+}
+/* Calendar: out-of-month cells hardcode cream; danger buttons hardcode white. */
+:root:not([data-theme="light"]) .cell.other {
+    background: rgba(148,184,255,0.045) !important; color: #4a5d80 !important;
+}
+:root:not([data-theme="light"]) .btn-danger {
+    background: rgba(248,113,113,0.12) !important; color: #f87171 !important;
+    border-color: rgba(248,113,113,0.35) !important;
+}
+/* Form controls on glass. */
+:root:not([data-theme="light"]) input[type="text"],
+:root:not([data-theme="light"]) input[type="password"],
+:root:not([data-theme="light"]) input[type="search"],
+:root:not([data-theme="light"]) input[type="email"],
+:root:not([data-theme="light"]) input[type="number"],
+:root:not([data-theme="light"]) input[type="date"],
+:root:not([data-theme="light"]) input[type="time"],
+:root:not([data-theme="light"]) textarea,
+:root:not([data-theme="light"]) select {
+    background: var(--mg-glass); color: var(--ink);
+    border-color: var(--line);
+}
+:root:not([data-theme="light"]) a { color: var(--forest); }
+:root:not([data-theme="light"]) code { background: var(--mg-glass2); color: var(--mg-cyan); }
+
+/* ===== Floating light/dark toggle (injected by blue.js) ================ */
 .blue-theme-toggle {
-    position: fixed; bottom: 18px; right: 18px; z-index: 9999;
+    position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    right: calc(18px + env(safe-area-inset-right, 0px)); z-index: 9999;
     width: 44px; height: 44px; border-radius: 50%;
     background: var(--paper); color: var(--forest);
-    border: 1px solid var(--line); box-shadow: 0 6px 18px rgba(26,46,26,0.18);
+    border: 1px solid var(--line); box-shadow: var(--shadow);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     display: flex; align-items: center; justify-content: center; cursor: pointer;
     transition: transform .15s ease, color .2s, background .2s;
 }
@@ -19568,52 +19727,69 @@ html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
 .blue-theme-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
     stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
+/* ===== Site-wide nav drawer (injected by blue.js) ======================= */
+.blue-nav-fab {
+    position: fixed; top: calc(14px + env(safe-area-inset-top, 0px));
+    left: calc(14px + env(safe-area-inset-left, 0px)); z-index: 9999;
+    width: 44px; height: 44px; border-radius: 14px;
+    background: var(--paper); color: var(--forest);
+    border: 1px solid var(--line); box-shadow: var(--shadow);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    transition: transform .15s ease;
+}
+.blue-nav-fab:hover { transform: translateY(-2px); }
+.blue-nav-fab svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
+    stroke-width: 1.8; stroke-linecap: round; }
+.blue-nav-scrim {
+    position: fixed; inset: 0; z-index: 9998; background: rgba(3,7,15,0.55);
+    opacity: 0; pointer-events: none; transition: opacity .2s ease;
+}
+.blue-nav-drawer {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 9999;
+    width: min(300px, 84vw); padding: 18px 14px calc(18px + env(safe-area-inset-bottom, 0px));
+    padding-top: calc(18px + env(safe-area-inset-top, 0px));
+    background: var(--cream); border-right: 1px solid var(--line);
+    box-shadow: 0 0 60px rgba(0,0,0,0.5);
+    transform: translateX(-102%); transition: transform .22s ease;
+    overflow-y: auto; display: flex; flex-direction: column; gap: 3px;
+}
+:root:not([data-theme="light"]) .blue-nav-drawer {
+    background: rgba(9,16,32,0.92);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+}
+.blue-nav-open .blue-nav-drawer { transform: none; }
+.blue-nav-open .blue-nav-scrim { opacity: 1; pointer-events: auto; }
+.blue-nav-drawer .bn-title {
+    font-family: 'Space Grotesk', 'IBM Plex Sans', sans-serif; font-weight: 700;
+    font-size: 19px; color: var(--ink); padding: 6px 12px 14px;
+    display: flex; align-items: center; gap: 10px;
+}
+.blue-nav-drawer .bn-orb { width: 22px; height: 22px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #93c5fd, #2563eb 65%);
+    box-shadow: 0 0 14px rgba(96,165,250,0.7); }
+:root[data-theme="light"] .blue-nav-drawer .bn-orb { box-shadow: none; }
+.blue-nav-drawer .bn-sec {
+    font-family: 'JetBrains Mono', 'IBM Plex Mono', monospace; font-size: 10.5px;
+    letter-spacing: 0.2em; text-transform: uppercase; color: var(--slate);
+    padding: 14px 12px 5px;
+}
+.blue-nav-drawer a {
+    display: flex; align-items: center; gap: 11px; text-decoration: none;
+    color: var(--ink); font-size: 15px; font-weight: 500;
+    padding: 11px 12px; border-radius: 12px; min-height: 44px;
+}
+.blue-nav-drawer a:hover { background: var(--mg-glass2, rgba(0,0,0,0.05)); }
+.blue-nav-drawer a.on { background: var(--mg-grad, #1a2e1a); color: #fff; }
+.blue-nav-drawer a svg { width: 19px; height: 19px; flex: none; fill: none;
+    stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
 /* Gentle entrance for cards/containers — a touch of life without bounce. */
 @keyframes blueFadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .container, .card, .grid, .day-panel { animation: blueFadeUp .28s ease both; }
 @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
 
-/* ===== Dark theme: flip the shared palette ===== */
-:root[data-theme="dark"] {
-    --cream:#11160f; --paper:#1a2217; --ink:#e9efe4; --forest:#a9c9a4;
-    --sage:#5f7a5f; --slate:#9fb1a4; --blue:#80b0ff; --gold:#e3c76c;
-    --line:rgba(169,201,164,0.16); --shadow:0 10px 30px rgba(0,0,0,0.5);
-}
-/* Strong-background elements hardcode white text; --ink is now light, so give
-   them a fixed dark surface back. */
-:root[data-theme="dark"] .btn-primary,
-:root[data-theme="dark"] .btn-save,
-:root[data-theme="dark"] .sendbtn,
-:root[data-theme="dark"] .file-input-label,
-:root[data-theme="dark"] .upload-btn,
-:root[data-theme="dark"] .download-btn,
-:root[data-theme="dark"] .newfolder-form button,
-:root[data-theme="dark"] .stat-card,
-:root[data-theme="dark"] .tree a.active,
-:root[data-theme="dark"] .cell.today .num,
-:root[data-theme="dark"] .tab.active,
-:root[data-theme="dark"] .row.user .bubble,
-:root[data-theme="dark"] .tile-cta {
-    background: #294326 !important; color: #f3f7f1 !important;
-}
-:root[data-theme="dark"] .btn-primary:hover,
-:root[data-theme="dark"] .sendbtn:hover:not(:disabled),
-:root[data-theme="dark"] .file-input-label:hover,
-:root[data-theme="dark"] .upload-btn:hover:not(:disabled),
-:root[data-theme="dark"] .newfolder-form button:hover {
-    background: #34552f !important;
-}
-/* Light accent chips → dark surfaces so their text stays legible. */
-:root[data-theme="dark"] .avatar,
-:root[data-theme="dark"] .photo,
-:root[data-theme="dark"] .ev,
-:root[data-theme="dark"] .c-rel,
-:root[data-theme="dark"] .badge,
-:root[data-theme="dark"] .ticon,
-:root[data-theme="dark"] .empty-state-icon { background: #243021 !important; }
-:root[data-theme="dark"] .upload-section { background: #161d13 !important; }
-
-/* ===== Phone-friendly ===== */
+/* ===== Phone-friendly ==================================================== */
 @media (max-width: 640px) {
     /* iOS zooms in when a focused field is under 16px — pin inputs to 16px. */
     input, textarea, select { font-size: 16px !important; }
@@ -19640,34 +19816,105 @@ html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
     .ev { font-size: 0.56em !important; padding: 1px 4px !important; }
     /* Long emails / filenames must wrap, not overflow. */
     .c-sub, .document-name, .ev-time, .tagline { overflow-wrap: anywhere; }
-    .blue-theme-toggle { bottom: 12px; right: 12px; }
+    .blue-theme-toggle { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); right: 12px; }
+    .blue-nav-fab { top: calc(10px + env(safe-area-inset-top, 0px)); left: 10px; }
 }
 """
 
 
 BLUE_JS = r"""
 (function(){
-  try { if (localStorage.getItem('blue-theme') === 'dark')
-          document.documentElement.setAttribute('data-theme','dark'); } catch(e){}
+  // MIDNIGHT GLASS is the default. data-theme="light" restores the original
+  // cream look. Kid mode (Vilda's chat) is pinned to light so her pastel UI
+  // never changes — no toggle, no nav drawer on her screen.
+  var KID = !!(document.body && document.body.classList.contains('kid'));
+  var stored = null;
+  try { stored = localStorage.getItem('blue-theme'); } catch(e){}
+  function setTheme(t){
+    if (t === 'light') document.documentElement.setAttribute('data-theme','light');
+    else document.documentElement.removeAttribute('data-theme');
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (!m) { m = document.createElement('meta'); m.name = 'theme-color';
+              document.head.appendChild(m); }
+    m.content = (t === 'light') ? '#faf8f4' : '#070d1a';
+  }
+  setTheme(KID ? 'light' : (stored === 'light' ? 'light' : 'midnight'));
+  if (KID) return;
+
+  function cur(){ return document.documentElement.getAttribute('data-theme')==='light' ? 'light':'midnight'; }
+
   var SUN='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>';
   var MOON='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>';
-  function cur(){ return document.documentElement.getAttribute('data-theme')==='dark' ? 'dark':'light'; }
-  function build(){
+  function buildToggle(){
     if (document.querySelector('.blue-theme-toggle')) return;
     var b=document.createElement('button');
     b.className='blue-theme-toggle'; b.type='button';
-    b.setAttribute('aria-label','Toggle light or dark mode'); b.title='Light / dark';
-    function paint(){ b.innerHTML = cur()==='dark' ? SUN : MOON; }
+    b.setAttribute('aria-label','Switch between midnight and light theme'); b.title='Midnight / light';
+    function paint(){ b.innerHTML = cur()==='midnight' ? SUN : MOON; }
     paint();
     b.addEventListener('click', function(){
-      var next = cur()==='dark' ? 'light':'dark';
-      if (next==='dark') document.documentElement.setAttribute('data-theme','dark');
-      else document.documentElement.removeAttribute('data-theme');
+      var next = cur()==='midnight' ? 'light':'midnight';
+      setTheme(next);
       try { localStorage.setItem('blue-theme', next); } catch(e){}
       paint();
     });
     document.body.appendChild(b);
   }
+
+  // ---- Site-wide navigation drawer -------------------------------------
+  var ICONS = {
+    home:'<svg viewBox="0 0 24 24"><path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/></svg>',
+    chat:'<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg>',
+    duet:'<svg viewBox="0 0 24 24"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg>',
+    lib:'<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>',
+    cal:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>',
+    ppl:'<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
+    eye:'<svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>',
+    persp:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    bot:'<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>',
+    tune:'<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>'
+  };
+  var NAV = [
+    ['Talk', [['/', 'Home', 'home'], ['/chat', 'Chat with Blue', 'chat'],
+              ['/hexia', 'Chat with Hexia', 'chat'], ['/duet', 'Duet', 'duet']]],
+    ['Know', [['/documents', 'Documents', 'lib'], ['/calendar', 'Calendar', 'cal'],
+              ['/contacts', 'Contacts', 'ppl'], ['/visual', 'Visual memory', 'eye'],
+              ['/perspective', 'Perspective', 'persp']]],
+    ['Robots', [['/heads', 'Robot heads', 'bot'], ['/head', "Tune Blue's head", 'tune'],
+                ['/head/hexia', "Tune Hexia's head", 'tune']]]
+  ];
+  function buildNav(){
+    if (location.pathname === '/login') return;
+    if (document.querySelector('.blue-nav-fab')) return;
+    var fab=document.createElement('button');
+    fab.className='blue-nav-fab'; fab.type='button';
+    fab.setAttribute('aria-label','Open navigation'); fab.title='Menu';
+    fab.innerHTML='<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+    var scrim=document.createElement('div'); scrim.className='blue-nav-scrim';
+    var d=document.createElement('nav'); d.className='blue-nav-drawer';
+    d.setAttribute('aria-label','Blue navigation');
+    var html='<div class="bn-title"><span class="bn-orb"></span>Blue</div>';
+    for (var s=0; s<NAV.length; s++){
+      html+='<div class="bn-sec">'+NAV[s][0]+'</div>';
+      var items=NAV[s][1];
+      for (var i=0; i<items.length; i++){
+        var on = location.pathname === items[i][0] ? ' class="on"' : '';
+        html+='<a href="'+items[i][0]+'"'+on+'>'+ICONS[items[i][2]]+items[i][1]+'</a>';
+      }
+    }
+    d.innerHTML=html;
+    function close(){ document.documentElement.classList.remove('blue-nav-open'); }
+    fab.addEventListener('click', function(){
+      document.documentElement.classList.toggle('blue-nav-open');
+    });
+    scrim.addEventListener('click', close);
+    document.addEventListener('keydown', function(e){ if (e.key==='Escape') close(); });
+    document.body.appendChild(fab);
+    document.body.appendChild(scrim);
+    document.body.appendChild(d);
+  }
+
+  function build(){ buildToggle(); buildNav(); }
   if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', build);
   else build();
 })();
@@ -20916,17 +21163,52 @@ def upload_page():
             return Response(body, mimetype="text/html")
 
     # GET -> simple HTML upload form
-    html = """
-<!doctype html>
-<title>Upload Images</title>
-<h2>Upload images to Blue's uploads folder</h2>
-<form method="post" enctype="multipart/form-data">
-  <input type="file" name="file" multiple accept="image/*">
-  <button type="submit">Upload</button>
-</form>
-<p>Files will be saved under: <code>{folder}</code></p>
-""".format(folder=UPLOAD_FOLDER)
+    html = _upload_page_html(
+        title="Upload images",
+        lead="Add photos to Blue's uploads folder.",
+        accept='accept="image/*"',
+        details=f"<p>Files will be saved under <code>{UPLOAD_FOLDER}</code></p>",
+    )
     return Response(html, mimetype="text/html")
+
+
+def _upload_page_html(title: str, lead: str, accept: str, details: str) -> str:
+    """Shared, design-system-styled shell for the two plain upload forms."""
+    return f"""
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} — Blue</title>
+<link rel="stylesheet" href="/assets/blue.css">
+<script src="/assets/blue.js" defer></script>
+<style>
+ :root{{ --cream:#faf8f4; --paper:#ffffff; --ink:#1a2e1a; --forest:#4a6b4a;
+   --sage:#8fae8f; --slate:#64748b; --blue:#3b82f6; --gold:#d4af37;
+   --line:rgba(143,174,143,0.32); --shadow:0 8px 24px rgba(26,46,26,0.06); }}
+ *{{box-sizing:border-box}}
+ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:var(--cream);color:var(--ink);
+   margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;line-height:1.55}}
+ .card{{background:var(--paper);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);
+   padding:28px;max-width:460px;width:100%}}
+ h1{{font-size:1.35em;margin:0 0 6px}}
+ p.lead{{color:var(--slate);margin:0 0 18px}}
+ input[type=file]{{display:block;width:100%;padding:12px;border:1.5px dashed var(--line);
+   border-radius:12px;margin-bottom:14px;background:transparent;color:var(--ink)}}
+ button.primary{{width:100%;padding:13px;border:none;border-radius:12px;background:#1a2e1a;color:#fff;
+   font:inherit;font-weight:600;cursor:pointer}}
+ .details{{margin-top:16px;font-size:.85em;color:var(--slate)}}
+ .details p{{margin:4px 0;overflow-wrap:anywhere}}
+</style></head><body>
+<div class="card">
+  <h1>{title}</h1>
+  <p class="lead">{lead}</p>
+  <form method="post" enctype="multipart/form-data">
+    <input type="file" name="file" multiple {accept}>
+    <button class="primary" type="submit">Upload</button>
+  </form>
+  <div class="details">{details}</div>
+</div>
+</body></html>"""
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -20992,18 +21274,16 @@ def documents_upload():
             return Response(body, mimetype="text/html")
 
     # GET -> HTML form
-    html = f"""
-<!doctype html>
-<title>Upload Documents</title>
-<h2>Upload documents/images</h2>
-<form method="post" enctype="multipart/form-data">
-  <input type="file" name="file" multiple>
-  <button type="submit">Upload</button>
-</form>
-<p>Documents saved under: <code>{DOCUMENTS_FOLDER}</code></p>
-<p>Images saved under: <code>{UPLOAD_FOLDER}</code></p>
-<p>Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}</p>
-"""
+    html = _upload_page_html(
+        title="Upload documents",
+        lead="Add documents or images to the library Blue & Hexia read.",
+        accept="",
+        details=(
+            f"<p>Documents saved under <code>{DOCUMENTS_FOLDER}</code></p>"
+            f"<p>Images saved under <code>{UPLOAD_FOLDER}</code></p>"
+            f"<p>Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}</p>"
+        ),
+    )
     return Response(html, mimetype="text/html")
 
 
