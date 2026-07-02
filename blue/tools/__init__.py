@@ -59,6 +59,13 @@ _LAZY_MAP = {
         "SEARCH_MAX_PER_MINUTE", "SEARCH_CACHE_TTL_SEC",
         "SEARCH_RESULTS_PER_QUERY",
     ),
+    "scholar": (
+        "execute_scholar_search", "execute_get_paper", "execute_read_paper",
+        "library_account_status", "proxy_link",
+        "omni_search_url", "WLU_PROXY_PREFIX", "OMNI_HOST", "OMNI_VID",
+        "SCHOLAR_MAX_PER_MINUTE", "SCHOLAR_CACHE_TTL_SEC",
+        "SCHOLAR_RESULTS_PER_QUERY",
+    ),
     "gmail": (
         "GMAIL_AVAILABLE", "GMAIL_SCOPES", "get_gmail_service",
         "execute_read_gmail", "execute_send_gmail", "execute_reply_gmail",

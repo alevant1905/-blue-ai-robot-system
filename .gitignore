@@ -132,6 +132,9 @@ data/*.db-wal
 gmail_token.pickle
 gmail_credentials.json
 
+# Laurier library credentials (username/password or proxy session cookie)
+wlu_credentials.json
+
 # Philips Hue configuration
 hue_config.json
 

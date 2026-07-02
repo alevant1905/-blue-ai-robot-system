@@ -17,6 +17,7 @@ from .detectors import (
     LightsDetector,
     DocumentsDetector,
     WebDetector,
+    ScholarDetector,
     VisionDetector,
     WeatherDetector,
     CalendarDetector,
@@ -62,6 +63,7 @@ class ImprovedToolSelector:
 
         # Supporting detectors
         self.registry.register('web', WebDetector(), enabled=True)
+        self.registry.register('scholar', ScholarDetector(), enabled=True)
         self.registry.register('notes', NotesDetector(), enabled=True)
         self.registry.register('system', SystemDetector(), enabled=True)
         self.registry.register('utilities', UtilitiesDetector(), enabled=True)
@@ -204,6 +206,8 @@ class ImprovedToolSelector:
             ('read_gmail', 'reply_gmail'),
             ('play_music', 'control_music'),
             ('search_documents', 'web_search'),
+            ('search_scholar', 'web_search'),
+            ('search_scholar', 'search_documents'),
         }
 
         pair = (intent1.tool_name, intent2.tool_name)
@@ -224,6 +228,7 @@ class ImprovedToolSelector:
             'control_lights': 'control lights',
             'search_documents': 'search your documents',
             'web_search': 'search the web',
+            'search_scholar': 'search academic journals',
         }
 
         primary_name = tool_names.get(primary.tool_name, primary.tool_name)

@@ -46,6 +46,12 @@ Blue AI Robot System is a modular, extensible platform that provides:
 - **Web Search** - Integrated search capabilities
 - **Document Management** - RAG-based document search
 
+### 🎓 Scholarly Research
+- **Academic Journal Search** - Peer-reviewed literature via OpenAlex, Crossref, and Omni (the Wilfrid Laurier University library's discovery system)
+- **Paper Lookup** - DOI/title lookup with abstracts, citation counts, and APA citations
+- **Full-Text Reading** - Blue fetches and reads articles: legal open-access copies via Unpaywall, or licensed copies through the Laurier library proxy using your library account (one article at a time, on demand)
+- **Save to Library** - Fetched papers can be dropped into Blue's document library (`Papers/`) and indexed for RAG citation later
+
 ### ⚙️ System Control
 - **Clipboard Management** - Copy/paste automation
 - **Screenshots** - Capture and manage screenshots
@@ -204,6 +210,14 @@ export LM_STUDIO_MODEL="your-model-name"
 # Gmail
 export GMAIL_USER_EMAIL="your.email@gmail.com"
 
+# Scholarly research (all optional — defaults target Wilfrid Laurier University)
+export WLU_PROXY_PREFIX="https://libproxy.wlu.ca/login?url="  # library off-campus proxy
+export OMNI_HOST="ocul-wlu.primo.exlibrisgroup.com"           # Omni/Primo VE discovery host
+export OMNI_VID="01OCUL_WLU:WLU_DEF"                          # Primo view ID
+export OMNI_INST="01OCUL_WLU"                                 # Primo institution code
+export OMNI_SCOPE="MyInst_and_CI"                             # search profile scope
+export UNPAYWALL_EMAIL="your.email@gmail.com"                 # polite-pool contact for OpenAlex/Crossref/Unpaywall
+
 # Database Locations (optional)
 export BLUE_CALENDAR_DB="path/to/calendar.db"
 export BLUE_CONTACTS_DB="path/to/contacts.db"
@@ -219,6 +233,44 @@ export BLUE_CONTACTS_DB="path/to/contacts.db"
 5. Download as `gmail_credentials.json`
 6. Place in project root
 7. Run Blue - it will prompt for authorization
+
+### Laurier Library Setup (full-text access)
+
+Searching journals needs no setup. To let Blue *read* licensed full text
+through the library proxy, give it your library sign-in — it stays on your
+machine (`wlu_credentials.json` is gitignored) and is used one article at a
+time, on demand.
+
+**Easiest way — run the interactive setup:**
+```bash
+python setup_library.py
+```
+It asks for your sign-in, writes the credentials file for you, and tests
+the login immediately.
+
+**Or set it up by hand:**
+
+1. Create `wlu_credentials.json` in the project root:
+```json
+{
+  "user": "your Laurier username",
+  "pass": "your password"
+}
+```
+2. If your library login goes through campus single-sign-on with Duo MFA,
+   a password alone can't get through. Sign in once in your browser at
+   https://libproxy.wlu.ca/login, copy the `ezproxy` cookie value
+   (DevTools → Application → Cookies), and use that instead:
+```json
+{
+  "cookie": "ezproxy=PASTE_VALUE_HERE"
+}
+```
+3. Env vars `WLU_LIBRARY_USER` / `WLU_LIBRARY_PASS` / `WLU_PROXY_COOKIE`
+   override the file.
+
+Blue fetches single articles you ask about — it does not bulk-download,
+which the library's database licenses prohibit.
 
 ### Philips Hue Setup
 
