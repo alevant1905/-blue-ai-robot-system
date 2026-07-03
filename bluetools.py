@@ -16637,10 +16637,10 @@ def duet_turn():
     # discussion we drop the long self-profile, which otherwise pulls them into
     # personal small talk and off the subject; plain chats keep it for colour.
     #
-    # The duet speaker is the SAME robot as in chat: the ground-truth household
-    # facts (who everyone is) and the current date come first, and the chat
-    # memory stores are consulted below — not a blank stage actor with only a
-    # persona line.
+    # The duet speaker is the SAME robot as in chat, not a blank stage actor:
+    # the preamble carries the robot's own identity facts and the current date,
+    # and the chat memory stores — household <known_facts>, notes, semantic
+    # memories, day recaps — are spliced in below.
     sys_p = (build_system_preamble(robot_name=sp["name"])
              + "\n\n" + _build_now_block()
              + "\n\n" + sp["persona_line"])
@@ -16662,19 +16662,35 @@ def duet_turn():
         "step further."
     )
 
-    # Long-term memory, same stores the chat persona draws on: Alex's explicit
-    # "remember this" notes always; plus memories semantically relevant to the
-    # topic and the last couple of turns.
+    # Long-term memory — the SAME stores and blocks the chat persona draws on, so
+    # the duet speaker knows the household and their shared life like in chat:
+    # the ground-truth <known_facts> (who Alex and everyone are) always; Alex's
+    # explicit "remember this" notes always; memories semantically relevant to
+    # the topic and the last couple of turns; plus the cross-day continuity
+    # blocks (recent day recaps + an older day resurfaced by relevance).
+    # Chat-situational blocks (proactive nudges, rhythms, calendar connections,
+    # raw chat history) stay out on purpose — they address the user mid-chat and
+    # would pull a robot-to-robot talk off its subject.
     mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
+    _mem_got = []
     try:
         if ENHANCED_MEMORY_AVAILABLE and memory_system:
+            # Household facts — the same authoritative block chat injects every
+            # turn. Without it the duet robots don't actually know who anyone is.
+            facts_block = memory_system._build_facts_block()
+            if facts_block:
+                sys_p += ("\n\nYour ground-truth knowledge of the household — \"the user\" "
+                          "in these facts is Alex:\n" + facts_block)
+                _mem_got.append("facts")
             notes_block = memory_system._build_user_notes_block()
             if notes_block:
                 sys_p += "\n\n" + notes_block
+                _mem_got.append("notes")
             if mem_query:
                 _facts_lower = sys_p.lower()
                 mem_lines = []
-                for mem in memory_system.search_memories(mem_query, top_k=4) or []:
+                # top_k matches chat's TOP_K_CONTEXT so recall depth is the same.
+                for mem in memory_system.search_memories(mem_query, top_k=6) or []:
                     if mem.get("type") == "session":
                         continue
                     mc = (mem.get("content") or "").strip()
@@ -16690,6 +16706,24 @@ def duet_turn():
                               "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
                               "it was remembered (see its age tag), not to now:\n"
                               + "\n".join(mem_lines) + "\n</relevant_memories>")
+                    _mem_got.append(f"memories({len(mem_lines)})")
+            # Day recaps give the pair a shared sense of their recent life with
+            # Alex ("remember Tuesday's..."). Skipped when the duet is grounded
+            # in library sources: the scholarly discussion must stay on ITS
+            # material — recaps of unrelated days are exactly the cross-context
+            # bleed the chat focus picker guards against.
+            if not src_self:
+                sess_block = memory_system._build_session_history_block()
+                if sess_block:
+                    sys_p += "\n\n" + sess_block
+                    _mem_got.append("sessions")
+                if mem_query:
+                    days_block = memory_system._build_recalled_days_block(mem_query)
+                    if days_block:
+                        sys_p += "\n\n" + days_block
+                        _mem_got.append("days")
+            if _mem_got:
+                print(f"   [DUET] ✓ Injecting memory context for {sp['name']}: {' + '.join(_mem_got)}")
     except Exception as e:
         log.warning(f"[DUET] memory context failed: {e}")
 
