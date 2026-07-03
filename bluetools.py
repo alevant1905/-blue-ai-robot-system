@@ -8954,6 +8954,13 @@ def _execute_auto_reply_inbox(args: Dict[str, Any]) -> str:
             headers = msg_data['payload']['headers']
             sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
             subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
+            # "duet" in the subject = mail addressed to a LIVE Blue<->Hexia duet
+            # (picked up by /duet/mail/check and answered from the conversation).
+            # The ordinary auto-responder must never answer it as regular mail.
+            if 'duet' in (subject or '').lower():
+                print(f"   [AUTO-REPLY] skip {ref['id']}: 'duet' subject — reserved for the duet")
+                skipped_filter.append({'id': ref['id'], 'from': sender, 'reason': 'duet mail'})
+                continue
             if _should_skip_sender(sender, headers):
                 # Be explicit about WHY so silent-skip cases are debuggable.
                 reason = "self-address" if any(
@@ -15597,6 +15604,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <button id="stopBtn" disabled>Stop</button>
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
  <label class="muted" title="They search the internet for the subject first and ground the conversation in what they find"><input type="checkbox" id="researchChk"> research the web</label>
+ <label class="muted" title="While they talk, Blue watches his inbox: an email with duet in the subject joins the conversation live, and the sender gets their spoken answer mailed back"><input type="checkbox" id="mailChk" checked> 📧 answer duet mail</label>
  <label class="muted" title="They read the best-matching Wikipedia article on the subject first and ground the conversation in it"><input type="checkbox" id="wikiChk"> consult Wikipedia</label>
 </div>
 <div id="usbHeads" class="controls" style="display:none;flex-direction:column;align-items:stretch;gap:10px;border:1px dashed #cfc9bd;border-radius:10px;padding:12px;background:#fff">
@@ -15812,11 +15820,50 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
 async function oneTurn(speaker){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ return false; }
-  if(!d||!d.text){ return false; }
-  const cfg=ROBOTS[speaker]; const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
+  // A queued duet email rides into THIS turn; the speaker takes it up out loud.
+  const mail=MAILQ.length? MAILQ.shift() : null;
+  if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); return false; }
+  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); return false; }
+  const cfg=ROBOTS[speaker];
+  // The email enters the shared history as an event, so the OTHER robot (and the
+  // take-stock bearing) see exactly what was written, not just the paraphrase.
+  if(mail){ history.push({speaker:'mail', text:'From '+mail.from_name+' — "'+mail.subject+'": '+mail.body}); }
+  const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
+  if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
+  else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
   maybeReflect();                 // take stock of the direction in the background, while this head speaks
   await speakAs(cfg,d.text,el); return true;
+}
+// ---- Live duet mail: email with "duet" in the subject joins the conversation ----
+// While a duet runs (and the checkbox is on), poll Blue's inbox in the background;
+// a new matching email is queued, barged into the next turn, and after BOTH robots
+// have spoken to it their lines are mailed back to the sender in-thread.
+let MAILQ=[], MAIL_REPLY=null, mailTimer=null;
+function mailOn(){ const c=document.getElementById('mailChk'); return !!(c && c.checked); }
+function pollMail(){
+  if(!running || !mailOn()) return;
+  fetch('/duet/mail/check',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(!j || !j.ok || !j.mails || !j.mails.length) return;
+      for(let i=0;i<j.mails.length;i++){
+        MAILQ.push(j.mails[i]);
+        addNote('(📧 mail from '+j.mails[i].from_name+' — "'+j.mails[i].subject+'" — queued for the next turn)');
+      }
+    }).catch(function(){});
+}
+function flushMailReply(){
+  const pr=MAIL_REPLY; MAIL_REPLY=null;
+  if(!pr || !pr.lines.length) return;
+  fetch('/duet/mail/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:pr.mail.id, thread_id:pr.mail.thread_id, message_id_header:pr.mail.message_id_header,
+                             from_email:pr.mail.from_email, subject:pr.mail.subject, lines:pr.lines})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(j&&j.ok) addNote('(📧 their answer was emailed back to '+pr.mail.from_name+')');
+      else addNote('(📧 could not email the answer back'+(j&&j.error?': '+j.error:'')+')');
+    }).catch(function(){});
 }
 // Every few turns, step back and refresh the conversation's bearing (DIRECTION):
 // where it's actually gotten and where it could go next. Fired without awaiting so
@@ -15869,13 +15916,22 @@ async function run(){
     if(wr&&wr.ok){ addNote("(they've read up on Wikipedia: "+((wr.titles&&wr.titles.length)?wr.titles.join(' · '):wr.query)+')'); }
     else{ addNote("(no Wikipedia match"+(wr&&wr.error?': '+wr.error:'')+" — they'll wing it)"); }
   }
+  MAILQ=[]; MAIL_REPLY=null;
+  if(mailOn()){
+    // Baseline first: mail already sitting in the inbox predates this duet and
+    // must not barge in stale. Only NEW arrivals join the conversation.
+    try{ await fetch('/duet/mail/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reset:true})}); }catch(e){}
+    if(!running){ return; }
+    addNote('(📧 watching the inbox — email with duet in the subject joins the conversation)');
+    mailTimer=setInterval(pollMail, 8000);
+  }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
   for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
   stop();
 }
 function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
-function stop(){ running=false; try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
+function stop(){ running=false; if(mailTimer){ clearInterval(mailTimer); mailTimer=null; } flushMailReply(); try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
 startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
 document.getElementById('speakChk').addEventListener('change', primeAudio);
@@ -16471,6 +16527,148 @@ _DUET_LENS = {
 }
 
 
+# ---- Duet mail: live email into a running conversation ---------------------
+# An email sent to Blue's own inbox (BLUE_OWN_EMAIL) with "duet" in the subject
+# barges into a RUNNING duet: the page polls /duet/mail/check between turns, the
+# next turn takes the email up out loud, and /duet/mail/reply then mails the
+# robots' spoken response back to the sender, in-thread. The ordinary email
+# auto-responder deliberately skips 'duet' subjects (see _execute_auto_reply_inbox)
+# so the two never race over the same message. Mail that arrives while NO duet is
+# running is baselined away at the next duet's start (reset) — never barged in stale.
+import threading as _duet_mail_threading
+_DUET_MAIL_SEEN: set = set()          # gmail message ids already handled (or baselined) this server run
+_DUET_MAIL_LOCK = _duet_mail_threading.Lock()
+
+
+def _duet_mail_plain_body(payload) -> str:
+    """Best-effort text/plain body of a Gmail message payload (recurses into
+    multipart/alternative, unlike the auto-reply's flat walk)."""
+    try:
+        for part in (payload.get('parts') or []):
+            if part.get('mimeType') == 'text/plain' and 'data' in (part.get('body') or {}):
+                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='replace')
+        for part in (payload.get('parts') or []):
+            if (part.get('mimeType') or '').startswith('multipart'):
+                inner = _duet_mail_plain_body(part)
+                if inner:
+                    return inner
+        if 'data' in (payload.get('body') or {}):
+            return base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='replace')
+    except Exception:
+        pass
+    return ""
+
+
+@app.route('/duet/mail/check', methods=['POST'])
+def duet_mail_check():
+    """Poll Blue's inbox for NEW unread mail with "duet" in the subject.
+
+    {reset:true} at duet start baselines: existing matching mail is marked seen
+    WITHOUT being returned (it predates this run — never barge it in stale, and
+    leave it unread/unanswered). Later polls return only mail that arrived since,
+    marking each read immediately so a restart can't double-handle it."""
+    d = request.get_json(silent=True) or {}
+    reset = bool(d.get('reset'))
+    if not GMAIL_AVAILABLE:
+        return jsonify({"ok": False, "error": "gmail not available", "mails": []})
+    try:
+        service = get_gmail_service()
+        refs = service.users().messages().list(
+            userId='me', q='in:inbox is:unread subject:duet newer_than:1d', maxResults=10,
+        ).execute().get('messages', []) or []
+        mails = []
+        for ref in refs:
+            mid = ref.get('id')
+            with _DUET_MAIL_LOCK:
+                if not mid or mid in _DUET_MAIL_SEEN:
+                    continue
+                _DUET_MAIL_SEEN.add(mid)
+            if reset:
+                continue
+            msg = service.users().messages().get(userId='me', id=mid, format='full').execute()
+            headers = (msg.get('payload') or {}).get('headers') or []
+            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
+            msgid_hdr = next((h['value'] for h in headers if h['name'].lower() == 'message-id'), '')
+            # Belt over the Gmail query: the SPEC is "duet appears in the subject".
+            if 'duet' not in subject.lower():
+                continue
+            if _should_skip_sender(sender, headers):
+                print(f"   [DUET-MAIL] skip {mid} from {sender!r}: automated/self sender")
+                continue
+            body = _duet_mail_plain_body(msg.get('payload') or {}) or msg.get('snippet', '')
+            body = body.replace('\r\n', '\n').strip()[:1200]
+            m = re.search(r'<(.+?)>', sender)
+            from_email = m.group(1) if m else sender.strip()
+            from_name = re.sub(r'\s*<.*$', '', sender).strip().strip('"') or from_email
+            # Mark read NOW (not at reply time) so a mid-duet restart can't rehandle it.
+            try:
+                service.users().messages().modify(
+                    userId='me', id=mid, body={'removeLabelIds': ['UNREAD']}).execute()
+            except Exception as e:
+                log.warning(f"[DUET-MAIL] mark-read failed for {mid}: {e}")
+            mails.append({"id": mid, "thread_id": msg.get('threadId'),
+                          "message_id_header": msgid_hdr,
+                          "from_name": from_name, "from_email": from_email,
+                          "subject": subject, "body": body})
+            print(f"   [DUET-MAIL] new duet mail from {from_name}: {subject!r}")
+        if reset:
+            return jsonify({"ok": True, "mails": []})
+        return jsonify({"ok": True, "mails": mails})
+    except Exception as e:
+        log.warning(f"[DUET-MAIL] check failed: {e}")
+        return jsonify({"ok": False, "error": str(e), "mails": []})
+
+
+@app.route('/duet/mail/reply', methods=['POST'])
+def duet_mail_reply():
+    """Mail the robots' spoken response back to the duet-mail sender, in the
+    original thread, BCC'd to Alex like every other outbound Blue email. The
+    page calls this once both voices have reacted (or on Stop with one)."""
+    d = request.get_json(silent=True) or {}
+    to = (d.get('from_email') or '').strip()
+    in_lines = d.get('lines') or []
+    spoken = "\n\n".join(
+        f"{(l.get('name') or '?').strip()}: {(l.get('text') or '').strip()}"
+        for l in in_lines if isinstance(l, dict) and (l.get('text') or '').strip())
+    if not GMAIL_AVAILABLE or not to or not spoken:
+        return jsonify({"ok": False, "error": "missing recipient or spoken lines"})
+    try:
+        service = get_gmail_service()
+        subject = (d.get('subject') or '').strip() or 'your email'
+        reply_subject = subject if subject.lower().startswith('re:') else f"Re: {subject}"
+        body = ("Your email reached Blue and Hexia in the middle of their conversation — "
+                "they took it up out loud. Here is what they said:\n\n" + spoken +
+                "\n\n— sent automatically from the duet")
+        reply_message = MIMEMultipart()
+        reply_message['To'] = to
+        reply_message['Subject'] = reply_subject
+        reply_message['Bcc'] = BLUE_BCC_EMAIL
+        msgid = (d.get('message_id_header') or '').strip()
+        if msgid:
+            reply_message['In-Reply-To'] = msgid
+            reply_message['References'] = msgid
+        reply_message.attach(MIMEText(body, 'plain', 'utf-8'))
+        raw = base64.urlsafe_b64encode(reply_message.as_bytes()).decode('utf-8')
+        send_body = {'raw': raw}
+        if d.get('thread_id'):
+            send_body['threadId'] = d.get('thread_id')
+        service.users().messages().send(userId='me', body=send_body).execute()
+        # Tag the original like the auto-responder does — auditable as answered.
+        try:
+            label_id = _get_or_create_blue_label(service)
+            if label_id and d.get('id'):
+                service.users().messages().modify(
+                    userId='me', id=d['id'], body={'addLabelIds': [label_id]}).execute()
+        except Exception:
+            pass
+        print(f"   [DUET-MAIL] replied to {to}: {reply_subject}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.warning(f"[DUET-MAIL] reply failed: {e}")
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route('/duet/reflect', methods=['POST'])
 def duet_reflect():
     """Step back from the back-and-forth and take stock of where the Blue<->Hexia
@@ -16501,11 +16699,15 @@ def duet_reflect():
         subject = ""
     # Render the recent turns; the previous bearing carries the earlier arc, so a
     # bounded window keeps the read sharp without re-reading the whole transcript.
+    # 'mail' entries are emails that barged into the talk — events, not speakers.
     lines = []
     for h in history[-16:]:
         sp_id = (h.get('speaker') or '').strip().lower()
         txt = (h.get('text') or '').strip()
         if not txt:
+            continue
+        if sp_id == 'mail':
+            lines.append(f"[email that arrived mid-conversation] {txt}")
             continue
         nm = _robot_cfg(sp_id)["name"] if sp_id in ROBOTS else (sp_id or "?")
         lines.append(f"{nm}: {txt}")
@@ -16598,6 +16800,11 @@ def duet_turn():
     # /duet/reflect and round-tripped through the browser. Injected below so each
     # speaker steers by it instead of only reacting to the last line.
     direction = (d.get('direction') or '').strip()
+    # Live mail: an email with "duet" in the subject that just arrived in Blue's
+    # inbox (fetched by the page via /duet/mail/check). THIS turn takes it up out
+    # loud; the page then mails the spoken response back via /duet/mail/reply.
+    mail = d.get('mail') if isinstance(d.get('mail'), dict) else None
+    mail_from = (str(mail.get('from_name') or 'someone').strip()[:80] or 'someone') if mail else ''
     roles = d.get('roles') or {}
     role_self = (roles.get(speaker) or '').strip()
     role_other = (roles.get(other) or '').strip()
@@ -16791,11 +16998,16 @@ def duet_turn():
 
     # Conversation so far as plain text. (A single [system, user] call is always
     # valid; mapping turns to roles breaks when the speaker started the duet.)
+    # 'mail' entries are emails that barged in earlier — rendered as events, not
+    # speakers, so both robots keep what was written (and answered) in view.
     lines = []
     for h in history[-6:]:  # recent context only — keeps the prompt tight and the directive prominent
         sp_id = (h.get('speaker') or '').strip().lower()
         txt = (h.get('text') or '').strip()
         if not txt:
+            continue
+        if sp_id == 'mail':
+            lines.append(f"[an email arrived mid-conversation] {txt}")
             continue
         nm = _robot_cfg(sp_id)["name"] if sp_id in ROBOTS else (sp_id or "?")
         lines.append(f"{nm}: {txt}")
@@ -16871,6 +17083,13 @@ def duet_turn():
             "corners.")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
+    if mail:
+        _m_subj = (str(mail.get('subject') or '')).strip()[:120]
+        _m_body = (str(mail.get('body') or '')).strip()[:1200]
+        parts.append(
+            f"AN EMAIL JUST ARRIVED in your own inbox, mid-conversation — from {mail_from}"
+            + (f', subject "{_m_subj}"' if _m_subj else '')
+            + (":\n\n" + _m_body if _m_body else ". (No body — just that subject line.)"))
 
     link_name = ""
     if url_text:
@@ -16972,6 +17191,20 @@ def duet_turn():
             directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
         elif wiki_block:
             directive += " Open with a specific fact or definition you read on Wikipedia, in your own words."
+    # A live email OVERRIDES this turn's job: relaying it and answering it IS the
+    # turn. (Built after the normal directive so all its bookkeeping still ran.)
+    if mail:
+        directive = (
+            f"Now give {sp['name']}'s next line. An email just landed in your own inbox, mid-"
+            f"conversation — it's shown above. Take it up out loud: tell {ot['name']} that mail "
+            f"just came in from {mail_from}, put what it says or asks into your own words in a "
+            "line — don't read it out — and then actually answer it: its question, its challenge, "
+            f"or what it adds. {mail_from} will be sent what you say, so you can speak to them "
+            "directly for a moment if that feels natural. If the email bears on what you two were "
+            "just discussing, connect it; if it pulls elsewhere, deal with it honestly and then "
+            "steer back to your subject. You are MID-conversation — NO greetings, NO small talk.")
+        if role_self:
+            directive += " Stay firmly in your role."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
     # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
@@ -16982,6 +17215,8 @@ def duet_turn():
         "a single punchy sentence that lands",
         "2 to 4 sentences built around one vivid example, image, or tiny story",
     ])
+    if mail:
+        length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
     parts.append(directive
                  + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
 
