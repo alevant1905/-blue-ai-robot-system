@@ -77,6 +77,18 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
+# Native-crash visibility: a fault in a C extension (access violation, heap
+# corruption) kills the whole process with NO Python traceback — the console
+# just drops back to the prompt. faulthandler prints every thread's Python
+# stack to stderr on the way down, so the guilty code path is identifiable.
+# (The 2026-07-03 Gmail thread-safety crash took three silent deaths to find;
+# with this enabled it would have named the thread on the first one.)
+import faulthandler
+try:
+    faulthandler.enable()
+except Exception:
+    pass
+
 # Third-party
 import requests
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
@@ -2189,40 +2201,62 @@ except Exception:
 GMAIL_TOKEN_FILE = "gmail_token.pickle"
 GMAIL_CREDENTIALS_FILE = "gmail_credentials.json"
 GMAIL_USER_EMAIL = "alevantresearch@gmail.com"
-_gmail_service = None
+import threading as _gmail_threading
+_gmail_creds = None                       # shared OAuth credentials (lock-protected)
+_GMAIL_CREDS_LOCK = _gmail_threading.Lock()
+_gmail_tls = _gmail_threading.local()     # per-THREAD service objects
+
 
 def get_gmail_service():
-    """Get or create Gmail API service"""
-    global _gmail_service
-    if _gmail_service:
-        return _gmail_service
+    """Get a Gmail API service for THIS thread.
 
+    The googleapiclient/httplib2 stack is NOT thread-safe: one shared service
+    object used simultaneously from the auto-reply background thread and Flask
+    request threads interleaves two conversations on the same SSL connection
+    and corrupts the native heap — the whole process dies with 0xc0000374 /
+    0xc0000005 in ntdll.dll and NO Python traceback. Rare while Gmail calls
+    were occasional; the duet's 8-second /duet/mail/check poll (2026-07-03)
+    made the collision routine and crashed the server within minutes.
+
+    Fix: credentials are shared and refreshed under a lock, but each thread
+    builds its OWN service (its own HTTP connection). build() uses the bundled
+    static discovery document, so a per-thread build costs milliseconds and no
+    network round-trip."""
+    global _gmail_creds
     if not GMAIL_AVAILABLE:
         raise Exception("Gmail libraries not installed")
 
-    creds = None
-    # Load existing token
-    if os.path.exists(GMAIL_TOKEN_FILE):
-        with open(GMAIL_TOKEN_FILE, 'rb') as token:
-            creds = pickle.load(token)
+    svc = getattr(_gmail_tls, 'service', None)
+    if svc is not None:
+        return svc
 
-    # If no valid credentials, authenticate
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(GMAIL_CREDENTIALS_FILE):
-                raise Exception(f"Gmail credentials file not found: {GMAIL_CREDENTIALS_FILE}. " +
-                              "Download from Google Cloud Console and save as gmail_credentials.json")
-            flow = InstalledAppFlow.from_client_secrets_file(GMAIL_CREDENTIALS_FILE, GMAIL_SCOPES)
-            creds = flow.run_local_server(port=0)
+    with _GMAIL_CREDS_LOCK:
+        creds = _gmail_creds
+        # Load existing token once per process
+        if creds is None and os.path.exists(GMAIL_TOKEN_FILE):
+            with open(GMAIL_TOKEN_FILE, 'rb') as token:
+                creds = pickle.load(token)
 
-        # Save the credentials
-        with open(GMAIL_TOKEN_FILE, 'wb') as token:
-            pickle.dump(creds, token)
+        # If no valid credentials, authenticate / refresh
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                if not os.path.exists(GMAIL_CREDENTIALS_FILE):
+                    raise Exception(f"Gmail credentials file not found: {GMAIL_CREDENTIALS_FILE}. " +
+                                  "Download from Google Cloud Console and save as gmail_credentials.json")
+                flow = InstalledAppFlow.from_client_secrets_file(GMAIL_CREDENTIALS_FILE, GMAIL_SCOPES)
+                creds = flow.run_local_server(port=0)
 
-    _gmail_service = build('gmail', 'v1', credentials=creds)
-    return _gmail_service
+            # Save the credentials
+            with open(GMAIL_TOKEN_FILE, 'wb') as token:
+                pickle.dump(creds, token)
+
+        _gmail_creds = creds
+
+    svc = build('gmail', 'v1', credentials=creds, cache_discovery=False)
+    _gmail_tls.service = svc
+    return svc
 
 # IMPROVED Keywords - More comprehensive and specific detection
 SEARCH_KEYWORDS = [
