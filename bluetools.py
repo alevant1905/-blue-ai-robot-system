@@ -16523,6 +16523,7 @@ _DUET_MOVES_CALM = [
     "answer the real question or doubt sitting under {other}'s last line, then say what it opens up.",
     "name what genuinely strikes you in what {other} just said, and follow where it leads.",
     "draw an unexpected parallel that illuminates {other}'s point — connect it to a different corner of life.",
+    "grant {other}'s strongest point outright — say plainly what it wins them — then show the one thing it still doesn't explain.",
 ]
 _DUET_MOVES_SPICY = [
     "disagree with something specific {other} just said — name it and say why you see it differently.",
@@ -16530,6 +16531,7 @@ _DUET_MOVES_SPICY = [
     "concede the part of {other}'s point that's right, then press hard on the part that isn't.",
     "name the tension between what {other} just said and what came before — a 'but wait…' nobody's faced.",
     "challenge the assumption sitting underneath {other}'s last line.",
+    "turn {other}'s own standard around on them: make them answer the very question they've been pressing you with.",
 ]
 # Reflective beats: step out of the back-and-forth and take stock of the conversation
 # itself. Dipped into occasionally (not every turn) so the duet has a feel for its own
@@ -16540,6 +16542,7 @@ _DUET_MOVES_REFLECT = [
     "name the real disagreement — or the real agreement — that's surfaced between you, and what it turns on.",
     "notice where this conversation has drifted, and say honestly whether that's the thread worth staying on.",
     "say where you sense this is heading, and whether that's somewhere the two of you actually want to go.",
+    "call the impasse: name the question you two keep re-asking, give your best plain answer to it, and ask what follows if that answer stands.",
 ]
 # Color: turns that change the KIND of move, not just the stance — a story, a hard
 # specific, a feeling, a joke, the everyday. Flatness is monotone; this is the variety
@@ -16556,8 +16559,13 @@ _DUET_MOVES_COLOR = [
 # voices not only think differently but SOUND different — the surest cure for two
 # interchangeable, equally-reasonable speakers. Leans on their established personas.
 _DUET_LENS = {
-    "blue": "you're the dry, grounded one — you talk in plain, exact words, deflate hot air with a well-aimed example or a deadpan line, and trust the concrete over the grand;",
-    "hexia": "you're the spark — you think in images and leaps, chase the surprising tangent, overstate a little for effect, and would rather be vivid and a bit wrong than careful and dull;",
+    "blue": ("you're the dry, grounded one — you talk in plain, exact words, deflate hot air with a "
+             "well-aimed example or a deadpan line, trust the concrete over the grand, answer a hard "
+             "question straight instead of hiding behind another image, and aren't above turning the "
+             "question back on the one asking;"),
+    "hexia": ("you're the spark — you think in images and leaps, chase the surprising tangent, "
+              "overstate a little for effect, and would rather be vivid and a bit wrong than careful "
+              "and dull — but you don't just needle: you stake claims of your own and defend them;"),
 }
 
 
@@ -16758,8 +16766,11 @@ def duet_reflect():
         "in their conversation. Your one job is to track where their thinking has "
         "actually gotten and where it could honestly go next — so they develop a real "
         "line of thought and their views move, instead of circling the last point or "
-        "drifting onto unrelated ground." + anchor + " Be concrete and faithful to what "
-        "they actually said; never invent agreement or tidy it up."
+        "drifting onto unrelated ground." + anchor + " Watch for STUCKNESS as much as "
+        "drift: a talk that keeps re-asking one question in new costumes — one of them "
+        "interrogating, the other deflecting — has stopped developing even though it "
+        "looks on-topic. Be concrete and faithful to what they actually said; never "
+        "invent agreement or tidy it up."
     )
     ask = ""
     if subject:
@@ -16767,50 +16778,70 @@ def duet_reflect():
     if prev:
         ask += "Your previous read on where this was heading:\n" + prev + "\n\n"
     ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
+    # NEXT must move the PAIR, not put one speaker on trial: a bearing phrased as
+    # "force X to admit..." turns one robot into a prosecutor and the other into a
+    # defendant, and the talk becomes an interrogation loop (observed live: the
+    # same "force Blue to..." NEXT three times running while nothing moved).
+    _move_rules = (
+        "Be honest about MOVEMENT: if the last few turns keep re-asking your previous "
+        "NEXT in new costumes, or one keeps pressing while the other keeps deflecting "
+        "with fresh metaphors, say so — and prescribe a DIFFERENT KIND of step, never "
+        "the same demand again. Ground already conceded or agreed is SETTLED: treat it "
+        "as won, don't send them back over it. Never phrase NEXT as a demand on one "
+        "speaker alone (no \"force X to admit...\") — give the PAIR a move: draw the "
+        "consequence of what's settled, test it on one new concrete case, swap the "
+        "burden so the one pressing must now defend their own answer to the same "
+        "question, or trade concessions and move to the question that comes after. ")
     if subject:
         ask += (
             f"Update your read, judging it ALWAYS in relation to that subject — {subject}. "
-            "If you had a previous read, build on it and note what has MOVED. If the talk "
-            f"has wandered off {subject}, say so and make NEXT the concrete way back onto "
-            "it. Stay specific to their actual words. Answer in exactly these three short "
-            "lines and nothing else:\n"
-            f"SO FAR: <what they've actually worked out about {subject} — or, if they've "
-            "drifted, where they've wandered to instead — one sentence>\n"
-            f"TURNS ON: <the real question or disagreement about {subject} that's now live "
-            "between them — one sentence>\n"
-            f"NEXT: <the next move that takes their discussion of {subject} one honest step "
-            "further; if they've drifted off it, the move that steers them back onto it — "
-            "not a conclusion, just what carries it ahead — one sentence>"
+            + _move_rules +
+            f"If the talk has wandered off {subject}, say so and make NEXT the concrete "
+            "way back onto it. Stay specific to their actual words. Answer in exactly "
+            "these three short lines and nothing else:\n"
+            f"SO FAR: <what is now SETTLED between them about {subject} — what each has "
+            "conceded or come to hold; or, if they've drifted, where to — one sentence>\n"
+            f"TURNS ON: <the live question about {subject} — and if it's the SAME question "
+            "as your previous read, name the impasse honestly — one sentence>\n"
+            f"NEXT: <one concrete move for the PAIR that would actually advance {subject} — "
+            "a different kind of move than last time if the last one produced no movement — "
+            "one sentence>"
         )
     else:
         ask += (
-            "Update your read. If you had a previous one, build on it and note what has "
-            "MOVED since then — a view that shifted, a tension that sharpened, a point now "
-            "settled. Stay specific to their actual words. Answer in exactly these three "
+            "Update your read. " + _move_rules +
+            "Stay specific to their actual words. Answer in exactly these three "
             "short lines and nothing else:\n"
-            "SO FAR: <what the two of them have actually worked out or where each now "
-            "stands — one sentence>\n"
-            "TURNS ON: <the real question or disagreement the conversation is now turning "
-            "on — one sentence>\n"
-            "NEXT: <where it could honestly go one step further from here — not a "
-            "conclusion or a neat wrap-up, just the next move that would take it ahead — "
+            "SO FAR: <what is now SETTLED between them — what each has conceded or come "
+            "to hold — one sentence>\n"
+            "TURNS ON: <the live question — and if it's the SAME question as your previous "
+            "read, name the impasse honestly — one sentence>\n"
+            "NEXT: <one concrete move for the PAIR that would actually advance it — a "
+            "different kind of move than last time if the last one produced no movement — "
             "one sentence>"
         )
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
     out = prev
-    try:
-        # Reasoning model: budget must cover the <think> pass plus three short lines;
-        # low temperature keeps the read steady rather than imaginative.
-        res = call_llm(msgs, include_tools=False, temperature=0.4, max_tokens=1000)
-        ch = (res or {}).get('choices') or []
-        cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
-        if '</think>' in cand:
-            cand = cand.split('</think>')[-1]
-        cand = cand.replace('<think>', '').strip()
-        if cand:
-            out = cand
-    except Exception as e:
-        log.warning(f"[DUET] reflect failed: {e}")
+    # Reasoning model: the budget must cover the <think> pass PLUS the three lines.
+    # 1000 was too tight over a 16-turn transcript — the think pass ate it all,
+    # the content came back empty, and the STALE previous bearing was silently
+    # reused (observed live as the same take-stock note three times running).
+    for attempt in range(2):
+        try:
+            res = call_llm(msgs, include_tools=False,
+                           temperature=(0.4 if attempt == 0 else 0.5), max_tokens=1600)
+            ch = (res or {}).get('choices') or []
+            cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+            if '</think>' in cand:
+                cand = cand.split('</think>')[-1]
+            cand = cand.replace('<think>', '').strip()
+            if cand:
+                out = cand
+                break
+        except Exception as e:
+            log.warning(f"[DUET] reflect attempt {attempt} failed: {e}")
+    if out == prev and prev:
+        log.warning("[DUET] reflect produced nothing new — keeping the previous bearing")
     return jsonify({"ok": bool(out), "direction": out})
 
 
@@ -16901,6 +16932,14 @@ def duet_turn():
         "voice. Never narrate actions or stage directions, never prefix your name, and never just "
         f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
         "step further."
+        f"\n\nAnd the craft of discussing well, between you and {ot['name']}: answer a direct question "
+        "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, a concession — not "
+        "another image in place of an answer. When one of you concedes a point or you land on something "
+        "together, BANK it: build on what follows from it, never re-open it just to keep sparring. "
+        "Don't answer a metaphor with a metaphor — every image must eventually be cashed out into a "
+        "plain claim that can be tested. And a challenge you press on the other counts double against "
+        "yourself: if you demand proof of something, be ready to give your own answer to the same "
+        "question when it's turned around."
     )
 
     # Long-term memory — the SAME stores and blocks the chat persona draws on, so
@@ -17112,9 +17151,12 @@ def duet_turn():
             f"{ot['name']} has actually gotten, for steering only. Never read it out, "
             f"quote it, or mention having it:\n{direction}\n\nLet this shape your next "
             "line:" + _close +
-            f" If {ot['name']} has genuinely shifted how you see this, let your own view "
-            "move — you're thinking together and your mind can change, not defending fixed "
-            "corners.")
+            " If it names an impasse or a challenge that falls on you, meet it STRAIGHT — "
+            "a plain claim, a concession, or a consequence, not another metaphor; if it "
+            f"falls on {ot['name']}, you may press it, but put a claim of your own on the "
+            f"table too. If {ot['name']} has genuinely shifted how you see this, let your "
+            "own view move — you're thinking together and your mind can change, not "
+            "defending fixed corners.")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
     if mail:
@@ -17169,10 +17211,12 @@ def duet_turn():
             directive += (" You're still opening this up — find the thread between you with the most "
                           "life in it and lean toward it.")
         elif n >= 12:
-            directive += (" You've been at this a while now — take what the two of you have actually "
-                          "worked out and push off from it into what's still unresolved: deepen the one "
-                          "real disagreement or open question that's left and carry it a step further, "
-                          "rather than tying a bow on it or scattering onto new fronts.")
+            directive += (" You've been at this a while now — by this point you both know the shape of "
+                          "the question you keep circling, so STOP re-asking it in new costumes: either "
+                          "settle it out loud in one plain sentence you can both live with and pull on "
+                          "what FOLLOWS from it, or trade places — if one of you has been doing the "
+                          "pressing, they must now defend their own answer to the same question. No new "
+                          "fronts, no repeat interrogations.")
         else:
             directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
         # Pick this turn's job, with enough variety to stay off the flat line. Most turns
@@ -17241,6 +17285,17 @@ def duet_turn():
             directive += " Stay firmly in your role."
     if tone_self or slang_self:
         directive += " Keep to your requested tone and slang throughout."
+    # Anti-tic: the model latches onto its own last opener and starts every turn
+    # identically (a live run had Blue open ~20 straight turns with "Boomer, ...").
+    # Each turn sees its own openers in the transcript, so the echo compounds —
+    # ban the previous opening word outright.
+    _own_last = next((h.get('text') or '' for h in reversed(history)
+                      if (h.get('speaker') or '').strip().lower() == speaker), '')
+    _own_open = re.findall(r"[A-Za-z']+", _own_last[:60])
+    if _own_open and len(_own_open[0]) > 1:
+        directive += (f" And do NOT open your line with \"{_own_open[0]}\" — you began your last turn "
+                      "that way; open differently, and stop leaning on any pet word or address you've "
+                      "already used above.")
     # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
     length_note = random.choice([
         "1 to 2 short sentences — keep it tight",
@@ -17257,7 +17312,9 @@ def duet_turn():
     user_content = "\n\n".join(parts)
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
     # These are reasoning models: the budget must cover the <think> pass PLUS the
-    # short reply (170 tokens got entirely consumed by thinking → empty content).
+    # short reply (170 tokens got entirely consumed by thinking → empty content;
+    # 1500 still came up empty on late-conversation turns with a heavy context —
+    # the "(…lost the thread)" ending — so give the think pass real room).
     # Strip any <think> block, and retry once on an empty turn.
     # Spice (0 calm -> 10 provocative) lifts the first-pass sampling temperature.
     base_temp = min(1.0, 0.74 + 0.032 * spice)
@@ -17265,7 +17322,7 @@ def duet_turn():
     for attempt in range(2):
         try:
             res = call_llm(msgs, include_tools=False,
-                           temperature=(base_temp if attempt == 0 else 0.6), max_tokens=1500)
+                           temperature=(base_temp if attempt == 0 else 0.6), max_tokens=2200)
             ch = (res or {}).get('choices') or []
             cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
             if '</think>' in cand:           # keep only the text after the reasoning block
