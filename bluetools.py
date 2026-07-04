@@ -4781,35 +4781,67 @@ def _infer_expertise_folders(query: str) -> List[str]:
 
 
 def load_document_index() -> Dict:
-    """Load the document index from disk. Repairs corrupt files in place.
+    """Load the document index from disk.
+
+    A corrupt index is QUARANTINED (renamed *.corrupt-<timestamp>) and the last
+    good backup (kept by save_document_index) is restored. The old behavior —
+    silently resetting to empty — turned one bad read into "all my documents
+    are gone": the 2026-07-04 hard reboot NUL-filled the file (lost write
+    cache), and the next load wiped the whole library listing.
 
     Backfills a `folder` field (computed from each file's location) on any
     entry that predates folder support, so the GUI and search always see one.
     """
+    def _read(path) -> Dict:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        if not (isinstance(data, dict) and isinstance(data.get('documents'), list)):
+            raise ValueError("unexpected shape")
+        return data
+
+    def _backfill(data: Dict) -> Dict:
+        for d in data['documents']:
+            if isinstance(d, dict) and 'folder' not in d:
+                d['folder'] = _folder_of_filepath(d.get('filepath', ''))
+        return data
+
     if os.path.exists(DOCUMENT_INDEX_FILE):
         try:
-            with open(DOCUMENT_INDEX_FILE, 'r') as f:
-                data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get('documents'), list):
-                for d in data['documents']:
-                    if isinstance(d, dict) and 'folder' not in d:
-                        d['folder'] = _folder_of_filepath(d.get('filepath', ''))
-                return data
-            print(f"[INDEX] {DOCUMENT_INDEX_FILE} has unexpected shape; resetting.")
+            return _backfill(_read(DOCUMENT_INDEX_FILE))
         except Exception as e:
-            print(f"[INDEX] {DOCUMENT_INDEX_FILE} is corrupt ({e}); resetting to empty.")
+            print(f"[INDEX] {DOCUMENT_INDEX_FILE} is corrupt ({e}); quarantining it and trying the backup.")
+            try:
+                os.replace(DOCUMENT_INDEX_FILE,
+                           DOCUMENT_INDEX_FILE + time.strftime(".corrupt-%Y%m%d-%H%M%S"))
+            except Exception as qe:
+                print(f"[INDEX] could not quarantine: {qe}")
         try:
-            with open(DOCUMENT_INDEX_FILE, 'w') as f:
-                json.dump({"documents": []}, f, indent=2)
+            if os.path.exists(DOCUMENT_INDEX_FILE + '.bak'):
+                data = _read(DOCUMENT_INDEX_FILE + '.bak')
+                save_document_index(data)     # re-materialize the main file from the backup
+                print(f"[INDEX] restored {len(data['documents'])} entries from {DOCUMENT_INDEX_FILE}.bak")
+                return _backfill(data)
         except Exception as e:
-            print(f"[INDEX] could not rewrite {DOCUMENT_INDEX_FILE}: {e}")
+            print(f"[INDEX] backup also unusable ({e}); starting empty.")
     return {"documents": []}
 
 
 def save_document_index(index: Dict):
-    """Save the document index to disk."""
-    with open(DOCUMENT_INDEX_FILE, 'w') as f:
+    """Save the document index ATOMICALLY: write a temp file, fsync it, keep
+    the previous good version as .bak, then rename into place. A plain
+    open(..., 'w') left a window where a crash or hard reboot produced a
+    truncated/NUL-filled file — which load then treated as corrupt."""
+    tmp = DOCUMENT_INDEX_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(index, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    if os.path.exists(DOCUMENT_INDEX_FILE):
+        try:
+            os.replace(DOCUMENT_INDEX_FILE, DOCUMENT_INDEX_FILE + '.bak')
+        except Exception:
+            pass
+    os.replace(tmp, DOCUMENT_INDEX_FILE)
 
 
 def allowed_file(filename):
