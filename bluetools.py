@@ -89,6 +89,14 @@ try:
 except Exception:
     pass
 
+# When run as a script (python bluetools.py), register this module under its
+# import name too, so extracted blue.server.* modules doing `import bluetools`
+# get THIS instance instead of executing the whole file a second time (which
+# would double every daemon thread and re-init the head hardware).
+import sys
+if __name__ == "__main__":
+    sys.modules.setdefault("bluetools", sys.modules[__name__])
+
 # Third-party
 import requests
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
