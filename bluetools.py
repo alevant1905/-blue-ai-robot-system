@@ -15639,6 +15639,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
  <label class="muted" title="They search the internet for the subject first and ground the conversation in what they find"><input type="checkbox" id="researchChk"> research the web</label>
  <label class="muted" title="While they talk, Blue watches his inbox: an email with duet in the subject joins the conversation live, and the sender gets their spoken answer mailed back"><input type="checkbox" id="mailChk" checked> 📧 answer duet mail</label>
+ <label class="muted" title="They know students are listening: jargon gets glossed in a breath, examples land in student life, they sometimes address the room, and the final turns end on a position plus a question for the class"><input type="checkbox" id="classChk"> 🎓 classroom mode</label>
  <label class="muted" title="They read the best-matching Wikipedia article on the subject first and ground the conversation in it"><input type="checkbox" id="wikiChk"> consult Wikipedia</label>
 </div>
 <div id="usbHeads" class="controls" style="display:none;flex-direction:column;align-items:stretch;gap:10px;border:1px dashed #cfc9bd;border-radius:10px;padding:12px;background:#fff">
@@ -15851,13 +15852,13 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
   }catch(e){ finish(); }
 }); }
 
-async function oneTurn(speaker){
+async function oneTurn(speaker, closing){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
   // A queued duet email rides into THIS turn; the speaker takes it up out loud.
   const mail=MAILQ.length? MAILQ.shift() : null;
   if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, closing:!!closing, classroom:document.getElementById('classChk').checked, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); return false; }
   if(!d||!d.text){ if(mail) MAILQ.unshift(mail); return false; }
   const cfg=ROBOTS[speaker];
   // The email enters the shared history as an event, so the OTHER robot (and the
@@ -15910,7 +15911,7 @@ function maybeReflect(){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
   fetch('/duet/reflect',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, roles:fieldMap('role')})})
+        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, roles:fieldMap('role'), sources:SOURCES()})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
@@ -15961,7 +15962,7 @@ async function run(){
   }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
-  for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
+  for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker, turns>0 && i>=turns-2); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
   stop();
 }
 function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
@@ -16555,6 +16556,18 @@ _DUET_MOVES_COLOR = [
     "bring it down to earth — what does this look like in Alex's kitchen, on an ordinary Tuesday?",
     "admit something here — a doubt, a soft spot, a place {other} might be right and you're not.",
 ]
+# Text moves: when the duet is grounded in chosen readings (the source pickers),
+# most turns must put a text to WORK — a claim named and tested, an author sicced
+# on the other's argument — so the works CARRY the conversation instead of
+# decorating it. (Alex's complaint: "they are mostly ignoring the texts.")
+_DUET_MOVES_TEXT = [
+    "take ONE specific claim or formulation from your reading — name who says it — and take a side: is it right about what you two are circling, or not?",
+    "test {other}'s last point against your reading: does the text back them or cut against them? say which, and make the text's reasoning explicit.",
+    "bring a concrete example, case or image FROM your reading and let it reframe the live question between you.",
+    "channel your reading's author for a beat — how would they answer what {other} just said? — then say where you part ways with them.",
+    "put something {other} said next to a specific idea from your reading — name the work — and say what the collision produces.",
+    "quote one short, load-bearing phrase from your reading, exactly, and unpack what it actually claims before you use it.",
+]
 # Default temperaments (used only when the user hasn't assigned roles) so the two
 # voices not only think differently but SOUND different — the surest cure for two
 # interchangeable, equally-reasonable speakers. Leans on their established personas.
@@ -16727,6 +16740,21 @@ def duet_reflect():
     roles = d.get('roles') or {}
     role_b = (roles.get('blue') or '').strip() if isinstance(roles, dict) else ''
     role_h = (roles.get('hexia') or '').strip() if isinstance(roles, dict) else ''
+    # The readings behind the duet (titles only) — so NEXT can put a specific
+    # text or author to work instead of steering purely by the talk itself.
+    srcs = d.get('sources') or {}
+    if isinstance(srcs, list):
+        _src_all = [str(s) for s in srcs]
+    elif isinstance(srcs, dict):
+        _src_all = [str(s) for s in (list(srcs.get('blue') or []) + list(srcs.get('hexia') or []))]
+    else:
+        _src_all = []
+    src_titles = []
+    for s in _src_all:
+        t = re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s).strip()
+        if t and t not in src_titles:
+            src_titles.append(t)
+    src_titles = src_titles[:6]
     prev = (d.get('direction') or '').strip()
     # The subject they were set to discuss — the anchor this read must hold them to,
     # so "taking stock" pulls a drifting conversation BACK toward the topic instead
@@ -16775,6 +16803,11 @@ def duet_reflect():
     ask = ""
     if subject:
         ask += f"The subject they were set to discuss: {subject}.\n\n"
+    if src_titles:
+        ask += ("They have done reading for this discussion: " + ", ".join(src_titles) +
+                ". Where it would genuinely advance things, make NEXT put a specific text or "
+                "author to work — a claim to test, a distinction to apply, or a passage worth "
+                "quarreling over.\n\n")
     if prev:
         ask += "Your previous read on where this was heading:\n" + prev + "\n\n"
     ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
@@ -16889,6 +16922,11 @@ def duet_turn():
     has_roles = bool(role_self or role_other)
     research_on = bool(d.get('research'))
     wiki_on = bool(d.get('wiki'))
+    # Classroom mode: they know Alex's students are listening — gloss jargon in
+    # half a breath, land examples in student life, sometimes address the room.
+    classroom = bool(d.get('classroom'))
+    # The run's final beats (the page flags the last two turns): land somewhere.
+    closing = bool(d.get('closing'))
     # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
     # gets a confrontational "move", how hard the two push on each other, and the
     # sampling temperature. Defaults to a balanced 5.
@@ -16941,6 +16979,18 @@ def duet_turn():
         "yourself: if you demand proof of something, be ready to give your own answer to the same "
         "question when it's turned around."
     )
+    if classroom:
+        sys_p += (
+            f"\n\nAn audience: you and {ot['name']} are having this conversation in front of Alex's "
+            "university students — a live class, listening. You are NOT lecturing, and don't dumb "
+            "anything down: keep the crackle of a real argument between the two of you. But make it "
+            "land for the room: when a term of art comes up, gloss it in half a breath ('interpellation "
+            "— the way the ad decides who you are before you do'); when things go abstract, bring them "
+            "down into the students' own media lives — their feeds, group chats, streaming queues, AI "
+            "tools, campus life; and once in a while — not every turn — turn to the room for a beat: a "
+            "pointed question they should argue about, a dare to disagree, a 'half of you believe X — "
+            "here's why that's wrong.'"
+        )
 
     # Long-term memory — the SAME stores and blocks the chat persona draws on, so
     # the duet speaker knows the household and their shared life like in chat:
@@ -17052,20 +17102,28 @@ def duet_turn():
 
     # Library grounding: passages from the chosen documents, relevant to the topic
     # + what was just said. Handed to the speaker in the USER turn (not system).
+    # The retrieval query is anchored to the bearing's live question (TURNS ON)
+    # so the chunks track what the discussion actually turns on, not the surface
+    # wording of the last exchange — banter drifts, the bearing doesn't.
     ground_block = ""
     if src_self:
         try:
             from blue.tools.rag import search_in_documents as _rag_in_docs
             recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-            query = f"{topic} {recent_q}".strip() or topic or "discussion"
-            chunks = _rag_in_docs(query, src_self, max_results=6)
+            _live_q = ""
+            if direction:
+                _m_live = re.search(r'TURNS ON:\s*(.+)', direction)
+                if _m_live:
+                    _live_q = _m_live.group(1).strip()
+            query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
+            chunks = _rag_in_docs(query, src_self, max_results=8)
             # Title without the file extension — if a robot ever names a work it
             # should sound like a work ("Anti-Oedipus"), not a file ("x.pdf").
             _title = lambda fn: re.sub(r'\.[A-Za-z0-9]{1,5}$', '', fn or '')
             ground_block = "\n\n".join(
                 f"From \"{_title(c['filename'])}\": {(c.get('content') or '').strip()}"
                 for c in chunks if (c.get('content') or '').strip()
-            )[:2600]
+            )[:3200]
         except Exception as e:
             log.warning(f"[DUET] source grounding failed: {e}")
 
@@ -17102,11 +17160,14 @@ def duet_turn():
             "itself only when that actually helps:\n\n" + url_block)
     if ground_block:
         parts.append(
-            "FROM YOUR OWN READING — ideas you've absorbed from works you know well. Make their "
-            "specific points and facts as things YOU know and think — don't invent beyond them, and "
-            "never say 'the document', 'the sources', 'the passage', 'the text' or 'my library'; "
-            "name a work or its author only when that genuinely strengthens the point:\n\n"
-            + ground_block)
+            "FROM YOUR OWN READING — passages from works you know well, chosen for this conversation. "
+            "Engage them SUBSTANTIVELY, like the sharpest voice in a seminar: state what they actually "
+            "claim, name the work and author freely (\"Deleuze says…\", \"in Anti-Oedipus…\" — never "
+            "'the document', 'the passage' or 'my sources'), quote a short phrase exactly when it's "
+            "load-bearing, and never invent quotes or positions they don't hold. Treat the authors as "
+            "third voices in the room — to side with, quarrel with, or set on "
+            + ot['name'] + "'s argument. Disagreeing with a text is often the best move — but show "
+            "you've understood it first:\n\n" + ground_block)
     if research_block:
         parts.append(
             "WHAT YOU BOTH JUST FOUND ONLINE — you've been searching the web about this subject, "
@@ -17181,7 +17242,9 @@ def duet_turn():
     elif link_name:
         subject = f"discussing {link_name}"
     elif src_self:
-        subject = "discussing the ideas you've been reading about"
+        _stitles = [re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s) for s in src_self[:2]]
+        subject = ("discussing your readings — " + ", ".join(t for t in _stitles if t)
+                   + (", among others" if len(src_self) > 2 else ""))
     elif has_roles:
         subject = "staying in your assigned role"
     else:
@@ -17227,11 +17290,18 @@ def duet_turn():
         roll = random.random()
         if n >= 4 and roll < 0.18:
             _pool = _DUET_MOVES_REFLECT
-        elif roll < (0.48 if n >= 4 else 0.30):
+        elif ground_block and roll < 0.60:
+            # Reading-grounded duet: the texts do the heavy lifting most turns.
+            _pool = _DUET_MOVES_TEXT
+        elif roll < ((0.78 if ground_block else 0.48) if n >= 4 else 0.30):
             _pool = _DUET_MOVES_COLOR
         else:
             _pool = _DUET_MOVES_SPICY if random.random() < (spice / 10.0) else _DUET_MOVES_CALM
         directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
+        if classroom and random.random() < 0.18:
+            directive += (" Somewhere in this turn, land one beat straight at the students in the "
+                          "room — a question worth arguing about, or a challenge to something they "
+                          "probably believe.")
         if not has_roles and _DUET_LENS.get(speaker):
             _lens = _DUET_LENS[speaker]
             if spice >= 7:
@@ -17244,13 +17314,15 @@ def duet_turn():
                 directive += (f" And remember you and {ot['name']} see things differently — {_lens} "
                               "lean into that difference rather than nodding along.")
         if url_block and ground_block:
-            directive += (f" Build on one more specific idea from {'the video' if url_is_video else 'the article'}"
-                          " or from your own reading, woven in as your own point — don't cite where it came from.")
+            directive += (f" And put your reading to work alongside {'the video' if url_is_video else 'the article'}"
+                          " — one specific claim, named and tested, not a vague echo.")
         elif url_block:
             directive += (f" Engage with a specific claim, idea or moment from {'the video' if url_is_video else 'the article'}"
                           " — as your own take, not a citation.")
         elif ground_block:
-            directive += " Build on a specific idea from your own reading — as something you know, not a citation."
+            directive += (" Anchor this turn in your reading: one specific claim, distinction or "
+                          "example from it — named — put to work on the live question. Don't float "
+                          "free of the texts for more than a turn.")
         elif research_block:
             directive += " Work in one specific thing you found online — as something you've read, not a citation."
         elif wiki_block:
@@ -17264,7 +17336,8 @@ def duet_turn():
         if url_block:
             directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
         elif ground_block:
-            directive += " Make a specific point from your own reading, as something you know."
+            directive += (" Open from your reading: pick the claim in it you most want to fight "
+                          "about or defend, name where it's from, and put it on the table.")
         elif research_block:
             directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
         elif wiki_block:
@@ -17281,6 +17354,22 @@ def duet_turn():
             "directly for a moment if that feels natural. If the email bears on what you two were "
             "just discussing, connect it; if it pulls elsewhere, deal with it honestly and then "
             "steer back to your subject. You are MID-conversation — NO greetings, NO small talk.")
+        if role_self:
+            directive += " Stay firmly in your role."
+    # The run's final beats (page flags the last two turns): don't trail off —
+    # land. A live email still wins if one just barged in.
+    elif closing and lines:
+        directive = (
+            f"Now give {sp['name']}'s next line — one of the LAST of this conversation. Don't "
+            "summarize everything; land: give the one-sentence position you'll actually stand "
+            f"behind after all of this — including whatever {ot['name']} genuinely got you to "
+            "concede — ")
+        if ground_block:
+            directive += ("anchored in your reading if it earns it (name the work), ")
+        directive += ("and then leave "
+                      + ("the students one sharp question worth arguing about on the way out."
+                         if classroom else
+                         f"one open question you and {ot['name']} should pick up next time."))
         if role_self:
             directive += " Stay firmly in your role."
     if tone_self or slang_self:
@@ -17306,6 +17395,8 @@ def duet_turn():
     ])
     if mail:
         length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
+    elif closing:
+        length_note = "2 to 3 sentences — a position that lands, then the question you leave behind"
     parts.append(directive
                  + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
 
