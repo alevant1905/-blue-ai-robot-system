@@ -178,6 +178,8 @@ desktop.ini
 data/
 # Local Claude Code tooling, settings, and git worktrees — never commit these.
 .claude/
+# Local Codex backup archives created before large edits.
+.codex-backups/
 # Debug dumps of LM Studio requests — contain raw conversation content.
 lm_studio_400_dump_*.json
 # The user's document corpus, uploads, camera captures, and the doc index.

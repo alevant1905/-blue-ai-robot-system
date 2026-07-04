@@ -149,6 +149,54 @@ def get_datetime_info() -> str:
 # CALCULATOR
 # ================================================================================
 
+def _eval_math_ast(expr: str, safe_dict: Dict[str, Any]) -> Any:
+    """Evaluate arithmetic expressions through AST nodes, not eval."""
+    import ast
+    import operator
+
+    bin_ops = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv,
+        ast.Mod: operator.mod,
+        ast.Pow: operator.pow,
+    }
+    unary_ops = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+    def eval_node(node, depth=0):
+        if depth > 20:
+            raise ValueError("expression is too complex")
+        if isinstance(node, ast.Expression):
+            return eval_node(node.body, depth + 1)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in safe_dict and not callable(safe_dict[node.id]):
+            return safe_dict[node.id]
+        if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:
+            return unary_ops[type(node.op)](eval_node(node.operand, depth + 1))
+        if isinstance(node, ast.BinOp) and type(node.op) in bin_ops:
+            left = eval_node(node.left, depth + 1)
+            right = eval_node(node.right, depth + 1)
+            if isinstance(node.op, ast.Pow) and abs(right) > 12:
+                raise ValueError("exponent is too large")
+            result = bin_ops[type(node.op)](left, right)
+            if isinstance(result, (int, float)) and abs(result) > 1e18:
+                raise ValueError("result is too large")
+            return result
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            fn = safe_dict.get(node.func.id)
+            if not callable(fn):
+                raise ValueError(f"function not allowed: {node.func.id}")
+            if len(node.args) > 3 or node.keywords:
+                raise ValueError("unsupported function arguments")
+            return fn(*[eval_node(arg, depth + 1) for arg in node.args])
+        raise ValueError("only arithmetic expressions are allowed")
+
+    return eval_node(ast.parse(expr, mode="eval"))
+
+
 def calculate(expression: str) -> str:
     """
     Safely evaluate a mathematical expression.
@@ -238,8 +286,8 @@ def calculate(expression: str) -> str:
         # Replace ^ with **
         expr = expr.replace('^', '**')
 
-        # Evaluate
-        result = eval(expr, {"__builtins__": {}}, safe_dict)
+        # Evaluate without executing Python code
+        result = _eval_math_ast(expr, safe_dict)
 
         # Format result
         if isinstance(result, float):

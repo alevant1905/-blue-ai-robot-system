@@ -10,7 +10,7 @@ Usage:
     from blue.llm import call_llm, LMStudioClient
 """
 
-__version__ = "9.0.0"
+__version__ = "12.5.0"
 
 # Re-export commonly used items for convenience
 from .utils import (

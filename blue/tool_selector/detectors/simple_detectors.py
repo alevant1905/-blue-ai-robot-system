@@ -200,13 +200,13 @@ class UtilitiesDetector(BaseDetector):
             'date today', 'time right now',
         ]
 
-        if any(s in msg_lower for s in calc_signals) and any(op in msg_lower for op in ['+', '-', '*', '/', 'plus', 'minus', 'times', 'divided']):
+        if any(s in msg_lower for s in calc_signals) and any(op in msg_lower for op in ['+', '-', '*', '/', '%', 'plus', 'minus', 'times', 'divided', 'sqrt']):
             return [ToolIntent(
-                tool_name='run_javascript',
+                tool_name='calculate',
                 confidence=0.85,
                 priority=ToolPriority.LOW,
-                reason="calculation keywords - using JS engine",
-                extracted_params={}
+                reason="calculation keywords",
+                extracted_params={"expression": self._extract_expression(msg_lower)}
             )]
         elif any(s in msg_lower for s in date_signals):
             # Determine if user wants date, time, or both
@@ -228,6 +228,23 @@ class UtilitiesDetector(BaseDetector):
                 extracted_params={"action": action}
             )]
         return []
+
+    @staticmethod
+    def _extract_expression(msg_lower: str) -> str:
+        """Best-effort extraction for direct arithmetic execution."""
+        q = msg_lower.strip().rstrip(".?!")
+        prefixes = [
+            "calculate", "compute", "what is", "what's", "how much is",
+            "math", "please calculate", "can you calculate",
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefixes:
+                if q.startswith(prefix):
+                    q = q[len(prefix):].strip(" :")
+                    changed = True
+        return q or msg_lower
 
 
 class MediaLibraryDetector(BaseDetector):

@@ -18,6 +18,8 @@ from urllib.parse import quote_plus, urljoin, urlsplit
 
 import requests
 
+from blue.server.security import assert_public_http_url
+
 # ================================================================================
 # CONFIGURATION
 # ================================================================================
@@ -258,8 +260,13 @@ def _extract_links(html_str: str, base_url: str, max_links: int = 40) -> List[st
     return out
 
 
+def _assert_public_http_url(url: str) -> str:
+    """Validate an outbound browse URL and block local/private networks."""
+    return assert_public_http_url(url)
+
+
 def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15, max_bytes: int = 1_500_000):
-    """Safely fetch a URL with size limits."""
+    """Safely fetch a URL with size, redirect, and private-network limits."""
     if not isinstance(url, str):
         raise ValueError("url must be a string")
     u = url.strip()
@@ -274,7 +281,23 @@ def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15,
     }
     if isinstance(headers, dict):
         req_headers.update({str(k): str(v) for k, v in headers.items()})
-    resp = requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=True)
+
+    redirects = 0
+    while True:
+        _assert_public_http_url(u)
+        resp = requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            redirects += 1
+            if redirects > 5:
+                raise ValueError("Too many redirects")
+            location = resp.headers.get("Location")
+            if not location:
+                raise ValueError("Redirect missing Location header")
+            u = urljoin(u, location)
+            resp.close()
+            continue
+        break
+
     resp.raise_for_status()
     content = b""
     for chunk in resp.iter_content(chunk_size=16384):

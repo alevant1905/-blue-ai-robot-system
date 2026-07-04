@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-12.0.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
+[![Version](https://img.shields.io/badge/version-12.5.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
 
 A pair of **local, private AI robot companions** — **Blue** and **Hexia** — that you can chat with, that drive real physical robot heads, and that can hold steerable conversations *with each other*. Built on a modular assistant platform with calendar, email, smart‑home, document, and recognition tools. Everything runs on your own machine — the language model, their memory, and your documents never leave the house.
 
@@ -197,7 +197,7 @@ blue-ai-robot-system/
 │   ├── utils.py              # Utility functions
 │   ├── memory.py             # Memory & facts system
 │   ├── llm.py                # LLM client
-│   ├── tool_selector.py      # Intent detection
+│   ├── tool_selector/        # Intent detection package
 │   └── tools/                # Tool implementations
 │       ├── calendar.py       # Calendar & events
 │       ├── contacts.py       # Contact management

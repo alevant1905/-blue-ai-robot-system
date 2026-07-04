@@ -9,6 +9,8 @@ future date with the current minute leaked in — so a past meeting fired today.
 
 from datetime import datetime
 
+import pytest
+
 from blue_tools_enhanced import (
     parse_when, parse_recurrence_phrase, parse_lead_minutes,
     recurrence_label, _expand_row,
@@ -86,6 +88,32 @@ EXPAND = [
      ["2026-05-04 09:00", "2026-05-11 09:00", "2026-05-18 09:00", "2026-05-25 09:00"]),
     (_row("2026-05-20T10:00", ""), datetime(2026, 6, 1), datetime(2026, 6, 30), []),
 ]
+
+
+def test_parse_when_expected():
+    for phrase, expected in EXPECTED.items():
+        assert parse_when(phrase, NOW).isoformat(timespec="minutes") == expected
+
+
+def test_parse_when_refuses_unresolved_past():
+    for phrase in MUST_REFUSE:
+        with pytest.raises(ValueError):
+            parse_when(phrase, NOW)
+
+
+def test_parse_recurrence_phrases():
+    for phrase, expected in RECUR.items():
+        assert parse_recurrence_phrase(phrase) == expected
+
+
+def test_parse_lead_minutes():
+    for phrase, expected in LEADS.items():
+        assert parse_lead_minutes(phrase) == expected
+
+
+def test_expand_rows():
+    for row, ws, we, expected in EXPAND:
+        assert _starts(_expand_row(row, ws, we)) == expected
 
 
 def run():

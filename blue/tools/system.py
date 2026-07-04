@@ -351,6 +351,31 @@ APP_ALIASES = {
 }
 
 
+def _allowed_file_roots() -> List[str]:
+    app_root = Path(__file__).resolve().parents[2]
+    raw = os.environ.get("BLUE_FILE_TOOL_ROOTS", "")
+    if raw.strip():
+        roots = [p.strip() for p in raw.split(os.pathsep) if p.strip()]
+    else:
+        roots = [
+            str(app_root / "documents"),
+            str(app_root / "uploads"),
+            str(app_root / "uploaded_documents"),
+        ]
+    return [str(Path(p).expanduser().resolve()) for p in roots]
+
+
+def _path_is_allowed(path: str) -> bool:
+    resolved = str(Path(path).expanduser().resolve())
+    for root in _allowed_file_roots():
+        try:
+            if os.path.commonpath([resolved, root]) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _find_app_command(app_name: str) -> Optional[str]:
     """Find the command to launch an application."""
     app_lower = app_name.lower().strip()
@@ -375,11 +400,23 @@ def launch_application(app_name: str) -> str:
         JSON result
     """
     try:
+        app_key = (app_name or "").strip().lower()
         command = _find_app_command(app_name)
+        allowed = set(APP_ALIASES.keys())
+        allowed.update(
+            item.strip().lower()
+            for item in os.environ.get("BLUE_ALLOWED_APPS", "").split(",")
+            if item.strip()
+        )
+        if app_key not in allowed and command.lower() not in allowed:
+            return json.dumps({
+                "success": False,
+                "error": f"Application not allowed: {app_name}",
+                "allowed": sorted(allowed)
+            })
 
         if platform.system() == 'Windows':
-            # Windows: use start command
-            subprocess.Popen(f'start "" "{command}"', shell=True)
+            subprocess.Popen([command], shell=False)
         elif platform.system() == 'Darwin':
             # macOS: use open command
             subprocess.Popen(['open', '-a', command])
@@ -413,8 +450,15 @@ def open_url(url: str) -> str:
     try:
         import webbrowser
 
-        # Ensure URL has protocol
-        if not url.startswith(('http://', 'https://', 'file://')):
+        url = (url or "").strip()
+        # Ensure URL has protocol. file:// is intentionally not accepted here;
+        # use open_file, which applies the file-root allowlist.
+        if url.startswith('file://'):
+            return json.dumps({
+                "success": False,
+                "error": "Only http and https URLs are allowed"
+            })
+        if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
 
         webbrowser.open(url)
@@ -447,6 +491,12 @@ def open_file(filepath: str) -> str:
             return json.dumps({
                 "success": False,
                 "error": f"File not found: {filepath}"
+            })
+        if not _path_is_allowed(filepath):
+            return json.dumps({
+                "success": False,
+                "error": "File is outside allowed roots",
+                "allowed_roots": _allowed_file_roots()
             })
 
         if platform.system() == 'Windows':

@@ -47,6 +47,27 @@ except ImportError:
 _DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _DB_PATH = os.path.join(_DB_DIR, "enhanced.db")
 _DB_LOCK = threading.Lock()
+_APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _configured_file_roots() -> List[str]:
+    raw = os.environ.get("BLUE_FILE_TOOL_ROOTS", "")
+    if raw.strip():
+        roots = [p.strip() for p in raw.split(os.pathsep) if p.strip()]
+    else:
+        roots = [
+            os.path.join(_APP_ROOT, "documents"),
+            os.path.join(_APP_ROOT, "uploads"),
+            os.path.join(_APP_ROOT, "uploaded_documents"),
+        ]
+    return [os.path.abspath(os.path.expanduser(p)) for p in roots]
+
+
+def _is_within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
 
 
 def _conn() -> sqlite3.Connection:
@@ -1622,14 +1643,44 @@ class SystemController:
             "spotify": "spotify.exe",
             "explorer": "explorer.exe",
         }
+        mac_aliases = {
+            "chrome": "Google Chrome",
+            "firefox": "Firefox",
+            "safari": "Safari",
+            "calculator": "Calculator",
+            "terminal": "Terminal",
+            "vscode": "Visual Studio Code",
+            "code": "Visual Studio Code",
+        }
+        linux_aliases = {
+            "chrome": "google-chrome",
+            "firefox": "firefox",
+            "calculator": "gnome-calculator",
+            "terminal": "x-terminal-emulator",
+            "vscode": "code",
+            "code": "code",
+        }
+        extra_allowed = {
+            item.strip().lower()
+            for item in os.environ.get("BLUE_ALLOWED_APPS", "").split(",")
+            if item.strip()
+        }
+        aliases = win_aliases if is_windows else mac_aliases if is_mac else linux_aliases
+        if name not in aliases and name not in extra_allowed:
+            return {
+                "success": False,
+                "message": f"Application not allowed: {app_name}",
+                "allowed": sorted(set(aliases) | extra_allowed),
+            }
+
         try:
             if is_windows:
-                target = win_aliases.get(name, name)
-                subprocess.Popen(target, shell=True)
+                target = aliases.get(name, name)
+                subprocess.Popen([target], shell=False)
             elif is_mac:
-                subprocess.Popen(["open", "-a", app_name])
+                subprocess.Popen(["open", "-a", aliases.get(name, app_name)])
             else:
-                subprocess.Popen([name])
+                subprocess.Popen([aliases.get(name, name)])
         except FileNotFoundError:
             return {"success": False, "message": f"Application not found: {app_name}"}
         except Exception as e:
@@ -1679,12 +1730,26 @@ class SystemController:
 class FileOperations:
     @staticmethod
     def _safe_resolve(path: str) -> str:
-        return os.path.abspath(os.path.expanduser(path or "."))
+        roots = _configured_file_roots()
+        raw = (path or ".").strip()
+        if raw in ("", "."):
+            candidate = roots[0]
+        elif os.path.isabs(os.path.expanduser(raw)):
+            candidate = os.path.abspath(os.path.expanduser(raw))
+        else:
+            candidate = os.path.abspath(os.path.join(roots[0], raw))
+        if not any(_is_within(candidate, root) for root in roots):
+            allowed = ", ".join(roots)
+            raise PermissionError(f"Path is outside allowed file roots: {allowed}")
+        return candidate
 
     @staticmethod
     def list_files(directory: str = ".", pattern: str = "*",
                    recursive: bool = False) -> Dict[str, Any]:
-        base = FileOperations._safe_resolve(directory)
+        try:
+            base = FileOperations._safe_resolve(directory)
+        except PermissionError as e:
+            return {"success": False, "message": str(e)}
         if not os.path.isdir(base):
             return {"success": False, "message": f"Not a directory: {base}"}
         pat = pattern or "*"
@@ -1718,7 +1783,10 @@ class FileOperations:
 
     @staticmethod
     def read_file(filepath: str) -> Dict[str, Any]:
-        path = FileOperations._safe_resolve(filepath)
+        try:
+            path = FileOperations._safe_resolve(filepath)
+        except PermissionError as e:
+            return {"success": False, "message": str(e)}
         if not os.path.isfile(path):
             return {"success": False, "message": f"Not a file: {path}"}
         if os.path.getsize(path) > 5 * 1024 * 1024:
@@ -1738,7 +1806,10 @@ class FileOperations:
 
     @staticmethod
     def write_file(filepath: str, content: str) -> Dict[str, Any]:
-        path = FileOperations._safe_resolve(filepath)
+        try:
+            path = FileOperations._safe_resolve(filepath)
+        except PermissionError as e:
+            return {"success": False, "message": str(e)}
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -1754,7 +1825,10 @@ class FileOperations:
 
     @staticmethod
     def get_file_info(filepath: str) -> Dict[str, Any]:
-        path = FileOperations._safe_resolve(filepath)
+        try:
+            path = FileOperations._safe_resolve(filepath)
+        except PermissionError as e:
+            return {"success": False, "message": str(e)}
         if not os.path.exists(path):
             return {"success": False, "message": f"Not found: {path}"}
         try:

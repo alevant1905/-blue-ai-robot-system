@@ -1558,6 +1558,8 @@ TOOL_SELECTOR = ImprovedToolSelector()
 print("[OK] Tool selector initialized - using modular confidence-based selection")
 
 
+APP_VERSION = "12.5.0"
+
 app = Flask(__name__)
 
 # ============================================================================
@@ -1741,6 +1743,34 @@ def _require_remote_auth():
     return redirect(url_for("blue_login", next=request.full_path))
 
 
+@app.before_request
+def _reject_cross_origin_state_changes():
+    """Reject browser-originated writes from other sites.
+
+    Native/local clients such as the Ohbot bridge often send no Origin header,
+    so missing Origin/Referer is allowed. Browser requests that do include an
+    Origin or Referer must match the current host.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        return None
+
+    marker = (request.headers.get("Origin") or "").strip()
+    if not marker:
+        marker = (request.headers.get("Referer") or "").strip()
+    if not marker:
+        return None
+
+    try:
+        from blue.server.security import marker_matches_host
+        ok = marker_matches_host(marker, request.host or "")
+    except Exception:
+        return Response("Invalid request origin.", status=403, mimetype="text/plain")
+
+    if not ok:
+        return Response("Cross-origin request blocked.", status=403, mimetype="text/plain")
+    return None
+
+
 # Users who are restricted to the chat only (e.g. Vilda on the iPad — she can
 # talk to Blue but not reach contacts/calendar/visual memory/documents/etc).
 _CHAT_ONLY_USERS = {"Vilda"}
@@ -1765,7 +1795,10 @@ _CHAT_ONLY_ALLOWED = {
 #    Gmail account — strictly an owner power.
 _KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer",
                       "move_head", "create_reminder", "get_upcoming_reminders",
-                      "capture_camera", "email_snapshot"}
+                      "capture_camera", "email_snapshot", "read_file",
+                      "write_file", "list_files", "get_file_info",
+                      "launch_application", "take_screenshot",
+                      "run_javascript"}
 
 
 @app.before_request
@@ -4151,14 +4184,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "run_javascript",
-            "description": "Execute JavaScript code",
+            "name": "calculate",
+            "description": "Evaluate arithmetic only. Use for math expressions such as '2 + 2', 'sqrt(16)', or '15% of 200'. This does not execute code.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string", "description": "JavaScript code"}
+                    "expression": {"type": "string", "description": "The arithmetic expression to evaluate."}
                 },
-                "required": ["code"]
+                "required": ["expression"]
             }
         }
     },
@@ -6870,8 +6903,14 @@ def _extract_links(html_str: str, base_url: str, max_links: int = 40) -> list:
             break
     return out
 
+def _assert_public_http_url(url: str) -> str:
+    """Validate an outbound browse URL and block local/private networks."""
+    from blue.server.security import assert_public_http_url
+    return assert_public_http_url(url)
+
+
 def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15, max_bytes: int = 1_500_000):
-    """Safely fetch a URL with size limits."""
+    """Safely fetch a URL with size, redirect, and private-network limits."""
     import requests as _requests
     import urllib.parse as _urlparse3
     if not isinstance(url, str):
@@ -6888,7 +6927,23 @@ def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15,
     }
     if isinstance(headers, dict):
         req_headers.update({str(k): str(v) for k,v in headers.items()})
-    resp = _requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=True)
+
+    redirects = 0
+    while True:
+        _assert_public_http_url(u)
+        resp = _requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            redirects += 1
+            if redirects > 5:
+                raise ValueError("Too many redirects")
+            location = resp.headers.get("Location")
+            if not location:
+                raise ValueError("Redirect missing Location header")
+            u = _urlparse3.urljoin(u, location)
+            resp.close()
+            continue
+        break
+
     resp.raise_for_status()
     content = b""
     for chunk in resp.iter_content(chunk_size=16384):
@@ -9224,6 +9279,112 @@ def _start_email_autoreply_loop():
     )
 
 
+def _safe_calculate(expression: str) -> str:
+    """Evaluate a small arithmetic expression without executing code."""
+    import ast as _ast
+    import math as _math
+    import operator as _operator
+
+    original = (expression or "").strip()
+    if not original:
+        return json.dumps({"success": False, "error": "expression is required"})
+    if len(original) > 300:
+        return json.dumps({"success": False, "error": "expression is too long"})
+
+    expr = original.lower()
+    percent = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?)\s*",
+        expr,
+    )
+    if percent:
+        expr = f"({percent.group(2)} * ({percent.group(1)} / 100))"
+    else:
+        replacements = {
+            " plus ": "+",
+            " minus ": "-",
+            " times ": "*",
+            " multiplied by ": "*",
+            " divided by ": "/",
+            " over ": "/",
+            " to the power of ": "**",
+            " squared": "**2",
+            " cubed": "**3",
+        }
+        expr = f" {expr} "
+        for word, symbol in replacements.items():
+            expr = expr.replace(word, symbol)
+        expr = expr.strip().replace("^", "**")
+
+    funcs = {
+        "sqrt": _math.sqrt,
+        "sin": _math.sin,
+        "cos": _math.cos,
+        "tan": _math.tan,
+        "log": _math.log10,
+        "ln": _math.log,
+        "abs": abs,
+        "round": round,
+        "floor": _math.floor,
+        "ceil": _math.ceil,
+    }
+    consts = {"pi": _math.pi, "e": _math.e}
+    bin_ops = {
+        _ast.Add: _operator.add,
+        _ast.Sub: _operator.sub,
+        _ast.Mult: _operator.mul,
+        _ast.Div: _operator.truediv,
+        _ast.FloorDiv: _operator.floordiv,
+        _ast.Mod: _operator.mod,
+        _ast.Pow: _operator.pow,
+    }
+    unary_ops = {_ast.UAdd: _operator.pos, _ast.USub: _operator.neg}
+
+    def eval_node(node, depth=0):
+        if depth > 20:
+            raise ValueError("expression is too complex")
+        if isinstance(node, _ast.Expression):
+            return eval_node(node.body, depth + 1)
+        if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, _ast.Name) and node.id in consts:
+            return consts[node.id]
+        if isinstance(node, _ast.UnaryOp) and type(node.op) in unary_ops:
+            return unary_ops[type(node.op)](eval_node(node.operand, depth + 1))
+        if isinstance(node, _ast.BinOp) and type(node.op) in bin_ops:
+            left = eval_node(node.left, depth + 1)
+            right = eval_node(node.right, depth + 1)
+            if isinstance(node.op, _ast.Pow) and abs(right) > 12:
+                raise ValueError("exponent is too large")
+            result = bin_ops[type(node.op)](left, right)
+            if isinstance(result, (int, float)) and abs(result) > 1e18:
+                raise ValueError("result is too large")
+            return result
+        if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name):
+            fn = funcs.get(node.func.id)
+            if fn is None:
+                raise ValueError(f"function not allowed: {node.func.id}")
+            if len(node.args) > 3 or node.keywords:
+                raise ValueError("unsupported function arguments")
+            return fn(*[eval_node(arg, depth + 1) for arg in node.args])
+        raise ValueError("only arithmetic expressions are allowed")
+
+    try:
+        tree = _ast.parse(expr, mode="eval")
+        result = eval_node(tree)
+        if isinstance(result, float):
+            result = int(result) if result.is_integer() else round(result, 10)
+        return json.dumps({
+            "success": True,
+            "expression": original,
+            "result": result,
+            "formatted": f"{original} = {result}",
+        })
+    except ZeroDivisionError:
+        return json.dumps({"success": False, "expression": original, "error": "division by zero"})
+    except Exception as e:
+        return json.dumps({"success": False, "expression": original, "error": str(e)})
+
+
 # ===== END GMAIL TOOLS =====
 
 
@@ -9572,7 +9733,17 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             pass
         return result
 
+    elif tool_name == "calculate":
+        result = _safe_calculate(tool_args.get("expression", ""))
+        print(f"   [OK] Calculation completed")
+        return result
+
     elif tool_name == "run_javascript":
+        if os.environ.get("BLUE_ENABLE_JAVASCRIPT_TOOL") != "1":
+            return json.dumps({
+                "success": False,
+                "error": "run_javascript is disabled. Use the calculate tool for arithmetic.",
+            })
         try:
             import js2py
             result = js2py.eval_js(tool_args.get("code", ""))
@@ -9685,19 +9856,27 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
 
     elif tool_name == "cancel_reminder" and ENHANCED_TOOLS_AVAILABLE:
         result = CalendarManager.cancel_reminder(**tool_args)
+        print(f"   [OK] Reminder cancel attempt: success={result.get('success')}")
+        return json.dumps(result)
 
     elif tool_name == "reschedule_reminder" and ENHANCED_TOOLS_AVAILABLE:
         result = CalendarManager.update_reminder(**tool_args)
+        print(f"   [OK] Reminder reschedule attempt: success={result.get('success')}")
+        return json.dumps(result)
 
     elif tool_name == "add_contact" and ENHANCED_TOOLS_AVAILABLE:
         result = ContactManager.add_contact(**tool_args)
+        print(f"   [OK] Contact add attempt: success={result.get('success')}")
+        return json.dumps(result)
 
     elif tool_name == "list_contacts" and ENHANCED_TOOLS_AVAILABLE:
         result = ContactManager.list_contacts(**tool_args)
+        print(f"   [OK] Contact list retrieved")
+        return json.dumps(result)
 
     elif tool_name == "find_contact" and ENHANCED_TOOLS_AVAILABLE:
         result = ContactManager.find_contact(**tool_args)
-        print(f"   [OK] Reminder cancel attempt: success={result.get('success')}")
+        print(f"   [OK] Contact lookup attempt: success={result.get('success')}")
         return json.dumps(result)
 
     elif tool_name == "create_task" and ENHANCED_TOOLS_AVAILABLE:
@@ -11741,7 +11920,6 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         'list_events': 'get_upcoming_reminders',
         'set_reminder': 'create_reminder',
         'list_notes': 'search_notes',
-        'calculate': 'run_javascript',
         'get_date_time': 'get_local_time',
         'visual_memory': 'recall_visual_memory',
         'recall_vision': 'recall_visual_memory',
@@ -11775,7 +11953,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # without any LLM call at all. This is the fastest possible path.
     # ================================================================================
     _ZERO_LLM_TOOLS = {
-        'control_music', 'control_lights', 'get_local_time',
+        'calculate', 'control_music', 'control_lights', 'get_local_time',
         'set_timer', 'music_visualizer', 'play_music',
     }
 
@@ -11839,6 +12017,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 elif time_str:
                     return f"It's {time_str}."
             return f"The time is {tool_result}." if tool_result else "Here's the time."
+
+        if tool_name == 'calculate':
+            return data.get('formatted') if isinstance(data, dict) else str(tool_result)
 
         if tool_name == 'set_timer':
             msg = data.get('message', '') if isinstance(data, dict) else ''
@@ -20965,7 +21146,7 @@ def chat_completions():
 
         # QUICK PRE-CHECK: Will this be a zero-LLM tool call?
         # If so, skip the expensive history injection and go straight to processing.
-        _ZERO_LLM_QUICK = {'control_music', 'control_lights', 'get_local_time',
+        _ZERO_LLM_QUICK = {'calculate', 'control_music', 'control_lights', 'get_local_time',
                            'set_timer', 'music_visualizer', 'play_music'}
         _quick_result = TOOL_SELECTOR.select_tool(last_user_msg) if last_user_msg else None
         _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
@@ -21326,7 +21507,7 @@ def health():
 
     return jsonify({
         "status": "healthy",
-        "version": "v8-enhanced",
+        "version": APP_VERSION,
         "service": "Blue AI Robot System",
         "uptime_note": "Flask app running",
         "components": {
@@ -21529,6 +21710,10 @@ def api_rag_stats():
 
 
 if __name__ == "__main__":
+    print("Start Blue with: python run.py")
+    print("Direct bluetools.py startup is disabled so all routes and tool patches load before the server starts.")
+    raise SystemExit(0)
+
     print("=" * 60)
     print("🎵💡 Blue AI Robot System - WITH MUSIC-LIGHT SYNC!")
     print("🔧 FIXED: Music controls now work from ANY window!")
@@ -21550,7 +21735,7 @@ if __name__ == "__main__":
     print("   • search_scholar (academic journals + Laurier library) 🎓")
     print("   • get_paper (DOI/title lookup, citations, full-text links) 📖")
     print("   • read_paper (fetch & read full text via Laurier account) 📚")
-    print("   • run_javascript 💻")
+    print("   • calculate (math-only) 🧮")
     print("   • create_document (save files) 📝")
     print("   • browse_website (fetch URLs) 🌐")
     print("   • read_gmail (check emails) 📧")
