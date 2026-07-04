@@ -15636,6 +15636,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
  <button id="stopBtn" disabled>Stop</button>
+ <button id="saveBtn" disabled title="Download the written dialogue (with the run's settings) as a Markdown file">💾 Save</button>
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
  <label class="muted" title="They search the internet for the subject first and ground the conversation in what they find"><input type="checkbox" id="researchChk"> research the web</label>
  <label class="muted" title="While they talk, Blue watches his inbox: an email with duet in the subject joins the conversation live, and the sender gets their spoken answer mailed back"><input type="checkbox" id="mailChk" checked> 📧 answer duet mail</label>
@@ -15701,9 +15702,54 @@ function SPICE(){ var s=document.getElementById('spice'); var n=s?parseInt(s.val
   var word=function(n){ n=+n; return n<=1?'easygoing':n<=3?'gentle':n<=4?'mellow':n===5?'balanced':n<=7?'lively':n<=8?'spirited':'provocative'; };
   var upd=function(){ v.textContent=word(s.value); }; s.addEventListener('input',upd); upd();
 })();
+// ---- Settings persistence: everything typed or ticked survives a reload ----
+// Saved to localStorage on every change; restored on load. (Voices and speeds
+// already persist separately via blueVoiceName_/blueVoiceRate_.)
+const SETTINGS_KEY='duetSettings.v1';
+const SET_TXT=['topic','url','roleBlue','roleHexia','toneBlue','toneHexia','slangBlue','slangHexia'];
+const SET_SEL=['turns','starter'];
+const SET_CHK=['speakChk','researchChk','mailChk','classChk','wikiChk'];
+function saveSettings(){
+  try{
+    const s={txt:{},sel:{},chk:{},spice:SPICE(),src:SOURCES()};
+    SET_TXT.forEach(function(id){ const e=document.getElementById(id); if(e) s.txt[id]=e.value; });
+    SET_SEL.forEach(function(id){ const e=document.getElementById(id); if(e) s.sel[id]=e.value; });
+    SET_CHK.forEach(function(id){ const e=document.getElementById(id); if(e) s.chk[id]=e.checked; });
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+  }catch(e){}
+}
+function restoreSettings(){
+  let s=null; try{ s=JSON.parse(localStorage.getItem(SETTINGS_KEY)||'null'); }catch(e){}
+  if(!s) return;
+  try{
+    SET_TXT.forEach(function(id){ const e=document.getElementById(id); if(e && typeof (s.txt||{})[id]==='string') e.value=s.txt[id]; });
+    SET_SEL.forEach(function(id){ const e=document.getElementById(id); if(e && (s.sel||{})[id]!=null) e.value=s.sel[id]; });
+    SET_CHK.forEach(function(id){ const e=document.getElementById(id); if(e && typeof (s.chk||{})[id]==='boolean') e.checked=s.chk[id]; });
+    const sp=document.getElementById('spice');
+    if(sp && s.spice!=null){ sp.value=s.spice; sp.dispatchEvent(new Event('input')); }
+    ['sourcesBlue','sourcesHexia'].forEach(function(id){
+      const want=((s.src||{})[id==='sourcesBlue'?'blue':'hexia'])||[];
+      const box=document.getElementById(id); if(!box) return;
+      Array.prototype.slice.call(box.querySelectorAll('input[type=checkbox]')).forEach(function(cb){
+        cb.checked = want.indexOf(cb.value)>=0;
+      });
+      box.dispatchEvent(new Event('change'));   // refresh the "n selected" badge
+    });
+  }catch(e){}
+}
+(function(){
+  SET_TXT.concat(SET_SEL,SET_CHK,['spice']).forEach(function(id){
+    const e=document.getElementById(id); if(!e) return;
+    e.addEventListener('change', saveSettings); e.addEventListener('input', saveSettings);
+  });
+  ['sourcesBlue','sourcesHexia'].forEach(function(id){ const e=document.getElementById(id); if(e) e.addEventListener('change', saveSettings); });
+  restoreSettings();
+})();
 let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect)
+let TRANSCRIPT=[], RUN_META=null;              // the written dialogue + the settings it ran with (for 💾 Save)
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
+const saveBtn=document.getElementById('saveBtn');
 
 // iOS Safari refuses speechSynthesis unless audio was first unlocked by a real
 // tap. The duet speaks each line ASYNCHRONOUSLY (after fetching the turn), which
@@ -15823,6 +15869,7 @@ function headLipStop(cfg){
 function addTurn(cfg,text){ const d=document.createElement('div'); d.className='turn '+cfg.id;
   const w=document.createElement('div'); w.className='who'; w.textContent=cfg.name;
   const x=document.createElement('div'); x.textContent=text; d.appendChild(w); d.appendChild(x);
+  TRANSCRIPT.push({kind:'turn', name:cfg.name, text:text}); saveBtn.disabled=false;
   logEl.appendChild(d); window.scrollTo(0,document.body.scrollHeight); return d; }
 
 function speakAs(cfg,text,el){ return new Promise(resolve=>{
@@ -15923,10 +15970,20 @@ function maybeReflect(){
 }
 async function run(){
   running=true; history=[]; DIRECTION=''; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
+  TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.
   const topicEl=document.getElementById('topic'), urlEl=document.getElementById('url');
   if(!urlEl.value.trim() && /^https?:\\/\\/\\S+$/.test(topicEl.value.trim())){ urlEl.value=topicEl.value.trim(); topicEl.value=''; }
   const url=urlEl.value.trim();
+  // Snapshot the settings this run started with — the transcript header (💾 Save)
+  // records them even if the fields are edited afterwards.
+  RUN_META={ when:new Date().toLocaleString(), topic:topicEl.value.trim(), url:url,
+             roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'),
+             sources:SOURCES(), spice:SPICE(),
+             classroom:document.getElementById('classChk').checked,
+             research:document.getElementById('researchChk').checked,
+             wiki:document.getElementById('wikiChk').checked,
+             mail:mailOn() };
   if(url){
     addNote('(reading the link…)');
     let r=null;
@@ -15965,10 +16022,47 @@ async function run(){
   for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker, turns>0 && i>=turns-2); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
   stop();
 }
-function addNote(t){ if(!t)return; const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
+function addNote(t){ if(!t)return; TRANSCRIPT.push({kind:'note', text:t}); const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
 function stop(){ running=false; if(mailTimer){ clearInterval(mailTimer); mailTimer=null; } flushMailReply(); try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
 startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
+// ---- 💾 Save: download the written dialogue as a Markdown file, headed by the
+// settings the run started with (so a class session can be re-created later).
+function saveTranscript(){
+  if(!TRANSCRIPT.length) return;
+  const m=RUN_META||{};
+  const L=['# Blue & Hexia — duet transcript','*'+(m.when||new Date().toLocaleString())+'*',''];
+  if(m.topic) L.push('- **Topic:** '+m.topic);
+  if(m.url) L.push('- **Link:** '+m.url);
+  ['blue','hexia'].forEach(function(id){
+    const bits=[];
+    if((m.roles||{})[id]) bits.push('role: '+m.roles[id]);
+    if((m.tones||{})[id]) bits.push('tone: '+m.tones[id]);
+    if((m.slang||{})[id]) bits.push('slang: '+m.slang[id]);
+    const src=((m.sources||{})[id])||[];
+    if(src.length) bits.push('draws on: '+src.join('; '));
+    if(bits.length) L.push('- **'+ROBOTS[id].name+':** '+bits.join(' — '));
+  });
+  const flags=[];
+  if(m.classroom) flags.push('classroom mode');
+  if(m.research) flags.push('web research');
+  if(m.wiki) flags.push('Wikipedia');
+  if(m.mail) flags.push('duet mail');
+  L.push('- **Spice:** '+(m.spice!=null?m.spice:5)+'/10'+(flags.length?' — '+flags.join(', '):''));
+  L.push('','---','');
+  TRANSCRIPT.forEach(function(t){
+    if(t.kind==='note') L.push('*'+t.text+'*','');
+    else L.push('**'+t.name+':** '+t.text,'');
+  });
+  const blob=new Blob([L.join('\\n')],{type:'text/markdown'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  const slug=((m.topic||'conversation').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40))||'conversation';
+  const d=new Date(); const pad=function(n){ return (n<10?'0':'')+n; };
+  a.download='duet-'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'-'+pad(d.getHours())+pad(d.getMinutes())+'-'+slug+'.md';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ try{ URL.revokeObjectURL(a.href); a.remove(); }catch(e){} }, 500);
+}
+saveBtn.addEventListener('click', saveTranscript);
 document.getElementById('speakChk').addEventListener('change', primeAudio);
 function refreshVoices(){ try{ window.speechSynthesis.getVoices(); }catch(e){} buildVoicePickers(); }
 if('speechSynthesis' in window){
