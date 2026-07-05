@@ -26,6 +26,32 @@ def register(app):
 
     def memory_stats():
         """Get statistics about stored conversations"""
+        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
+            try:
+                summary = bt.memory_system.get_memory_summary()
+                if summary.get("error"):
+                    return jsonify({"error": summary["error"]}), 500
+                db_size_mb = 0
+                try:
+                    db_size_mb = round(
+                        bt.os.path.getsize(bt.memory_system.db_path) / (1024 * 1024),
+                        2,
+                    )
+                except Exception:
+                    pass
+                return jsonify({
+                    "status": "success",
+                    "enhanced": True,
+                    "total_conversations": summary.get("total_conversation_messages", 0),
+                    "total_memories": summary.get("total_memories", 0),
+                    "total_facts": summary.get("total_facts", 0),
+                    "vector_index_count": summary.get("vector_index_count", 0),
+                    "db_size_mb": db_size_mb,
+                    "message": "Enhanced long-term memory is active"
+                })
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
         if not bt.CONVERSATION_DB_AVAILABLE or not bt.db:
             return jsonify({"error": "Database not available"}), 503
 
@@ -48,11 +74,42 @@ def register(app):
 
     def get_recent_memory():
         """Get recent conversation history"""
-        if not bt.CONVERSATION_DB_AVAILABLE or not bt.db:
-            return jsonify({"error": "Database not available"}), 503
-
         user_name = request.args.get('user', 'Alex')
         limit = int(request.args.get('limit', 20))
+        robot = request.args.get('robot')
+
+        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
+            try:
+                conversations = bt.memory_system.get_recent_conversations(
+                    user_name=user_name,
+                    limit=limit,
+                    robot=robot,
+                )
+                if conversations and conversations[0].get("error"):
+                    return jsonify({"error": conversations[0]["error"]}), 500
+
+                return jsonify({
+                    "status": "success",
+                    "enhanced": True,
+                    "user": user_name,
+                    "robot": robot,
+                    "count": len(conversations),
+                    "conversations": [
+                        {
+                            "role": c.get("role"),
+                            "content": (c.get("content") or "")[:200],
+                            "timestamp": c.get("timestamp"),
+                            "importance": c.get("importance"),
+                            "robot": c.get("robot")
+                        }
+                        for c in conversations
+                    ]
+                })
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        if not bt.CONVERSATION_DB_AVAILABLE or not bt.db:
+            return jsonify({"error": "Database not available"}), 503
 
         try:
             conversations = bt.db.get_recent_conversations(user_name=user_name, limit=limit)

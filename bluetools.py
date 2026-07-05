@@ -138,9 +138,9 @@ try:
     from blue_proactive_assistance import get_proactive_assistance, ProactiveSuggestion
     PROACTIVE_ASSISTANCE_AVAILABLE = True
     print("[OK] Proactive assistance loaded - Blue can offer helpful suggestions!")
-except ImportError:
+except ImportError as e:
     PROACTIVE_ASSISTANCE_AVAILABLE = False
-    print("[WARN] Proactive assistance not available")
+    print(f"[INFO] Optional proactive assistance not installed: {e}")
 
 # Proactive heartbeat queue (reminders → next inbound response)
 try:
@@ -160,9 +160,9 @@ try:
     )
     ACADEMIC_ASSISTANT_AVAILABLE = True
     print("[OK] Academic assistant loaded - Teaching and research tools ready!")
-except ImportError:
+except ImportError as e:
     ACADEMIC_ASSISTANT_AVAILABLE = False
-    print("[WARN] Academic assistant not available")
+    print(f"[INFO] Optional academic assistant not installed: {e}")
 
 # Scholarly research — academic journal search wired to the Laurier library
 # (Omni discovery + OpenAlex/Crossref/Unpaywall; full text via libproxy)
@@ -186,9 +186,9 @@ try:
     )
     CONTEXT_AWARENESS_AVAILABLE = True
     print("[OK] Context awareness loaded - Blue adapts to his audience!")
-except ImportError:
+except ImportError as e:
     CONTEXT_AWARENESS_AVAILABLE = False
-    print("[WARN] Context awareness not available")
+    print(f"[INFO] Optional context awareness not installed: {e}")
 
 # ================================================================================
 # LOGGING (single source)
@@ -1476,8 +1476,12 @@ try:
 except Exception as e:
     CONVERSATION_DB_AVAILABLE = False
     db = None
-    print(f"[WARN] Conversation database not available: {e}")
-    print("[WARN] Blue will not remember conversations across sessions")
+    if ENHANCED_MEMORY_AVAILABLE and memory_system:
+        print(f"[INFO] Legacy conversation database not loaded: {e}")
+        print("[OK] Enhanced memory is active for cross-session conversations")
+    else:
+        print(f"[WARN] Conversation database not available: {e}")
+        print("[WARN] Blue will not remember conversations across sessions")
 
 
 # ================================================================================
@@ -2067,6 +2071,11 @@ def _hue_bridge_alive(ip: str, timeout: float = 2.0) -> bool:
     try:
         # /api/0/config is unauthenticated and returns bridge metadata.
         # Try HTTPS first (newer bridges enforce TLS), fall back to HTTP.
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
         for proto in ("https", "http"):
             try:
                 r = requests.get(f"{proto}://{ip}/api/0/config", timeout=timeout, verify=False)
@@ -3449,10 +3458,25 @@ def stop_music_visualizer() -> str:
 from blue.server.tool_schemas import RAW_TOOLS
 TOOLS = list(RAW_TOOLS)
 
+
+def _filter_unavailable_tools(tool_names: set[str], reason: str) -> None:
+    """Remove schemas whose backing runtime module is not available."""
+    global TOOLS
+    before = len(TOOLS)
+    TOOLS = [
+        tool for tool in TOOLS
+        if tool["function"]["name"] not in tool_names
+    ]
+    removed = before - len(TOOLS)
+    if removed:
+        names = ", ".join(sorted(tool_names))
+        print(f"[INFO] Filtered {removed} {reason} tool(s): {names}")
+
+
 # Filter out tools that require unavailable modules
 if not ENHANCED_TOOLS_AVAILABLE:
     # Remove file operation tools that won't work
-    TOOLS = [tool for tool in TOOLS if tool["function"]["name"] not in [
+    _filter_unavailable_tools({
         "list_files", "read_file", "write_file", "get_file_info",
         "create_reminder", "get_upcoming_reminders", "cancel_reminder",
         "reschedule_reminder",
@@ -3460,8 +3484,20 @@ if not ENHANCED_TOOLS_AVAILABLE:
         "check_timers", "get_system_info", "take_screenshot",
         "launch_application", "set_volume", "story_prompt", "educational_activity",
         "get_local_time", "get_sunrise_sunset"
-    ]]
-    print(f"[INFO] Filtered {len([t for t in TOOLS if t['function']['name'] in ['list_files', 'read_file']])} unavailable enhanced tools")
+    }, "unavailable enhanced")
+
+if not ACADEMIC_ASSISTANT_AVAILABLE:
+    _filter_unavailable_tools({
+        "analyze_with_chat_theory",
+        "prepare_lecture",
+        "discussion_questions",
+        "simulate_student_questions",
+    }, "unavailable academic assistant")
+
+if not PROACTIVE_ASSISTANCE_AVAILABLE:
+    _filter_unavailable_tools({
+        "check_proactive_suggestions",
+    }, "unavailable proactive assistance")
 
 
 # ===== DOCUMENT MANAGEMENT FUNCTIONS =====
@@ -13021,7 +13057,14 @@ if __name__ == "__main__":
     # localhost stays ungated for the Ohbot client). Override with BLUE_HOST.
     _bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
     print(f"[NET] Binding to {_bind_host}:{PROXY_PORT} (remote access requires the password)")
-    app.run(host=_bind_host, port=PROXY_PORT, debug=False, threaded=True)
+    try:
+        from waitress import serve
+    except ImportError:
+        print("[NET] Waitress is not installed; using Flask's local/LAN development server")
+        app.run(host=_bind_host, port=PROXY_PORT, debug=False, threaded=True)
+    else:
+        print("[NET] Serving with Waitress")
+        serve(app, host=_bind_host, port=PROXY_PORT, threads=8)
 
 
 # --- Image/document upload endpoints --- (routes live in blue/server/routes/documents.py;

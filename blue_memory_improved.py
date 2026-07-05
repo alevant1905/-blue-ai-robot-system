@@ -12,6 +12,7 @@ Provides the interface expected by bluetools.py:
     - memory_system.should_inject_context(messages)
     - memory_system.build_context(messages, user_name)
     - memory_system.consolidate_if_needed(user_name)
+    - memory_system.get_recent_conversations(user_name)
     - memory_system.get_memory_summary()
 """
 
@@ -3426,6 +3427,54 @@ class EnhancedMemorySystem:
         )
 
     # ------------------------------------------------------------------ Summary / stats
+
+    def get_recent_conversations(
+        self,
+        user_name: str = "Alex",
+        limit: int = 20,
+        robot: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent conversation log rows for status/API routes."""
+        safe_limit = max(1, min(int(limit or 20), 200))
+        try:
+            conn = self._conn()
+            if robot:
+                rows = conn.execute(
+                    """
+                    SELECT role, content, timestamp, importance, session_id, robot
+                    FROM conversation_log
+                    WHERE user_name = ? AND robot = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (user_name, robot, safe_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT role, content, timestamp, importance, session_id, robot
+                    FROM conversation_log
+                    WHERE user_name = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (user_name, safe_limit),
+                ).fetchall()
+            conn.close()
+        except Exception as e:
+            return [{"error": str(e)}]
+
+        return [
+            {
+                "role": row["role"],
+                "content": row["content"] or "",
+                "timestamp": row["timestamp"],
+                "importance": row["importance"],
+                "session_id": row["session_id"],
+                "robot": row["robot"],
+            }
+            for row in rows
+        ]
 
     def get_memory_summary(self) -> Dict[str, Any]:
         """Get comprehensive stats about the memory system.

@@ -31,8 +31,20 @@ import io
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer,
+        encoding='utf-8',
+        errors='replace',
+        line_buffering=True,
+        write_through=True,
+    )
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer,
+        encoding='utf-8',
+        errors='replace',
+        line_buffering=True,
+        write_through=True,
+    )
 
 # Ensure we're in the right directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +53,20 @@ os.chdir(script_dir)
 # Add to path if needed
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
+
+
+def serve_app(app, host: str, port: int) -> None:
+    """Serve the Flask app with Waitress when available."""
+    try:
+        from waitress import serve
+    except ImportError:
+        print("   Waitress is not installed; using Flask's local/LAN development server.")
+        app.run(host=host, port=port, debug=False, threaded=True)
+        return
+
+    print("   Serving with Waitress")
+    serve(app, host=host, port=port, threads=8)
+
 
 def print_banner():
     """Print startup banner."""
@@ -175,12 +201,9 @@ def run_server():
         print("   Remote devices must sign in with the access password.")
         print("   Press CTRL+C to quit")
         print("")
-        # The Flask app.run() is inside bluetools' if __name__ == "__main__" block
-        # We need to run it manually since we're importing, not executing
+        # bluetools.py is imported here, so start the server explicitly.
         if hasattr(bluetools, 'app'):
-            # threaded=True keeps the server responsive (and Ctrl+C working)
-            # even when a single request stalls — e.g. a slow ChromaDB call.
-            bluetools.app.run(host=bind_host, port=port, debug=False, threaded=True)
+            serve_app(bluetools.app, bind_host, port)
 
 def main():
     """Main entry point."""
