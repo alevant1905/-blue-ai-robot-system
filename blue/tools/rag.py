@@ -142,8 +142,10 @@ def index_document(filepath: str, filename: str, doc_id: str = None,
         return {"success": False, "error": "ChromaDB not available"}
 
     if text is None:
-        from blue.tools.documents import extract_text_from_file
-        text = extract_text_from_file(filepath)
+        # Subprocess-isolated: pypdf access violations must not kill the
+        # server (it happened twice on 2026-07-04 during batch reindexing).
+        from blue.tools.documents import extract_text_isolated
+        text = extract_text_isolated(filepath)
 
     if text.startswith("Error"):
         return {"success": False, "error": text}

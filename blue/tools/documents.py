@@ -10,6 +10,8 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -135,9 +137,46 @@ def encode_image_to_base64(filepath: str) -> Optional[Dict[str, Any]]:
 # TEXT EXTRACTION
 # ================================================================================
 
+def extract_text_isolated(filepath: str, timeout: int = 600) -> str:
+    """Extract text in a throwaway subprocess.
+
+    pypdf killed the server twice on 2026-07-04 with a native access
+    violation mid-extraction — an uncatchable crash, and on a different PDF
+    each run. Batch indexing (reindex, folder watcher) calls this instead of
+    extract_text_from_file so a dying parser costs one document, not the
+    whole process.
+    """
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "extract_worker.py")
+    try:
+        proc = subprocess.run(
+            [sys.executable, worker, str(filepath)],
+            capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"Error: text extraction timed out after {timeout}s"
+    except OSError as e:
+        return f"Error: could not start extraction worker: {e}"
+    if proc.returncode != 0:
+        tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        detail = tail[-1] if tail else f"exit code {proc.returncode}"
+        return f"Error: text extraction crashed ({detail})"
+    return proc.stdout.decode("utf-8", "replace")
+
+
 def extract_text_from_file(filepath: str) -> str:
     """Extract text from various file types."""
     ext = filepath.rsplit('.', 1)[1].lower() if '.' in filepath else ''
+
+    # Files NUL-filled by an unclean shutdown make pypdf die with a native
+    # access violation that no except clause can catch (it took the whole
+    # server down on 2026-07-04), so refuse them before any parser runs.
+    try:
+        with open(filepath, 'rb') as f:
+            head = f.read(4096)
+        if head and not head.strip(b'\x00'):
+            return "Error: file is NUL-corrupted (unclean shutdown?) and needs to be restored"
+    except OSError as e:
+        return f"Error reading file: {e}"
 
     if ext in ('txt', 'md'):
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:

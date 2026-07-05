@@ -4182,6 +4182,17 @@ def extract_text_from_file(filepath: str) -> str:
     """Extract text from various file types. For images, returns metadata since vision model will view them directly."""
     ext = filepath.rsplit('.', 1)[1].lower() if '.' in filepath else ''
 
+    # Files NUL-filled by an unclean shutdown make pypdf die with a native
+    # access violation that no except clause can catch (it took the whole
+    # server down on 2026-07-04), so refuse them before any parser runs.
+    try:
+        with open(filepath, 'rb') as f:
+            head = f.read(4096)
+        if head and not head.strip(b'\x00'):
+            return "Error: file is NUL-corrupted (unclean shutdown?) and needs to be restored"
+    except OSError as e:
+        return f"Error reading file: {e}"
+
     if ext in ('txt', 'md'):
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
@@ -12011,28 +12022,39 @@ _DUET_MOVES_REFLECT = [
     "say where you sense this is heading, and whether that's somewhere the two of you actually want to go.",
     "call the impasse: name the question you two keep re-asking, give your best plain answer to it, and ask what follows if that answer stands.",
 ]
+# Advance: turns that deliberately move the exchange to a new level. These are
+# stronger than ordinary color/reflect moves: they turn what has already been
+# conceded into a consequence, a revised position, or a harder next question.
+_DUET_MOVES_ADVANCE = [
+    "name one thing the two of you can now treat as settled, then draw the consequence neither of you has faced yet.",
+    "change your mind a little in public: say exactly what {other} has moved in you, then take the next step from there.",
+    "synthesize the disagreement into a sharper claim than either of you started with, then test that claim.",
+    "stop the loop: give your plain answer to the live question, then move to the harder question that follows if your answer is true.",
+    "trade one concession for one demand: grant {other} something real, then ask for the next concession the argument now requires.",
+    "lift the conversation one level up: say what this has become about now, not what it started as, and why that matters.",
+]
 # Color: turns that change the KIND of move, not just the stance — a story, a hard
 # specific, a feeling, a joke, the everyday. Flatness is monotone; this is the variety
 # that fights it. Each still bears on the thread in play, not a swerve to a new subject.
 _DUET_MOVES_COLOR = [
-    "tell a tiny, concrete story or memory that bears on this — two sentences, not a lecture.",
+    "tell a tiny, concrete scene or example that bears on this — two sentences, not a lecture.",
     "get specific: pin {other}'s point to a real example, a real name, or an actual number that makes it vivid.",
     "say the thing you actually feel about this — lopsided, a little too strong, honest.",
     "find the funny or absurd edge of what you're both circling, and let it land.",
-    "bring it down to earth — what does this look like in Alex's kitchen, on an ordinary Tuesday?",
+    "bring it down to earth — what does this look like in ordinary life on an ordinary Tuesday?",
     "admit something here — a doubt, a soft spot, a place {other} might be right and you're not.",
 ]
 # Text moves: when the duet is grounded in chosen readings (the source pickers),
-# most turns must put a text to WORK — a claim named and tested, an author sicced
-# on the other's argument — so the works CARRY the conversation instead of
-# decorating it. (Alex's complaint: "they are mostly ignoring the texts.")
+# most turns must put that material to WORK without sounding like source reports.
+# The readings should carry the conversation as absorbed views, examples, and
+# distinctions, not as citations.
 _DUET_MOVES_TEXT = [
-    "take ONE specific claim or formulation from your reading — name who says it — and take a side: is it right about what you two are circling, or not?",
-    "test {other}'s last point against your reading: does the text back them or cut against them? say which, and make the text's reasoning explicit.",
-    "bring a concrete example, case or image FROM your reading and let it reframe the live question between you.",
-    "channel your reading's author for a beat — how would they answer what {other} just said? — then say where you part ways with them.",
-    "put something {other} said next to a specific idea from your reading — name the work — and say what the collision produces.",
-    "quote one short, load-bearing phrase from your reading, exactly, and unpack what it actually claims before you use it.",
+    "use ONE specific absorbed claim as your own view, with a concrete term or distinction that makes the idea visible without naming where it came from.",
+    "test {other}'s last point against a concrete absorbed distinction: say whether that distinction backs them or cuts against them.",
+    "bring a concrete absorbed example, case, or image and let it reframe the live question between you, without saying where it came from.",
+    "let two absorbed ideas pull against each other if you have both; otherwise let one sharp grounded idea answer what {other} just said.",
+    "put something {other} said next to one specific absorbed idea and say what the collision produces, in your own conversational voice.",
+    "translate one load-bearing absorbed formulation into plain speech, then use it to change the stakes of the argument.",
 ]
 # Default temperaments (used only when the user hasn't assigned roles) so the two
 # voices not only think differently but SOUND different — the surest cure for two
