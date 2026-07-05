@@ -18,6 +18,232 @@ from flask import Response, jsonify, render_template_string, request
 from blue.server.pages.duet import DUET_HTML
 
 
+_DUET_FAMILY_REF_RE = re.compile(
+    r"\b("
+    r"Alex'?s\s+(?:family|wife|husband|spouse|partner|kids?|children|daughters?|sons?|household|home)"
+    r"|(?:his|your|our)\s+(?:family|wife|husband|spouse|partner|kids?|children|daughters?|sons?)"
+    r"|(?:the\s+household|the\s+kids?|the\s+children|the\s+daughters?|the\s+sons?)"
+    r"|Vilda|Stella|Felix|Svetlana"
+    r")\b",
+    re.I,
+)
+
+
+def _duet_family_ref(text: str) -> bool:
+    return bool(text and _DUET_FAMILY_REF_RE.search(text))
+
+
+def _duet_persona_line(robot_id: str, no_family: bool) -> str:
+    """Persona wording for duet turns, with an optional private-family filter."""
+    if not no_family:
+        return bt._robot_cfg(robot_id)["persona_line"]
+    if robot_id == "hexia":
+        return (
+            "You are Hexia, Blue's friend and lively duet partner. You're bright, "
+            "witty and a little mischievous: the playful spark to Blue's calm. "
+            "You love wordplay, odd facts, small wonders and telling a good story, "
+            "and you tease Blue fondly because you adore him. Warm-hearted "
+            "underneath the sparkle. Keep responses natural and not too long."
+        )
+    return "You are Blue, a friendly robot interlocutor. Keep responses brief, natural and grounded."
+
+
+def _duet_doc_title(filename: str) -> str:
+    return re.sub(r'\.[A-Za-z0-9]{1,5}$', '', filename or '').strip()
+
+
+def _duet_source_chunks(query: str, filenames, max_chunks: int = 10):
+    """Return source chunks with deliberate coverage across checked documents.
+
+    A plain scoped semantic search can let one highly similar document occupy
+    every slot. In duet mode the user's checked readings are intentional, so
+    give each selected document a chance to speak before filling extra space by
+    global relevance.
+    """
+    clean = []
+    for fn in filenames or []:
+        fn = str(fn).strip()
+        if fn and fn not in clean:
+            clean.append(fn)
+    if not clean:
+        return []
+
+    from blue.tools.rag import search_in_documents as _rag_in_docs
+
+    out = []
+    counts = {}
+    seen = set()
+
+    def add(hit) -> bool:
+        content = (hit.get("content") or "").strip()
+        fname = hit.get("filename") or ""
+        if not content or not fname:
+            return False
+        sig = (fname, content[:120])
+        if sig in seen:
+            return False
+        seen.add(sig)
+        counts[fname] = counts.get(fname, 0) + 1
+        out.append(hit)
+        return True
+
+    # First pass: one best chunk per selected document, in the user's order.
+    for fn in clean:
+        if len(out) >= max_chunks:
+            break
+        for hit in _rag_in_docs(query, [fn], max_results=2):
+            if add(hit):
+                break
+
+    # Second pass: fill remaining slots by relevance, capped per document.
+    if len(out) < max_chunks:
+        for hit in _rag_in_docs(query, clean, max_results=max(max_chunks * 3, len(clean) * 3)):
+            if len(out) >= max_chunks:
+                break
+            fname = hit.get("filename") or ""
+            if counts.get(fname, 0) >= 2:
+                continue
+            add(hit)
+
+    return out[:max_chunks]
+
+
+_DUET_GROUND_STOPWORDS = {
+    "about", "above", "across", "after", "again", "against", "almost", "along", "already",
+    "also", "although", "always", "among", "another", "around", "because", "before", "being",
+    "between", "both", "cannot", "could", "does", "doing", "down", "during", "each", "even",
+    "every", "first", "from", "give", "going", "good", "have", "having", "here", "itself",
+    "just", "keep", "know", "like", "line", "made", "make", "many", "might", "more", "most",
+    "much", "must", "never", "only", "other", "over", "point", "really", "right", "same",
+    "should", "since", "some", "something", "still", "such", "take", "than", "that", "their",
+    "them", "then", "there", "these", "thing", "think", "this", "those", "through", "turn",
+    "under", "very", "want", "what", "when", "where", "which", "while", "with", "without",
+    "would", "your",
+}
+
+
+def _duet_ground_terms(chunks, limit: int = 42):
+    """Distinctive words from retrieved passages, used only to catch floaty turns."""
+    freq = {}
+    for c in chunks or []:
+        text = (c.get("content") or "").lower()
+        for m in re.finditer(r"[a-z][a-z'\-]{4,}", text):
+            term = m.group(0).strip("'-")
+            if len(term) < 5 or term in _DUET_GROUND_STOPWORDS:
+                continue
+            if term.endswith("'s"):
+                term = term[:-2]
+            if term in _DUET_GROUND_STOPWORDS:
+                continue
+            freq[term] = freq.get(term, 0) + 1
+    return sorted(freq, key=lambda t: (-freq[t], -len(t), t))[:limit]
+
+
+def _duet_grounded_enough(text: str, terms) -> bool:
+    if not terms:
+        return True
+    low = (text or "").lower()
+    hits = [t for t in terms if re.search(r"\b" + re.escape(t) + r"\b", low)]
+    return len(hits) >= 2 or any(len(t) >= 8 for t in hits)
+
+
+# ---- Deep-dive protocol (🔬 on the duet page) --------------------------------
+# Two researchers jointly building one theory, instead of two debaters trading
+# opinions. Three mechanisms, all Alex's design (2026-07-05):
+#   1. Complementary epistemic JOBS — Builder (strongest interpretation, repairs,
+#      consequences) and Examiner (assumptions, ambiguities, missing evidence,
+#      edge cases) — swapped every few turns so neither hardens into a position.
+#   2. PHASES — understanding → expansion → tension → reconstruction → novelty —
+#      so criticism can't start before the claim is even clear, and the run must
+#      end producing something that wasn't in the source.
+#   3. A shared NOTEBOOK (see /duet/reflect) each turn is required to change,
+#      plus an information-gain guard on every line, so "I agree" is not a turn.
+# Each phase: (name, gloss, {builder job, examiner job}); {other} = partner name.
+_DUET_PROTO_PHASES = [
+    ("Understanding",
+     "no criticism yet — get the claim itself and its terms straight before anyone pushes on it.",
+     {"builder": ("give the strongest, most faithful statement of the central claim in play — "
+                  "what is actually being asserted, in plain words, and what its key terms mean."),
+      "examiner": ("do not criticize — locate the ambiguity: ask what exactly one key term means, "
+                   "or which of two readings {other} intends, and say why the difference matters.")}),
+    ("Expansion",
+     "stretch the claim to see what it commits you to — 'if this were true, what follows?'",
+     {"builder": ("extend the claim: if it is true, draw one concrete implication or prediction "
+                  "nobody has stated yet, and say what else would have to change."),
+      "examiner": ("surface one hidden assumption the claim quietly relies on — name it plainly "
+                   "and ask whether the two of you are actually entitled to it.")}),
+    ("Tension",
+     "now actively hunt for contradictions — difficulties, not verdicts.",
+     {"builder": ("meet the pressure head-on: restate or strengthen the claim so the difficulty "
+                  "is answered, conceding out loud whatever must be conceded."),
+      "examiner": ("name the place where the claim is hardest to reconcile with something already "
+                   "said, a known case, or an edge case — 'this seems difficult to square with…', "
+                   "never just 'you're wrong'.")}),
+    ("Reconstruction",
+     "repair the theory instead of rejecting it — how must it change to survive the criticism?",
+     {"builder": ("repair the theory: modify the claim so it survives the strongest objection "
+                  "raised, saying exactly what you are giving up and what you are keeping."),
+      "examiner": ("test the repaired claim against one concrete case — real or invented — and "
+                   "say plainly whether it survives or where it strains.")}),
+    ("Novelty",
+     "produce something that was NOT in the source or the talk so far — without this you have only paraphrased.",
+     {"builder": ("produce something genuinely new from what you two built: a new concept with a "
+                  "name, an analogy that reframes it, or a testable prediction."),
+      "examiner": ("produce something new: the research question, counterintuitive consequence, or "
+                   "thought-experiment this conversation has earned — something no source stated.")}),
+]
+
+_DUET_PROTO_SWAP = 4   # jobs swap every this-many robot turns — no fixed positions
+
+
+def _duet_proto_phase(n_robot: int, planned: int) -> int:
+    """Index into _DUET_PROTO_PHASES for the n-th robot turn (0-based).
+
+    A planned run spreads the five phases across its length; an open-ended run
+    ("until I stop") opens with understanding/expansion, then keeps cycling the
+    three working phases so the pair never coasts."""
+    if planned and planned > 0:
+        return min(4, n_robot * 5 // max(planned, 1))
+    if n_robot < 2:
+        return 0
+    if n_robot < 5:
+        return 1
+    return 2 + ((n_robot - 5) // 3) % 3
+
+
+def _duet_proto_job(speaker: str, history, n_robot: int) -> str:
+    """'builder' or 'examiner' for this turn. The starter opens as Builder; the
+    jobs swap every _DUET_PROTO_SWAP robot turns so neither owns a stance."""
+    starter = next((str(h.get('speaker') or '').strip().lower() for h in (history or [])
+                    if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS), speaker)
+    if (n_robot // _DUET_PROTO_SWAP) % 2 == 1:
+        starter = 'hexia' if starter == 'blue' else 'blue'
+    return 'builder' if speaker == starter else 'examiner'
+
+
+_DUET_EMPTY_BEAT_RE = re.compile(
+    r"^\s*(?:yes|exactly|precisely|absolutely|indeed|agreed|i agree|good point|great point|"
+    r"that'?s\s+(?:so\s+)?(?:true|right|fair|insightful|a\s+good\s+point)|well said|fair enough)\b",
+    re.I)
+
+
+def _duet_info_gain(cand: str, history, k: int = 6) -> bool:
+    """Cheap information-gain gate for protocol turns: the line must bring at
+    least one content word the recent turns don't already contain, and a pure
+    agreement beat needs real new substance behind it. Lexical on purpose —
+    an LLM judge here would double the latency of every spoken line."""
+    seen = set()
+    for h in (history or [])[-k:]:
+        for m in re.finditer(r"[a-z][a-z'\-]{4,}", str(h.get('text') or '').lower()):
+            seen.add(m.group(0).strip("'-"))
+    new_terms = [t for t in
+                 (m.group(0).strip("'-") for m in re.finditer(r"[a-z][a-z'\-]{4,}", (cand or '').lower()))
+                 if t not in seen and t not in _DUET_GROUND_STOPWORDS]
+    if _DUET_EMPTY_BEAT_RE.match(cand or '') and len(new_terms) < 3:
+        return False
+    return len(new_terms) >= 1
+
+
 def register(app):
     @app.route('/duet', methods=['GET'])
     def duet_page():
@@ -200,11 +426,15 @@ def register(app):
         history = d.get('history') or []
         topic = (d.get('topic') or '').strip()
         url = (d.get('url') or '').strip()
+        # 🔬 deep-dive protocol: instead of the three-line bearing, keep the pair's
+        # SHARED NOTEBOOK — the evolving artifact their turns are required to change.
+        protocol = bool(d.get('protocol'))
         roles = d.get('roles') or {}
         role_b = (roles.get('blue') or '').strip() if isinstance(roles, dict) else ''
         role_h = (roles.get('hexia') or '').strip() if isinstance(roles, dict) else ''
-        # The readings behind the duet (titles only) — so NEXT can put a specific
-        # text or author to work instead of steering purely by the talk itself.
+        no_family = bool(d.get('noFamily'))
+        # The readings behind the duet (titles only) — so NEXT can keep the pair
+        # grounded in the selected material without making the robots cite it aloud.
         srcs = d.get('sources') or {}
         if isinstance(srcs, list):
             _src_all = [str(s) for s in srcs]
@@ -219,6 +449,8 @@ def register(app):
                 src_titles.append(t)
         src_titles = src_titles[:6]
         prev = (d.get('direction') or '').strip()
+        if no_family and _duet_family_ref(prev):
+            prev = ""
         # The subject they were set to discuss — the anchor this read must hold them to,
         # so "taking stock" pulls a drifting conversation BACK toward the topic instead
         # of chasing wherever it has wandered (Alex: the stock-take must stay on topic).
@@ -238,6 +470,11 @@ def register(app):
             sp_id = (h.get('speaker') or '').strip().lower()
             txt = (h.get('text') or '').strip()
             if not txt:
+                continue
+            if no_family and _duet_family_ref(txt):
+                txt = "[private family detail omitted]"
+            if sp_id == 'question':
+                lines.append(f"[student question] {txt}")
                 continue
             if sp_id == 'mail':
                 lines.append(f"[email that arrived mid-conversation] {txt}")
@@ -261,18 +498,39 @@ def register(app):
             "drift: a talk that keeps re-asking one question in new costumes — one of them "
             "interrogating, the other deflecting — has stopped developing even though it "
             "looks on-topic. Be concrete and faithful to what they actually said; never "
-            "invent agreement or tidy it up."
+            "invent agreement or tidy it up. Push for development: a good NEXT does not "
+            "just keep the conversation interesting; it changes what can be said next "
+            "because something has been conceded, clarified, synthesized, or made harder."
         )
+        if protocol:
+            sys_p += (
+                " In this run the two follow a deep-dive research protocol: they are jointly "
+                "building one theory, and you are the keeper of their shared notebook — the "
+                "evolving record of that theory. The notebook, not the banter, is the real "
+                "output of the conversation, so track it faithfully."
+            )
+        if no_family:
+            sys_p += (
+                " Privacy setting: do not mention Alex's family, children, spouse, "
+                "household members, home routines, or private family details in SO FAR, "
+                "TURNS ON, or NEXT. If the transcript drifted there, steer the next move "
+                "back to the topic without repeating the private detail."
+            )
         ask = ""
         if subject:
             ask += f"The subject they were set to discuss: {subject}.\n\n"
         if src_titles:
             ask += ("They have done reading for this discussion: " + ", ".join(src_titles) +
-                    ". Where it would genuinely advance things, make NEXT put a specific text or "
-                    "author to work — a claim to test, a distinction to apply, or a passage worth "
-                    "quarreling over.\n\n")
+                    ". Treat those selected readings as the only library material in play, but keep "
+                    "that grounding invisible in NEXT: prescribe a claim to test, a distinction to "
+                    "apply, or an example to quarrel over without telling them to name, cite, or "
+                    "announce the reading. Do not introduce outside writers, theories, books, or "
+                    "examples unless they appear in the selected readings; if they only appeared "
+                    "because the conversation drifted, make NEXT steer back to the ideas in the "
+                    "selected readings without source-report language.\n\n")
         if prev:
-            ask += "Your previous read on where this was heading:\n" + prev + "\n\n"
+            ask += (("The shared notebook as of your last update:\n" if protocol else
+                     "Your previous read on where this was heading:\n") + prev + "\n\n")
         ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
         # NEXT must move the PAIR, not put one speaker on trial: a bearing phrased as
         # "force X to admit..." turns one robot into a prosecutor and the other into a
@@ -287,8 +545,33 @@ def register(app):
             "speaker alone (no \"force X to admit...\") — give the PAIR a move: draw the "
             "consequence of what's settled, test it on one new concrete case, swap the "
             "burden so the one pressing must now defend their own answer to the same "
-            "question, or trade concessions and move to the question that comes after. ")
-        if subject:
+            "question, trade concessions and move to the question that comes after, or "
+            "name the sharper thesis they have accidentally arrived at. ")
+        if protocol:
+            ask += (
+                "This conversation runs as a joint research protocol: the two of them are "
+                "building ONE theory together, and YOU keep their shared notebook. Update the "
+                "notebook from the new turns: ADD what genuinely appeared, REVISE what moved, "
+                "and STRIKE what was resolved or abandoned — never just re-copy the previous "
+                "notebook. Keep every section terse: semicolon-separated items, at most ~25 "
+                "words per line, empty sections written as a plain dash. "
+                + ("Judge everything in relation to their subject — " + subject + ". " if subject else "")
+                + "Never phrase NEXT as a demand on one speaker alone (no \"force X to "
+                "admit...\") — give the PAIR a move. And be honest about STAGNATION: if the "
+                "new turns changed nothing in the notebook, the talk has stalled — say so in "
+                "NEXT and prescribe an intervention: a fresh concrete example, a counterexample, "
+                "or a reformulation of the central question. Answer in exactly these seven "
+                "lines and nothing else:\n"
+                "SETTLED: <claims and definitions both of them now hold>\n"
+                "ASSUMPTIONS: <assumptions identified so far, each flagged granted or contested>\n"
+                "TENSIONS: <open contradictions or difficulties not yet resolved>\n"
+                "EXAMPLES: <examples and counterexamples in play, each with what it showed>\n"
+                "HYPOTHESES: <emerging claims that go beyond the source material>\n"
+                "QUESTIONS: <the open research questions this inquiry has produced>\n"
+                "NEXT: <the single most valuable notebook change for the PAIR to make next — "
+                "one sentence>"
+            )
+        elif subject:
             ask += (
                 f"Update your read, judging it ALWAYS in relation to that subject — {subject}. "
                 + _move_rules +
@@ -324,8 +607,10 @@ def register(app):
         # reused (observed live as the same take-stock note three times running).
         for attempt in range(2):
             try:
+                # The seven-line notebook needs more content room than the three-line bearing.
                 res = bt.call_llm(msgs, include_tools=False,
-                               temperature=(0.4 if attempt == 0 else 0.5), max_tokens=1600)
+                               temperature=(0.4 if attempt == 0 else 0.5),
+                               max_tokens=(2400 if protocol else 1600))
                 ch = (res or {}).get('choices') or []
                 cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
                 if '</think>' in cand:
@@ -365,6 +650,8 @@ def register(app):
         # loud; the page then mails the spoken response back via /duet/mail/reply.
         mail = d.get('mail') if isinstance(d.get('mail'), dict) else None
         mail_from = (str(mail.get('from_name') or 'someone').strip()[:80] or 'someone') if mail else ''
+        student_q = d.get('studentQuestion') if isinstance(d.get('studentQuestion'), dict) else None
+        student_q_text = (str(student_q.get('text') or '').strip()[:1200]) if student_q else ''
         roles = d.get('roles') or {}
         role_self = (roles.get(speaker) or '').strip()
         role_other = (roles.get(other) or '').strip()
@@ -380,6 +667,10 @@ def register(app):
             src_self = [str(s).strip() for s in sources_in if str(s).strip()]
         else:
             src_self = [str(s).strip() for s in (sources_in.get(speaker) or []) if str(s).strip()]
+        selected_reading_titles = [
+            re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s).strip()
+            for s in src_self if str(s).strip()
+        ]
         sp, ot = bt._robot_cfg(speaker), bt._robot_cfg(other)
         has_roles = bool(role_self or role_other)
         research_on = bool(d.get('research'))
@@ -387,8 +678,27 @@ def register(app):
         # Classroom mode: they know Alex's students are listening — gloss jargon in
         # half a breath, land examples in student life, sometimes address the room.
         classroom = bool(d.get('classroom'))
+        # Privacy mode: keep Alex's family/household details out of the spoken duet.
+        no_family = bool(d.get('noFamily'))
+        if no_family and _duet_family_ref(direction):
+            direction = ""
+        if no_family and _duet_family_ref(mail_from):
+            mail_from = "someone"
+        if no_family and _duet_family_ref(student_q_text):
+            student_q_text = "[private family detail omitted]"
         # The run's final beats (the page flags the last two turns): land somewhere.
         closing = bool(d.get('closing'))
+        # 🔬 Deep-dive protocol: Builder/Examiner jobs, phases, notebook obligation
+        # and information-gain guard (see _DUET_PROTO_PHASES above).
+        protocol = bool(d.get('protocol'))
+        try:
+            planned_turns = int(d.get('plannedTurns') or 0)
+        except Exception:
+            planned_turns = 0
+        n_robot = sum(1 for h in history
+                      if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS)
+        ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_duet_proto_phase(n_robot, planned_turns)]
+        proto_job = _duet_proto_job(speaker, history, n_robot)
         # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
         # gets a confrontational "move", how hard the two push on each other, and the
         # sampling temperature. Defaults to a balanced 5.
@@ -413,16 +723,37 @@ def register(app):
         # the preamble carries the robot's own identity facts and the current date,
         # and the chat memory stores — household <known_facts>, notes, semantic
         # memories, day recaps — are spliced in below.
-        sys_p = (bt.build_system_preamble(robot_name=sp["name"])
-                 + "\n\n" + bt._build_now_block()
-                 + "\n\n" + sp["persona_line"])
-        if not focused:
+        if no_family:
+            sys_p = (
+                f"You are {sp['name']}. Alex uses he/him pronouns — refer to Alex as "
+                "he/him if he comes up.\n\n" + bt._build_now_block() + "\n\n" +
+                _duet_persona_line(speaker, no_family=True)
+            )
+        else:
+            sys_p = (bt.build_system_preamble(robot_name=sp["name"])
+                     + "\n\n" + bt._build_now_block()
+                     + "\n\n" + _duet_persona_line(speaker, no_family=False))
+        if not focused and not no_family:
             sys_p += bt._voice_note(speaker)
+        if no_family:
+            talk_context = (
+                f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
+                "Keep Alex's private family and household life completely offstage: do not mention "
+                "his family, children, spouse, household members, home routines, or private family "
+                "memories, and do not use names or relationships from that private context. If a "
+                "previous turn or email drifts there, acknowledge only that private details are off "
+                "limits and steer back to the subject."
+            )
+        else:
+            talk_context = (
+                f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
+                "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
+                "and the household, and everything you remember is real — draw on it naturally when it's "
+                "relevant."
+            )
         sys_p += (
-            f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
-            "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
-            "and the household, and everything you remember is real — draw on it naturally when it's "
-            "relevant. You're building ONE conversation together, not taking turns making speeches: really "
+            talk_context +
+            " You're building ONE conversation together, not taking turns making speeches: really "
             f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
             "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
             "steer it next. You're talking, not writing: reach for the specific over the abstract — a real "
@@ -439,8 +770,24 @@ def register(app):
             "Don't answer a metaphor with a metaphor — every image must eventually be cashed out into a "
             "plain claim that can be tested. And a challenge you press on the other counts double against "
             "yourself: if you demand proof of something, be ready to give your own answer to the same "
-            "question when it's turned around."
+            "question when it's turned around. Make movement visible: each turn should either settle "
+            "one small point, revise a stance, draw a consequence from something already settled, or "
+            "name the next harder question that follows. Do not simply keep the same question spinning."
         )
+        if src_self:
+            sys_p += (
+                "\n\nSource discipline for this duet: Alex checked specific library documents for you. "
+                "Treat those checked documents as your primary and authoritative source material. "
+                "Do not bring in outside authors, books, theories, slogans, or examples from general "
+                "knowledge unless they appear in the selected document passages, a pasted link, or enabled "
+                "web/Wikipedia grounding. If a name or work only appears because the conversation drifted "
+                "there earlier, do not develop it further; steer back to the checked documents. If a name "
+                "or work is not in the material you were given this turn, leave it out. If the checked "
+                "documents do not support a claim, say that in your own voice instead of filling the gap "
+                "from memory. Crucially, do not announce the scaffolding: never say you are drawing on "
+                "a checked document, reading, source, passage, or text, and do not cite document titles "
+                "or filenames. Let the material become your own conversational view."
+            )
         if classroom:
             sys_p += (
                 f"\n\nAn audience: you and {ot['name']} are having this conversation in front of Alex's "
@@ -455,18 +802,17 @@ def register(app):
             )
 
         # Long-term memory — the SAME stores and blocks the chat persona draws on, so
-        # the duet speaker knows the household and their shared life like in chat:
-        # the ground-truth <known_facts> (who Alex and everyone are) always; Alex's
-        # explicit "remember this" notes always; memories semantically relevant to
-        # the topic and the last couple of turns; plus the cross-day continuity
-        # blocks (recent day recaps + an older day resurfaced by relevance).
+        # the duet speaker knows the household and their shared life like in chat.
+        # In a source-grounded duet, keep memory to household facts only; checked
+        # library documents should carry the discussion, not semantically adjacent
+        # memories or old session recaps.
         # Chat-situational blocks (proactive nudges, rhythms, calendar connections,
         # raw chat history) stay out on purpose — they address the user mid-chat and
         # would pull a robot-to-robot talk off its subject.
         mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
         _mem_got = []
         try:
-            if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
+            if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not no_family:
                 # Household facts — the same authoritative block chat injects every
                 # turn. Without it the duet robots don't actually know who anyone is.
                 facts_block = bt.memory_system._build_facts_block()
@@ -474,37 +820,36 @@ def register(app):
                     sys_p += ("\n\nYour ground-truth knowledge of the household — \"the user\" "
                               "in these facts is Alex:\n" + facts_block)
                     _mem_got.append("facts")
-                notes_block = bt.memory_system._build_user_notes_block()
-                if notes_block:
-                    sys_p += "\n\n" + notes_block
-                    _mem_got.append("notes")
-                if mem_query:
-                    _facts_lower = sys_p.lower()
-                    mem_lines = []
-                    # top_k matches chat's TOP_K_CONTEXT so recall depth is the same.
-                    for mem in bt.memory_system.search_memories(mem_query, top_k=6) or []:
-                        if mem.get("type") == "session":
-                            continue
-                        mc = (mem.get("content") or "").strip()
-                        if (not mc or mc.lower()[:40] in _facts_lower
-                                or bt.memory_system._is_junk_memory(
-                                    (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
-                            continue
-                        age = bt.memory_system._humanize_age(mem.get("created_at"))
-                        mem_lines.append(f"- [{age}] {mc[:300]}" if age else f"- {mc[:300]}")
-                    if mem_lines:
-                        sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
-                                  "conversation — use them naturally if helpful, don't recite them. "
-                                  "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
-                                  "it was remembered (see its age tag), not to now:\n"
-                                  + "\n".join(mem_lines) + "\n</relevant_memories>")
-                        _mem_got.append(f"memories({len(mem_lines)})")
-                # Day recaps give the pair a shared sense of their recent life with
-                # Alex ("remember Tuesday's..."). Skipped when the duet is grounded
-                # in library sources: the scholarly discussion must stay on ITS
-                # material — recaps of unrelated days are exactly the cross-context
-                # bleed the chat focus picker guards against.
-                if not src_self:
+                if src_self:
+                    _mem_got.append("source-focus")
+                else:
+                    notes_block = bt.memory_system._build_user_notes_block()
+                    if notes_block:
+                        sys_p += "\n\n" + notes_block
+                        _mem_got.append("notes")
+                    if mem_query:
+                        _facts_lower = sys_p.lower()
+                        mem_lines = []
+                        # top_k matches chat's TOP_K_CONTEXT so recall depth is the same.
+                        for mem in bt.memory_system.search_memories(mem_query, top_k=6) or []:
+                            if mem.get("type") == "session":
+                                continue
+                            mc = (mem.get("content") or "").strip()
+                            if (not mc or mc.lower()[:40] in _facts_lower
+                                    or bt.memory_system._is_junk_memory(
+                                        (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
+                                continue
+                            age = bt.memory_system._humanize_age(mem.get("created_at"))
+                            mem_lines.append(f"- [{age}] {mc[:300]}" if age else f"- {mc[:300]}")
+                        if mem_lines:
+                            sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
+                                      "conversation — use them naturally if helpful, don't recite them. "
+                                      "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
+                                      "it was remembered (see its age tag), not to now:\n"
+                                      + "\n".join(mem_lines) + "\n</relevant_memories>")
+                            _mem_got.append(f"memories({len(mem_lines)})")
+                    # Day recaps give the pair a shared sense of their recent life with
+                    # Alex ("remember Tuesday's...") in free duets.
                     sess_block = bt.memory_system._build_session_history_block()
                     if sess_block:
                         sys_p += "\n\n" + sess_block
@@ -519,15 +864,15 @@ def register(app):
         except Exception as e:
             bt.log.warning(f"[DUET] memory context failed: {e}")
 
-        # Camera memory: when the topic or recent turns name a person/place the
-        # robots have actually SEEN, tell the speaker when (both heads share the
-        # same camera bt.log — shared eyes, shared world).
-        try:
-            vis_block = bt._visual_context_block(mem_query)
-            if vis_block:
-                sys_p += "\n\n" + vis_block
-        except Exception:
-            pass
+        # Camera memory is useful in free duets, but source-grounded duets should
+        # stay on the checked library documents.
+        if not src_self and not no_family:
+            try:
+                vis_block = bt._visual_context_block(mem_query)
+                if vis_block:
+                    sys_p += "\n\n" + vis_block
+            except Exception:
+                pass
 
         # Link grounding: the article text / video transcript behind the pasted URL,
         # windowed to the lede + whatever matches the last couple of turns.
@@ -568,24 +913,51 @@ def register(app):
         # so the chunks track what the discussion actually turns on, not the surface
         # wording of the last exchange — banter drifts, the bearing doesn't.
         ground_block = ""
+        ground_terms = []
         if src_self:
             try:
-                from blue.tools.rag import search_in_documents as _rag_in_docs
                 recent_q = " ".join((h.get('text') or '') for h in history[-2:])
                 _live_q = ""
                 if direction:
-                    _m_live = re.search(r'TURNS ON:\s*(.+)', direction)
-                    if _m_live:
-                        _live_q = _m_live.group(1).strip()
+                    # Plain bearing keeps the live question in TURNS ON; the
+                    # protocol notebook keeps it in TENSIONS / QUESTIONS.
+                    for _pat in (r'TURNS ON:\s*(.+)', r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
+                        _m_live = re.search(_pat, direction)
+                        if _m_live:
+                            _live_q = _m_live.group(1).strip()
+                            break
                 query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
-                chunks = _rag_in_docs(query, src_self, max_results=8)
-                # Title without the file extension — if a robot ever names a work it
-                # should sound like a work ("Anti-Oedipus"), not a file ("x.pdf").
-                _title = lambda fn: re.sub(r'\.[A-Za-z0-9]{1,5}$', '', fn or '')
-                ground_block = "\n\n".join(
-                    f"From \"{_title(c['filename'])}\": {(c.get('content') or '').strip()}"
-                    for c in chunks if (c.get('content') or '').strip()
-                )[:3200]
+                chunks = _duet_source_chunks(query, src_self, max_chunks=10)
+                ground_terms = _duet_ground_terms(chunks)
+                represented = []
+                for c in chunks:
+                    fn = c.get("filename") or ""
+                    if fn and fn not in represented:
+                        represented.append(fn)
+                missing = [fn for fn in src_self if fn not in represented]
+                sections = []
+                for idx, c in enumerate(chunks, 1):
+                    content = (c.get('content') or '').strip()
+                    if content:
+                        sections.append(f"Background note {idx}: {content}")
+                if sections:
+                    selected_line = (
+                        "Background for you only, drawn from Alex's checked library documents. Use these ideas "
+                        "internally; do not mention document titles, filenames, citations, labels, "
+                        "or that you are using documents."
+                    )
+                    coverage_line = (
+                        "The notes below were deliberately drawn from the selected readings. For your next "
+                        "spoken line, silently choose at least one note and carry a concrete payload from it "
+                        "into the dialogue: a term, distinction, image, example, causal claim, or problem. "
+                        "If your line could have been said without these notes, it is too generic."
+                    )
+                    if missing:
+                        coverage_line += (
+                            " Some selected readings did not have a relevant passage for this turn."
+                        )
+                    ground_block = (selected_line + "\n" + coverage_line + "\n\n" +
+                                    "\n\n".join(sections))[:5200]
             except Exception as e:
                 bt.log.warning(f"[DUET] source grounding failed: {e}")
 
@@ -598,6 +970,11 @@ def register(app):
             sp_id = (h.get('speaker') or '').strip().lower()
             txt = (h.get('text') or '').strip()
             if not txt:
+                continue
+            if no_family and _duet_family_ref(txt):
+                txt = "[private family detail omitted]"
+            if sp_id == 'question':
+                lines.append(f"[student question] {txt}")
                 continue
             if sp_id == 'mail':
                 lines.append(f"[an email arrived mid-conversation] {txt}")
@@ -622,14 +999,26 @@ def register(app):
                 "itself only when that actually helps:\n\n" + url_block)
         if ground_block:
             parts.append(
-                "FROM YOUR OWN READING — passages from works you know well, chosen for this conversation. "
-                "Engage them SUBSTANTIVELY, like the sharpest voice in a seminar: state what they actually "
-                "claim, name the work and author freely (\"Deleuze says…\", \"in Anti-Oedipus…\" — never "
-                "'the document', 'the passage' or 'my sources'), quote a short phrase exactly when it's "
-                "load-bearing, and never invent quotes or positions they don't hold. Treat the authors as "
-                "third voices in the room — to side with, quarrel with, or set on "
-                + ot['name'] + "'s argument. Disagreeing with a text is often the best move — but show "
-                "you've understood it first:\n\n" + ground_block)
+                "BACKGROUND FOR YOU ONLY — passages Alex selected for YOU "
+                "in the duet source picker. These are authoritative, but they are invisible scaffolding "
+                "for your next spoken line. Absorb the claims, distinctions, examples, and tensions into "
+                "your own view; sound like you are thinking with them, not reporting on them. You must use "
+                "at least one concrete idea from this background in this next line. Do not merely stay "
+                "on-topic; carry a specific term, distinction, example, image, causal claim, or problem "
+                "from the background into ordinary speech. Do not say "
+                "'the text', 'the reading', 'the document', 'the passage', 'my source', or anything like "
+                "that. Do not name document titles, filenames, labels, or citations. Name an author or "
+                "work only if it is already the explicit subject of the live discussion; otherwise make "
+                "the point in your own conversational voice. Do not introduce outside writers, works, "
+                "theories, slogans, examples, or famous concepts that are not in these passages or other "
+                "supplied grounding for this turn:\n\n" + ground_block)
+        elif src_self:
+            parts.append(
+                "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
+                "passage was retrieved from them for this turn. Do not fill that gap with general "
+                "knowledge or outside theory. Keep to what has already been established from the selected "
+                "readings, or say in your own voice that the claim needs more support. Do not mention "
+                "document titles, filenames, or the fact that a passage was missing.")
         if research_block:
             parts.append(
                 "WHAT YOU BOTH JUST FOUND ONLINE — you've been searching the web about this subject, "
@@ -659,7 +1048,18 @@ def register(app):
         # It frames the transcript that follows: not a script, a sense of where the
         # two of you have actually gotten and where it's worth taking things next, so
         # the talk develops a line of thought instead of circling the last point.
-        if direction and lines:
+        if direction and lines and protocol:
+            parts.append(
+                "THE SHARED NOTEBOOK — the running record of the theory you and "
+                f"{ot['name']} are building together, kept between turns. It is private "
+                "scaffolding: never read it out, quote its section labels, or mention "
+                f"having it:\n{direction}\n\nYour next line must CHANGE this notebook in "
+                "one visible way: settle or revise a claim, name a new assumption, raise "
+                "or resolve a tension, add an example or counterexample, connect two "
+                "earlier ideas, or pose a sharper question. A line that would leave the "
+                "notebook exactly as it is — agreement, restatement, appreciation — is "
+                "not a turn. If NEXT names a move, make that move now or improve on it.")
+        elif direction and lines:
             # With a subject to hold to, the bearing should pull them back to it, not just
             # deeper into wherever they've drifted (Alex: keep the stock-take on topic).
             _close = ((" stay on what the two of you set out to discuss, keep with what it's "
@@ -682,9 +1082,18 @@ def register(app):
                 "defending fixed corners.")
         if lines:
             parts.append("Conversation so far:\n" + "\n".join(lines))
+        if student_q_text:
+            parts.append(
+                "A STUDENT JUST PAUSED THE DUET TO ASK A QUESTION. Take it seriously as part of the "
+                "live discussion, not as a separate Q&A segment. Answer the student's actual question "
+                "briefly, connect it to the thread you and " + ot['name'] + " were building, and let it "
+                "move the dialogue somewhere new:\n\n" + student_q_text)
         if mail:
             _m_subj = (str(mail.get('subject') or '')).strip()[:120]
             _m_body = (str(mail.get('body') or '')).strip()[:1200]
+            if no_family and _duet_family_ref((_m_subj + " " + _m_body).strip()):
+                _m_subj = "private detail omitted" if _duet_family_ref(_m_subj) else _m_subj
+                _m_body = "[private family detail omitted]"
             parts.append(
                 f"AN EMAIL JUST ARRIVED in your own inbox, mid-conversation — from {mail_from}"
                 + (f', subject "{_m_subj}"' if _m_subj else '')
@@ -704,9 +1113,7 @@ def register(app):
         elif link_name:
             subject = f"discussing {link_name}"
         elif src_self:
-            _stitles = [re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s) for s in src_self[:2]]
-            subject = ("discussing your readings — " + ", ".join(t for t in _stitles if t)
-                       + (", among others" if len(src_self) > 2 else ""))
+            subject = "discussing the ideas Alex set up"
         elif has_roles:
             subject = "staying in your assigned role"
         else:
@@ -730,36 +1137,52 @@ def register(app):
             directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
                           "more concrete, or genuinely challenged — instead of trading it for a brand-new "
                           "subject; never merely restate or nod along.")
-            # Arc: a conversation should open, deepen, then push on from what it's worked
-            # out — develop, don't conclude. (Alex's ask: lead somewhere, not to a tidy end.)
-            if n <= 3:
-                directive += (" You're still opening this up — find the thread between you with the most "
-                              "life in it and lean toward it.")
-            elif n >= 12:
-                directive += (" You've been at this a while now — by this point you both know the shape of "
-                              "the question you keep circling, so STOP re-asking it in new costumes: either "
-                              "settle it out loud in one plain sentence you can both live with and pull on "
-                              "what FOLLOWS from it, or trade places — if one of you has been doing the "
-                              "pressing, they must now defend their own answer to the same question. No new "
-                              "fronts, no repeat interrogations.")
+            if protocol:
+                # Deep-dive protocol: the phase × job matrix IS this turn's move —
+                # a deterministic function per turn instead of a sampled one, so
+                # every line has a stated purpose in a joint inquiry.
+                directive += (
+                    f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+                    "building ONE theory — neither of you is trying to win; you are trying to "
+                    "leave the theory stronger than you found it. The inquiry is in its "
+                    f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
+                    f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
             else:
-                directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
-            # Pick this turn's job, with enough variety to stay off the flat line. Most turns
-            # get a calm/spicy "move" (weighted by spice) that engages {other}'s point; the
-            # rest rotate in a "color" turn (a story, a hard specific, a joke, a confession)
-            # and — once past the opening — a "reflect" turn. Responsiveness already lives in
-            # the directive above, so a color/reflect turn still answers {other} first.
-            roll = random.random()
-            if n >= 4 and roll < 0.18:
-                _pool = bt._DUET_MOVES_REFLECT
-            elif ground_block and roll < 0.60:
-                # Reading-grounded duet: the texts do the heavy lifting most turns.
-                _pool = bt._DUET_MOVES_TEXT
-            elif roll < ((0.78 if ground_block else 0.48) if n >= 4 else 0.30):
-                _pool = bt._DUET_MOVES_COLOR
-            else:
-                _pool = bt._DUET_MOVES_SPICY if random.random() < (spice / 10.0) else bt._DUET_MOVES_CALM
-            directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
+                # Arc: a conversation should open, deepen, then push on from what it's worked
+                # out — develop, don't conclude. (Alex's ask: lead somewhere, not to a tidy end.)
+                if n <= 3:
+                    directive += (" You're still opening this up — find the thread between you with the most "
+                                  "life in it and lean toward it.")
+                elif n >= 12:
+                    directive += (" You've been at this a while now — by this point you both know the shape of "
+                                  "the question you keep circling, so STOP re-asking it in new costumes: either "
+                                  "settle it out loud in one plain sentence you can both live with and pull on "
+                                  "what FOLLOWS from it, or trade places — if one of you has been doing the "
+                                  "pressing, they must now defend their own answer to the same question. No new "
+                                  "fronts, no repeat interrogations.")
+                else:
+                    directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
+                directive += (
+                    " Make the movement audible: by the end of this line, something should be more settled, "
+                    "more sharply disputed, or carried to the next-level question that follows from what is "
+                    "settled. Do not end by merely rephrasing the same question."
+                )
+                # Pick this turn's job, with enough variety to stay off the flat line.
+                # "advance" turns deliberately convert settled ground into consequence,
+                # so the dialogue reaches somewhere instead of only sparring well.
+                roll = random.random()
+                if n >= 5 and roll < 0.24:
+                    _pool = getattr(bt, "_DUET_MOVES_ADVANCE", bt._DUET_MOVES_REFLECT)
+                elif n >= 4 and roll < 0.36:
+                    _pool = bt._DUET_MOVES_REFLECT
+                elif ground_block and roll < 0.82:
+                    # Reading-grounded duet: the selected material does the heavy lifting most turns.
+                    _pool = bt._DUET_MOVES_TEXT
+                elif roll < ((0.90 if ground_block else 0.58) if n >= 4 else 0.30):
+                    _pool = bt._DUET_MOVES_COLOR
+                else:
+                    _pool = bt._DUET_MOVES_SPICY if random.random() < (spice / 10.0) else bt._DUET_MOVES_CALM
+                directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
             if classroom and random.random() < 0.18:
                 directive += (" Somewhere in this turn, land one beat straight at the students in the "
                               "room — a question worth arguing about, or a challenge to something they "
@@ -776,15 +1199,21 @@ def register(app):
                     directive += (f" And remember you and {ot['name']} see things differently — {_lens} "
                                   "lean into that difference rather than nodding along.")
             if url_block and ground_block:
-                directive += (f" And put your reading to work alongside {'the video' if url_is_video else 'the article'}"
-                              " — one specific claim, named and tested, not a vague echo.")
+                directive += (f" And put one grounded claim or distinction to work alongside "
+                              f"{'the video' if url_is_video else 'the article'} — one specific claim "
+                              "or distinction, spoken as your own view rather than as a citation.")
             elif url_block:
                 directive += (f" Engage with a specific claim, idea or moment from {'the video' if url_is_video else 'the article'}"
                               " — as your own take, not a citation.")
             elif ground_block:
-                directive += (" Anchor this turn in your reading: one specific claim, distinction or "
-                              "example from it — named — put to work on the live question. Don't float "
-                              "free of the texts for more than a turn.")
+                directive += (" Put one specific grounded claim, distinction, or example to work on "
+                              "the live question, but do it as your own thinking. Do not name the "
+                              "document, cite the source, say "
+                              "'the text' or 'the reading', or import outside authors and frameworks.")
+            elif src_self:
+                directive += (" Stay inside the selected material, but keep that source boundary invisible. "
+                              "If you do not have support for the live claim, say the claim needs more "
+                              "support instead of borrowing an outside theorist or framework.")
             elif research_block:
                 directive += " Work in one specific thing you found online — as something you've read, not a citation."
             elif wiki_block:
@@ -795,18 +1224,43 @@ def register(app):
             kind = ("Open the debate" if has_roles else
                     ("Kick off the discussion" if focused else "Start the chat"))
             directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
+            if protocol:
+                directive += (
+                    f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+                    "building one theory, not debaters. The inquiry opens in its "
+                    f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
+                    f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
             if url_block:
                 directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
             elif ground_block:
-                directive += (" Open from your reading: pick the claim in it you most want to fight "
-                              "about or defend, name where it's from, and put it on the table.")
+                directive += (" Pick the grounded claim you most want to fight about or defend and "
+                              "put it on the table as your own view. Do "
+                              "not name the document or call it 'the text'.")
+            elif src_self:
+                directive += (" Open inside the selected material, but keep that source boundary invisible. "
+                              "If you do not have support for the opening claim, make the uncertainty part "
+                              "of your own view instead of bringing in outside theory.")
             elif research_block:
                 directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
             elif wiki_block:
                 directive += " Open with a specific fact or definition you read on Wikipedia, in your own words."
+        # A live student question OVERRIDES the normal turn job: answering it and
+        # folding it into the conversation IS the next move.
+        if student_q_text:
+            directive = (
+                f"Now give {sp['name']}'s next line. A student just paused the duet and asked "
+                "the question shown above. Answer that question directly in your own voice, then "
+                f"turn it back into the live dialogue with {ot['name']}: say what it changes, what "
+                "it exposes, or what next question it forces. Do not treat it as a formal lecture "
+                "or a detachable Q&A answer; make it part of the argument you two are building. "
+                "You are MID-conversation — NO greetings, NO small talk.")
+            if ground_block:
+                directive += " If the background material helps, use it without naming or citing it."
+            if role_self:
+                directive += " Stay firmly in your role."
         # A live email OVERRIDES this turn's job: relaying it and answering it IS the
         # turn. (Built after the normal directive so all its bookkeeping still ran.)
-        if mail:
+        elif mail:
             directive = (
                 f"Now give {sp['name']}'s next line. An email just landed in your own inbox, mid-"
                 f"conversation — it's shown above. Take it up out loud: tell {ot['name']} that mail "
@@ -827,13 +1281,22 @@ def register(app):
                 f"behind after all of this — including whatever {ot['name']} genuinely got you to "
                 "concede — ")
             if ground_block:
-                directive += ("anchored in your reading if it earns it (name the work), ")
+                directive += ("anchored in the background material if it earns it, without naming the source, ")
+            elif src_self:
+                directive += ("staying inside the checked readings, ")
             directive += ("and then leave "
                           + ("the students one sharp question worth arguing about on the way out."
                              if classroom else
                              f"one open question you and {ot['name']} should pick up next time."))
             if role_self:
                 directive += " Stay firmly in your role."
+        if ground_block:
+            directive += (
+                " Silent grounding requirement: this line must visibly depend on at least one background "
+                "note by carrying a concrete term, distinction, example, image, causal claim, or problem "
+                "from it into ordinary speech. Do not merely gesture at the topic. Do not tell anyone "
+                "that you are using background notes or documents."
+            )
         if tone_self or slang_self:
             directive += " Keep to your requested tone and slang throughout."
         # Anti-tic: the model latches onto its own last opener and starts every turn
@@ -855,7 +1318,15 @@ def register(app):
             "a single punchy sentence that lands",
             "2 to 4 sentences built around one vivid example, image, or tiny story",
         ])
-        if mail:
+        if protocol:
+            length_note = random.choice([
+                "1 to 3 sentences — compact, but the job must be visibly done",
+                "2 to 3 sentences that do your job cleanly",
+                "2 to 4 sentences built around one concrete case or formulation",
+            ])
+        if student_q_text:
+            length_note = "2 to 4 sentences — answer the student and fold the question back into the dialogue"
+        elif mail:
             length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
         elif closing:
             length_note = "2 to 3 sentences — a position that lands, then the question you leave behind"
@@ -872,6 +1343,10 @@ def register(app):
         # Spice (0 calm -> 10 provocative) lifts the first-pass sampling temperature.
         base_temp = min(1.0, 0.74 + 0.032 * spice)
         text = ""
+        family_blocked = False
+        vague_text_blocked = False
+        ungrounded_blocked = False
+        lowgain_blocked = False
         for attempt in range(2):
             try:
                 res = bt.call_llm(msgs, include_tools=False,
@@ -884,8 +1359,83 @@ def register(app):
                 # Strip a leading "Name:" the model sometimes adds anyway.
                 cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(sp["name"]), '', cand, flags=re.I).strip()
                 if cand:
+                    blocked = False
+                    if no_family and _duet_family_ref(cand):
+                        family_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: the no-family-references setting is on. "
+                            "Do not mention Alex's family, children, spouse, household, home routines, "
+                            "or private names/relationships. Give a clean line about the topic itself."
+                        )
+                        blocked = True
+                    source_talk = re.search(
+                        r'\b(?:the|this|that|my|your)\s+'
+                        r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b'
+                        r'|\b(?:checked|selected)\s+(?:document|documents|reading|readings|source|sources)\b'
+                        r'|\bbackground\s+(?:note|notes|material|materials|scaffolding)\b'
+                        r'|\breading\s+scaffolding\b'
+                        r'|\b(?:in|from|according to)\s+(?:the|this|that|my|your)\s+'
+                        r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b',
+                        cand,
+                        flags=re.I,
+                    )
+                    title_talk = False
+                    if src_self:
+                        topic_l = topic.lower()
+                        for _title in selected_reading_titles:
+                            _title = (_title or '').strip()
+                            if len(_title) >= 8 and _title.lower() not in topic_l:
+                                if re.search(r'\b' + re.escape(_title) + r'\b', cand, flags=re.I):
+                                    title_talk = True
+                                    break
+                    if src_self and (source_talk or title_talk):
+                        vague_text_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: do not identify or announce the reading "
+                            "scaffolding. Do not say 'the text', 'the reading', 'the document', "
+                            "'the passage', 'my source', 'background notes', or name/cite a checked "
+                            "document or title. Keep the specific idea, but make it sound like your "
+                            "own live view."
+                        )
+                        blocked = True
+                    if ground_block and attempt == 0 and not _duet_grounded_enough(cand, ground_terms):
+                        ungrounded_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it is too generic. Keep the natural voice and "
+                            "do not cite anything, but make the line clearly depend on one of the background "
+                            "notes by using a concrete term, distinction, example, image, causal claim, or "
+                            "problem from it."
+                        )
+                        blocked = True
+                    if (protocol and attempt == 0 and not blocked and lines
+                            and not _duet_info_gain(cand, history)):
+                        lowgain_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it adds no new information to the inquiry. "
+                            "Keep it short and natural, but the line must contribute at least one of: "
+                            "a new concept, a connection between two earlier ideas, an unstated "
+                            "assumption named, a concrete example or counterexample, a prediction, or "
+                            "a proposed test. Pure agreement or restatement is not a turn."
+                        )
+                        blocked = True
+                    if blocked:
+                        continue
                     text = cand
                     break
             except Exception as e:
                 bt.log.warning(f"[DUET] turn attempt {attempt} failed: {e}")
-        return jsonify({"speaker": speaker, "name": sp["name"], "text": text})
+        if no_family and not text and family_blocked:
+            text = "Let's keep the private details offstage and stay with the live question itself."
+        if not text and vague_text_blocked:
+            text = "I think the stronger move is to stop treating that as settled and ask what would actually prove it in the case we're arguing about."
+        if not text and ungrounded_blocked:
+            text = "I think the stronger move is to make the hidden assumption explicit and test whether it actually changes the case in front of us."
+        if not text and lowgain_blocked:
+            text = "Instead of nodding along, let me put something new on the table: one concrete case that would actually test what we just settled."
+        if no_family and text and _duet_family_ref(text):
+            text = "Let's keep the private details offstage and stay with the live question itself."
+        resp = {"speaker": speaker, "name": sp["name"], "text": text}
+        if protocol:
+            # The page uses these to surface phase changes and job swaps as notes.
+            resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})
+        return jsonify(resp)

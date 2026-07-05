@@ -195,3 +195,6 @@ document_index.json.before-cleanup
 
 # Ohbot library runtime data (this branch only)
 ohbotData/
+
+# Editor/agent backup snapshots
+.codex-backups/

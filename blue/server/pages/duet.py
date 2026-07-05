@@ -30,6 +30,13 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  .turn.hexia{align-self:flex-end;background:#f4ecfc;border:1px solid #e6d6f7}
  .turn.hexia .who{color:var(--hexiac)}
  .turn.speaking{box-shadow:0 0 0 2px currentColor}
+ .qpanel{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--paper);margin:8px 0 14px;box-shadow:var(--shadow)}
+ .qhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+ .qmode{display:flex;gap:6px;flex-wrap:wrap}
+ .qmode button.active{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
+ #questionText{width:100%;min-height:74px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:inherit;resize:vertical;color:var(--ink);background:var(--paper)}
+ .qactions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}
+ #qRecordBtn.recording{background:#e9534e;border-color:#e9534e;color:#fff}
  .srcbox{border:1px solid var(--line);border-radius:8px;padding:8px;max-height:180px;overflow:auto;background:var(--paper);font-size:.9em}
  .srcbox .fold{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);margin:7px 0 3px;font-weight:600}
  .srcbox .fold:first-child{margin-top:0}
@@ -41,7 +48,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  :root:not([data-theme="light"]) .turn.hexia{background:rgba(176,108,240,.12);border-color:rgba(176,108,240,.35)}
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
-<p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
+<p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Checked readings become that robot's source boundary for the duet. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
 <p class="sub" id="devNote" style="margin-top:-8px;display:none"></p>
 <div class="controls">
  <input type="text" id="topic" placeholder="Topic (optional) — e.g. what makes a good story">
@@ -71,11 +78,11 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 </div>
 <div class="controls">
  <div style="flex:1;display:flex;flex-direction:column;gap:5px">
-  <span class="muted">Blue draws on — tick any number (<span class="srccount" id="cntBlue">0</span> selected)</span>
+  <span class="muted">Blue checked readings — only these library docs (<span class="srccount" id="cntBlue">0</span> selected)</span>
   <div id="sourcesBlue" class="srcbox" style="border-color:#cfe4fb"></div>
  </div>
  <div style="flex:1;display:flex;flex-direction:column;gap:5px">
-  <span class="muted">Hexia draws on — tick any number (<span class="srccount" id="cntHexia">0</span> selected)</span>
+  <span class="muted">Hexia checked readings — only these library docs (<span class="srccount" id="cntHexia">0</span> selected)</span>
   <div id="sourcesHexia" class="srcbox" style="border-color:#e6d6f7"></div>
  </div>
 </div>
@@ -88,6 +95,8 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option><option value="20">20 turns</option><option value="0">until I stop</option></select>
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
+ <button id="questionBtn" disabled title="Pause the duet so a student can ask a question">Question</button>
+ <button id="pauseBtn" disabled title="Pause after the current spoken line, then continue without restarting">Pause</button>
  <button id="stopBtn" disabled>Stop</button>
  <button id="saveBtn" disabled title="Download the written dialogue (with the run's settings) as a Markdown file">💾 Save</button>
  <label class="muted"><input type="checkbox" id="speakChk" checked> speak aloud</label>
@@ -95,6 +104,27 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <label class="muted" title="While they talk, Blue watches his inbox: an email with duet in the subject joins the conversation live, and the sender gets their spoken answer mailed back"><input type="checkbox" id="mailChk" checked> 📧 answer duet mail</label>
  <label class="muted" title="They know students are listening: jargon gets glossed in a breath, examples land in student life, they sometimes address the room, and the final turns end on a position plus a question for the class"><input type="checkbox" id="classChk"> 🎓 classroom mode</label>
  <label class="muted" title="They read the best-matching Wikipedia article on the subject first and ground the conversation in it"><input type="checkbox" id="wikiChk"> consult Wikipedia</label>
+ <label class="muted" title="Keep Alex's private family and household details out of the robots' dialogue"><input type="checkbox" id="noFamilyChk" checked> no family refs</label>
+ <label class="muted" title="Joint research protocol: Builder and Examiner jobs that swap every few turns, five phases (understand → expand → tension → repair → novelty), and a shared notebook of claims, assumptions, tensions and questions that every turn must change — so the talk builds a theory instead of circling"><input type="checkbox" id="protoChk"> 🔬 deep dive</label>
+</div>
+<div id="questionPanel" class="qpanel" style="display:none">
+ <div class="qhead">
+  <b>Student question</b>
+  <div class="qmode">
+   <button id="qTypeBtn" class="active" type="button">Type</button>
+   <button id="qSpeakBtn" type="button">Speak</button>
+  </div>
+ </div>
+ <textarea id="questionText" placeholder="Type the student's question here"></textarea>
+ <div id="qSpeakBox" style="display:none">
+  <button id="qRecordBtn" type="button">Start recording</button>
+  <span id="qRecordStatus" class="muted">Speak the question, then stop recording.</span>
+ </div>
+ <div class="qactions">
+  <button class="primary" id="qSubmitBtn" type="button">Send question</button>
+  <button id="qCancelBtn" type="button">Cancel</button>
+  <span class="muted" id="qStatus">Dialogue paused while the question is open.</span>
+ </div>
 </div>
 <div id="usbHeads" class="controls" style="display:none;flex-direction:column;align-items:stretch;gap:10px;border:1px dashed #cfc9bd;border-radius:10px;padding:12px;background:#fff">
  <div class="muted" style="font-weight:600;color:#1a2e1a">Heads on this device (USB-C)</div>
@@ -161,7 +191,7 @@ function SPICE(){ var s=document.getElementById('spice'); var n=s?parseInt(s.val
 const SETTINGS_KEY='duetSettings.v1';
 const SET_TXT=['topic','url','roleBlue','roleHexia','toneBlue','toneHexia','slangBlue','slangHexia'];
 const SET_SEL=['turns','starter'];
-const SET_CHK=['speakChk','researchChk','mailChk','classChk','wikiChk'];
+const SET_CHK=['speakChk','researchChk','mailChk','classChk','wikiChk','noFamilyChk','protoChk'];
 function saveSettings(){
   try{
     const s={txt:{},sel:{},chk:{},spice:SPICE(),src:SOURCES()};
@@ -198,11 +228,20 @@ function restoreSettings(){
   ['sourcesBlue','sourcesHexia'].forEach(function(id){ const e=document.getElementById(id); if(e) e.addEventListener('change', saveSettings); });
   restoreSettings();
 })();
-let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect)
+let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect); in 🔬 deep-dive mode it's the shared notebook
+let LAST_PHASE='', LAST_BUILDER='';            // 🔬 deep-dive protocol: for surfacing phase changes and job swaps as notes
+function PROTO(){ const c=document.getElementById('protoChk'); return !!(c && c.checked); }
 let TRANSCRIPT=[], RUN_META=null;              // the written dialogue + the settings it ran with (for 💾 Save)
 const logEl=document.getElementById('log');
-const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn');
+const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn'), questionBtn=document.getElementById('questionBtn'), pauseBtn=document.getElementById('pauseBtn');
 const saveBtn=document.getElementById('saveBtn');
+const questionPanel=document.getElementById('questionPanel'), questionText=document.getElementById('questionText');
+const qTypeBtn=document.getElementById('qTypeBtn'), qSpeakBtn=document.getElementById('qSpeakBtn');
+const qSpeakBox=document.getElementById('qSpeakBox'), qRecordBtn=document.getElementById('qRecordBtn');
+const qSubmitBtn=document.getElementById('qSubmitBtn'), qCancelBtn=document.getElementById('qCancelBtn');
+const qStatus=document.getElementById('qStatus'), qRecordStatus=document.getElementById('qRecordStatus');
+let PAUSED=false, PAUSE_REASON=null, PAUSE_WAITERS=[], STUDENTQ=[];
+let ACTIVE_SPEECH_FINISH=null;
 
 // iOS Safari refuses speechSynthesis unless audio was first unlocked by a real
 // tap. The duet speaks each line ASYNCHRONOUSLY (after fetching the turn), which
@@ -331,7 +370,8 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
   const frames=buildLipFrames(text, rate);
   const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
   let done=false, keepAlive=null;
-  const finish=()=>{ if(done)return; done=true; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  ACTIVE_SPEECH_FINISH=finish;
   if(el)el.classList.add('speaking'); headLip(cfg,frames);
   if(!useTTS){ setTimeout(finish, Math.max(1500, est+400)); return; }   // no audio: wait out the lip-flap
   try{
@@ -352,18 +392,192 @@ function speakAs(cfg,text,el){ return new Promise(resolve=>{
   }catch(e){ finish(); }
 }); }
 
+function updatePauseButton(){
+  if(!pauseBtn) return;
+  if(!running){
+    pauseBtn.disabled=true; pauseBtn.textContent='Pause'; return;
+  }
+  if(PAUSE_REASON==='question'){
+    pauseBtn.disabled=true; pauseBtn.textContent='Paused'; return;
+  }
+  pauseBtn.disabled=false;
+  pauseBtn.textContent=PAUSED?'Continue':'Pause';
+}
+function setPaused(v, reason){
+  PAUSED=!!v;
+  PAUSE_REASON=PAUSED?(reason||PAUSE_REASON||'manual'):null;
+  updatePauseButton();
+  if(!PAUSED){
+    const waiters=PAUSE_WAITERS.slice(); PAUSE_WAITERS=[];
+    waiters.forEach(function(fn){ try{ fn(); }catch(e){} });
+  }
+}
+function waitWhilePaused(){
+  if(!PAUSED) return Promise.resolve();
+  return new Promise(function(resolve){ PAUSE_WAITERS.push(resolve); });
+}
+function openQuestionPanel(){
+  if(!running) return;
+  questionBtn.disabled=true;
+  setPaused(true,'question');
+  try{ window.speechSynthesis.cancel(); }catch(e){}
+  if(ACTIVE_SPEECH_FINISH) ACTIVE_SPEECH_FINISH();
+  headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia);
+  questionPanel.style.display='block';
+  qStatus.textContent='Dialogue paused while the question is open.';
+  if(!questionText.value.trim()) questionText.value='';
+  questionText.focus();
+  addNote('(student question pause)');
+}
+function closeQuestionPanel(resume){
+  questionPanel.style.display='none';
+  if(qRecording) stopQuestionRecording(false);
+  if(running) questionBtn.disabled=false;
+  if(resume) setPaused(false);
+}
+function toggleManualPause(){
+  if(!running || PAUSE_REASON==='question') return;
+  if(PAUSED){
+    setPaused(false);
+    questionBtn.disabled=false;
+    addNote('(duet continued)');
+  }else{
+    setPaused(true,'manual');
+    questionBtn.disabled=true;
+    addNote('(duet paused)');
+  }
+}
+function setQuestionMode(mode){
+  const speak = mode === 'speak';
+  qTypeBtn.classList.toggle('active', !speak);
+  qSpeakBtn.classList.toggle('active', speak);
+  qSpeakBox.style.display = speak ? 'block' : 'none';
+  questionText.placeholder = speak ? 'The spoken question transcript will appear here' : "Type the student's question here";
+  if(!speak && qRecording) stopQuestionRecording(false);
+}
+
+let qAudioCtx=null, qMicStream=null, qSrcNode=null, qProcNode=null;
+let qRecording=false, qChunks=[], qSampleRate=16000, qAutoStop=null;
+async function ensureQuestionAudio(){
+  const AC=window.AudioContext||window.webkitAudioContext;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!AC) return 'unsupported';
+  try{ if(!qAudioCtx) qAudioCtx=new AC(); }catch(e){ return 'unsupported'; }
+  const resumeP=(qAudioCtx.state!=='running')?qAudioCtx.resume():null;
+  const mediaP=qMicStream?null:navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}).catch(function(){
+    return navigator.mediaDevices.getUserMedia({audio:true});
+  });
+  if(resumeP){ try{ await resumeP; }catch(e){} }
+  if(qMicStream && qAudioCtx.state!=='closed') return true;
+  let stream;
+  try{ stream=await mediaP; }catch(e){ return 'denied'; }
+  qMicStream=stream; qSampleRate=qAudioCtx.sampleRate||44100;
+  qSrcNode=qAudioCtx.createMediaStreamSource(qMicStream);
+  qProcNode=qAudioCtx.createScriptProcessor(4096,1,1);
+  qProcNode.onaudioprocess=function(e){
+    if(!qRecording) return;
+    const input=e.inputBuffer.getChannelData(0);
+    qChunks.push(new Float32Array(input));
+  };
+  const mute=qAudioCtx.createGain(); mute.gain.value=0;
+  qSrcNode.connect(qProcNode); qProcNode.connect(mute); mute.connect(qAudioCtx.destination);
+  window.__duetQuestionMic=[qAudioCtx,qMicStream,qSrcNode,qProcNode,mute];
+  return true;
+}
+function qEncodeWav(chunks,sampleRate){
+  let len=0; for(let i=0;i<chunks.length;i++) len+=chunks[i].length;
+  const buf=new ArrayBuffer(44+len*2), view=new DataView(buf);
+  function ws(off,s){ for(let i=0;i<s.length;i++) view.setUint8(off+i,s.charCodeAt(i)); }
+  ws(0,'RIFF'); view.setUint32(4,36+len*2,true); ws(8,'WAVE');
+  ws(12,'fmt '); view.setUint32(16,16,true); view.setUint16(20,1,true);
+  view.setUint16(22,1,true); view.setUint32(24,sampleRate,true);
+  view.setUint32(28,sampleRate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+  ws(36,'data'); view.setUint32(40,len*2,true);
+  let off=44;
+  for(let i=0;i<chunks.length;i++){
+    const c=chunks[i];
+    for(let j=0;j<c.length;j++){
+      let v=c[j]; if(v>1)v=1; else if(v<-1)v=-1;
+      view.setInt16(off, v<0?v*0x8000:v*0x7FFF, true); off+=2;
+    }
+  }
+  return new Blob([view],{type:'audio/wav'});
+}
+async function startQuestionRecording(){
+  primeAudio();
+  if('speechSynthesis' in window) try{ window.speechSynthesis.cancel(); }catch(e){}
+  const ok=await ensureQuestionAudio();
+  if(ok==='denied'){ qRecordStatus.textContent='Microphone permission was denied.'; return; }
+  if(ok!==true){ qRecordStatus.textContent=window.isSecureContext?'This browser cannot use the microphone.':'Open the secure HTTPS address to use the microphone.'; return; }
+  qChunks=[]; qRecording=true;
+  qRecordBtn.classList.add('recording');
+  qRecordBtn.textContent='Stop recording';
+  qRecordStatus.textContent='Listening... stop recording when the student is done.';
+  if(qAutoStop) clearTimeout(qAutoStop);
+  qAutoStop=setTimeout(function(){ stopQuestionRecording(true); }, 20000);
+}
+function stopQuestionRecording(submitForTranscription){
+  if(qAutoStop){ clearTimeout(qAutoStop); qAutoStop=null; }
+  if(!qRecording) return;
+  qRecording=false;
+  qRecordBtn.classList.remove('recording');
+  qRecordBtn.textContent='Start recording';
+  const chunks=qChunks; qChunks=[];
+  if(submitForTranscription!==false) transcribeQuestion(chunks,qSampleRate);
+}
+async function transcribeQuestion(chunks,sampleRate){
+  let total=0; for(let i=0;i<chunks.length;i++) total+=chunks[i].length;
+  if(!total){ qRecordStatus.textContent='I did not hear anything. Try recording again.'; return; }
+  qRecordBtn.disabled=true;
+  qRecordStatus.textContent='Transcribing the question...';
+  const fd=new FormData();
+  fd.append('audio', qEncodeWav(chunks,sampleRate), 'question.wav');
+  try{
+    const res=await fetch('/stt',{method:'POST',body:fd});
+    const data=await res.json().catch(function(){ return null; });
+    const said=((data&&data.text)||'').trim();
+    if(said){ questionText.value=said; qRecordStatus.textContent='Transcript ready. Edit it if needed, then send.'; questionText.focus(); }
+    else qRecordStatus.textContent='I did not catch that. Try recording again.';
+  }catch(e){
+    qRecordStatus.textContent='Could not transcribe that. Try again.';
+  }finally{
+    qRecordBtn.disabled=false;
+  }
+}
+function submitStudentQuestion(){
+  const text=(questionText.value||'').trim();
+  if(!text){ qStatus.textContent='Type or record a question first.'; questionText.focus(); return; }
+  STUDENTQ.push({text:text});
+  addNote('(student asks: '+text+')');
+  questionText.value='';
+  closeQuestionPanel(true);
+}
+
 async function oneTurn(speaker, closing){
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
+  const noFamily=document.getElementById('noFamilyChk').checked;
+  const studentQuestion=STUDENTQ.length?STUDENTQ.shift():null;
   // A queued duet email rides into THIS turn; the speaker takes it up out loud.
-  const mail=MAILQ.length? MAILQ.shift() : null;
+  const mail=(!studentQuestion && MAILQ.length)? MAILQ.shift() : null;
   if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, closing:!!closing, classroom:document.getElementById('classChk').checked, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); return false; }
-  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
+  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
+  if(!studentQuestion && !mail){
+    if(PAUSED){
+      await waitWhilePaused();
+      if(!running) return null;
+    }
+    if(STUDENTQ.length) return 'defer';  // a question arrived while this ordinary line was being generated
+  }
   const cfg=ROBOTS[speaker];
   // The email enters the shared history as an event, so the OTHER robot (and the
   // take-stock bearing) see exactly what was written, not just the paraphrase.
+  if(studentQuestion){ history.push({speaker:'question', text:studentQuestion.text}); }
   if(mail){ history.push({speaker:'mail', text:'From '+mail.from_name+' — "'+mail.subject+'": '+mail.body}); }
+  // 🔬 deep-dive protocol: surface phase changes and Builder/Examiner swaps as notes.
+  if(d.phase && d.phase!==LAST_PHASE){ LAST_PHASE=d.phase; addNote('(🔬 '+d.phase+' phase — '+(d.phaseNote||'')+')'); }
+  if(d.job){ const b=(d.job==='builder')?speaker:(speaker==='blue'?'hexia':'blue');
+    if(b!==LAST_BUILDER){ LAST_BUILDER=b; addNote('(🔬 '+ROBOTS[b].name+' builds, '+ROBOTS[b==='blue'?'hexia':'blue'].name+' examines)'); } }
   const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
@@ -406,12 +620,15 @@ function flushMailReply(){
 // the updated bearing. This is what lets the duet develop a line of thought and the
 // two robots' views move, instead of just volleying replies to the last point.
 function maybeReflect(){
-  const n=history.length;
-  if(n<4 || n%4!==0) return;      // not in the opening; take stock once every 4 turns
+  const n=history.length, proto=PROTO();
+  // Not in the opening; take stock often enough to keep an arc. In 🔬 deep-dive
+  // mode the notebook is the point, so it refreshes every other turn (still
+  // backgrounded under the head's speech, so it costs no turn time).
+  if(n<3 || n%(proto?2:3)!==0) return;
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
   fetch('/duet/reflect',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, roles:fieldMap('role'), sources:SOURCES()})})
+        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, protocol:proto, roles:fieldMap('role'), sources:SOURCES(), noFamily:document.getElementById('noFamilyChk').checked})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
@@ -422,7 +639,8 @@ function maybeReflect(){
     }).catch(function(){});
 }
 async function run(){
-  running=true; history=[]; DIRECTION=''; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false;
+  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  setPaused(false); STUDENTQ=[];
   TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.
   const topicEl=document.getElementById('topic'), urlEl=document.getElementById('url');
@@ -434,6 +652,8 @@ async function run(){
              roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'),
              sources:SOURCES(), spice:SPICE(),
              classroom:document.getElementById('classChk').checked,
+             protocol:PROTO(),
+             noFamily:document.getElementById('noFamilyChk').checked,
              research:document.getElementById('researchChk').checked,
              wiki:document.getElementById('wikiChk').checked,
              mail:mailOn() };
@@ -472,13 +692,27 @@ async function run(){
   }
   let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
   let speaker=document.getElementById('starter').value;
-  for(let i=0; running && (turns===0 || i<turns); i++){ const ok=await oneTurn(speaker, turns>0 && i>=turns-2); if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; } speaker=(speaker==='blue')?'hexia':'blue'; }
+  for(let i=0; running && (turns===0 || i<turns); i++){
+    await waitWhilePaused();
+    if(!running) break;
+    const ok=await oneTurn(speaker, turns>0 && i>=turns-2);
+    if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; }
+    if(ok==='defer'){ i--; continue; }
+    speaker=(speaker==='blue')?'hexia':'blue';
+  }
   stop();
 }
 function addNote(t){ if(!t)return; TRANSCRIPT.push({kind:'note', text:t}); const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
-function stop(){ running=false; if(mailTimer){ clearInterval(mailTimer); mailTimer=null; } flushMailReply(); try{ window.speechSynthesis.cancel(); }catch(e){} headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; }
+function stop(){ running=false; setPaused(false); if(qRecording) stopQuestionRecording(false); if(questionPanel) questionPanel.style.display='none'; if(mailTimer){ clearInterval(mailTimer); mailTimer=null; } flushMailReply(); try{ window.speechSynthesis.cancel(); }catch(e){} if(ACTIVE_SPEECH_FINISH) ACTIVE_SPEECH_FINISH(); headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; questionBtn.disabled=true; pauseBtn.disabled=true; pauseBtn.textContent='Pause'; }
 startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
+questionBtn.addEventListener('click', openQuestionPanel);
+pauseBtn.addEventListener('click', toggleManualPause);
+qTypeBtn.addEventListener('click', function(){ setQuestionMode('type'); });
+qSpeakBtn.addEventListener('click', function(){ setQuestionMode('speak'); try{ fetch('/stt/warmup'); }catch(e){} });
+qRecordBtn.addEventListener('click', function(){ qRecording ? stopQuestionRecording(true) : startQuestionRecording(); });
+qSubmitBtn.addEventListener('click', submitStudentQuestion);
+qCancelBtn.addEventListener('click', function(){ questionText.value=''; closeQuestionPanel(true); addNote('(student question cancelled)'); });
 // ---- 💾 Save: download the written dialogue as a Markdown file, headed by the
 // settings the run started with (so a class session can be re-created later).
 function saveTranscript(){
@@ -498,6 +732,8 @@ function saveTranscript(){
   });
   const flags=[];
   if(m.classroom) flags.push('classroom mode');
+  if(m.protocol) flags.push('🔬 deep-dive protocol');
+  if(m.noFamily) flags.push('no family refs');
   if(m.research) flags.push('web research');
   if(m.wiki) flags.push('Wikipedia');
   if(m.mail) flags.push('duet mail');
@@ -507,6 +743,12 @@ function saveTranscript(){
     if(t.kind==='note') L.push('*'+t.text+'*','');
     else L.push('**'+t.name+':** '+t.text,'');
   });
+  // 🔬 deep-dive protocol: the shared notebook is the run's real output — save it.
+  if(m.protocol && DIRECTION){
+    L.push('---','','## Shared notebook (final state)','');
+    DIRECTION.split('\\n').forEach(function(x){ if(x.trim()) L.push('- '+x.trim()); });
+    L.push('');
+  }
   const blob=new Blob([L.join('\\n')],{type:'text/markdown'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   const slug=((m.topic||'conversation').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40))||'conversation';
