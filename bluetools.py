@@ -11779,37 +11779,97 @@ def _duet_research_query(topic: str, url_info, roles) -> str:
     return ""
 
 
-def _duet_research_digest(query: str):
+def _duet_research_plan(query: str):
+    """Search angles for a THOROUGH start-of-duet research pass (Alex, 2026-07-06:
+    one shallow search wasn't giving them a real, current sense of the subject).
+    The LLM plans three complementary queries — latest developments, essential
+    background, the live debate — with deterministic variants as the fallback.
+    Always leads with the plain subject itself."""
+    q = re.sub(r'\s+', ' ', (query or '')).strip()
+    plans = []
+    try:
+        res = call_llm(
+            [{"role": "system", "content":
+              "You plan web searches. Answer with exactly three lines, each a short "
+              "search query (no numbering, no quotes, no commentary)."},
+             {"role": "user", "content":
+              f"Two discussants want a thorough, up-to-date grounding on: {q}\n"
+              "Line 1: a query for the latest developments / current news on it.\n"
+              "Line 2: a query for the essential background needed to understand it.\n"
+              "Line 3: a query for the main debate, criticism, or controversy around it."}],
+            include_tools=False, temperature=0.3, max_tokens=900)
+        ch = (res or {}).get('choices') or []
+        cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+        if '</think>' in cand:
+            cand = cand.split('</think>')[-1]
+        for ln in cand.replace('<think>', '').strip().splitlines():
+            ln = re.sub(r'^\s*(?:\d+[\).:]|[-*•])\s*', '', ln).strip().strip('"').strip()
+            if 3 <= len(ln) <= 140:
+                plans.append(ln)
+    except Exception as e:
+        log.warning(f"[DUET] research plan failed: {e}")
+    if not plans:
+        plans = [f"{q} latest developments", f"{q} debate criticism"]
+    out = [q]
+    for p in plans:
+        if p.lower() not in {o.lower() for o in out}:
+            out.append(p)
+    return out[:4]
+
+
+def _duet_research_digest(query: str, deep: bool = False):
     """Search the web for the duet's subject and weave the hits into one
     research text. Returns {'titles','text','error'}; empty text ⇒ nothing
-    usable (see error). Failures retry after 2 min, hits live for the TTL."""
+    usable (see error). Failures retry after 2 min, hits live for the TTL.
+
+    deep=True (the /duet/research warmup) runs the full multi-angle pass —
+    several planned queries, more pages actually read, a larger digest — and
+    caches it under the same key, so every turn reuses the thorough result."""
     import time as _t
     q = re.sub(r'\s+', ' ', (query or '')).strip().lower()
     if not q:
         return None
     hit = _DUET_RESEARCH_CACHE.get(q)
     if hit and _t.time() - hit['at'] < (_DUET_RESEARCH_TTL if hit.get('text') else 120):
-        return hit
-    info = {'titles': [], 'text': '', 'error': None, 'at': _t.time()}
-    try:
-        data = json.loads(execute_web_search(q) or '{}')
-    except Exception as e:
-        data = {'error': f'{e.__class__.__name__}: {e}'}
-    results = (data.get('results') or []) if data.get('success') else []
+        if hit.get('deep') or not deep:      # never let a shallow hit shadow a deep request
+            return hit
+    info = {'titles': [], 'text': '', 'error': None, 'at': _t.time(), 'deep': deep,
+            'queries': []}
+    queries = _duet_research_plan(query) if deep else [q]
+    info['queries'] = queries
+    results, seen_urls = [], set()
+    last_err = None
+    for sq in queries:
+        try:
+            data = json.loads(execute_web_search(sq) or '{}')
+        except Exception as e:
+            data = {'error': f'{e.__class__.__name__}: {e}'}
+        if not data.get('success'):
+            last_err = data.get('error') or last_err
+            continue
+        for r in (data.get('results') or []):
+            u = (r.get('url') or '').strip()
+            if u and u in seen_urls:
+                continue
+            if u:
+                seen_urls.add(u)
+            results.append(r)
     if not results:
-        info['error'] = data.get('error') or 'the search came up empty'
+        info['error'] = last_err or 'the search came up empty'
     parts = []
     for r in results:
         t = (r.get('title') or '').strip()
         s = (r.get('snippet') or '').strip()
-        if t:
+        if t and t not in info['titles']:
             info['titles'].append(t)
         if t or s:
             parts.append(f"{t} — {s}" if t and s else (t or s))
     # Read the most promising pages so they have substance, not just blurbs.
+    # The deep pass reads more of them — that's what "thorough" buys.
+    max_fetch, max_attempts = (5, 10) if deep else (2, 4)
     fetched = attempts = 0
     for r in results:
-        if fetched >= 2 or attempts >= 4:
+        if fetched >= max_fetch or attempts >= max_attempts:
             break
         u = (r.get('url') or '').strip()
         if not u:
@@ -11821,7 +11881,7 @@ def _duet_research_digest(query: str):
             ttl = (page.get('title') or r.get('title') or u).strip()
             parts.append(f"From \"{ttl}\":\n{txt[:4000]}")
             fetched += 1
-    info['text'] = "\n\n".join(parts)[:_DUET_RESEARCH_MAX_TEXT]
+    info['text'] = "\n\n".join(parts)[:(20000 if deep else _DUET_RESEARCH_MAX_TEXT)]
     if len(_DUET_RESEARCH_CACHE) >= 8:
         _DUET_RESEARCH_CACHE.clear()
     _DUET_RESEARCH_CACHE[q] = info
@@ -11896,12 +11956,51 @@ _WIKI_LANGS = {'en', 'fr', 'ru', 'el', 'da'}   # household languages WITH a Wiki
 _WIKI_UA = {'User-Agent': 'BlueRobot/1.0 (home assistant; alevantresearch@gmail.com)'}
 
 
-def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2):
+def _wiki_subjects_for(topic: str):
+    """The encyclopedic SUBJECT(S) at the heart of a discussion topic (Alex,
+    2026-07-06: typing a debate-shaped topic straight into Wikipedia search
+    matched tangents). 'should schools ban phones?' isn't an article; 'mobile
+    phone use in schools' and 'attention span' are. LLM-extracted, up to 3;
+    empty list on failure (caller falls back to searching the raw topic)."""
+    t = re.sub(r'\s+', ' ', (topic or '')).strip()
+    if not t:
+        return []
+    subjects = []
+    try:
+        res = call_llm(
+            [{"role": "system", "content":
+              "You know Wikipedia's coverage. Answer with 1 to 3 lines, each the title-like "
+              "subject of a real encyclopedia article (a noun phrase — no numbering, no "
+              "quotes, no commentary)."},
+             {"role": "user", "content":
+              f"A discussion is about to start on: {t}\n"
+              "Which encyclopedia article subjects best cover the ISSUE at the heart of it? "
+              "Give the most central subject first."}],
+            include_tools=False, temperature=0.2, max_tokens=700)
+        ch = (res or {}).get('choices') or []
+        cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+        if '</think>' in cand:
+            cand = cand.split('</think>')[-1]
+        for ln in cand.replace('<think>', '').strip().splitlines():
+            ln = re.sub(r'^\s*(?:\d+[\).:]|[-*•])\s*', '', ln).strip().strip('"').strip()
+            if 2 <= len(ln) <= 90 and ln.lower() not in {s.lower() for s in subjects}:
+                subjects.append(ln)
+    except Exception as e:
+        log.warning(f"[DUET] wiki subject extraction failed: {e}")
+    return subjects[:3]
+
+
+def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2, deep: bool = False):
     """Look the subject up on Wikipedia and return the intro of the best-matching
     article(s) as one text. {'titles','text','urls','error','at'}; empty text ⇒
     nothing usable (see error). Two HTTP calls — search, then one batched extract
     fetch — cached per (lang, query) so a duet consults once; failures retry
-    after 2 min, hits live for the TTL."""
+    after 2 min, hits live for the TTL.
+
+    deep=True (the /duet/wikipedia warmup) first has the LLM name the
+    encyclopedic subjects at the heart of the topic and searches THOSE, so a
+    debate-shaped topic lands on the relevant articles instead of tangents;
+    cached under the same key so every turn reuses it."""
     import time as _t
     import requests
     lang = lang if lang in _WIKI_LANGS else 'en'
@@ -11911,17 +12010,38 @@ def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2):
     key = f"{lang}:{q.lower()}"
     hit = _WIKI_CACHE.get(key)
     if hit and _t.time() - hit['at'] < (_WIKI_TTL if hit.get('text') else 120):
-        return hit
-    info = {'titles': [], 'text': '', 'urls': [], 'error': None, 'at': _t.time()}
+        if hit.get('deep') or not deep:      # never let a shallow hit shadow a deep request
+            return hit
+    info = {'titles': [], 'text': '', 'urls': [], 'error': None, 'at': _t.time(),
+            'deep': deep}
     base = f"https://{lang}.wikipedia.org/w/api.php"
+    if deep:
+        max_articles = max(max_articles, 3)
     titles = []
-    try:
+
+    def _search_titles(srch: str, limit: int):
         s = requests.get(base, params={'action': 'query', 'list': 'search',
-                                       'srsearch': q[:200], 'srlimit': 4, 'format': 'json'},
+                                       'srsearch': srch[:200], 'srlimit': limit, 'format': 'json'},
                          headers=_WIKI_UA, timeout=10).json()
-        titles = [h.get('title') for h in (s.get('query', {}).get('search') or []) if h.get('title')]
+        return [h.get('title') for h in (s.get('query', {}).get('search') or []) if h.get('title')]
+
+    if deep:
+        # Aim each search at an encyclopedic subject, most central first.
+        for subj in _wiki_subjects_for(q):
+            try:
+                for t in _search_titles(subj, 2)[:1]:
+                    if t not in titles:
+                        titles.append(t)
+            except Exception:
+                continue
+    try:
+        for t in _search_titles(q, 4):
+            if t not in titles:
+                titles.append(t)
     except Exception as e:
-        info['error'] = f'{e.__class__.__name__}: {e}'
+        if not titles:
+            info['error'] = f'{e.__class__.__name__}: {e}'
+    titles = titles[:5]
     if not titles and not info['error']:
         info['error'] = 'nothing on Wikipedia matched that'
     arts = []
@@ -11930,7 +12050,7 @@ def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2):
             e = requests.get(base, params={'action': 'query', 'prop': 'extracts|info',
                                            'exintro': 1, 'explaintext': 1, 'exlimit': 'max',
                                            'inprop': 'url', 'redirects': 1,
-                                           'titles': '|'.join(titles[:4]), 'format': 'json'},
+                                           'titles': '|'.join(titles[:5]), 'format': 'json'},
                              headers=_WIKI_UA, timeout=10).json()
             for pg in (e.get('query', {}).get('pages') or {}).values():
                 ex = (pg.get('extract') or '').strip()
@@ -11939,9 +12059,16 @@ def _wikipedia_digest(query: str, lang: str = 'en', max_articles: int = 2):
                                  'url': (pg.get('fullurl') or '').strip(), 'text': ex})
         except Exception as ee:
             info['error'] = info['error'] or f'{ee.__class__.__name__}: {ee}'
-    # Longest intro first = the substantive article, not a stub or a disambiguation
-    # page that happened to match the search words.
-    arts.sort(key=lambda a: len(a['text']), reverse=True)
+    if deep and arts:
+        # The deep pass searched targeted subjects, most central first — keep that
+        # order (the batched extract fetch returns pages shuffled), demoting stubs.
+        _rank = {t.lower(): i for i, t in enumerate(titles)}
+        arts.sort(key=lambda a: (_rank.get(a['title'].lower(), 99), -len(a['text'])))
+        arts = [a for a in arts if len(a['text']) >= 200] or arts
+    else:
+        # Longest intro first = the substantive article, not a stub or a disambiguation
+        # page that happened to match the search words.
+        arts.sort(key=lambda a: len(a['text']), reverse=True)
     parts = []
     for a in arts[:max(1, max_articles)]:
         info['titles'].append(a['title'])

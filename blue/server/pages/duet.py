@@ -578,6 +578,7 @@ async function oneTurn(speaker, closing){
   if(d.phase && d.phase!==LAST_PHASE){ LAST_PHASE=d.phase; addNote('(🔬 '+d.phase+' phase — '+(d.phaseNote||'')+')'); }
   if(d.job){ const b=(d.job==='builder')?speaker:(speaker==='blue'?'hexia':'blue');
     if(b!==LAST_BUILDER){ LAST_BUILDER=b; addNote('(🔬 '+ROBOTS[b].name+' builds, '+ROBOTS[b==='blue'?'hexia':'blue'].name+' examines)'); } }
+  if(d.beat==='conclusions'){ addNote('('+ROBOTS[speaker].name+' pauses to weigh what they can conclude so far)'); }
   const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
@@ -666,11 +667,14 @@ async function run(){
     addNote("(they've "+(r.kind==='video'?'watched':'read')+': '+(r.title||url)+')');
   }
   if(document.getElementById('researchChk').checked){
-    addNote('(searching the web…)');
+    addNote('(researching the subject thoroughly — several searches, reading the best pages…)');
     let rr=null;
     try{ rr=await (await fetch('/duet/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:topicEl.value.trim(), url:url, roles:fieldMap('role')})})).json(); }catch(e){}
     if(!running){ return; }
-    if(rr&&rr.ok){ addNote("(they've looked it up: "+((rr.titles&&rr.titles.length)?rr.titles.join(' · '):rr.query)+')'); }
+    if(rr&&rr.ok){
+      if(rr.queries&&rr.queries.length>1){ addNote('(searched: '+rr.queries.join(' · ')+')'); }
+      addNote("(they've read up on it: "+((rr.titles&&rr.titles.length)?rr.titles.slice(0,4).join(' · '):rr.query)+')');
+    }
     else{ addNote("(web research came up empty"+(rr&&rr.error?': '+rr.error:'')+" — they'll wing it)"); }
   }
   const srcSel=SOURCES();

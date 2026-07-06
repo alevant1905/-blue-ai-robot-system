@@ -400,10 +400,13 @@ def register(app):
         rq = bt._duet_research_query(topic, url_info, d.get('roles') or {})
         if not rq:
             return jsonify({"ok": False, "error": "give them a topic, a link or roles to research"})
-        info = bt._duet_research_digest(rq) or {}
+        # deep=True: the thorough multi-angle pass (planned queries, more pages
+        # read). Cached under the same key, so every turn reuses this result.
+        info = bt._duet_research_digest(rq, deep=True) or {}
         if not (info.get('text') or '').strip():
             return jsonify({"ok": False, "error": info.get('error') or "the search came up empty"})
         return jsonify({"ok": True, "query": rq, "titles": (info.get('titles') or [])[:4],
+                        "queries": (info.get('queries') or [])[:4],
                         "chars": len(info['text'])})
 
     @app.route('/duet/wikipedia', methods=['POST'])
@@ -418,7 +421,9 @@ def register(app):
         wq = bt._duet_research_query(topic, url_info, d.get('roles') or {})
         if not wq:
             return jsonify({"ok": False, "error": "give them a topic, a link or roles to look up"})
-        info = bt._wikipedia_digest(wq) or {}
+        # deep=True: extract the encyclopedic subjects at the heart of the topic
+        # and search those, so a debate-shaped topic lands on relevant articles.
+        info = bt._wikipedia_digest(wq, deep=True) or {}
         if not (info.get('text') or '').strip():
             return jsonify({"ok": False, "error": info.get('error') or "nothing on Wikipedia matched"})
         return jsonify({"ok": True, "query": wq, "titles": (info.get('titles') or [])[:4],
@@ -857,6 +862,13 @@ def register(app):
                       if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS)
         ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_duet_proto_phase(n_robot, planned_turns)]
         proto_job = _duet_proto_job(speaker, history, n_robot)
+        # Spoken conclusions beat (Alex, 2026-07-06): every ~7 robot turns the
+        # speaker steps out of the volley and weighs OUT LOUD what the discussion
+        # can now conclude, then hands it back. Distinct from the private bearing/
+        # notebook — this reflection happens in the dialogue itself. Never lands
+        # on closing turns or on turns already owned by mail/student questions.
+        conclusion_beat = (n_robot >= 5 and n_robot % 7 == 5
+                           and not (closing or mail or student_q_text))
         # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
         # gets a confrontational "move", how hard the two push on each other, and the
         # sampling temperature. Defaults to a balanced 5.
@@ -1323,7 +1335,17 @@ def register(app):
             directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
                           "more concrete, or genuinely challenged — instead of trading it for a brand-new "
                           "subject; never merely restate or nod along.")
-            if protocol:
+            if conclusion_beat:
+                directive += (
+                    " CONCLUSIONS BEAT — this turn, step out of the back-and-forth and weigh out "
+                    f"loud what your discussion with {ot['name']} can NOW conclude. Looking over "
+                    "the whole conversation so far, name one or two conclusions it actually "
+                    "supports — plain claims you would stand behind, each with the strongest "
+                    "reason it has earned in this talk — and, if there is one, the question you "
+                    f"are still not ready to close and why. Then hand it back: ask {ot['name']} "
+                    "straight whether they would sign their name under those conclusions or "
+                    "amend them.")
+            elif protocol:
                 # Deep-dive protocol: the phase × job matrix IS this turn's move —
                 # a deterministic function per turn instead of a sampled one, so
                 # every line has a stated purpose in a joint inquiry.
@@ -1515,6 +1537,8 @@ def register(app):
                 "2 to 3 sentences that do your job cleanly",
                 "2 to 4 sentences built around one concrete case or formulation",
             ])
+        if conclusion_beat:
+            length_note = "2 to 4 sentences — conclusions stated plainly, then the handback"
         if student_q_text:
             length_note = "2 to 4 sentences — answer the student and fold the question back into the dialogue"
         elif mail:
@@ -1630,4 +1654,6 @@ def register(app):
         if protocol:
             # The page uses these to surface phase changes and job swaps as notes.
             resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})
+        if conclusion_beat:
+            resp["beat"] = "conclusions"
         return jsonify(resp)
