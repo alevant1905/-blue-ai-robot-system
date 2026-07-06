@@ -341,6 +341,40 @@ _DUET_MOVEMENT_FIX = {
                     "to be."),
 }
 
+# Inquiry arcs (Alex, 2026-07-06): think in ARCS, not turns. The keeper INFERS
+# which stage the inquiry is actually in (ARC: line) from what the pair is
+# doing — and that inference, once available, drives the Builder/Examiner
+# directives instead of the turn-count schedule (which remains only the
+# opening fallback). Stage -> the five-phase directive matrix:
+_DUET_ARC_TO_PHASE = {
+    "QUESTION": 0, "CONCEPTS": 0,          # understanding
+    "MODEL": 1,                            # expansion
+    "CHALLENGE": 2,                        # tension
+    "REPAIR": 3, "APPLICATION": 3,         # reconstruction (repair / test on cases)
+    "GENERALIZATION": 4, "NEW QUESTION": 4,  # novelty
+}
+# And when the page sees the SAME inferred stage three reflects running, the
+# inquiry itself has stalled ("20 turns challenging, nothing repaired") — the
+# next turn is forced to advance the inquiry to what comes after that stage.
+_DUET_ARC_ADVANCE = {
+    "QUESTION": ("stop refining the question and commit to first CONCEPTS: define the two "
+                 "or three terms any answer will need, and stake them."),
+    "CONCEPTS": ("stop defining and BUILD: assemble your concepts into a first explicit "
+                 "model — a claim about how the pieces actually connect."),
+    "MODEL": ("stop elaborating the model and CHALLENGE it: bring the strongest case or "
+              "tension that could break it, and press."),
+    "CHALLENGE": ("stop challenging and REPAIR: take the strongest objection still standing "
+                  "and modify the model so it survives, saying out loud what you give up."),
+    "REPAIR": ("stop patching and APPLY: run the repaired model on one concrete case from "
+               "start to finish and say whether it holds."),
+    "APPLICATION": ("stop running cases and GENERALIZE: state what the accumulated cases "
+                    "show as one claim broader than any of them."),
+    "GENERALIZATION": ("you have your generalization — now produce the NEW QUESTION it "
+                       "opens, one neither of you could have asked when this started."),
+    "NEW QUESTION": ("take the new question you've produced and begin on it in earnest: "
+                     "sharpen it and stake the first concepts an answer will need."),
+}
+
 
 def _duet_proto_phase(n_robot: int, planned: int) -> int:
     """Index into _DUET_PROTO_PHASES for the n-th robot turn (0-based).
@@ -656,6 +690,9 @@ def register(app):
             if sp_id == 'mail':
                 lines.append(f"[email that arrived mid-conversation] {txt}")
                 continue
+            if sp_id == 'notebook':
+                lines.append(f"[the notebook's own observation, spoken into the talk] {txt}")
+                continue
             nm = bt._robot_cfg(sp_id)["name"] if sp_id in bt.ROBOTS else (sp_id or "?")
             lines.append(f"{nm}: {txt}")
         if len(lines) < 4:                       # nothing has developed yet — keep what we have
@@ -689,8 +726,8 @@ def register(app):
         if no_family:
             sys_p += (
                 " Privacy setting: do not mention Alex's family, children, spouse, "
-                "household members, home routines, or private family details in SO FAR, "
-                "TURNS ON, or NEXT. If the transcript drifted there, steer the next move "
+                "household members, home routines, or private family details in ANY line "
+                "of your answer. If the transcript drifted there, steer the next move "
                 "back to the topic without repeating the private detail."
             )
         ask = ""
@@ -750,7 +787,7 @@ def register(app):
                 "admit...\") — give the PAIR a move. And be honest about STAGNATION: if the "
                 "new turns changed nothing in the notebook, the talk has stalled — say so in "
                 "NEXT and prescribe an intervention: a fresh concrete example, a counterexample, "
-                "or a reformulation of the central question. Answer in exactly these eight "
+                "or a reformulation of the central question. Answer in exactly these ten "
                 "lines and nothing else:\n"
                 "SETTLED: <claims and definitions both of them now hold>\n"
                 "ASSUMPTIONS: <assumptions identified so far, each flagged granted or contested>\n"
@@ -767,7 +804,22 @@ def register(app):
                 "conflict between items was identified), RESOLUTION (an open tension was "
                 "closed), REFRAMING (the central question was reformulated), APPLICATION (a "
                 "claim was tested on a concrete case), or NONE (nothing structurally moved). "
-                "Pick the STRONGEST honest label — REVISION beats ADDITION if both happened>"
+                "Pick the STRONGEST honest label — REVISION beats ADDITION if both happened>\n"
+                "ARC: <which stage of the inquiry they are ACTUALLY in, judged from what they "
+                "are DOING — not from time elapsed and not from where they should be. The "
+                "stages: QUESTION (still sharpening what to ask), CONCEPTS (defining the "
+                "terms), MODEL (building the explanation), CHALLENGE (testing it against "
+                "cases and tensions), REPAIR (modifying it to survive), APPLICATION (running "
+                "the repaired model on concrete cases), GENERALIZATION (lifting what the "
+                "cases show into a broader claim), NEW QUESTION (the inquiry has produced "
+                "its next question). Add a dash and one honest clause — including, if true, "
+                "that they are STUCK in this stage>\n"
+                "OBSERVE: <a methodologist's observation the pair should HEAR, only if the "
+                "notebook's shape genuinely earns one — e.g. three assumptions identified "
+                "but none tested; two competing hypotheses explaining the same evidence; "
+                "every example so far supporting the same side; a question raised and then "
+                "forgotten. One sentence addressed to the two of them, or a plain dash if "
+                "nothing is earned. Never repeat your previous observation>"
             )
         elif subject:
             ask += (
@@ -851,8 +903,30 @@ def register(app):
                     movement["note"] = m_mv.group(2).strip()[:200]
             if movement["type"] == "NONE":
                 stalled = True
+        # Inferred inquiry ARC + an optional methodologist's OBSERVATION the page
+        # can inject into the dialogue as the notebook's own voice.
+        arc = {"stage": "", "note": ""}
+        observation = ""
+        if protocol and out:
+            m_arc = re.search(r'^\s*ARC:\s*(.+)$', out, re.M)
+            if m_arc:
+                raw = m_arc.group(1).strip()
+                mm = re.match(r"[A-Za-z][A-Za-z \-]{2,20}", raw)
+                if mm:
+                    _st = re.sub(r"[\s\-]+", " ", mm.group(0)).strip().upper()
+                    # Longest match first: "NEW QUESTION" must not resolve to "QUESTION".
+                    for stage in sorted(_DUET_ARC_ADVANCE, key=len, reverse=True):
+                        if _st.startswith(stage):
+                            arc["stage"] = stage
+                            arc["note"] = raw[len(mm.group(0)):].strip(" —–-:,")[:200]
+                            break
+            m_obs = re.search(r'^\s*OBSERVE:\s*(.+)$', out, re.M)
+            if m_obs:
+                o = m_obs.group(1).strip()
+                if len(o) > 12 and o.lower() not in ("none", "n/a", "nothing earned"):
+                    observation = o[:280]
         return jsonify({"ok": bool(out), "direction": out, "stalled": stalled,
-                        "movement": movement})
+                        "movement": movement, "arc": arc, "observation": observation})
 
     @app.route('/duet/turn', methods=['POST'])
     def duet_turn():
@@ -927,6 +1001,20 @@ def register(app):
         n_robot = sum(1 for h in history
                       if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS)
         ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_duet_proto_phase(n_robot, planned_turns)]
+        # Inquiry over schedule: once the keeper has INFERRED where the inquiry
+        # actually is (the notebook's ARC line, round-tripped in `direction`),
+        # that inference drives the Builder/Examiner directives; the turn-count
+        # schedule above remains only the opening fallback.
+        arc_stage = ""
+        if protocol and direction:
+            _m_arc = re.search(r'^\s*ARC:\s*(.+)$', direction, re.M)
+            if _m_arc:
+                _raw = re.sub(r"[\s\-]+", " ", _m_arc.group(1)).strip().upper()
+                for _stage in sorted(_DUET_ARC_ADVANCE, key=len, reverse=True):
+                    if _raw.startswith(_stage):
+                        arc_stage = _stage
+                        ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_DUET_ARC_TO_PHASE[_stage]]
+                        break
         proto_job = _duet_proto_job(speaker, history, n_robot)
         # Spoken conclusions beat (Alex, 2026-07-06): every ~7 robot turns the
         # speaker steps out of the volley and weighs OUT LOUD what the discussion
@@ -943,10 +1031,24 @@ def register(app):
         # Monotony break (protocol): the page saw the SAME movement type three
         # reflects running (e.g. nothing but ADDITIONs) — force the complementary
         # move. A full stall outranks it; so do all the turn-owning events.
+        # Arc-stuck break (protocol): the page saw the keeper infer the SAME
+        # inquiry stage three reflects running ("20 turns challenging, nothing
+        # repaired") — intervene at the level of the INQUIRY: force the move
+        # that advances it to the next stage. Outranks move-level monotony.
+        arc_stuck = str(d.get('arcStuck') or '').strip().upper()
+        arc_break = (protocol and arc_stuck in _DUET_ARC_ADVANCE
+                     and not (closing or mail or student_q_text
+                              or conclusion_beat or stall_break))
         monotony = str(d.get('monotony') or '').strip().upper()
         monotony_break = (protocol and monotony in _DUET_MOVEMENT_FIX
                           and not (closing or mail or student_q_text
-                                   or conclusion_beat or stall_break))
+                                   or conclusion_beat or stall_break or arc_break))
+        # The notebook's own voice: an observation the keeper earned, injected by
+        # the page into THIS turn. Additive — it rides alongside whatever job the
+        # turn already has, and the speaker must answer it out loud.
+        nb_note = str(d.get('notebookNote') or '').strip()[:300]
+        if no_family and _duet_family_ref(nb_note):
+            nb_note = ""
         # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
         # gets a confrontational "move", how hard the two push on each other, and the
         # sampling temperature. Defaults to a balanced 5.
@@ -1244,6 +1346,9 @@ def register(app):
             if sp_id == 'mail':
                 lines.append(f"[an email arrived mid-conversation] {txt}")
                 continue
+            if sp_id == 'notebook':
+                lines.append(f"[your shared notebook observed] {txt}")
+                continue
             nm = bt._robot_cfg(sp_id)["name"] if sp_id in bt.ROBOTS else (sp_id or "?")
             lines.append(f"{nm}: {txt}")
 
@@ -1327,9 +1432,10 @@ def register(app):
         if direction and lines and protocol:
             parts.append(
                 "THE SHARED NOTEBOOK — the running record of the theory you and "
-                f"{ot['name']} are building together, kept between turns. It is private "
-                "scaffolding: never read it out, quote its section labels, or mention "
-                f"having it:\n{direction}\n\nYour next line must CHANGE this notebook in "
+                f"{ot['name']} are building together, kept between turns. Do not read its "
+                "sections out or quote its labels — though the notebook itself is no "
+                "secret: when it speaks an observation into the talk, answer it openly"
+                f":\n{direction}\n\nYour next line must CHANGE this notebook in "
                 "one visible way: settle or revise a claim, name a new assumption, raise "
                 "or resolve a tension, add an example or counterexample, connect two "
                 "earlier ideas, or pose a sharper question. A line that would leave the "
@@ -1356,6 +1462,13 @@ def register(app):
                 f"table too. If {ot['name']} has genuinely shifted how you see this, let your "
                 "own view move — you're thinking together and your mind can change, not "
                 "defending fixed corners.")
+        if nb_note:
+            parts.append(
+                "YOUR SHARED NOTEBOOK SPEAKS — the notebook you and " + ot['name'] + " jointly "
+                "keep has issued a methodologist's observation about the SHAPE of your "
+                "inquiry:\n\n" + nb_note + "\n\nTreat it as the third voice in the room: it "
+                "says nothing about who is right, but it is usually right about what the "
+                "inquiry is missing.")
         if lines:
             parts.append("Conversation so far:\n" + "\n".join(lines))
         if student_q_text:
@@ -1434,6 +1547,14 @@ def register(app):
                     "of the discussion so far; or reformulate the central question so it can "
                     "actually be answered — and answer it. Your job stays "
                     f"{proto_job.upper()} in spirit, but new ground comes first.")
+            elif arc_break:
+                directive += (
+                    f" INQUIRY INTERVENTION — the notebook shows your inquiry with {ot['name']} "
+                    f"has sat in its {arc_stuck} stage for a long stretch without advancing. "
+                    "This turn, move the INQUIRY itself forward, not just the exchange: "
+                    + _DUET_ARC_ADVANCE[arc_stuck]
+                    + f" Your job stays {proto_job.upper()} in spirit, but advancing the "
+                    "inquiry comes first.")
             elif monotony_break:
                 directive += (
                     f" MOVEMENT MONOTONY — your inquiry with {ot['name']} keeps advancing the "
@@ -1607,6 +1728,11 @@ def register(app):
                 "consequence). Dropping a term or a name without its claim does not count. Do not "
                 "merely gesture at the topic, and do not tell anyone you are using notes or documents."
             )
+        if nb_note and not (student_q_text or mail):
+            directive += (" And answer your shared notebook's observation out loud somewhere in "
+                          "this line — do what it asks, or say plainly why it is wrong this time. "
+                          "Refer to it naturally ('our notebook says...', 'the notebook's right...') "
+                          "— it is a real third voice you both keep, not a secret.")
         if tone_self or slang_self:
             directive += " Keep to your requested tone and slang throughout."
         # Anti-tic: the model latches onto its own last opener and starts every turn
@@ -1757,4 +1883,8 @@ def register(app):
             resp["stallBreak"] = True
         if monotony_break:
             resp["monotonyBreak"] = monotony
+        if arc_break:
+            resp["arcBreak"] = arc_stuck
+        if protocol and arc_stage:
+            resp["arcStage"] = arc_stage
         return jsonify(resp)

@@ -243,11 +243,17 @@ let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's
 let LAST_PHASE='', LAST_BUILDER='';            // 🔬 deep-dive protocol: for surfacing phase changes and job swaps as notes
 let STALL=0;                                   // consecutive reflects where the notebook barely changed (server-diffed)
 let MOVETYPES=[];                              // keeper-reported MOVED labels, most recent last (movement-monotony watch)
+let ARCS=[];                                   // keeper-INFERRED inquiry stages (arc-stuck watch)
+let NBQ=[], LAST_OBS='';                       // queued notebook observations (the notebook's own voice)
 function PROTO(){ const c=document.getElementById('protoChk'); return !!(c && c.checked); }
 // Movement monotony: the same MOVED type three reflects running (e.g. nothing but
 // additions) => oneTurn sends it and the server forces the complementary move.
 function MONO(){ const n=MOVETYPES.length; if(n<3) return '';
   const t=MOVETYPES[n-1]; return (MOVETYPES[n-2]===t && MOVETYPES[n-3]===t)?t:''; }
+// Arc stuck: the keeper inferred the SAME inquiry stage three reflects running
+// ("20 turns challenging, nothing repaired") => force the stage-advancing move.
+function ARCSTUCK(){ const n=ARCS.length; if(n<3) return '';
+  const t=ARCS[n-1]; return (ARCS[n-2]===t && ARCS[n-3]===t)?t:''; }
 // 📓 Live shared notebook: render the current DIRECTION (the protocol's evolving
 // artifact) into the collapsible panel above the log, one row per section.
 function renderNotebook(){
@@ -264,6 +270,7 @@ function renderNotebook(){
     b.appendChild(d);
   });
   if(st){ st.textContent='updated after turn '+history.length
+    +(ARCS.length?' — inquiry: '+ARCS[ARCS.length-1].toLowerCase():'')
     +(MOVETYPES.length?' — last movement: '+MOVETYPES[MOVETYPES.length-1].toLowerCase():'')
     +(STALL?' — barely moved ×'+STALL:''); }
 }
@@ -596,8 +603,11 @@ async function oneTurn(speaker, closing){
   // A queued duet email rides into THIS turn; the speaker takes it up out loud.
   const mail=(!studentQuestion && MAILQ.length)? MAILQ.shift() : null;
   if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
-  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
+  // The notebook's queued observation rides into THIS turn (unless a student
+  // question or an email already owns it).
+  const nbNote=(PROTO() && !studentQuestion && !mail && NBQ.length)? NBQ.shift() : null;
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, notebookNote:nbNote, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), arcStuck:(PROTO()?ARCSTUCK():''), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
+  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
   if(!studentQuestion && !mail){
     if(PAUSED){
       await waitWhilePaused();
@@ -610,6 +620,9 @@ async function oneTurn(speaker, closing){
   // take-stock bearing) see exactly what was written, not just the paraphrase.
   if(studentQuestion){ history.push({speaker:'question', text:studentQuestion.text}); }
   if(mail){ history.push({speaker:'mail', text:'From '+mail.from_name+' — "'+mail.subject+'": '+mail.body}); }
+  // The notebook spoke: it enters the shared history as its own voice, so BOTH
+  // robots (and the keeper) see exactly what it said.
+  if(nbNote){ history.push({speaker:'notebook', text:nbNote}); addNote('(📓 the notebook observes: '+nbNote+')'); }
   // 🔬 deep-dive protocol: surface phase changes and Builder/Examiner swaps as notes.
   if(d.phase && d.phase!==LAST_PHASE){ LAST_PHASE=d.phase; addNote('(🔬 '+d.phase+' phase — '+(d.phaseNote||'')+')'); }
   if(d.job){ const b=(d.job==='builder')?speaker:(speaker==='blue'?'hexia':'blue');
@@ -617,6 +630,7 @@ async function oneTurn(speaker, closing){
   if(d.beat==='conclusions'){ addNote('('+ROBOTS[speaker].name+' pauses to weigh what they can conclude so far)'); }
   if(d.stallBreak){ addNote('(🔬 stall break — '+ROBOTS[speaker].name+' must bring new ground this turn)'); }
   if(d.monotonyBreak){ addNote('(🔬 '+ROBOTS[speaker].name+' must change the kind of move — no more '+d.monotonyBreak.toLowerCase()+'s)'); }
+  if(d.arcBreak){ addNote('(🔬 inquiry intervention — '+ROBOTS[speaker].name+' must advance it past '+d.arcBreak.toLowerCase()+')'); }
   const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
@@ -687,6 +701,20 @@ function maybeReflect(){
             if(MONO() && running) addNote('(📓 movement monotony — '+j.movement.type.toLowerCase()+' three reflects running; a different kind of move is coming)');
           }
         }
+        // Track WHERE the inquiry is (inferred, not scheduled); note stage changes.
+        if(j.arc && j.arc.stage){
+          const prevArc=ARCS.length?ARCS[ARCS.length-1]:'';
+          ARCS.push(j.arc.stage);
+          if(ARCS.length>6) ARCS.shift();
+          if(running && j.arc.stage!==prevArc) addNote('(📓 the inquiry has entered its '+j.arc.stage.toLowerCase()+' stage)');
+          else if(running && ARCSTUCK()) addNote('(📓 the inquiry has sat in '+j.arc.stage.toLowerCase()+' for a while — pushing it forward)');
+        }
+        // The notebook's own voice: queue an earned observation for the next turn
+        // (one at a time, never the same one twice).
+        if(j.observation && j.observation!==LAST_OBS){
+          LAST_OBS=j.observation;
+          NBQ=[j.observation];
+        }
       }
       renderNotebook();
       // Surface the developing direction unobtrusively, so the self-reflection is visible.
@@ -698,7 +726,7 @@ function maybeReflect(){
     }).catch(function(){});
 }
 async function run(){
-  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; ARCS=[]; NBQ=[]; LAST_OBS=''; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
   setPaused(false); STUDENTQ=[];
   TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.
