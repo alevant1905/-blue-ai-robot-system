@@ -314,6 +314,33 @@ _DUET_PROTO_PHASES = [
 
 _DUET_PROTO_SWAP = 4   # jobs swap every this-many robot turns — no fixed positions
 
+# Movement-monotony correctives (Alex, 2026-07-06): the subtler stall is not "no
+# movement" but the SAME KIND of movement over and over — a talk that keeps adding
+# examples without ever revising a claim is hoarding, not thinking. When the page
+# sees the keeper report the same MOVED type three reflects running, the next turn
+# is forced to make the COMPLEMENTARY move: each type maps to the move that cashes
+# its accumulation out.
+_DUET_MOVEMENT_FIX = {
+    "ADDITION": ("Do not add another example, fact, or new item. Take what has ACCUMULATED "
+                 "and use it to revise or qualify the strongest current claim — say what the "
+                 "pile of examples actually forces you two to change."),
+    "REVISION": ("Do not re-polish the claim again. APPLY its latest version to one concrete "
+                 "case and say plainly whether it survives."),
+    "CONNECTION": ("Do not draw another parallel. Find where the ideas you've been linking "
+                   "PULL APART — name the contradiction the connections have been papering "
+                   "over."),
+    "CONTRADICTION": ("Do not raise another tension. Pick the sharpest one already on the "
+                      "table and RESOLVE it: modify a claim so it survives, and say out loud "
+                      "what you are giving up."),
+    "RESOLUTION": ("Do not tidy further. Ask the harder question your resolutions have "
+                   "earned — say what this discussion has now really become about."),
+    "REFRAMING": ("Do not reframe again. Cash the current frame out: run it on one concrete "
+                  "case and show what it explains that the old frame could not."),
+    "APPLICATION": ("Do not run another case. Lift what the cases have shown into a general "
+                    "move: restate the central claim as the accumulated cases now force it "
+                    "to be."),
+}
+
 
 def _duet_proto_phase(n_robot: int, planned: int) -> int:
     """Index into _DUET_PROTO_PHASES for the n-th robot turn (0-based).
@@ -723,7 +750,7 @@ def register(app):
                 "admit...\") — give the PAIR a move. And be honest about STAGNATION: if the "
                 "new turns changed nothing in the notebook, the talk has stalled — say so in "
                 "NEXT and prescribe an intervention: a fresh concrete example, a counterexample, "
-                "or a reformulation of the central question. Answer in exactly these seven "
+                "or a reformulation of the central question. Answer in exactly these eight "
                 "lines and nothing else:\n"
                 "SETTLED: <claims and definitions both of them now hold>\n"
                 "ASSUMPTIONS: <assumptions identified so far, each flagged granted or contested>\n"
@@ -732,7 +759,15 @@ def register(app):
                 "HYPOTHESES: <emerging claims that go beyond the source material>\n"
                 "QUESTIONS: <the open research questions this inquiry has produced>\n"
                 "NEXT: <the single most valuable notebook change for the PAIR to make next — "
-                "one sentence>"
+                "one sentence>\n"
+                "MOVED: <ONE label for HOW the discussion just advanced, then a dash and a "
+                "short clause saying what moved. The labels: ADDITION (a new item entered a "
+                "section), REVISION (an existing claim, hypothesis, or assumption was changed "
+                "or qualified), CONNECTION (two existing items were linked), CONTRADICTION (a "
+                "conflict between items was identified), RESOLUTION (an open tension was "
+                "closed), REFRAMING (the central question was reformulated), APPLICATION (a "
+                "claim was tested on a concrete case), or NONE (nothing structurally moved). "
+                "Pick the STRONGEST honest label — REVISION beats ADDITION if both happened>"
             )
         elif subject:
             ask += (
@@ -801,7 +836,23 @@ def register(app):
                             for m in re.finditer(r"[a-z][a-z'\-]{4,}", t.lower())
                             } - _DUET_GROUND_STOPWORDS
                 stalled = len(_nb_terms(out) - _nb_terms(prev)) < 4
-        return jsonify({"ok": bool(out), "direction": out, "stalled": stalled})
+        # Movement TYPE (Alex, 2026-07-06): not just "did the notebook move" but
+        # HOW — the keeper's self-reported MOVED label, validated here. NONE is a
+        # stall by definition; the page watches for the subtler failure of the
+        # SAME kind of movement over and over (e.g. example-piling) and forces
+        # the complementary move via /duet/turn's monotony break.
+        movement = {"type": "", "note": ""}
+        if protocol and out:
+            m_mv = re.search(r'^\s*MOVED:\s*([A-Za-z]+)\s*[—–\-:,]*\s*(.*)$', out, re.M)
+            if m_mv:
+                _mt = m_mv.group(1).upper()
+                if _mt in _DUET_MOVEMENT_FIX or _mt == "NONE":
+                    movement["type"] = _mt
+                    movement["note"] = m_mv.group(2).strip()[:200]
+            if movement["type"] == "NONE":
+                stalled = True
+        return jsonify({"ok": bool(out), "direction": out, "stalled": stalled,
+                        "movement": movement})
 
     @app.route('/duet/turn', methods=['POST'])
     def duet_turn():
@@ -889,6 +940,13 @@ def register(app):
         # is then FORCED to break new ground, not asked nicely.
         stall_break = (protocol and bool(d.get('stalled'))
                        and not (closing or mail or student_q_text or conclusion_beat))
+        # Monotony break (protocol): the page saw the SAME movement type three
+        # reflects running (e.g. nothing but ADDITIONs) — force the complementary
+        # move. A full stall outranks it; so do all the turn-owning events.
+        monotony = str(d.get('monotony') or '').strip().upper()
+        monotony_break = (protocol and monotony in _DUET_MOVEMENT_FIX
+                          and not (closing or mail or student_q_text
+                                   or conclusion_beat or stall_break))
         # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
         # gets a confrontational "move", how hard the two push on each other, and the
         # sampling temperature. Defaults to a balanced 5.
@@ -1376,6 +1434,14 @@ def register(app):
                     "of the discussion so far; or reformulate the central question so it can "
                     "actually be answered — and answer it. Your job stays "
                     f"{proto_job.upper()} in spirit, but new ground comes first.")
+            elif monotony_break:
+                directive += (
+                    f" MOVEMENT MONOTONY — your inquiry with {ot['name']} keeps advancing the "
+                    f"same way: {monotony.lower()} after {monotony.lower()}, while the argument "
+                    "itself stands still. This turn, change the KIND of move. "
+                    + _DUET_MOVEMENT_FIX[monotony]
+                    + f" Your job stays {proto_job.upper()} in spirit, but the different kind "
+                    "of move comes first.")
             elif protocol:
                 # Deep-dive protocol: the phase × job matrix IS this turn's move —
                 # a deterministic function per turn instead of a sampled one, so
@@ -1689,4 +1755,6 @@ def register(app):
             resp["beat"] = "conclusions"
         if stall_break:
             resp["stallBreak"] = True
+        if monotony_break:
+            resp["monotonyBreak"] = monotony
         return jsonify(resp)
