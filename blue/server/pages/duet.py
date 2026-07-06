@@ -673,6 +673,17 @@ async function run(){
     if(rr&&rr.ok){ addNote("(they've looked it up: "+((rr.titles&&rr.titles.length)?rr.titles.join(' · '):rr.query)+')'); }
     else{ addNote("(web research came up empty"+(rr&&rr.error?': '+rr.error:'')+" — they'll wing it)"); }
   }
+  const srcSel=SOURCES();
+  if((srcSel.blue||[]).length || (srcSel.hexia||[]).length){
+    // Digest the checked documents' ARGUMENTS up front (cached after the first
+    // time), so every turn can engage the works' claims, not just stray passages.
+    addNote('(studying the readings…)');
+    let sr=null;
+    try{ sr=await (await fetch('/duet/readings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sources:srcSel})})).json(); }catch(e){}
+    if(!running){ return; }
+    if(sr&&sr.ok){ addNote("(they've studied: "+(sr.read||[]).join(' · ')+((sr.failed&&sr.failed.length)?" — couldn't digest: "+sr.failed.join(' · '):'')+')'); }
+    else{ addNote("(couldn't digest the readings — they'll lean on retrieved passages alone)"); }
+  }
   if(document.getElementById('wikiChk').checked){
     addNote('(reading Wikipedia…)');
     let wr=null;

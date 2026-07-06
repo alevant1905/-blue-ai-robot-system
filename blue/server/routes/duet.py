@@ -7,6 +7,7 @@ bt.<name> at request time.
 """
 import base64
 import json
+import os
 import random
 import re
 from email.mime.multipart import MIMEMultipart
@@ -145,6 +146,124 @@ def _duet_grounded_enough(text: str, terms) -> bool:
     low = (text or "").lower()
     hits = [t for t in terms if re.search(r"\b" + re.escape(t) + r"\b", low)]
     return len(hits) >= 2 or any(len(t) >= 8 for t in hits)
+
+
+# ---- Reading digests: the ARGUMENT of each checked document ------------------
+# Scattered RAG chunks alone made the robots decorate turns with a reading's
+# vocabulary while never engaging its claims (Alex, 2026-07-06: "not using the
+# documents substantively enough") — you can't discuss a work you've only seen
+# through ten random 800-char peepholes. So each checked document gets a one-time
+# absorbed digest of what it actually ARGUES (thesis, claims, terms, examples,
+# what it's against), built by the LLM from the document's real text, cached by
+# file mtime (in memory + on disk, so server restarts don't re-pay the read),
+# warmed at duet start by /duet/readings, and injected EVERY grounded turn as
+# stable context alongside the per-turn chunks: the digest carries the argument,
+# the chunks carry the specifics.
+_DUET_READ_CACHE: dict = {}          # filename -> {"mtime": float, "digest": str}
+_DUET_READ_LOADED = False
+
+
+def _duet_read_store() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(bt.__file__)),
+                        "data", "duet_reading_digests.json")
+
+
+def _duet_read_load():
+    global _DUET_READ_LOADED
+    if _DUET_READ_LOADED:
+        return
+    _DUET_READ_LOADED = True
+    try:
+        with open(_duet_read_store(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _DUET_READ_CACHE.update(data)
+    except Exception:
+        pass
+
+
+def _duet_read_save():
+    path = _duet_read_store()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_DUET_READ_CACHE, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)      # atomic — a mid-write crash can't NUL the store
+    except Exception as e:
+        bt.log.warning(f"[DUET] couldn't persist reading digests: {e}")
+
+
+def _duet_reading_file(filename: str) -> str:
+    """Resolve a checked document's filename to a real path (index filepath
+    first, DOCUMENTS_FOLDER fallback — the same order the mail attachment
+    resolver uses)."""
+    try:
+        for doc in bt.load_document_index().get("documents", []):
+            if (doc.get("filename") or "").strip() == filename:
+                fp = doc.get("filepath") or ""
+                if fp and os.path.exists(fp):
+                    return fp
+                break
+    except Exception:
+        pass
+    alt = os.path.join(bt.DOCUMENTS_FOLDER, filename)
+    return alt if os.path.exists(alt) else ""
+
+
+def _duet_reading_digest(filename: str) -> str:
+    """The absorbed five-line digest of one checked document (cached)."""
+    path = _duet_reading_file(filename)
+    if not path:
+        return ""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return ""
+    _duet_read_load()
+    hit = _DUET_READ_CACHE.get(filename)
+    if hit and hit.get("mtime") == mtime and (hit.get("digest") or "").strip():
+        return hit["digest"]
+    try:
+        text = (bt.extract_text_from_file(path) or "").strip()
+    except Exception as e:
+        bt.log.warning(f"[DUET] digest extraction failed for {filename}: {e}")
+        return ""
+    if not text or text.lower().startswith("error"):
+        return ""
+    if len(text) > 18000:
+        # Lede-weighted window: theses live up front, conclusions at the end.
+        text = text[:14000] + "\n[...]\n" + text[-4000:]
+    title = _duet_doc_title(filename) or filename
+    sys_p = ("You distill written works for two discussants who have read them in full. "
+             "Be strictly faithful to the work itself — no outside knowledge, nothing "
+             "invented, plain concrete language, no praise or commentary.")
+    ask = (f"The work, \"{title}\":\n\n{text}\n\n"
+           "Write its reading digest in exactly these five lines and nothing else:\n"
+           "THESIS: <the work's central claim, one sentence>\n"
+           "CLAIMS: <the 3-4 load-bearing claims, semicolon-separated>\n"
+           "TERMS: <3-4 key concepts, each with the meaning THIS work gives it, semicolon-separated>\n"
+           "EXAMPLES: <the 2-3 most concrete examples or cases the work uses, semicolon-separated>\n"
+           "AGAINST: <the view or common assumption the work argues against, one sentence>")
+    msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
+    for attempt in range(2):
+        try:
+            res = bt.call_llm(msgs, include_tools=False,
+                              temperature=(0.3 if attempt == 0 else 0.5), max_tokens=2000)
+            ch = (res or {}).get("choices") or []
+            cand = ((ch[0].get("message") or {}).get("content") or "") if ch else ""
+            if "</think>" in cand:
+                cand = cand.split("</think>")[-1]
+            cand = cand.replace("<think>", "").strip()
+            if cand and "THESIS" in cand.upper():
+                digest = f"\"{title}\":\n{cand}"
+                _DUET_READ_CACHE[filename] = {"mtime": mtime, "digest": digest}
+                _duet_read_save()
+                # ASCII only: a cp1252 console kills the print AND the digest with it.
+                bt.log.info(f"[DUET] digested reading: {filename}")
+                return digest
+        except Exception as e:
+            bt.log.warning(f"[DUET] digest attempt {attempt} failed for {filename}: {e}")
+    return ""
 
 
 # ---- Deep-dive protocol (🔬 on the duet page) --------------------------------
@@ -304,6 +423,32 @@ def register(app):
             return jsonify({"ok": False, "error": info.get('error') or "nothing on Wikipedia matched"})
         return jsonify({"ok": True, "query": wq, "titles": (info.get('titles') or [])[:4],
                         "chars": len(info['text'])})
+
+    @app.route('/duet/readings', methods=['POST'])
+    def duet_readings():
+        """Build (or reuse) the reading digests for the checked documents before
+        the duet starts — warms the cache so turns get each work's ARGUMENT
+        instantly, and tells the page what they actually studied. First-time
+        digests cost one LLM call per document; afterwards they're free."""
+        d = request.get_json(silent=True) or {}
+        srcs = d.get('sources') or {}
+        if isinstance(srcs, list):
+            _all = [str(s).strip() for s in srcs]
+        elif isinstance(srcs, dict):
+            _all = [str(s).strip() for s in
+                    (list(srcs.get('blue') or []) + list(srcs.get('hexia') or []))]
+        else:
+            _all = []
+        clean = []
+        for fn in _all:
+            if fn and fn not in clean:
+                clean.append(fn)
+        if not clean:
+            return jsonify({"ok": False, "error": "no documents checked"})
+        read, failed = [], []
+        for fn in clean[:8]:
+            (read if _duet_reading_digest(fn) else failed).append(_duet_doc_title(fn) or fn)
+        return jsonify({"ok": bool(read), "read": read, "failed": failed})
 
     @app.route('/duet/mail/check', methods=['POST'])
     def duet_mail_check():
@@ -519,6 +664,13 @@ def register(app):
         ask = ""
         if subject:
             ask += f"The subject they were set to discuss: {subject}.\n\n"
+        src_digests = ""
+        if _src_all:
+            try:
+                _dgs = [g for g in (_duet_reading_digest(fn) for fn in _src_all[:4]) if g]
+                src_digests = "\n\n".join(_dgs)[:2600]
+            except Exception:
+                pass
         if src_titles:
             ask += ("They have done reading for this discussion: " + ", ".join(src_titles) +
                     ". Treat those selected readings as the only library material in play, but keep "
@@ -528,6 +680,12 @@ def register(app):
                     "examples unless they appear in the selected readings; if they only appeared "
                     "because the conversation drifted, make NEXT steer back to the ideas in the "
                     "selected readings without source-report language.\n\n")
+        if src_digests:
+            ask += ("What those readings actually argue — for your steering only:\n" + src_digests +
+                    "\n\nJudge SUBSTANCE against these claims: if the talk is only borrowing the "
+                    "readings' vocabulary without engaging their claims, say so plainly and make "
+                    "NEXT force engagement with ONE specific claim — affirmed, attacked, or tested "
+                    "on a concrete case.\n\n")
         if prev:
             ask += (("The shared notebook as of your last update:\n" if protocol else
                      "Your previous read on where this was heading:\n") + prev + "\n\n")
@@ -913,7 +1071,18 @@ def register(app):
         # so the chunks track what the discussion actually turns on, not the surface
         # wording of the last exchange — banter drifts, the bearing doesn't.
         ground_block = ""
+        digest_block = ""
         ground_terms = []
+        if src_self:
+            # The absorbed ARGUMENT of each checked work — stable across the whole
+            # duet (unlike the per-turn chunks), so the speaker can engage claims,
+            # not just borrow vocabulary. Warmed by /duet/readings at start.
+            try:
+                _dgs = [g for g in (_duet_reading_digest(fn) for fn in src_self[:4]) if g]
+                if _dgs:
+                    digest_block = "\n\n".join(_dgs)[:3600]
+            except Exception as e:
+                bt.log.warning(f"[DUET] reading digests failed: {e}")
         if src_self:
             try:
                 recent_q = " ".join((h.get('text') or '') for h in history[-2:])
@@ -928,7 +1097,10 @@ def register(app):
                             break
                 query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
                 chunks = _duet_source_chunks(query, src_self, max_chunks=10)
-                ground_terms = _duet_ground_terms(chunks)
+                # Digest terms count toward groundedness too — engaging a work's
+                # claims from the digest is exactly the substance we want.
+                ground_terms = _duet_ground_terms(
+                    chunks + ([{"content": digest_block}] if digest_block else []))
                 represented = []
                 for c in chunks:
                     fn = c.get("filename") or ""
@@ -960,6 +1132,9 @@ def register(app):
                                     "\n\n".join(sections))[:5200]
             except Exception as e:
                 bt.log.warning(f"[DUET] source grounding failed: {e}")
+        # Any source material in hand this turn — the digest (argument) and the
+        # chunks (specifics) gate the same behaviors.
+        grounded = bool(ground_block or digest_block)
 
         # Conversation so far as plain text. (A single [system, user] call is always
         # valid; mapping turns to roles breaks when the speaker started the duet.)
@@ -997,6 +1172,17 @@ def register(app):
                 f"contain. Weave it in naturally — {nono}, 'the excerpt', 'the material' or 'it says "
                 f"here'; just say what {said}, and name the {'video' if url_is_video else 'article'} "
                 "itself only when that actually helps:\n\n" + url_block)
+        if digest_block:
+            parts.append(
+                "THE WORKS YOU'VE READ — your own absorbed understanding of each work Alex "
+                "checked for you: what it argues, its claims, its terms, its cases. This is "
+                "YOUR understanding now, not notes — never mention digests, summaries, "
+                "readings, or documents, and never speak a work's title unless it is already "
+                "the explicit subject of the live discussion. Substantive engagement means "
+                "working at the level of these CLAIMS: affirm one and build on it, attack one "
+                "with a reason, put two of them against each other, or test one against the "
+                "case in play. Naming a term without using its claim is NOT engagement:\n\n"
+                + digest_block)
         if ground_block:
             parts.append(
                 "BACKGROUND FOR YOU ONLY — passages Alex selected for YOU "
@@ -1012,7 +1198,7 @@ def register(app):
                 "the point in your own conversational voice. Do not introduce outside writers, works, "
                 "theories, slogans, examples, or famous concepts that are not in these passages or other "
                 "supplied grounding for this turn:\n\n" + ground_block)
-        elif src_self:
+        elif src_self and not digest_block:
             parts.append(
                 "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
                 "passage was retrieved from them for this turn. Do not fill that gap with general "
@@ -1175,10 +1361,10 @@ def register(app):
                     _pool = getattr(bt, "_DUET_MOVES_ADVANCE", bt._DUET_MOVES_REFLECT)
                 elif n >= 4 and roll < 0.36:
                     _pool = bt._DUET_MOVES_REFLECT
-                elif ground_block and roll < 0.82:
+                elif grounded and roll < 0.82:
                     # Reading-grounded duet: the selected material does the heavy lifting most turns.
                     _pool = bt._DUET_MOVES_TEXT
-                elif roll < ((0.90 if ground_block else 0.58) if n >= 4 else 0.30):
+                elif roll < ((0.90 if grounded else 0.58) if n >= 4 else 0.30):
                     _pool = bt._DUET_MOVES_COLOR
                 else:
                     _pool = bt._DUET_MOVES_SPICY if random.random() < (spice / 10.0) else bt._DUET_MOVES_CALM
@@ -1198,18 +1384,21 @@ def register(app):
                 else:
                     directive += (f" And remember you and {ot['name']} see things differently — {_lens} "
                                   "lean into that difference rather than nodding along.")
-            if url_block and ground_block:
+            if url_block and grounded:
                 directive += (f" And put one grounded claim or distinction to work alongside "
                               f"{'the video' if url_is_video else 'the article'} — one specific claim "
                               "or distinction, spoken as your own view rather than as a citation.")
             elif url_block:
                 directive += (f" Engage with a specific claim, idea or moment from {'the video' if url_is_video else 'the article'}"
                               " — as your own take, not a citation.")
-            elif ground_block:
-                directive += (" Put one specific grounded claim, distinction, or example to work on "
-                              "the live question, but do it as your own thinking. Do not name the "
-                              "document, cite the source, say "
-                              "'the text' or 'the reading', or import outside authors and frameworks.")
+            elif grounded:
+                directive += (" Engage the readings at the level of CLAIMS, as your own thinking: "
+                              "take one specific claim from what you've read and affirm it with a "
+                              "consequence, attack it with a reason, set it against another claim, "
+                              "or test it on the case in play. Borrowing a term or name without "
+                              "using its claim is not engagement. Do not name the document, cite "
+                              "the source, say 'the text' or 'the reading', or import outside "
+                              "authors and frameworks.")
             elif src_self:
                 directive += (" Stay inside the selected material, but keep that source boundary invisible. "
                               "If you do not have support for the live claim, say the claim needs more "
@@ -1232,9 +1421,10 @@ def register(app):
                     f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
             if url_block:
                 directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
-            elif ground_block:
-                directive += (" Pick the grounded claim you most want to fight about or defend and "
-                              "put it on the table as your own view. Do "
+            elif grounded:
+                directive += (" Pick the claim from your reading you most want to fight about or "
+                              "defend and put it on the table as your own view — the claim itself, "
+                              "not just its vocabulary. Do "
                               "not name the document or call it 'the text'.")
             elif src_self:
                 directive += (" Open inside the selected material, but keep that source boundary invisible. "
@@ -1254,7 +1444,7 @@ def register(app):
                 "it exposes, or what next question it forces. Do not treat it as a formal lecture "
                 "or a detachable Q&A answer; make it part of the argument you two are building. "
                 "You are MID-conversation — NO greetings, NO small talk.")
-            if ground_block:
+            if grounded:
                 directive += " If the background material helps, use it without naming or citing it."
             if role_self:
                 directive += " Stay firmly in your role."
@@ -1280,7 +1470,7 @@ def register(app):
                 "summarize everything; land: give the one-sentence position you'll actually stand "
                 f"behind after all of this — including whatever {ot['name']} genuinely got you to "
                 "concede — ")
-            if ground_block:
+            if grounded:
                 directive += ("anchored in the background material if it earns it, without naming the source, ")
             elif src_self:
                 directive += ("staying inside the checked readings, ")
@@ -1290,12 +1480,13 @@ def register(app):
                              f"one open question you and {ot['name']} should pick up next time."))
             if role_self:
                 directive += " Stay firmly in your role."
-        if ground_block:
+        if grounded:
             directive += (
-                " Silent grounding requirement: this line must visibly depend on at least one background "
-                "note by carrying a concrete term, distinction, example, image, causal claim, or problem "
-                "from it into ordinary speech. Do not merely gesture at the topic. Do not tell anyone "
-                "that you are using background notes or documents."
+                " Silent grounding requirement: this line must visibly depend on your reading — carry "
+                "one of its actual CLAIMS, distinctions, examples, causal arguments, or problems into "
+                "ordinary speech and DO something with it (affirm, attack, test, or draw its "
+                "consequence). Dropping a term or a name without its claim does not count. Do not "
+                "merely gesture at the topic, and do not tell anyone you are using notes or documents."
             )
         if tone_self or slang_self:
             directive += " Keep to your requested tone and slang throughout."
@@ -1398,13 +1589,14 @@ def register(app):
                             "own live view."
                         )
                         blocked = True
-                    if ground_block and attempt == 0 and not _duet_grounded_enough(cand, ground_terms):
+                    if grounded and attempt == 0 and not _duet_grounded_enough(cand, ground_terms):
                         ungrounded_blocked = True
                         msgs[1]["content"] += (
-                            "\n\nRewrite your last draft: it is too generic. Keep the natural voice and "
-                            "do not cite anything, but make the line clearly depend on one of the background "
-                            "notes by using a concrete term, distinction, example, image, causal claim, or "
-                            "problem from it."
+                            "\n\nRewrite your last draft: it is too generic — it could have been said by "
+                            "someone who never read the works. Keep the natural voice and do not cite "
+                            "anything, but take one actual CLAIM, distinction, example, or causal argument "
+                            "from your reading and do something with it: affirm it with a consequence, "
+                            "attack it with a reason, or test it on the case in play."
                         )
                         blocked = True
                     if (protocol and attempt == 0 and not blocked and lines
