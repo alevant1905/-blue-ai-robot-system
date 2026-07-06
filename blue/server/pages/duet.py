@@ -43,6 +43,12 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  .srcbox label{display:flex;gap:7px;align-items:flex-start;padding:3px 0;cursor:pointer}
  .srcbox input{margin-top:3px;flex:none}
  .srccount{font-size:.8em;color:var(--slate)}
+ /* 🔬 deep dive: the live shared notebook — the theory under construction. */
+ #notebookPanel{border:1px dashed var(--line);border-radius:10px;padding:8px 12px;background:var(--paper);margin-top:12px}
+ #notebookPanel summary{cursor:pointer;font-weight:600;color:var(--forest);font-size:.9em}
+ #notebookPanel .nbrow{margin:4px 0;font-size:.88em;color:var(--ink);line-height:1.45}
+ #notebookPanel .nbrow b{color:var(--forest);font-size:.82em;text-transform:uppercase;letter-spacing:.05em}
+ #notebookPanel .nbstamp{font-size:.75em;color:var(--slate);margin-top:6px}
  /* Midnight: the robots' identity bubbles become glass tints. */
  :root:not([data-theme="light"]) .turn.blue{background:rgba(61,169,252,.12);border-color:rgba(61,169,252,.35)}
  :root:not([data-theme="light"]) .turn.hexia{background:rgba(176,108,240,.12);border-color:rgba(176,108,240,.35)}
@@ -147,6 +153,11 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
   <span class="muted" style="font-size:.85em">Plug Blue and Hexia into this Mac, Connect each, then Nod to check which is which (Swap if needed).</span>
  </div>
 </div>
+<details id="notebookPanel" style="display:none" open>
+ <summary>📓 Shared notebook — the theory they're building</summary>
+ <div id="notebookBody"></div>
+ <div class="nbstamp" id="notebookStamp"></div>
+</details>
 <div id="log"></div>
 <script src="/js/ohbot-heads.js"></script>
 <script>
@@ -230,7 +241,25 @@ function restoreSettings(){
 })();
 let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect); in 🔬 deep-dive mode it's the shared notebook
 let LAST_PHASE='', LAST_BUILDER='';            // 🔬 deep-dive protocol: for surfacing phase changes and job swaps as notes
+let STALL=0;                                   // consecutive reflects where the notebook barely changed (server-diffed)
 function PROTO(){ const c=document.getElementById('protoChk'); return !!(c && c.checked); }
+// 📓 Live shared notebook: render the current DIRECTION (the protocol's evolving
+// artifact) into the collapsible panel above the log, one row per section.
+function renderNotebook(){
+  const p=document.getElementById('notebookPanel'), b=document.getElementById('notebookBody'), st=document.getElementById('notebookStamp');
+  if(!p||!b) return;
+  if(!PROTO() || !DIRECTION){ p.style.display='none'; return; }
+  p.style.display='block'; b.innerHTML='';
+  DIRECTION.split('\\n').forEach(function(x){
+    x=x.trim(); if(!x) return;
+    const m=/^([A-Z][A-Z ]{2,}):\\s*(.*)$/.exec(x);
+    const d=document.createElement('div'); d.className='nbrow';
+    if(m){ const k=document.createElement('b'); k.textContent=m[1]+': '; d.appendChild(k); d.appendChild(document.createTextNode(m[2])); }
+    else{ d.textContent=x; }
+    b.appendChild(d);
+  });
+  if(st){ st.textContent='updated after turn '+history.length+(STALL?' — barely moved ×'+STALL:''); }
+}
 let TRANSCRIPT=[], RUN_META=null;              // the written dialogue + the settings it ran with (for 💾 Save)
 const logEl=document.getElementById('log');
 const startBtn=document.getElementById('startBtn'), stopBtn=document.getElementById('stopBtn'), questionBtn=document.getElementById('questionBtn'), pauseBtn=document.getElementById('pauseBtn');
@@ -560,7 +589,7 @@ async function oneTurn(speaker, closing){
   // A queued duet email rides into THIS turn; the speaker takes it up out loud.
   const mail=(!studentQuestion && MAILQ.length)? MAILQ.shift() : null;
   if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
   if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); return false; }
   if(!studentQuestion && !mail){
     if(PAUSED){
@@ -579,6 +608,7 @@ async function oneTurn(speaker, closing){
   if(d.job){ const b=(d.job==='builder')?speaker:(speaker==='blue'?'hexia':'blue');
     if(b!==LAST_BUILDER){ LAST_BUILDER=b; addNote('(🔬 '+ROBOTS[b].name+' builds, '+ROBOTS[b==='blue'?'hexia':'blue'].name+' examines)'); } }
   if(d.beat==='conclusions'){ addNote('('+ROBOTS[speaker].name+' pauses to weigh what they can conclude so far)'); }
+  if(d.stallBreak){ addNote('(🔬 stall break — '+ROBOTS[speaker].name+' must bring new ground this turn)'); }
   const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
@@ -634,13 +664,21 @@ function maybeReflect(){
     .then(function(j){
       if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
       DIRECTION=j.direction;
+      // Mechanical stall counter (protocol): the server diffed the new notebook
+      // against the previous one. Two barely-moved reflects in a row => the next
+      // turns are FORCED to break new ground (oneTurn sends stalled:true).
+      if(proto){
+        if(j.stalled){ STALL++; if(running) addNote('(📓 the notebook barely moved'+(STALL>=2?' — forcing new ground next turn':'')+')'); }
+        else STALL=0;
+      }
+      renderNotebook();
       // Surface the developing direction unobtrusively, so the self-reflection is visible.
       const m=/NEXT:\\s*(.+)/i.exec(DIRECTION);
       if(m && running) addNote('(they take stock — where this is heading: '+m[1].trim()+')');
     }).catch(function(){});
 }
 async function run(){
-  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; logEl.innerHTML=''; startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
   setPaused(false); STUDENTQ=[];
   TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.

@@ -786,7 +786,22 @@ def register(app):
                 bt.log.warning(f"[DUET] reflect attempt {attempt} failed: {e}")
         if out == prev and prev:
             bt.log.warning("[DUET] reflect produced nothing new — keeping the previous bearing")
-        return jsonify({"ok": bool(out), "direction": out})
+        # Mechanical stagnation check (protocol mode): the keeper is TOLD to be
+        # honest about stagnation, but that's the honor system — here the server
+        # actually diffs the notebooks. Fewer than 4 genuinely new content words
+        # (or a verbatim reuse) = the artifact isn't changing meaningfully; the
+        # page counts these and forces a stall-break turn after two in a row.
+        stalled = False
+        if protocol and prev:
+            if out == prev:
+                stalled = True
+            elif out:
+                def _nb_terms(t):
+                    return {m.group(0).strip("'-")
+                            for m in re.finditer(r"[a-z][a-z'\-]{4,}", t.lower())
+                            } - _DUET_GROUND_STOPWORDS
+                stalled = len(_nb_terms(out) - _nb_terms(prev)) < 4
+        return jsonify({"ok": bool(out), "direction": out, "stalled": stalled})
 
     @app.route('/duet/turn', methods=['POST'])
     def duet_turn():
@@ -869,6 +884,11 @@ def register(app):
         # on closing turns or on turns already owned by mail/student questions.
         conclusion_beat = (n_robot >= 5 and n_robot % 7 == 5
                            and not (closing or mail or student_q_text))
+        # Stall break (protocol): the page flags this after /duet/reflect's
+        # mechanical diff found the notebook unchanged twice running — the turn
+        # is then FORCED to break new ground, not asked nicely.
+        stall_break = (protocol and bool(d.get('stalled'))
+                       and not (closing or mail or student_q_text or conclusion_beat))
         # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
         # gets a confrontational "move", how hard the two push on each other, and the
         # sampling temperature. Defaults to a balanced 5.
@@ -1345,6 +1365,17 @@ def register(app):
                     f"are still not ready to close and why. Then hand it back: ask {ot['name']} "
                     "straight whether they would sign their name under those conclusions or "
                     "amend them.")
+            elif stall_break:
+                directive += (
+                    " STALL BREAK — your shared notebook has stopped changing: the last several "
+                    "turns produced no new claim, assumption, tension, example, or question. Do "
+                    "NOT continue the exchange as it was going. This turn you must break new "
+                    "ground in exactly one of three ways: bring a NEW concrete example or "
+                    "counterexample neither of you has used and run the live claim through it; "
+                    "mount your strongest honest challenge against the best-established claim "
+                    "of the discussion so far; or reformulate the central question so it can "
+                    "actually be answered — and answer it. Your job stays "
+                    f"{proto_job.upper()} in spirit, but new ground comes first.")
             elif protocol:
                 # Deep-dive protocol: the phase × job matrix IS this turn's move —
                 # a deterministic function per turn instead of a sampled one, so
@@ -1656,4 +1687,6 @@ def register(app):
             resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})
         if conclusion_beat:
             resp["beat"] = "conclusions"
+        if stall_break:
+            resp["stallBreak"] = True
         return jsonify(resp)
