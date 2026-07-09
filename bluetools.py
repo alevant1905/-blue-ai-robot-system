@@ -9311,6 +9311,51 @@ def detect_hallucinated_action(response: str) -> str | None:
     return None
 
 
+# Words in the USER's message that mean the claimed action was actually asked
+# for. The hallucinated-action recovery used to force the claimed tool
+# UNCONDITIONALLY — so a confabulated "I sent the introduction email to the
+# class" (2026-07-09, nobody asked for ANY email) would be turned into a REAL
+# email to an invented address. A claim with no matching request must be
+# regenerated or scrubbed, never executed.
+_ACTION_REQUEST_WORDS = {
+    "send_gmail": ("email", "e-mail", "mail", "send", "write to", "message",
+                   "forward", "compose", "reply", "respond", "tell "),
+    "reply_gmail": ("reply", "respond", "answer", "write back", "email", "mail"),
+    "email_snapshot": ("email", "send", "mail", "photo", "picture", "snapshot", "pic"),
+    "capture_camera": ("photo", "picture", "camera", "snapshot", "look", "see",
+                       "capture", "pic", "watch"),
+    "create_reminder": ("remind", "reminder", "timer", "alarm", "schedule",
+                        "calendar", "appointment", "event", "book"),
+    "create_note": ("note", "write down", "jot", "save", "remember this"),
+}
+
+
+def _user_requested_action(tool_name: str, user_text: str) -> bool:
+    """Did the user's latest message actually ask for the claimed action?
+    Unknown tools default to True (keep the legacy force-retry for them)."""
+    words = _ACTION_REQUEST_WORDS.get(tool_name)
+    if not words:
+        return True
+    t = (user_text or "").lower()
+    return any(w in t for w in words)
+
+
+def _scrub_action_claim_sentences(text: str, tool_name: str) -> str:
+    """Cut the sentences that claim an action that never happened (plus the
+    'It's all handled!' tail), keeping whatever real answer surrounds them."""
+    pat = _ACTION_CLAIM_PATTERNS.get(tool_name)
+    if not pat:
+        return text
+    parts = re.split(r'(?<=[.!?])\s+', (text or '').strip())
+    kept = [s for s in parts
+            if not (pat.search(s)
+                    or re.match(r"^\s*it['’]?s all (?:handled|done|set|taken care of)",
+                                s, re.I))]
+    out = ' '.join(kept).strip()
+    return out or ("To be clear — I didn't actually send or do anything just now. "
+                   "What would you like to know?")
+
+
 # Email helper functions (still used by send_gmail tool execution)
 def extract_email_address(message: str) -> str | None:
     """Extract email address from message."""
@@ -10308,6 +10353,41 @@ def _strip_parroted_prefix(text: str, prev_assistant: str) -> str:
     return rest
 
 
+def _strip_recycled_lead(text: str, messages) -> str:
+    """Drop LEADING sentences the assistant already said verbatim earlier in
+    the thread — the 'I sent the introduction email... It's all handled!'
+    preamble replayed two turns later before the real answer (2026-07-09).
+    Only long sentences (≥40 normalized chars) count, and only from the head;
+    a reply that is entirely recycled is left alone (better than empty)."""
+    t = (text or '').strip()
+    prior = " ".join(m.get('content') or '' for m in (messages or [])
+                     if m.get('role') == 'assistant' and isinstance(m.get('content'), str))
+    if not t or not prior:
+        return text
+
+    def _norm(s: str) -> str:
+        return re.sub(r'\W+', ' ', s.lower()).strip()
+
+    nprior = _norm(prior)
+    parts = re.split(r'(?<=[.!?])\s+', t)
+    drop = 0
+    for s in parts[:6]:
+        ns = _norm(s)
+        # A short recycled sentence ("It's all handled!") only counts when it
+        # rides a recycled run started by a long one — alone it's too generic.
+        if ns and ns in nprior and (len(ns) >= 40 or drop > 0):
+            drop += 1
+            continue
+        break
+    if not drop:
+        return text
+    rest = ' '.join(parts[drop:]).strip()
+    if len(rest) < 20:
+        return text
+    print(f"   [ANTI-PARROT] dropped {drop} recycled sentence(s) from the reply head")
+    return rest
+
+
 def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
     """Build system message with anti-repetition context from conversation history.
 
@@ -11097,6 +11177,18 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                             _save_visual_observation(content)
                         return response
 
+                # Same safety gate as the main loop: a send/mail claim the user
+                # never asked for is scrubbed, not executed.
+                if hallucinated_tool in ("send_gmail", "reply_gmail", "email_snapshot") and \
+                        not _user_requested_action(hallucinated_tool, last_user_message):
+                    print(f"   [SKIP-RETRY] {hallucinated_tool} claim but the user asked for "
+                          f"no such action — scrubbing the claim instead of executing it")
+                    cleaned = _scrub_action_claim_sentences(content, hallucinated_tool)
+                    response["choices"][0]["message"]["content"] = cleaned
+                    if _last_vision_image_paths and cleaned:
+                        _save_visual_observation(cleaned)
+                    return response
+
                 print(f"   [WARN] Fast-exec model claimed to {hallucinated_tool} after {improved_force_tool} — running it for real")
                 # Drop the synthetic "[Answer naturally...]" guard turn so
                 # the loop's next call doesn't see it as the latest user msg.
@@ -11131,6 +11223,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # can't ping-pong the loop between a refusal and a forced search forever.
     _web_refusal_forced = False
     _leaked_tool_forced = False
+    _phantom_claim_corrected = False
 
     while iteration < max_iterations:
         iteration += 1
@@ -11282,6 +11375,32 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                     for m in conversation_messages):
                 hallucinated_tool = None
             if hallucinated_tool and not force_tool:
+                # The force-retry below turns the claim into a REAL action —
+                # only right when the user actually asked for one. A claim
+                # nobody asked for ("I sent the introduction email to the
+                # class", 2026-07-09) must be regenerated, and if the model
+                # insists, scrubbed — NEVER executed.
+                if not _user_requested_action(hallucinated_tool, last_user_message):
+                    if _phantom_claim_corrected:
+                        print(f"   [WARN] AI still claiming {hallucinated_tool} nobody asked for — scrubbing the claim")
+                        cleaned = _scrub_action_claim_sentences(content, hallucinated_tool)
+                        response["choices"][0]["message"]["content"] = cleaned
+                        if _last_vision_image_paths and cleaned:
+                            _save_visual_observation(cleaned)
+                        return response
+                    _phantom_claim_corrected = True
+                    print(f"   [WARN] AI claimed {hallucinated_tool} nobody asked for — regenerating, NOT executing")
+                    conversation_messages.append({
+                        "role": "user",
+                        "content": (
+                            "[Correction: you claimed you performed an action, but the "
+                            "user did not ask for any such action and no tool was called. "
+                            "Nothing was sent or done. Do NOT perform, offer, or claim any "
+                            "action. Just answer the user's actual question directly: "
+                            f"\"{(last_user_message or '').strip()[:300]}\"]"
+                        ),
+                    })
+                    continue
                 print(f"   [WARN] AI claimed to {hallucinated_tool} but no tool called — forcing retry")
                 # Replace the lying response with a marker that tells the
                 # next iteration "you said you did this, now actually do it"
@@ -13251,6 +13370,12 @@ def chat_completions():
                     if _deparroted != final_content:
                         final_content = _deparroted
                         response["choices"][0]["message"]["content"] = final_content
+                # And the finer-grained variant: individual sentences replayed
+                # from ANY earlier reply as a preamble to the real answer.
+                _derecycled = _strip_recycled_lead(final_content, messages)
+                if _derecycled != final_content:
+                    final_content = _derecycled
+                    response["choices"][0]["message"]["content"] = final_content
             except Exception as e:
                 log.warning(f"[ANTI-PARROT] check failed: {e}")
 
