@@ -574,7 +574,9 @@ function primeAudio(){
   try{ window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); audioPrimed=true; }catch(e){}
 }
 
-function cleanForSpeech(t){ return (t||'').replace(/https?:\\/\\/\\S+/g,' a link ').replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu,'').replace(/[*_#>~]/g,'').replace(/\\s+/g,' ').trim(); }
+// Square-bracket source tags ([Blue_Thoughts_2605.pdf]) stay visible in the
+// transcript but are never read aloud (Alex, 2026-07-09).
+function cleanForSpeech(t){ return (t||'').replace(/https?:\\/\\/\\S+/g,' a link ').replace(/\\[[^\\[\\]]{1,120}\\]/g,' ').replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu,'').replace(/[*_#>~]/g,'').replace(/\\s+/g,' ').trim(); }
 function buildLipFrames(text, rate){
   rate=rate||1.0; const k=1.0/rate; const words=(text.match(/[^\\s]+/g)||[]); const frames=[]; const MPC=0.060;
   for(const w of words){ const core=w.replace(/[^A-Za-z0-9\\u00C0-\\u024F]/g,''); const len=Math.max(1,core.length);
@@ -687,7 +689,7 @@ function addTurn(cfg,text){ const d=document.createElement('div'); d.className='
 function speakAs(cfg,text,el){ return new Promise(resolve=>{
   const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
   const rate=voiceRateFor(cfg.id);
-  const frames=buildLipFrames(text, rate);
+  const frames=buildLipFrames(cleanForSpeech(text), rate);   // lips track what's actually SPOKEN
   const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
   let done=false, keepAlive=null;
   const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };

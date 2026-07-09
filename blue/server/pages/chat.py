@@ -684,6 +684,9 @@ CHAT_HTML = """
         function cleanForSpeech(t) {
             return (t || '')
                 .replace(/https?:\\/\\/\\S+/g, ' a link ')
+                // Square-bracket source tags ([Blue_Thoughts_2605.pdf], [1]) stay
+                // visible in the chat text but are never read aloud (Alex, 2026-07-09).
+                .replace(/\\[[^\\[\\]]{1,120}\\]/g, ' ')
                 .replace(/[\\u{1F000}-\\u{1FFFF}\\u{2600}-\\u{27BF}]/gu, '')
                 .replace(/[*_`#>~]/g, '')
                 .replace(/\\s+/g, ' ')
