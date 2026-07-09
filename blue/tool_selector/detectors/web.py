@@ -78,7 +78,34 @@ class WebDetector(BaseDetector):
 
     @staticmethod
     def _extract_search_query(msg: str) -> str:
-        """Strip conversational preamble to extract the actual search topic."""
+        """Strip conversational preamble to extract the actual search topic.
+
+        The regex capture must be scrubbed too: 'search the web and tell me
+        who is left in the fifa world cup' captures 'and tell me who is
+        left...' — sent verbatim to the engine it returns junk (2026-07-09)."""
+        filler = [
+            'try again ', 'again ', 'once more ',
+            'and ', 'then ', 'also ', 'now ', 'just ', 'go ',
+            'i want you to ', 'can you ', 'please ', 'could you ',
+            'do a ', 'run a ', 'search for ', 'search ', 'google ',
+            'look up ', 'find out about ', 'find out ', 'find ', 'summarize ',
+            'give me ', 'show me ', 'tell me ', 'tell us ', 'get me ',
+            'let me know ', 'check ',
+            'what are ', "what's ", 'what is ',
+        ]
+
+        def strip_filler(q: str) -> str:
+            changed = True
+            while changed:
+                changed = False
+                for f in filler:
+                    if q.startswith(f):
+                        q = q[len(f):]
+                        changed = True
+            # Trailing errand: "..., and tell me about it"
+            q = re.sub(r'[,.;]?\s*(?:and|then)\s+(?:tell|let)\s+(?:me|us)\b.*$', '', q)
+            return q.strip().rstrip('.!?').strip()
+
         # Try explicit "search for X" / "google X" / "look up X" patterns
         patterns = [
             r'(?:search|google|look up|find)\s+(?:the web |the internet |the net |online )?(?:for |about |on )?(.+)',
@@ -87,27 +114,11 @@ class WebDetector(BaseDetector):
         for pat in patterns:
             m = re.search(pat, msg)
             if m:
-                q = m.group(1).strip().rstrip('.!?')
+                q = strip_filler(m.group(1).strip().rstrip('.!?'))
                 if q:
                     return q
-        # Fallback: strip common prefixes
-        filler = [
-            'try again ', 'again ', 'once more ',
-            'i want you to ', 'can you ', 'please ', 'could you ',
-            'do a ', 'run a ', 'search for ', 'search ', 'google ',
-            'look up ', 'find out about ', 'find ', 'summarize ',
-            'give me ', 'show me ', 'tell me ', 'get me ',
-            'what are ', "what's ", 'what is ',
-        ]
-        q = msg
-        changed = True
-        while changed:
-            changed = False
-            for f in filler:
-                if q.startswith(f):
-                    q = q[len(f):]
-                    changed = True
-        return q.strip().rstrip('.!?') or msg
+        # Fallback: strip common prefixes from the whole message
+        return strip_filler(msg) or msg
 
     def _detect_browse_intent(self, msg_lower: str) -> Optional[ToolIntent]:
         browse_verbs = ['browse', 'open', 'visit', 'go to', 'navigate to', 'load', 'fetch']

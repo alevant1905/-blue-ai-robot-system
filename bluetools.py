@@ -5615,45 +5615,87 @@ def _get_cached(query):
 def _set_cached(query, value):
     _SEARCH_CACHE[query.strip().lower()] = (time.time() + SEARCH_CACHE_TTL_SEC, value)
 
-def execute_web_search(query: str) -> str:
-    """Execute a web search with caching + rate limiting and graceful provider backoff. Returns JSON."""
-    import time
+# Command scaffolding that detectors and models let through to the search box.
+# "search the web and tell me who is left in the fifa work cup" reached the
+# engine VERBATIM (2026-07-09), returned math-calculator junk, and Blue then
+# narrated the wreckage. Engines want the subject, not the errand.
+_SEARCH_SCAFFOLD_LEAD_RE = re.compile(
+    r'^(?:and|then|also|please|kindly|can you|could you|would you|will you|'
+    r'i want you to|i need you to|go|now|just|quickly|'
+    r'tell me|tell us|let me know|find out|check|'
+    r'search(?: the (?:web|internet|net))?|google|look up|find|'
+    r'for me|for us|about|on|for)\s+', re.I)
+
+
+def _clean_search_query(q: str) -> str:
+    """Strip leading command scaffolding and trailing errands from a query."""
+    s = re.sub(r'\s+', ' ', q or '').strip()
+    prev = None
+    while prev != s:
+        prev = s
+        s = _SEARCH_SCAFFOLD_LEAD_RE.sub('', s, count=1).strip()
+    # Trailing errand: "..., and tell me about it" / "and let me know please"
+    s = re.sub(r'[,.;]?\s*(?:and|then)\s+(?:tell|let)\s+(?:me|us)\b.*$', '', s, flags=re.I)
+    s = re.sub(r'\s*(?:for me|please)\s*[.!?]*$', '', s, flags=re.I)
+    s = s.strip(' ?.!,;:')
+    return s or (q or '').strip()
+
+
+_SEARCH_RELEVANCE_STOP = {
+    'the', 'and', 'for', 'with', 'from', 'that', 'this', 'these', 'those',
+    'what', 'who', 'whom', 'whose', 'which', 'when', 'where', 'why', 'how',
+    'many', 'much', 'are', 'was', 'were', 'has', 'have', 'had', 'does', 'did',
+    'can', 'could', 'would', 'should', 'will', 'you', 'your', 'his', 'her',
+    'its', 'their', 'out', 'about', 'into', 'over', 'under', 'between',
+    'still', 'left', 'now', 'today', 'currently', 'latest', 'current',
+    'recent', 'news',
+}
+
+
+def _search_results_relevant(q: str, results) -> bool:
+    """Do the hits actually concern the query's subject? At least half of the
+    query's distinctive words must appear somewhere in the titles+snippets —
+    the gate that catches a scaffolding-polluted or mistyped search."""
+    words = {w for w in re.findall(r"[a-z0-9][a-z0-9'\-]{2,}", (q or '').lower())
+             if w not in _SEARCH_RELEVANCE_STOP}
+    if not words:
+        return True
+    blob = " ".join((r.get('title') or '') + ' ' + (r.get('snippet') or '')
+                    for r in (results or [])).lower()
+    hits = sum(1 for w in words if w in blob)
+    return hits >= max(1, (len(words) + 1) // 2)
+
+
+def _llm_search_query_rewrite(original: str) -> str:
+    """One small LLM call to turn a conversational ask into a clean engine
+    query — this is also what fixes typos ('fifa work cup' → 'FIFA World
+    Cup'). Returns '' on failure so callers can skip the retry."""
+    try:
+        res = call_llm(
+            [{"role": "system", "content":
+              "You write web search queries. Answer with ONLY the query — 2 to 7 words, "
+              "no quotes, no punctuation, no commentary. Fix obvious typos."},
+             {"role": "user", "content":
+              "Turn this request into the best short web search query:\n" + (original or '')}],
+            include_tools=False, temperature=0.2, max_tokens=600)
+        ch = (res or {}).get('choices') or []
+        cand = ((ch[0].get('message') or {}).get('content') or '') if ch else ''
+        if '</think>' in cand:
+            cand = cand.split('</think>')[-1]
+        lines = [ln.strip().strip('"\'') for ln in cand.replace('<think>', '').strip().splitlines() if ln.strip()]
+        cand = lines[0] if lines else ''
+        if 2 <= len(cand) <= 90:
+            return cand
+    except Exception as e:
+        log.warning(f"[SEARCH] query rewrite failed: {e}")
+    return ""
+
+
+def _run_search_providers(q: str):
+    """The raw provider pass (ddgs, then the HTML endpoint). Returns
+    (results, used_provider, error) — error is set only when a provider
+    failed outright, not for a clean empty result."""
     from urllib.parse import quote_plus
-
-    if not query or not query.strip():
-        return json.dumps({
-            "success": False,
-            "error": "Please provide a search query."
-        })
-
-    q = query.strip()
-
-    # Cap absurdly long queries — LLMs sometimes dump every keyword they know
-    MAX_QUERY_LEN = 120
-    if len(q) > MAX_QUERY_LEN:
-        # Keep only the first few meaningful words
-        words = q.split()
-        truncated = []
-        for w in words:
-            truncated.append(w)
-            if len(' '.join(truncated)) >= MAX_QUERY_LEN:
-                break
-        q = ' '.join(truncated)
-        print(f"   [SEARCH] Truncated long query to {len(q)} chars")
-
-    with _SEARCH_LOCK:
-        cached = _get_cached(q)
-        if cached is not None:
-            return cached
-        if not _search_budget_ok():
-            if cached is not None:
-                return cached
-            return json.dumps({
-                "success": False,
-                "error": "[RATE LIMIT] You've run out of web searches for the moment. Please wait ~60 seconds and try again. Tip: identical queries are cached for 6 hours."
-            })
-        _record_search()
-
     results = []
     used_provider = None
 
@@ -5688,13 +5730,7 @@ def execute_web_search(query: str) -> str:
             url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}"
             resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (compatible; BlueBot/1.0)"})
             if resp.status_code == 429:
-                cached = _get_cached(q)
-                if cached is not None:
-                    return cached
-                return json.dumps({
-                    "success": False,
-                    "error": "[PROVIDER LIMIT] The search provider is rate-limiting right now. Please retry in a minute."
-                })
+                return [], None, "[PROVIDER LIMIT] The search provider is rate-limiting right now. Please retry in a minute."
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
             items = soup.select(".result__body")
@@ -5714,12 +5750,84 @@ def execute_web_search(query: str) -> str:
                         "snippet": snippet
                     })
         except Exception as e:
-            msg = json.dumps({
+            return [], None, f"Web search failed: {e.__class__.__name__}: {e}"
+
+    return results, used_provider, None
+
+
+def execute_web_search(query: str) -> str:
+    """Execute a web search with caching + rate limiting and graceful provider backoff. Returns JSON.
+
+    The query is scrubbed of command scaffolding first; a search whose results
+    don't match the query's subject is retried ONCE with an LLM-rewritten
+    query (which also fixes typos). If results still look unrelated, the
+    payload carries a warning so the model says so instead of summarizing
+    junk. Centralized here so every caller benefits: the model's own tool
+    calls, the selector's force-executed params, the chat research toggle,
+    and the anti-hallucination forced search."""
+    if not query or not query.strip():
+        return json.dumps({
+            "success": False,
+            "error": "Please provide a search query."
+        })
+
+    raw = query.strip()
+    q = _clean_search_query(raw)
+    if q != raw:
+        print(f"   [SEARCH] cleaned query: {raw!r} -> {q!r}")
+
+    # Cap absurdly long queries — LLMs sometimes dump every keyword they know
+    MAX_QUERY_LEN = 120
+    if len(q) > MAX_QUERY_LEN:
+        # Keep only the first few meaningful words
+        words = q.split()
+        truncated = []
+        for w in words:
+            truncated.append(w)
+            if len(' '.join(truncated)) >= MAX_QUERY_LEN:
+                break
+        q = ' '.join(truncated)
+        print(f"   [SEARCH] Truncated long query to {len(q)} chars")
+
+    cache_key = q
+    with _SEARCH_LOCK:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+        if not _search_budget_ok():
+            return json.dumps({
                 "success": False,
-                "error": f"Web search failed: {e.__class__.__name__}: {e}"
+                "error": "[RATE LIMIT] You've run out of web searches for the moment. Please wait ~60 seconds and try again. Tip: identical queries are cached for 6 hours."
             })
-            _set_cached(q, msg)
-            return msg
+        _record_search()
+
+    results, used_provider, err = _run_search_providers(q)
+
+    # Bad harvest → one reformulated retry. The rewrite sees the ORIGINAL ask
+    # (more signal than the cleaned query) and fixes typos along the way.
+    note = ""
+    if err is None and (not results or not _search_results_relevant(q, results)):
+        q2 = _llm_search_query_rewrite(raw)
+        if q2 and q2.lower() != q.lower():
+            with _SEARCH_LOCK:
+                budget_ok = _search_budget_ok()
+                if budget_ok:
+                    _record_search()
+            if budget_ok:
+                print(f"   [SEARCH] weak results — retrying with rewritten query: {q2!r}")
+                r2, p2, e2 = _run_search_providers(q2)
+                if e2 is None and r2 and (_search_results_relevant(q2, r2) or not results):
+                    results, used_provider = r2, p2
+                    note = f"query was reformulated to '{q2}'"
+                    q = q2
+
+    if err and not results:
+        msg = json.dumps({
+            "success": False,
+            "error": err
+        })
+        _set_cached(cache_key, msg)
+        return msg
 
     if not results:
         msg = json.dumps({
@@ -5727,19 +5835,27 @@ def execute_web_search(query: str) -> str:
             "query": q,
             "error": "No results found."
         })
-        _set_cached(q, msg)
+        _set_cached(cache_key, msg)
         return msg
 
     # Return proper JSON with success field
-    payload = json.dumps({
+    payload_obj = {
         "success": True,
         "query": q,
         "provider": used_provider or "unknown",
         "results": results,
         "result_count": len(results)
-    }, ensure_ascii=False)
+    }
+    if note:
+        payload_obj["note"] = note
+    if not _search_results_relevant(q, results):
+        payload_obj["warning"] = (
+            "These results may not actually answer the question. Tell the user honestly "
+            "what you could and couldn't find — do not summarize unrelated links as if "
+            "they were the answer. You may call web_search once more with a sharper query.")
+    payload = json.dumps(payload_obj, ensure_ascii=False)
 
-    _set_cached(q, payload)
+    _set_cached(cache_key, payload)
     return payload
 # ===== END patched web search =====
 
