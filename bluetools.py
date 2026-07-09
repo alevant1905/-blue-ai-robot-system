@@ -9149,6 +9149,59 @@ def detect_hallucinated_search(response: str) -> bool:
     return bool(_HALLUCINATION_RE.search(response))
 
 
+# The model HAS live web access via web_search, but on current-events questions
+# it sometimes claims otherwise and sends the user off to check ESPN/FIFA.com
+# themselves (four straight turns of it on "who is left in the world cup",
+# 2026-07-09). When a reply is that refusal AND no tool ran, force the search.
+_WEB_REFUSAL_RE = re.compile(
+    # ['’] — the model emits curly apostrophes ("I don’t") as often as ASCII.
+    r"i (?:don['’]?t|do not) have (?:a )?(?:live|real[- ]?time|current)"
+    r"|i (?:don['’]?t|do not) have access to (?:live|real[- ]?time|current)"
+    r"|can['’]?t access (?:live|real[- ]?time|current)"
+    r"|no (?:live|real[- ]?time) (?:access|feed|data|scoreboard)"
+    r"|i(?:['’]d)? recommend checking|your best bet is to check"
+    r"|best (?:place|way) to check|check a live sports",
+    re.IGNORECASE,
+)
+
+
+def detect_web_refusal(response: str) -> bool:
+    """A no-live-access claim / go-check-a-website deflection — the tell that
+    the model skipped the web_search it should have run."""
+    return bool(_WEB_REFUSAL_RE.search(response or ""))
+
+
+# A local model sometimes emits its tool call as visible TEXT instead of a real
+# tool call — observed live 2026-07-09: the reply contained a literal
+# "<tool_call><function=web_search><parameter=query>...</parameter></function>
+# </tool_call>" block, which reached the user as words. Parse it and run it.
+_LEAKED_TOOL_RE = re.compile(
+    r"<tool_call>\s*<function=([\w\-]+)>(.*?)</function>\s*</tool_call>"
+    r"|<function=([\w\-]+)>(.*?)</function>",
+    re.DOTALL,
+)
+_LEAKED_PARAM_RE = re.compile(r"<parameter=([\w\-]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+
+
+def parse_leaked_tool_call(response: str):
+    """(tool_name, args) when the reply contains a tool call written out as
+    text; None otherwise. Handles <parameter=...> bodies and a JSON body."""
+    m = _LEAKED_TOOL_RE.search(response or "")
+    if not m:
+        return None
+    name = (m.group(1) or m.group(3) or "").strip()
+    body = m.group(2) or m.group(4) or ""
+    args = {k: v.strip() for k, v in _LEAKED_PARAM_RE.findall(body)}
+    if not args:
+        try:
+            j = json.loads(body.strip())
+            if isinstance(j, dict):
+                args = j
+        except Exception:
+            pass
+    return (name, args) if name else None
+
+
 # Patterns that mean "I performed action X" — keyed by the tool that should
 # have been called. If the assistant claims one of these but tool_calls is
 # empty, the response is a hallucination and we need to force-retry.
@@ -10428,6 +10481,12 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{face_capability}"
             "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
             "light show → music_visualizer; tool results are REAL, use them immediately.\n"
+            "LIVE INFORMATION: You HAVE live internet access through the web_search "
+            "tool. For anything current — news, sports scores, standings, results, "
+            "weather, prices, elections, 'who won', 'what happened', 'who is left' — "
+            "call web_search and answer from the results. NEVER say you lack live or "
+            "real-time access, and NEVER tell the user to go check a website, app, or "
+            "sports site themselves: looking it up is YOUR job.\n"
             "NO FAKE ACTIONS: Never say you've set a reminder, added an event, "
             "saved a note, sent an email, started a timer, or changed any "
             "system state unless you actually called the matching tool THIS "
@@ -11068,6 +11127,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         else:
             return {"choices": [{"message": {"role": "assistant", "content": "Done!"}}]}
 
+    # One-shot flags for the forced-recovery paths below, so a stubborn model
+    # can't ping-pong the loop between a refusal and a forced search forever.
+    _web_refusal_forced = False
+    _leaked_tool_forced = False
+
     while iteration < max_iterations:
         iteration += 1
         print(f"\n[ITER] Iteration {iteration}")
@@ -11140,6 +11204,56 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                         "content": tool_result
                     })
                     continue
+
+            # The model wrote a tool call as visible TEXT instead of calling it
+            # (the "<tool_call>...</tool_call> reached the user as words" bug).
+            # Parse it and run it for real; the next iteration composes the
+            # answer from the actual result.
+            _leaked = None if _leaked_tool_forced else parse_leaked_tool_call(content)
+            if _leaked and _leaked[0] in {
+                    t.get("function", {}).get("name") for t in TOOLS}:
+                _leaked_tool_forced = True
+                _lk_name, _lk_args = _leaked
+                print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
+                tool_result = execute_tool(_lk_name, _lk_args)
+                conversation_messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "leaked", "type": "function",
+                                    "function": {"name": _lk_name, "arguments": json.dumps(_lk_args)}}]
+                })
+                conversation_messages.append({"role": "tool", "tool_call_id": "leaked",
+                                              "name": _lk_name, "content": tool_result})
+                continue
+
+            # The model claimed it has no live/real-time access, or told the
+            # user to go check a website — but web_search exists precisely for
+            # this. Run the search it dodged and make it answer from results.
+            if detect_web_refusal(content) and not _web_refusal_forced:
+                _web_refusal_forced = True
+                print("   [WARN] model claimed no live access — forcing web_search")
+                _q = last_user_message.strip()[:160]
+                # A bare follow-up ("tell me the latest") carries no subject —
+                # borrow it from the previous user turn.
+                if len(re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
+                    _prev_users = [m.get("content", "") for m in conversation_messages
+                                   if m.get("role") == "user" and isinstance(m.get("content"), str)]
+                    if len(_prev_users) >= 2:
+                        _q = f"{_prev_users[-2].strip()[:120]} {_q}".strip()
+                search_result = execute_tool("web_search", {"query": _q})
+                conversation_messages.append({
+                    "role": "assistant",
+                    "content": "Let me actually look that up.",
+                    "tool_calls": [{"id": "forced", "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": _q})}}]
+                })
+                conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
+                conversation_messages.append({
+                    "role": "user",
+                    "content": ("[Those are LIVE web results you just fetched yourself. Answer "
+                                "the question directly from them. Do NOT say you lack live or "
+                                "real-time access, and do NOT tell the user to check a website.]")
+                })
+                continue
 
             # Check if model is hallucinating search results
             if detect_hallucinated_search(content):

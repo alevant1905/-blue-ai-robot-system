@@ -32,6 +32,18 @@ class WebDetector(BaseDetector):
         temporal = ['latest', 'recent', 'current', 'today', 'this week']
         news_topics = ['news', 'headlines', 'price', 'score', 'weather',
                        'results', 'standings', 'stock', 'market']
+        # Live-event questions: current-affairs asks that name no search verb
+        # and no temporal word — "who is left in the fifa world cup" got four
+        # straight no-live-access refusals before this tier (2026-07-09).
+        live_topics = ['world cup', 'olympics', 'playoffs', 'the finals',
+                       'champions league', 'super bowl', 'stanley cup',
+                       'wimbledon', 'grand slam', 'election', 'tournament',
+                       'euros', 'euro 2', 'nba finals', 'the match', 'the game']
+        live_questions = ['who is left', "who's left", 'who won', 'who is winning',
+                          "who's winning", 'who advanced', 'who qualified',
+                          'still in', 'knocked out', 'eliminated', 'what happened',
+                          'who plays', 'who is playing', "who's playing",
+                          'what teams are left', 'which teams are left']
         # Named news sources strongly imply web search
         news_sources = ['guardian', 'bbc', 'cnn', 'reuters', 'nyt',
                         'new york times', 'washington post', 'times',
@@ -50,6 +62,14 @@ class WebDetector(BaseDetector):
             if any(topic in msg_lower for topic in news_topics):
                 confidence = 0.85
                 reasons.append("temporal + news/price")
+        # "who is left in the world cup" — a live-event question is a web
+        # search even with no search verb and no temporal word.
+        if any(t in msg_lower for t in live_topics) and \
+           (any(q in msg_lower for q in live_questions) or
+                any(t in msg_lower for t in temporal) or
+                any(topic in msg_lower for topic in news_topics)):
+            confidence = max(confidence, 0.85)
+            reasons.append("live event question")
         # "headlines from the guardian" — news topic + named source
         if any(topic in msg_lower for topic in news_topics) and \
            any(src in msg_lower for src in news_sources):
