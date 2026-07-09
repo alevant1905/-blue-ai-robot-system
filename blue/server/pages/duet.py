@@ -49,6 +49,37 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  #notebookPanel .nbrow{margin:4px 0;font-size:.88em;color:var(--ink);line-height:1.45}
  #notebookPanel .nbrow b{color:var(--forest);font-size:.82em;text-transform:uppercase;letter-spacing:.05em}
  #notebookPanel .nbstamp{font-size:.75em;color:var(--slate);margin-top:6px}
+ #notebookPanel .workspace{display:grid;grid-template-columns:minmax(112px,150px) 1fr;gap:5px 10px;border-bottom:1px solid var(--line);padding:8px 0 10px;margin-bottom:8px}
+ #notebookPanel .wlabel{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);font-weight:700}
+ #notebookPanel .wvalue{font-size:.88em;color:var(--ink);line-height:1.35;min-width:0;overflow-wrap:anywhere}
+ #notebookPanel .wempty{color:var(--slate);font-style:italic}
+ #notebookPanel .statusMatrix{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:6px;margin-bottom:4px}
+ #notebookPanel .statusCell{border:1px solid var(--line);border-radius:8px;background:#fff;padding:6px 7px;min-width:0}
+ #notebookPanel .statusCell b{display:block;font-size:.68em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);margin-bottom:2px}
+ #notebookPanel .statusCell span{display:block;font-size:.82em;color:var(--ink);overflow-wrap:anywhere}
+ #notebookPanel .liveArtifact{grid-column:1/-1;border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
+ #notebookPanel .artifactTitle{font-size:.74em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);font-weight:700;margin-bottom:5px}
+ #notebookPanel .artifactHint{font-size:.76em;color:var(--slate);margin-bottom:6px}
+ #notebookPanel .artifactTable{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82em;background:#fff}
+ #notebookPanel .artifactTable th,#notebookPanel .artifactTable td{border:1px solid var(--line);padding:6px 7px;vertical-align:top;overflow-wrap:anywhere}
+ #notebookPanel .artifactTable th{background:#f3f7f1;color:var(--forest);text-align:left;font-weight:700}
+ #notebookPanel .artifactTable td:first-child{font-weight:600;background:#fafbf8;width:24%}
+ #notebookPanel .artifactTable td[contenteditable="true"]{min-height:28px;outline:none}
+ #notebookPanel .artifactTable td[contenteditable="true"]:focus{box-shadow:inset 0 0 0 2px var(--forest);background:#fffef6}
+ #notebookPanel .rawNotebook{border-top:1px solid var(--line);padding-top:6px}
+ #notebookPanel .rawNotebook summary{font-size:.78em;color:var(--slate);font-weight:600}
+ #conceptGraph{display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+ #conceptGraph .gtitle{font-size:.72em;text-transform:uppercase;letter-spacing:.06em;color:var(--forest);font-weight:700;margin-bottom:6px}
+ #conceptGraph .gbody{display:flex;gap:8px;align-items:stretch;overflow:auto;padding-bottom:2px}
+ #conceptGraph .gnode{min-width:112px;max-width:170px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:6px 8px;font-size:.78em;line-height:1.25;box-shadow:var(--shadow)}
+ #conceptGraph .gnode.core{border-color:var(--forest);background:#f3f7f1;font-weight:600}
+ #conceptGraph .gnode.supported{border-color:#74a66a}
+ #conceptGraph .gnode.tentative{border-color:#d4af37}
+ #conceptGraph .gnode.contested{border-color:#d46a6a}
+ #conceptGraph .gedge{align-self:center;color:var(--slate);font-size:.85em}
+ #conceptGraph .gedge.supported{color:#3f8f4a}
+ #conceptGraph .gedge.tentative{color:#b58a13}
+ #conceptGraph .gedge.contested{color:#c54a4a}
  /* Midnight: the robots' identity bubbles become glass tints. */
  :root:not([data-theme="light"]) .turn.blue{background:rgba(61,169,252,.12);border-color:rgba(61,169,252,.35)}
  :root:not([data-theme="light"]) .turn.hexia{background:rgba(176,108,240,.12);border-color:rgba(176,108,240,.35)}
@@ -111,7 +142,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  <label class="muted" title="They know students are listening: jargon gets glossed in a breath, examples land in student life, they sometimes address the room, and the final turns end on a position plus a question for the class"><input type="checkbox" id="classChk"> 🎓 classroom mode</label>
  <label class="muted" title="They read the best-matching Wikipedia article on the subject first and ground the conversation in it"><input type="checkbox" id="wikiChk"> consult Wikipedia</label>
  <label class="muted" title="Keep Alex's private family and household details out of the robots' dialogue"><input type="checkbox" id="noFamilyChk" checked> no family refs</label>
- <label class="muted" title="Joint research protocol: Builder and Examiner jobs that swap every few turns, five phases (understand → expand → tension → repair → novelty), and a shared notebook of claims, assumptions, tensions and questions that every turn must change — so the talk builds a theory instead of circling"><input type="checkbox" id="protoChk"> 🔬 deep dive</label>
+ <label class="muted" title="Joint research protocol: Builder and Examiner jobs, phases, and a canonical notebook of competing models, blocking active tasks, first-class experiments, execution modes, evidence-gated edits, validation decisions, confidence provenance, dependencies, archives, reopenings and concept compression — so the talk carries inquiry cycles to completion"><input type="checkbox" id="protoChk"> 🔬 deep dive</label>
 </div>
 <div id="questionPanel" class="qpanel" style="display:none">
  <div class="qhead">
@@ -154,8 +185,9 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  </div>
 </div>
 <details id="notebookPanel" style="display:none" open>
- <summary>📓 Shared notebook — the theory they're building</summary>
+ <summary>📓 Shared research notebook — the knowledge base they're testing</summary>
  <div id="notebookBody"></div>
+ <div id="conceptGraph"></div>
  <div class="nbstamp" id="notebookStamp"></div>
 </details>
 <div id="log"></div>
@@ -245,6 +277,22 @@ let STALL=0;                                   // consecutive reflects where the
 let MOVETYPES=[];                              // keeper-reported MOVED labels, most recent last (movement-monotony watch)
 let ARCS=[];                                   // keeper-INFERRED inquiry stages (arc-stuck watch)
 let NBQ=[], LAST_OBS='';                       // queued notebook observations (the notebook's own voice)
+let REFLECTS=0;                                // protocol notebook refreshes; periodic progress + paradigm checks
+let OPFAILS=0;                                 // consecutive requested operations the keeper marked MISSED
+let GATEFAILS=0;                               // consecutive notebook edits rejected by evidence/validation gate
+let PROMOTIONFAILS=0;                          // consecutive over-promotion attempts rejected by promotion gate
+let ACTIVE_TASK='';                            // blocking notebook workflow item, e.g. E1 EXECUTING
+let ACTIVE_TASK_ATTEMPTS=0;                    // repeated reflects on the same blocking task
+let ARTIFACT_PLAN='';                          // construction-order note from ARTIFACT PLANNER / TASK REVISION
+let ARTIFACT_MODE='';                          // lock into direct artifact manipulation, e.g. OS1/E1 table fill
+let ARTIFACT_SILENCE=0;                        // turns where notebook observations stay silent after a lock
+let ART_REQ=0, ART_CREATED=0, ART_POPULATED=0, ART_USED=0; // coarse artifact completion metrics
+let KERNELFAILS=0;                             // consecutive kernel request denials
+let PROTOCOL_AUDIT='';                         // compressed violation summary from the notebook
+let KERNEL_HEALTH='NORMAL';                    // NORMAL/WARNING/RECOVERING/PAUSED; workflow deadlock is separate
+let WORKFLOW_STATE='IDLE';                     // IDLE/BLOCKED/EXECUTING/DEADLOCKED; separate from kernel health
+let DEADLOCKED=false;                          // workflow deadlock detected by notebook/browser
+let LAST_RECOVERY_TURN=0;                      // last turn where a blocked workflow recovered
 function PROTO(){ const c=document.getElementById('protoChk'); return !!(c && c.checked); }
 // Movement monotony: the same MOVED type three reflects running (e.g. nothing but
 // additions) => oneTurn sends it and the server forces the complementary move.
@@ -254,25 +302,254 @@ function MONO(){ const n=MOVETYPES.length; if(n<3) return '';
 // ("20 turns challenging, nothing repaired") => force the stage-advancing move.
 function ARCSTUCK(){ const n=ARCS.length; if(n<3) return '';
   const t=ARCS[n-1]; return (ARCS[n-2]===t && ARCS[n-3]===t)?t:''; }
+function updateKernelDeadlock(){
+  if(!PROTO()) return false;
+  const blockedLongEnough=ACTIVE_TASK && ACTIVE_TASK_ATTEMPTS>=6;
+  const repeatedFailure=(KERNELFAILS>0 || OPFAILS>0 || GATEFAILS>0 || PROMOTIONFAILS>0);
+  const noMovement=STALL>=2;
+  if(blockedLongEnough && repeatedFailure && noMovement){
+    DEADLOCKED=true; WORKFLOW_STATE='DEADLOCKED';
+    const msg='DEADLOCK DETECTED: '+ACTIVE_TASK+' has repeated the same blocked transition '+ACTIVE_TASK_ATTEMPTS+' times with no notebook movement. Last successful recovery turn '+(LAST_RECOVERY_TURN||'none')+'. Set aside the blocked object, identify its unmet dependency, resume the prerequisite, and name the next resolvable operation without narrating kernel state.';
+    if(NBQ.indexOf(msg)<0) NBQ.push(msg);
+    return true;
+  }
+  if(!repeatedFailure && DEADLOCKED){
+    DEADLOCKED=false; WORKFLOW_STATE='RECOVERING'; KERNEL_HEALTH='RECOVERING'; LAST_RECOVERY_TURN=history.length;
+  }
+  return false;
+}
+function nbSections(txt){
+  const out={};
+  (txt||'').split('\\n').forEach(function(x){
+    const m=/^([A-Z][A-Z_ ]{2,}):\\s*(.*)$/.exec((x||'').trim());
+    if(m) out[m[1].replace(/_/g,' ')]=m[2]||'';
+  });
+  return out;
+}
+function graphStatus(text){
+  text=(text||'').toLowerCase();
+  if(/\\b(refuted|rejected|denied|abandoned|failed|contested|contradiction|missed|needs_reevaluation|needs re-evaluation)\\b/.test(text)) return 'contested';
+  if(/\\b(supported|accepted|confirmed|completed|survived)\\b/.test(text)) return 'supported';
+  return 'tentative';
+}
+function graphLabel(text, fallback){
+  text=(text||'').replace(/[<>{}\\[\\]]/g,' ').replace(/\\s+/g,' ').trim();
+  if(!text || text==='-' || text==='—') return fallback;
+  const id=/\\b((?:CG|PM|CD|CU|DR|VL|BC|FM|DP|CE|MEC|MC|MS|CC|EP|OS|KG|[ACDEHIMOPRSTV])\\d+)\\b/.exec(text);
+  const before=(id?text.slice(0, text.indexOf(id[1])):text).split(/[;,.]/)[0].trim();
+  const label=(id?id[1]+' ':'')+(before||text.split(/[;,.]/)[0]||fallback);
+  return label.slice(0,72);
+}
+function renderConceptGraph(){
+  const g=document.getElementById('conceptGraph'); if(!g) return;
+  if(!PROTO() || !DIRECTION){ g.style.display='none'; g.innerHTML=''; return; }
+  const s=nbSections(DIRECTION), nodes=[];
+  const add=function(label, cls){ if(label && nodes.map(function(n){return n.label;}).indexOf(label)<0) nodes.push({label:label, cls:cls||'tentative'}); };
+  add(graphLabel(s.FOCUS||s.CENTRAL,'Discrimination target'), 'core');
+  ['KERNEL DECISION','KERNEL HEALTH','KERNEL REVIEW','INQUIRY PAUSE','PROTOCOL AUDIT','DEPENDENCY SOLVER','ARTIFACT PLANNER','ARTIFACT COMPILER','TASK REVISION','ARTIFACT MODE','ARTIFACT EDITOR','ACTIVE TASK','WORK QUEUE','RECOVERY STRATEGY','INQUIRY PATTERNS','CONCEPT REGISTER','DESIGN VARIABLES','OPERATIONAL CRITERIA','DEFINITION CONFLICTS','DEFINITION REVISION','MECHANISMS','MECHANISM SPLIT','MECHANISM CANDIDATES','CAUSAL GRAPH','CAUSAL CLAIMS','INTERPRETATIONS','ALTERNATIVE INTERPRETATIONS','EXPLANATORY PATHS','REPLICATIONS','PROMOTION GATE','KNOWLEDGE GRAPH','COUNTEREXAMPLES','THEORY HEALTH','DISAGREEMENTS','EVENT SEVERITY','REVISION IMPACT','EXPERIMENTS','OBSERVATIONS','OBSERVATION SETS','SALVAGE','COMPETING MODELS','SUPPORTED','EVIDENCE','WORKING DEFINITIONS','HYPOTHESES','MODEL OBJECTS','ARTIFACTS','DISCRIMINATORS','DEPENDENCIES','STATUS LEDGER','CHANGE LOG','INQUIRY CYCLES','ARTIFACT METRICS','REGISTERS'].forEach(function(k){
+    (s[k]||'').split(';').slice(0,3).forEach(function(part){ add(graphLabel(part,''), graphStatus(part)); });
+  });
+  if(nodes.length<2){ g.style.display='none'; g.innerHTML=''; return; }
+  g.style.display='block'; g.innerHTML='';
+  const title=document.createElement('div'); title.className='gtitle'; title.textContent='Concept graph'; g.appendChild(title);
+  const body=document.createElement('div'); body.className='gbody'; g.appendChild(body);
+  nodes.slice(0,8).forEach(function(n,i){
+    if(i>0){ const e=document.createElement('div'); e.className='gedge '+(n.cls||'tentative'); e.textContent='→'; body.appendChild(e); }
+    const d=document.createElement('div'); d.className='gnode '+(n.cls||'tentative'); d.textContent=n.label; body.appendChild(d);
+  });
+}
 // 📓 Live shared notebook: render the current DIRECTION (the protocol's evolving
 // artifact) into the collapsible panel above the log, one row per section.
+function workspaceText(sec, keys){
+  for(let i=0;i<keys.length;i++){
+    const v=(sec[keys[i]]||'').trim();
+    if(v && v!=='-' && v.charCodeAt(0)!==8212) return v;
+  }
+  return '';
+}
+function addWorkspaceRow(box, label, value){
+  const k=document.createElement('div'); k.className='wlabel'; k.textContent=label;
+  const v=document.createElement('div'); v.className='wvalue';
+  if(value && value.trim()){ v.textContent=value.trim(); }
+  else{ v.className+=' wempty'; v.textContent='not set'; }
+  box.appendChild(k); box.appendChild(v);
+}
+function artifactBlob(sec){
+  const keys=['ACTIVE TASK','WORK QUEUE','ARTIFACT MODE','ARTIFACT COMPILER','ARTIFACTS','DESIGN VARIABLES','OPERATIONAL CRITERIA','EXPERIMENTS','OBSERVATION SETS','OPERATIONS','COMPETING MODELS','INTERPRETATIONS'];
+  return keys.map(function(k){ return sec[k]||''; }).join('; ')+'; '+(ACTIVE_TASK||'')+'; '+(ARTIFACT_MODE||'')+'; '+(DIRECTION||'');
+}
+function rowCells(blob, label, n){
+  const want=label.toLowerCase();
+  const parts=(blob||'').split(';');
+  for(let i=0;i<parts.length;i++){
+    const p=parts[i].trim(), low=p.toLowerCase();
+    if(low.indexOf(want+' |')===0 || low.indexOf(want+'|')===0){
+      const bits=p.split('|').map(function(x){ return x.trim(); });
+      const out=[];
+      for(let j=1;j<=n;j++) out.push(bits[j]||'');
+      return out;
+    }
+  }
+  return Array(n).fill('');
+}
+function renderArtifactTable(zone, title, hint, headers, rows){
+  const t=document.createElement('div'); t.className='artifactTitle'; t.textContent=title; zone.appendChild(t);
+  const h=document.createElement('div'); h.className='artifactHint'; h.textContent=hint; zone.appendChild(h);
+  const table=document.createElement('table'); table.className='artifactTable';
+  const thead=document.createElement('thead'), trh=document.createElement('tr');
+  headers.forEach(function(x){ const th=document.createElement('th'); th.textContent=x; trh.appendChild(th); });
+  thead.appendChild(trh); table.appendChild(thead);
+  const tbody=document.createElement('tbody');
+  rows.forEach(function(row){
+    const tr=document.createElement('tr');
+    row.forEach(function(x, i){
+      const td=document.createElement('td'); td.textContent=x||'';
+      if(i>0){ td.contentEditable='true'; td.spellcheck=false; }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody); zone.appendChild(table);
+}
+function renderLiveArtifact(sec, box){
+  const blob=artifactBlob(sec);
+  const wantsDV=/\\b(DV\\d+|DESIGN[_ ]VARIABLE|design variable|design-space|design space|transparency overhead|latency vs consensus|interface friction)\\b/i.test(blob);
+  const wantsOC=/\\b(OC\\d+|OPERATIONAL[_ ]CRITERI(?:ON|A)|operational criterion|operational definition|failure mode|observable discriminator|evidence standard)\\b/i.test(blob);
+  const wantsCG=/\\b(CG\\d+|COMPARISON[_ ]GRID|comparison grid|cost bearer|infrastructure cost|transparent cloud|local federated)\\b/i.test(blob);
+  const wantsOS=/\\b(OS\\d+|OBSERVATION[_ ]SET|observation set|User Statement|Attribution|Supports|Student \\| Question Asked)\\b/i.test(blob);
+  const wantsCompiled=/\\b(ARTIFACT[_ ]COMPILER|compiled|harvested|Injected Signal|Output Changed|Influence Override|Fruit\\/Painting|OS2)\\b/i.test(blob);
+  if(!wantsDV && !wantsOC && !wantsCG && !wantsOS && !wantsCompiled) return;
+  const zone=document.createElement('div'); zone.className='liveArtifact'; box.appendChild(zone);
+  if(wantsDV){
+    const dv3=/transparency overhead/i.test(blob)?'Transparency Overhead':'';
+    renderArtifactTable(
+      zone,
+      'Current Artifact: Design Variable Register',
+      'Editable cells. Accept, reject, merge, or rename proposed axes before they enter CG1 or E1.',
+      ['DV','Name','Definition','Status','Affects / Blocks'],
+      [
+        ['DV1','Latency','','',''],
+        ['DV2','Consensus','','',''],
+        ['DV3',dv3,'','','']
+      ]
+    );
+  }
+  if(wantsOC){
+    renderArtifactTable(
+      zone,
+      'Current Artifact: Operational Criterion',
+      'Editable cells. Use this when a definition becomes a failure-mode test or evidence standard.',
+      ['OC','Target','Failure Mode','Observable Discriminator','Status / Experiment'],
+      [
+        ['OC1','','','',''],
+        ['OC2','','','','']
+      ]
+    );
+  }
+  if(wantsOS){
+    const systems=['A','B','C'];
+    renderArtifactTable(
+      zone,
+      'Current Artifact: OS1 Branches',
+      'Editable cells. OS1 executes the artifact: one branch may support M1, one M2, and one neither or mixed.',
+      ['System','User Statement','Attribution','Supports'],
+      systems.map(function(label){ const cells=rowCells(blob,label,3); return [label,cells[0],cells[1],cells[2]]; })
+    );
+  }
+  if(wantsCompiled){
+    const caseCells=rowCells(blob,'Fruit/Painting',3);
+    renderArtifactTable(
+      zone,
+      'Current Artifact: OS2 Compiled Observations',
+      'Editable cells. Rows can be harvested from prose; add the next independent case before interpretation.',
+      ['Case','Injected Signal','Output Changed?','Supports'],
+      [
+        ['Fruit/Painting',caseCells[0]||'fruit concept/signal',caseCells[1]||'No',caseCells[2]||'M2'],
+        ['','','','']
+      ]
+    );
+  }
+  if(wantsCG){
+    const labels=['Energy cost','Storage cost','Verification burden','Annotation labor','Cost bearer','Prediction'];
+    renderArtifactTable(
+      zone,
+      'Current Artifact: CG1',
+      'Editable cells. Once CG1 exists, execute it by deriving OS1 branch rows instead of treating it as an illustration.',
+      ['Variable','M1: Transparent Cloud','M2: Local Federated'],
+      labels.map(function(label){ const cells=rowCells(blob,label,2); return [label,cells[0],cells[1]]; })
+    );
+  }
+}
+function workflowStatus(sec){
+  const blob=artifactBlob(sec).toLowerCase();
+  if(DEADLOCKED || /\\b(workflow state\\s*:\\s*deadlocked|workflow deadlock|deadlocked)\\b/.test(blob)) return 'DEADLOCKED';
+  if(ARTIFACT_MODE || /\\b(artifact mode|artifact execution|executing|populate os\\d+|os\\d+ from cg\\d+)\\b/.test(blob)) return 'EXECUTING';
+  if(ACTIVE_TASK || workspaceText(sec,['ACTIVE TASK','WORK QUEUE'])) return 'BLOCKED';
+  return WORKFLOW_STATE || 'IDLE';
+}
+function activeArtifact(sec){
+  const txt=ARTIFACT_MODE || workspaceText(sec,['ARTIFACT MODE','ARTIFACT COMPILER','OPERATIONAL CRITERIA','DESIGN VARIABLES','ARTIFACTS','EXPERIMENTS','OBSERVATION SETS','OPERATIONS','ACTIVE TASK']);
+  const m=/\\b(CG\\d+|OS\\d+|E\\d+|PM\\d+|CD\\d+|DV\\d+|OC\\d+|D\\d+)\\b/i.exec(txt||'');
+  return m ? m[1].toUpperCase() : (txt ? txt.slice(0,70) : 'none');
+}
+function addStatusMatrix(box, sec){
+  const grid=document.createElement('div'); grid.className='statusMatrix'; box.appendChild(grid);
+  const items=[
+    ['Kernel', KERNEL_HEALTH || workspaceText(sec,['KERNEL HEALTH']) || 'NORMAL'],
+    ['Workflow', workflowStatus(sec)],
+    ['Inquiry', workspaceText(sec,['OPERATION CHECK','INQUIRY CYCLES','FOCUS']) || 'not set'],
+    ['Artifact', activeArtifact(sec)]
+  ];
+  items.forEach(function(pair){
+    const d=document.createElement('div'); d.className='statusCell';
+    const b=document.createElement('b'); b.textContent=pair[0]; d.appendChild(b);
+    const s=document.createElement('span'); s.textContent=pair[1]||'not set'; d.appendChild(s);
+    grid.appendChild(d);
+  });
+}
+function renderResearchWorkspace(sec, body){
+  const box=document.createElement('div'); box.className='workspace'; body.appendChild(box);
+  addStatusMatrix(box, sec);
+  addWorkspaceRow(box,'Work Queue',workspaceText(sec,['WORK QUEUE']) || ACTIVE_TASK);
+  addWorkspaceRow(box,'Active Task',ACTIVE_TASK || workspaceText(sec,['ACTIVE TASK']));
+  addWorkspaceRow(box,'Competing Models',workspaceText(sec,['COMPETING MODELS','MODEL OBJECTS']));
+  addWorkspaceRow(box,'Working Definition',workspaceText(sec,['WORKING DEFINITIONS','DEFINITION REVISION','DEFINITION CONFLICTS']));
+  addWorkspaceRow(box,'Design Variables',workspaceText(sec,['DESIGN VARIABLES']));
+  addWorkspaceRow(box,'Operational Criteria',workspaceText(sec,['OPERATIONAL CRITERIA']));
+  addWorkspaceRow(box,'Compiled Artifacts',workspaceText(sec,['ARTIFACT COMPILER']));
+  addWorkspaceRow(box,'Current Artifact',ARTIFACT_MODE || workspaceText(sec,['ARTIFACT MODE','ARTIFACT COMPILER','OPERATIONAL CRITERIA','DESIGN VARIABLES','ARTIFACTS','EXPERIMENTS','OBSERVATION SETS','OPERATIONS']));
+  addWorkspaceRow(box,'Next Decision',workspaceText(sec,['NEXT','KERNEL DECISION','PROMOTION GATE','TASK REVISION','DEPENDENCY SOLVER']));
+  renderLiveArtifact(sec, box);
+}
 function renderNotebook(){
   const p=document.getElementById('notebookPanel'), b=document.getElementById('notebookBody'), st=document.getElementById('notebookStamp');
   if(!p||!b) return;
   if(!PROTO() || !DIRECTION){ p.style.display='none'; return; }
   p.style.display='block'; b.innerHTML='';
+  const sec=nbSections(DIRECTION);
+  renderResearchWorkspace(sec, b);
+  const raw=document.createElement('details'); raw.className='rawNotebook';
+  const rawSum=document.createElement('summary'); rawSum.textContent='Full ledger'; raw.appendChild(rawSum);
   DIRECTION.split('\\n').forEach(function(x){
     x=x.trim(); if(!x) return;
-    const m=/^([A-Z][A-Z ]{2,}):\\s*(.*)$/.exec(x);
+    const m=/^([A-Z][A-Z_ ]{2,}):\\s*(.*)$/.exec(x);
     const d=document.createElement('div'); d.className='nbrow';
-    if(m){ const k=document.createElement('b'); k.textContent=m[1]+': '; d.appendChild(k); d.appendChild(document.createTextNode(m[2])); }
+    if(m){ const k=document.createElement('b'); k.textContent=m[1].replace(/_/g,' ')+': '; d.appendChild(k); d.appendChild(document.createTextNode(m[2])); }
     else{ d.textContent=x; }
-    b.appendChild(d);
+    raw.appendChild(d);
   });
+  b.appendChild(raw);
   if(st){ st.textContent='updated after turn '+history.length
     +(ARCS.length?' — inquiry: '+ARCS[ARCS.length-1].toLowerCase():'')
     +(MOVETYPES.length?' — last movement: '+MOVETYPES[MOVETYPES.length-1].toLowerCase():'')
+    +(ACTIVE_TASK?' — active task: '+ACTIVE_TASK+(ACTIVE_TASK_ATTEMPTS?' ×'+ACTIVE_TASK_ATTEMPTS:''):'')
+    +(sec['INQUIRY CYCLES'] && sec['INQUIRY CYCLES']!=='-'?' — cycles: '+sec['INQUIRY CYCLES']:'')
     +(STALL?' — barely moved ×'+STALL:''); }
+  if(st && PROTOCOL_AUDIT){ st.textContent += ' | audit: '+PROTOCOL_AUDIT; }
+  if(st && KERNEL_HEALTH && KERNEL_HEALTH!=='NORMAL'){ st.textContent += ' | kernel: '+KERNEL_HEALTH.toLowerCase(); }
+  if(st && ARTIFACT_MODE){ st.textContent += ' | artifact mode'; }
+  if(st && (ART_REQ||ART_CREATED||ART_POPULATED||ART_USED)){ st.textContent += ' | artifacts '+ART_REQ+'/'+ART_CREATED+'/'+ART_POPULATED+'/'+ART_USED; }
+  renderConceptGraph();
 }
 let TRANSCRIPT=[], RUN_META=null;              // the written dialogue + the settings it ran with (for 💾 Save)
 const logEl=document.getElementById('log');
@@ -605,8 +882,10 @@ async function oneTurn(speaker, closing){
   if(mail && MAIL_REPLY) flushMailReply();   // a fresh email arrived before the last one collected its second voice — send what we have
   // The notebook's queued observation rides into THIS turn (unless a student
   // question or an email already owns it).
-  const nbNote=(PROTO() && !studentQuestion && !mail && NBQ.length)? NBQ.shift() : null;
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, notebookNote:nbNote, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), arcStuck:(PROTO()?ARCSTUCK():''), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
+  const quietArtifact=(PROTO() && ARTIFACT_SILENCE>0 && ARTIFACT_MODE);
+  const nbNote=(PROTO() && !studentQuestion && !mail && NBQ.length && !quietArtifact)? NBQ.shift() : null;
+  if(quietArtifact) ARTIFACT_SILENCE--;
+  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, notebookNote:nbNote, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), arcStuck:(PROTO()?ARCSTUCK():''), operationMissed:(PROTO() && OPFAILS>0), validationRejected:(PROTO() && GATEFAILS>0), promotionRejected:(PROTO() && PROMOTIONFAILS>0), kernelDenied:(PROTO() && KERNELFAILS>0), kernelDeadlocked:(PROTO() && DEADLOCKED), kernelHealth:(PROTO()?KERNEL_HEALTH:''), activeTask:(PROTO()?ACTIVE_TASK:''), artifactPlan:(PROTO()?ARTIFACT_PLAN:''), artifactMode:(PROTO()?ARTIFACT_MODE:''), activeTaskAttempts:(PROTO()?ACTIVE_TASK_ATTEMPTS:0), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
   if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
   if(!studentQuestion && !mail){
     if(PAUSED){
@@ -686,10 +965,12 @@ function maybeReflect(){
     .then(function(j){
       if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
       DIRECTION=j.direction;
+      const compiledArtifact=!!(j.artifactCompiler && ['COMPILED','HARVESTED'].indexOf(j.artifactCompiler.status)>=0);
       // Mechanical stall counter (protocol): the server diffed the new notebook
       // against the previous one. Two barely-moved reflects in a row => the next
       // turns are FORCED to break new ground (oneTurn sends stalled:true).
       if(proto){
+        REFLECTS++;
         if(j.stalled){ STALL++; if(running) addNote('(📓 the notebook barely moved'+(STALL>=2?' — forcing new ground next turn':'')+')'); }
         else STALL=0;
         // Track HOW it moved; a NONE clears the streak (the stall machinery owns that case).
@@ -709,12 +990,239 @@ function maybeReflect(){
           if(running && j.arc.stage!==prevArc) addNote('(📓 the inquiry has entered its '+j.arc.stage.toLowerCase()+' stage)');
           else if(running && ARCSTUCK()) addNote('(📓 the inquiry has sat in '+j.arc.stage.toLowerCase()+' for a while — pushing it forward)');
         }
-        // The notebook's own voice: queue an earned observation for the next turn
-        // (one at a time, never the same one twice).
-        if(j.observation && j.observation!==LAST_OBS){
-          LAST_OBS=j.observation;
-          NBQ=[j.observation];
+        if(j.activeTask && typeof j.activeTask.active!=='undefined'){
+          if(j.activeTask.active){
+            const nextTask=(j.activeTask.note||j.activeTask.id||'active task').trim();
+            ACTIVE_TASK_ATTEMPTS=(ACTIVE_TASK && nextTask===ACTIVE_TASK)?ACTIVE_TASK_ATTEMPTS+1:1;
+            if(!ACTIVE_TASK || nextTask!==ACTIVE_TASK) ART_REQ++;
+            ACTIVE_TASK=nextTask;
+            WORKFLOW_STATE=/\b(execut|observe|observation|populate|OS\d+|E\d+)\b/i.test(ACTIVE_TASK)?'EXECUTING':'BLOCKED';
+            const taskMsg='ACTIVE TASK BLOCKING: '+ACTIVE_TASK+'. Attempts '+ACTIVE_TASK_ATTEMPTS+'. No new hypotheses, definitions, examples, or paradigm challenges. If CG1 exists, execute through OS1 branch rows (System | User Statement | Attribution | Supports) before interpreting. If an experiment is designed, execute only: Input, Prediction, Observation table, Outcome. Otherwise advance one legal lifecycle step or mark FAILED with a reason.';
+            if(NBQ.indexOf(taskMsg)<0) NBQ.push(taskMsg);
+            if(/\b(execut|observe|observation|populate|OS\d+|E\d+)\b/i.test(ACTIVE_TASK)){
+              ARTIFACT_MODE=ACTIVE_TASK;
+              ARTIFACT_SILENCE=2;
+            }
+            if(running) addNote('(📓 active task blocking — '+ACTIVE_TASK+' ×'+ACTIVE_TASK_ATTEMPTS+')');
+          } else if(ACTIVE_TASK){
+            ACTIVE_TASK='';
+            ACTIVE_TASK_ATTEMPTS=0;
+            ARTIFACT_MODE='';
+            ARTIFACT_SILENCE=0;
+            WORKFLOW_STATE='IDLE';
+            LAST_RECOVERY_TURN=history.length;
+            if(running) addNote('(📓 active task cleared)');
+          }
         }
+        if(compiledArtifact){
+          KERNELFAILS=0; OPFAILS=0; DEADLOCKED=false; KERNEL_HEALTH='NORMAL';
+          WORKFLOW_STATE='EXECUTING'; LAST_RECOVERY_TURN=history.length;
+          ARTIFACT_MODE=(j.artifactCompiler.note||'compiled observation set').trim();
+          ARTIFACT_SILENCE=1;
+          const compilerMsg='Artifact compiler harvested prose into a row: '+(j.artifactCompiler.note||'compiled observation row')+'. Continue from the compiled artifact; ask only for missing fields or the next independent case before interpretation.';
+          if(NBQ.indexOf(compilerMsg)<0){ NBQ.push(compilerMsg); ART_POPULATED++; }
+          if(PAUSED && PAUSE_REASON==='kernel') setPaused(false);
+          if(running) addNote('(artifact compiler - row harvested)');
+        }
+        if(j.kernelDecision && j.kernelDecision.status){
+          if(compiledArtifact && ['DENIED','DEADLOCKED','PAUSED','SUSPENDED','PENDING'].indexOf(j.kernelDecision.status)>=0){
+            KERNELFAILS=0; KERNEL_HEALTH='NORMAL'; DEADLOCKED=false; WORKFLOW_STATE='EXECUTING';
+          } else if(j.kernelDecision.status==='DENIED'){
+            KERNELFAILS++;
+            const denied='PROTOCOL VIOLATION: blocked transition attempt '+KERNELFAILS+'; '+(j.kernelDecision.note||'state transition illegal or prerequisite missing')+'. Perform only the allowed next transition; do not discuss the denial.';
+            NBQ.push(denied);
+            if(running) addNote('(📓 request denied — '+(j.kernelDecision.note||'kernel prerequisite missing')+')');
+          } else if(j.kernelDecision.status==='DEADLOCKED'){
+            DEADLOCKED=true; WORKFLOW_STATE='DEADLOCKED';
+            const dead='DEADLOCK DETECTED: '+(j.kernelDecision.note||'workflow has mutually blocking requirements')+'. Set aside the blocked object and resume its prerequisite before any further execution demand; do not narrate kernel state.';
+            if(NBQ.indexOf(dead)<0) NBQ.push(dead);
+            if(running) addNote('(kernel deadlocked - dependency solver required)');
+          } else if(j.kernelDecision.status==='PAUSED'){
+            KERNEL_HEALTH='PAUSED';
+            const paused='INQUIRY PAUSED: '+(j.kernelDecision.note||'kernel paused until a required artifact is accepted')+'. Resume when the required artifact is accepted.';
+            if(NBQ.indexOf(paused)<0) NBQ.push(paused);
+            if(running){ addNote('(inquiry paused - artifact required before continuing)'); setPaused(true,'kernel'); }
+          } else if(j.kernelDecision.status==='SUSPENDED'){
+            const suspended='KERNEL SUSPENSION: '+(j.kernelDecision.note||'execution blocked by concept instability')+'. Required operation: concept audit / definition resolution before execution resumes.';
+            if(NBQ.indexOf(suspended)<0) NBQ.push(suspended);
+            if(running) addNote('(kernel suspended - concept resolution required)');
+          } else if(j.kernelDecision.status==='DEFERRED'){
+            KERNELFAILS=0;
+            ARTIFACT_PLAN=j.kernelDecision.note||ARTIFACT_PLAN;
+            const deferred='Task deferred to prerequisite: '+(j.kernelDecision.note||'build the prerequisite artifact, then resume the original target')+'. Do not treat this as failure; build the prerequisite artifact next.';
+            if(NBQ.indexOf(deferred)<0) NBQ.push(deferred);
+            if(running) addNote('(task revised - prerequisite artifact first)');
+          } else if(j.kernelDecision.status==='ACCEPTED' || j.kernelDecision.status==='NONE'){
+            KERNELFAILS=0;
+          }
+        }
+        if(j.kernelHealth && j.kernelHealth.status){
+          if(compiledArtifact && ['DEADLOCKED','PAUSED','WARNING'].indexOf(j.kernelHealth.status)>=0){
+            KERNEL_HEALTH='NORMAL'; DEADLOCKED=false;
+          } else if(j.kernelHealth.status==='DEADLOCKED'){
+            DEADLOCKED=true; WORKFLOW_STATE='DEADLOCKED'; KERNEL_HEALTH='NORMAL';
+          } else {
+            KERNEL_HEALTH=j.kernelHealth.status;
+          }
+          const healthMsg=(DEADLOCKED?'WORKFLOW STATE: '+WORKFLOW_STATE+'. ':'KERNEL HEALTH: '+KERNEL_HEALTH+'. ')+(j.kernelHealth.note||'');
+          if((KERNEL_HEALTH!=='NORMAL' || DEADLOCKED) && NBQ.indexOf(healthMsg)<0) NBQ.push(healthMsg);
+          if(running && DEADLOCKED) addNote('(workflow deadlocked - kernel still tracking state)');
+        }
+        if(j.inquiryPause && j.inquiryPause.active && !compiledArtifact){
+          KERNEL_HEALTH='PAUSED';
+          const pauseMsg='INQUIRY PAUSED: '+(j.inquiryPause.note||'required artifact not accepted yet')+'. Resume when the required artifact is accepted.';
+          if(NBQ.indexOf(pauseMsg)<0) NBQ.push(pauseMsg);
+          if(running){ addNote('(inquiry paused - '+(j.inquiryPause.note||'awaiting artifact')+')'); setPaused(true,'kernel'); }
+        }
+        if(j.protocolAudit && j.protocolAudit.note){
+          PROTOCOL_AUDIT=j.protocolAudit.note;
+          const auditMsg='PROTOCOL AUDIT: '+PROTOCOL_AUDIT+'. Compress repeated violations and perform only the legal next operation.';
+          if(NBQ.indexOf(auditMsg)<0) NBQ.push(auditMsg);
+          if(running) addNote('(protocol audit - '+PROTOCOL_AUDIT+')');
+        } else if(!KERNELFAILS && !OPFAILS && !GATEFAILS && !PROMOTIONFAILS) {
+          PROTOCOL_AUDIT='';
+        }
+        if(j.conceptConflict && j.conceptConflict.active){
+          const conceptMsg='CONCEPT AUDIT: '+(j.conceptConflict.note||'definition instability blocks the current experiment')+'. Suspend experiment execution until the term has current definition, alternative D IDs, dependencies, counterexamples, stress level, stability, and a resolution operation.';
+          if(NBQ.indexOf(conceptMsg)<0) NBQ.push(conceptMsg);
+          if(running) addNote('(concept audit - definition instability blocks execution)');
+        }
+        if(j.dependencySolver && j.dependencySolver.note){
+          const solverMsg='Recovery prerequisite: '+j.dependencySolver.note+'. Execute the next resolvable prerequisite before returning to the blocked object.';
+          if(NBQ.indexOf(solverMsg)<0) NBQ.push(solverMsg);
+          if(running) addNote('(dependency solver - prerequisite selected)');
+        }
+        if(j.artifactPlanner && j.artifactPlanner.active){
+          ARTIFACT_PLAN=(j.artifactPlanner.note||'').trim();
+          const planMsg='Artifact construction order: '+(ARTIFACT_PLAN||'choose the smallest missing artifact')+'. If the target artifact is ready, build it exactly; if not, build only the prerequisite and state when the target resumes.';
+          if(NBQ.indexOf(planMsg)<0) NBQ.push(planMsg);
+          if(running) addNote('(artifact planner - '+(j.artifactPlanner.status||'planned').toLowerCase()+')');
+        }
+        if(j.artifactCompiler && j.artifactCompiler.status==='NEEDS_HUMAN'){
+          const needsMsg='Artifact compiler cannot infer one required field: '+(j.artifactCompiler.note||'missing row field')+'. Ask only for that missing field; do not restart the artifact or pause the whole inquiry.';
+          if(NBQ.indexOf(needsMsg)<0) NBQ.push(needsMsg);
+          if(running) addNote('(artifact compiler - missing field only)');
+        }
+        if(j.artifactMode && j.artifactMode.active){
+          ARTIFACT_MODE=(j.artifactMode.note||ACTIVE_TASK||'active artifact').trim();
+          ARTIFACT_SILENCE=2;
+          WORKFLOW_STATE='EXECUTING';
+          if(running) addNote('(artifact mode locked - notebook quiet while cells are filled)');
+        }
+        if(j.recoveryStrategy && j.recoveryStrategy.note){
+          const strategyMsg='RECOVERY STRATEGY: '+j.recoveryStrategy.note+'. Produce the exact requested artifact, not another audit.';
+          if(NBQ.indexOf(strategyMsg)<0) NBQ.push(strategyMsg);
+          if(running) addNote('(recovery strategy - '+j.recoveryStrategy.note+')');
+        }
+        if(j.operationCheck && j.operationCheck.status){
+          if(j.operationCheck.status==='MISSED'){
+            OPFAILS++;
+            if(!DEADLOCKED) WORKFLOW_STATE='BLOCKED';
+            const miss='Operation not completed: produce the explicit artifact now. If CG1 is instantiated, create/populate OS1 with branch rows; otherwise use System A/System B, variables, prediction, result, or confidence change. Hypothesis and definition status remain unchanged. No metaphor-only answer.';
+            NBQ.push(miss);
+            if(running) addNote('(📓 operation missed — requiring an explicit artifact next turn)');
+          } else if(j.operationCheck.status==='COMPLETED'){
+            OPFAILS=0;
+            ART_CREATED++;
+            if(ARTIFACT_MODE){ ART_POPULATED++; ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; }
+            if(!ACTIVE_TASK) WORKFLOW_STATE='IDLE';
+            LAST_RECOVERY_TURN=history.length;
+            const useArtifact='Artifact created or completed: do not abandon it. Next, test it, use it as evidence, build a discriminator, submit the proposed edit to validation, or link the named artifact ID to a dependency.';
+            NBQ.push(useArtifact);
+            if(running) addNote('(📓 operation completed — '+(j.operationCheck.note||'artifact recorded')+')');
+          } else if(j.operationCheck.status==='FAILED'){
+            OPFAILS=0;
+            if(ARTIFACT_MODE){ ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; }
+            WORKFLOW_STATE='RECOVERING';
+            const failed='Experiment failed: record why it failed, preserve salvageable data (primary result, secondary observation, unexpected finding, redesign implication), and do not let it change theory confidence unless interpretation is warranted.';
+            NBQ.push(failed);
+            if(running) addNote('(📓 experiment failed — recording failure as evidence)');
+          } else if(['PROPOSED','DESIGNED','EXECUTING','OBSERVED','INTERPRETED','OPERATIONALIZED','RUNNING','EXECUTED','PENDING'].indexOf(j.operationCheck.status)>=0){
+            OPFAILS=0;
+            WORKFLOW_STATE=(j.operationCheck.status==='EXECUTING' || j.operationCheck.status==='RUNNING' || j.operationCheck.status==='OPERATIONALIZED')?'EXECUTING':'BLOCKED';
+            if(j.operationCheck.status==='OBSERVED' || j.operationCheck.status==='EXECUTED'){
+              ART_POPULATED++;
+              if(ARTIFACT_MODE){ ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; }
+            }
+            const inProgress='Operation in progress ('+j.operationCheck.status.toLowerCase()+'): continue the same task to its next lifecycle state before introducing new hypotheses or definitions.';
+            if(NBQ.indexOf(inProgress)<0) NBQ.push(inProgress);
+            if(running) addNote('(📓 operation '+j.operationCheck.status.toLowerCase()+' — continuing task)');
+          } else if(j.operationCheck.status==='NONE'){
+            OPFAILS=0;
+          }
+        }
+        if(j.validationGate && j.validationGate.status){
+          if(j.validationGate.status==='REJECTED'){
+            GATEFAILS++;
+            const rejected='Validation gate rejected: do not revise the hypothesis, definition, or status yet. Complete the missing comparison, prediction, discriminator, experiment execution/interpretation, dependency update, or evidence provenance first.';
+            NBQ.push(rejected);
+            if(running) addNote('(📓 validation gate rejected — status unchanged until evidence is earned)');
+          } else if(j.validationGate.status==='ACCEPTED'){
+            GATEFAILS=0;
+            ART_USED++;
+            LAST_RECOVERY_TURN=history.length;
+            const accepted='Notebook edit accepted: record the commit consequence by naming affected objects, dependencies, and the evidence that justified the change.';
+            NBQ.push(accepted);
+            if(running) addNote('(📓 validation gate accepted — commit the consequence)');
+          } else if(j.validationGate.status==='NONE'){
+            GATEFAILS=0;
+          }
+        }
+        if(j.promotionGate && j.promotionGate.status){
+          if(j.promotionGate.status==='REJECTED'){
+            PROMOTIONFAILS++;
+            const promoRejected='Promotion gate rejected: keep the candidate INTERESTING/SUGGESTIVE, split observation from interpretation, preserve alternative interpretations, and add the next independent replication or discriminator before any SUPPORTED status.';
+            if(NBQ.indexOf(promoRejected)<0) NBQ.push(promoRejected);
+            if(running) addNote('(ðŸ““ promotion gate rejected â€” replication required before support)');
+          } else if(j.promotionGate.status==='ACCEPTED'){
+            PROMOTIONFAILS=0;
+            ART_USED++;
+            LAST_RECOVERY_TURN=history.length;
+            const promoAccepted='Promotion gate accepted: record which independent replications/discriminators earned the status change and update dependent causal claims.';
+            if(NBQ.indexOf(promoAccepted)<0) NBQ.push(promoAccepted);
+            if(running) addNote('(ðŸ““ promotion gate accepted â€” commit earned status)');
+          } else if(j.promotionGate.status==='PENDING'){
+            const promoPending='Promotion pending: name the candidate ladder state, count independent replications/discriminators, and run the next missing discriminator before promotion.';
+            if(NBQ.indexOf(promoPending)<0) NBQ.push(promoPending);
+            if(running) addNote('(ðŸ““ promotion pending â€” candidate still under replication)');
+          } else if(j.promotionGate.status==='NONE'){
+            PROMOTIONFAILS=0;
+          }
+        }
+        if(j.paradigmCheck && j.paradigmCheck.status==='MISSED'){
+          const pmiss='Paradigm challenge not completed: choose one rival framework and use only its ontology first, then give the separating prediction. Do not translate the current theory into new words.';
+          NBQ.push(pmiss);
+          if(running) addNote('(📓 paradigm challenge missed — requiring a stricter rival ontology next turn)');
+        }
+        if(updateKernelDeadlock() && running) addNote('(workflow deadlock detected - recovery operation next)');
+        // The notebook's own voice: queue earned observations and periodic
+        // progress checks for upcoming turns.
+        if(!ARTIFACT_MODE && j.observation && j.observation!==LAST_OBS){
+          LAST_OBS=j.observation;
+          NBQ.push(j.observation);
+        }
+        if(!ARTIFACT_MODE && REFLECTS>0 && REFLECTS%4===0){
+          const progressCheck='Which inquiry cycle advanced: task, experiment, observation, or notebook revision? If none, name the blocking lifecycle step still missing.';
+          if(NBQ.indexOf(progressCheck)<0){
+            NBQ.push(progressCheck);
+            if(running) addNote('(📓 progress check queued — the next turn must name the cycle step advanced or the blocking step still missing)');
+          }
+        }
+        if(!ARTIFACT_MODE && REFLECTS>0 && REFLECTS%6===0){
+          const paradigmCheck='META: suppose the current leading model is false. Choose exactly one rival framework for one turn only - cognitive psychology, actor-network theory, distributed cognition, cybernetics, information economics, or media ecology - explain the same observations only from that framework, then name the prediction that would separate it from the current one.';
+          if(NBQ.indexOf(paradigmCheck)<0){
+            NBQ.push(paradigmCheck);
+            if(running) addNote('(📓 paradigm challenge queued — the next turn must test a rival framework)');
+          }
+        }
+        if(!ARTIFACT_MODE && REFLECTS>0 && REFLECTS%5===0){
+          const editMode='EDIT MODE: introduce no new concepts. Only delete, revise, split, merge, archive, or re-evaluate existing notebook objects by ID. Identify at least one redundant concept or dependency consequence.';
+          if(NBQ.indexOf(editMode)<0){
+            NBQ.push(editMode);
+            if(running) addNote('(📓 edit mode queued — compress or revise existing objects only)');
+          }
+        }
+        if(NBQ.length>7) NBQ=NBQ.slice(-7);
       }
       renderNotebook();
       // Surface the developing direction unobtrusively, so the self-reflection is visible.
@@ -726,7 +1234,7 @@ function maybeReflect(){
     }).catch(function(){});
 }
 async function run(){
-  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; ARCS=[]; NBQ=[]; LAST_OBS=''; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; ARCS=[]; NBQ=[]; LAST_OBS=''; REFLECTS=0; OPFAILS=0; GATEFAILS=0; PROMOTIONFAILS=0; KERNELFAILS=0; PROTOCOL_AUDIT=''; KERNEL_HEALTH='NORMAL'; WORKFLOW_STATE='IDLE'; DEADLOCKED=false; LAST_RECOVERY_TURN=0; ACTIVE_TASK=''; ACTIVE_TASK_ATTEMPTS=0; ARTIFACT_PLAN=''; ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; ART_REQ=0; ART_CREATED=0; ART_POPULATED=0; ART_USED=0; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
   setPaused(false); STUDENTQ=[];
   TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.
