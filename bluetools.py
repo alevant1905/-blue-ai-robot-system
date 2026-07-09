@@ -12500,6 +12500,13 @@ from blue.server.routes import duet as _duet_routes
 _duet_routes.register(app)
 
 
+# ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
+# (routes live in blue/server/routes/jspace.py)
+
+from blue.server.routes import jspace as _jspace_routes
+_jspace_routes.register(app)
+
+
 
 
 
