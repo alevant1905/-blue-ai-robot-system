@@ -1672,6 +1672,20 @@ class EnhancedMemorySystem:
         # 3) Recent conversation history — only if it's actually recent.
         #    Old code dumped 6 random old messages, which was just noise.
         recent = self._get_relevant_recent_history(user_name, user_msg, limit=8, robot=robot)
+        # The browser already sends the live thread in `messages`; conversation_log
+        # also contains those same just-logged turns. Re-injecting them here showed
+        # the model its own previous reply TWICE (three times counting the
+        # anti-repetition quote), and it started replaying that reply verbatim
+        # before answering (2026-07-09). Keep only rows the thread doesn't carry.
+        _live = [
+            (m.get("content") or "").strip()
+            for m in (messages or [])
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        ]
+        def _already_in_thread(content: str) -> bool:
+            probe = (content or "").strip()[:120]
+            return bool(probe) and any(probe in lv for lv in _live)
+        recent = [r for r in recent if not _already_in_thread(r.get("content"))]
         if recent:
             now = datetime.now()
             history_lines = []

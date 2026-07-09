@@ -10223,6 +10223,38 @@ def _last_exchange(conversation_messages: List[Dict]):
     return last_user, prev_assistant
 
 
+def _strip_parroted_prefix(text: str, prev_assistant: str) -> str:
+    """Deterministic net under the prompt-level fixes: a local model sometimes
+    replays its ENTIRE previous reply and appends the new answer (seen live
+    2026-07-09 — the classroom introduction came back verbatim with the real
+    answer stapled on). If the new reply opens with a near-verbatim copy of
+    the previous assistant message, cut the copy and keep the new part."""
+    t = (text or '').lstrip()
+    p = (prev_assistant or '').strip()
+    if len(p) < 80:
+        return text
+
+    def _norm(s: str) -> str:
+        return re.sub(r'\W+', ' ', s.lower()).strip()
+
+    np_, nt = _norm(p), _norm(t)
+    # Must actually copy the previous reply from its start, and must have real
+    # new content after it (otherwise stripping would leave nothing useful).
+    if not np_ or not nt.startswith(np_) or len(nt) < len(np_) + 20:
+        return text
+    # Find where the copy ends in the RAW text by locating the previous
+    # reply's tail, then drop everything up to it.
+    tail = p[-48:]
+    idx = t.lower().find(tail.lower())
+    if idx < 0:
+        return text
+    rest = t[idx + len(tail):].lstrip(" \n\r\t-—–:.,!;")
+    if len(rest) < 20:
+        return text
+    print(f"   [ANTI-PARROT] stripped {idx + len(tail)} replayed chars from the reply head")
+    return rest
+
+
 def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
     """Build system message with anti-repetition context from conversation history.
 
@@ -10264,7 +10296,14 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             )
         }
 
-    conversational_guidance = "Be natural, concise, and conversational. Vary your phrasing.\n"
+    conversational_guidance = (
+        "Be natural, concise, and conversational — a person talking, not a document. "
+        "Vary your phrasing and your openings. Answer ONLY the newest message: never "
+        "re-answer an earlier question, never re-introduce yourself unless asked, and "
+        "never restate a previous reply before adding to it — the user has already "
+        "read everything you said. Use headings or numbered lists only when the user "
+        "asks for a list or comparison; otherwise reply in plain flowing sentences.\n"
+    )
 
     # Build anti-repetition context (skip vision descriptions and refusals).
     # Refusals like "I don't have that yet" must NEVER appear here even with a
@@ -10299,9 +10338,15 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     anti_repetition_context = ""
     if recent_assistant_responses:
         responses_list = "\n".join([f"  - \"{resp}...\"" for resp in recent_assistant_responses])
+        # Wording matters here: an earlier version said "build on them", which a
+        # local model read as REPLAY-then-extend — it re-said its whole previous
+        # reply verbatim and appended the new answer (2026-07-09, the classroom
+        # introduction). Say "already read", never "build on".
         anti_repetition_context = (
-            f"\nYour recent replies (do NOT re-say these word-for-word — but DO "
-            f"stay on the same topic and build on them):\n{responses_list}\n"
+            "\nYou ALREADY said the following earlier in this conversation and the "
+            "user has read it. Do not re-say any of it — not word-for-word, not "
+            "paraphrased, and never as the opening of your next reply. Stay on the "
+            f"same topic but say only what is NEW:\n{responses_list}\n"
         )
 
     # "yes" / "sure" / "go ahead": the user is accepting YOUR own last offer.
@@ -13082,6 +13127,18 @@ def chat_completions():
                 response = {"choices": [{"message": {
                     "role": "assistant", "content": final_content,
                 }}]}
+
+            # Anti-parrot net: if the model replayed its previous reply verbatim
+            # before answering (the classroom-introduction bug), cut the replay.
+            try:
+                _, _prev_assist = _last_exchange(messages)
+                if _prev_assist:
+                    _deparroted = _strip_parroted_prefix(final_content, _prev_assist)
+                    if _deparroted != final_content:
+                        final_content = _deparroted
+                        response["choices"][0]["message"]["content"] = final_content
+            except Exception as e:
+                log.warning(f"[ANTI-PARROT] check failed: {e}")
 
             # Prepend proactive content: the once-a-day schedule briefing,
             # then any reminder alerts queued by the heartbeat thread. Done
