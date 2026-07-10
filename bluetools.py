@@ -13772,18 +13772,28 @@ def chat_completions():
                 # correction; keep the replay if the retry fails.
                 def _parrot_norm(s):
                     return re.sub(r'\W+', ' ', (s or '').lower()).strip()
-                if (_prev_assist and final_content
-                        and _parrot_norm(final_content) == _parrot_norm(_prev_assist)):
-                    print("   [ANTI-PARROT] pure replay of previous reply — regenerating once")
+                # Compare against the last several assistant turns, not just
+                # the previous one: seen live 2026-07-10, a mis-heard question
+                # got a word-for-word replay of the reply from TWO turns back.
+                _recent_assists = [
+                    m.get("content") for m in messages
+                    if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+                ][-6:]
+                _norm_final = _parrot_norm(final_content)
+                _norm_recents = {_parrot_norm(a) for a in _recent_assists if a}
+                if _prev_assist:
+                    _norm_recents.add(_parrot_norm(_prev_assist))
+                if _norm_final and _norm_final in _norm_recents:
+                    print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
                     # The model's chat template only allows ONE system message,
                     # at position 0 (anything else → LM Studio 400): merge the
                     # persona into an existing head system message if present.
                     _retry_msgs = list(messages) + [
                         {"role": "assistant", "content": final_content},
                         {"role": "user", "content": (
-                            "[That reply was a word-for-word repeat of what you said "
-                            "one turn earlier. Do not repeat it. Answer my last "
-                            "question directly, in new words.]")},
+                            "[That reply was a word-for-word repeat of something you "
+                            "already said in this conversation. Do not repeat it. "
+                            "Answer my last question directly, in new words.]")},
                     ]
                     _persona = _robot_cfg(robot)["persona_line"]
                     if _retry_msgs and _retry_msgs[0].get("role") == "system":
@@ -13801,7 +13811,7 @@ def chat_completions():
                         _redo_text = ""
                     if "</think>" in _redo_text:
                         _redo_text = _redo_text.split("</think>")[-1].strip()
-                    if _redo_text and _parrot_norm(_redo_text) != _parrot_norm(_prev_assist):
+                    if _redo_text and _parrot_norm(_redo_text) not in _norm_recents:
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
             except Exception as e:

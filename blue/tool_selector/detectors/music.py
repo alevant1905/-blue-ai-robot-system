@@ -28,6 +28,26 @@ from ..data.music_data import (
     NON_MUSIC_CONTEXT_WORDS,
 )
 
+def _compile_terms(terms):
+    """Whole-word alternation for a term list. Substring matching burned us
+    live (2026-07-10): 'intere-STING' matched the artist Sting and
+    'SOME-thing' matched the quantity word 'some' — together they turned
+    'tell me something interesting' into play_music at 0.85."""
+    escaped = sorted((re.escape(t) for t in terms if t), key=len, reverse=True)
+    return re.compile(r"\b(?:" + "|".join(escaped) + r")\b")
+
+
+_ARTISTS_RE = _compile_terms(ARTISTS)
+_GENRES_RE = _compile_terms(GENRES)
+
+# "I didn't ask you to play anything" is a complaint about playback, not a
+# request for it (live 2026-07-10: it fuzzy-matched 'just wanted' to Justin
+# Bieber and played him).
+_NEGATED_PLAY_RE = re.compile(
+    r"\b(?:didn'?t|did not|don'?t|do not|never|wasn'?t|not)\b"
+    r"[^.!?]{0,40}\bplay(?:ing)?\b"
+)
+
 # Pre-compiled regex for non-music usage of ambiguous control words
 _NON_MUSIC_FOLLOW_RE = re.compile(
     r'\bstop\s+(?:using|doing|saying|being|making|asking|telling|showing|giving|that)'
@@ -83,9 +103,13 @@ class MusicDetector(BaseDetector):
     ) -> Optional[ToolIntent]:
         """Detect play music intent."""
 
-        # Check for artists and genres
-        has_artist = any(artist in msg_lower for artist in ARTISTS)
-        has_genre = any(genre in msg_lower for genre in GENRES)
+        # A negated "play" is a complaint, never a request.
+        if _NEGATED_PLAY_RE.search(msg_lower):
+            return None
+
+        # Check for artists and genres (whole words only — see _compile_terms)
+        has_artist = bool(_ARTISTS_RE.search(msg_lower))
+        has_genre = bool(_GENRES_RE.search(msg_lower))
 
         # Fuzzy match for artist names (handles typos)
         matched_artist = None
@@ -150,8 +174,10 @@ class MusicDetector(BaseDetector):
                 if i + length <= len(words):
                     phrase = ' '.join(words[i:i+length])
                     if len(phrase) >= 4:  # At least 4 characters
-                        # Lower threshold to 0.60 for better fuzzy matching
-                        match = fuzzy_match(phrase, ARTISTS, threshold=0.60)
+                        # 0.74: at 0.60 ordinary phrases matched artists
+                        # ("just wanted" → Justin Bieber, live 2026-07-10);
+                        # genuine typos ("the beetles") still clear 0.74.
+                        match = fuzzy_match(phrase, ARTISTS, threshold=0.74)
                         if match:
                             return match
         return None
@@ -215,8 +241,9 @@ class MusicDetector(BaseDetector):
             confidence = 0.92
             reasons.append("put on + music/artist/genre")
 
-        # Artist mention with quantity words
-        elif has_artist and any(w in msg_lower for w in ['some', 'little', 'bit of']):
+        # Artist mention with quantity words (whole words — 'something' is
+        # not 'some')
+        elif has_artist and re.search(r"\bsome\b|\blittle\b|\bbit of\b", msg_lower):
             confidence = 0.85
             reasons.append("artist + quantity word suggests play intent")
 
