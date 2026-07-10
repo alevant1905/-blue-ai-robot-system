@@ -5683,6 +5683,27 @@ _LIVE_INFO_TEMPORAL = (
 )
 
 
+def _intent_text(message) -> str:
+    """The user's actual ask with any attached-document block stripped.
+
+    Intent/tool detection must NEVER run on attached text: a book excerpt
+    containing the word "playing" started REAL music in the house, and
+    another force-ran a garbage web_search (both 2026-07-10). Attachments
+    ride as '[Attached document: name]' followed by a triple-quoted block,
+    with the user's own words before or after it.
+    """
+    if not isinstance(message, str):
+        return ""
+    if '[attached document:' not in message.lower():
+        return message
+    cleaned = re.sub(r'\[attached document:[^\]]*\]\s*""".*?"""', ' ',
+                     message, flags=re.I | re.S)
+    if '[attached document:' in cleaned.lower():
+        # Unclosed quoting — keep only what precedes the attachment.
+        cleaned = re.split(r'\[attached document:', cleaned, flags=re.I)[0]
+    return cleaned.strip()
+
+
 def _live_info_query_from_message(message: str, history: List[Dict] = None) -> str:
     """Return a web-search query for live/current-event asks, else ''.
 
@@ -11085,16 +11106,20 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     from blue.tool_selector.detectors.vision import (
         extract_camera_view_args, extract_email_snapshot_args,
         is_email_snapshot_request)
-    if (is_email_snapshot_request(last_user_message.lower())
+    # Detection sees the user's ASK only — attached document text once
+    # keyword-matched its way into starting real music (2026-07-10).
+    _detect_msg = _intent_text(last_user_message)
+    _detect_low = _detect_msg.lower()
+    if (is_email_snapshot_request(_detect_low)
             and user_name not in _CHAT_ONLY_USERS):
         print(f"   [SNAPSHOT-DETECT] ✅ Snapshot-by-email intent detected!")
         improved_force_tool = "email_snapshot"
-        improved_tool_args = extract_email_snapshot_args(last_user_message.lower())
+        improved_tool_args = extract_email_snapshot_args(_detect_low)
         if improved_tool_args:
             print(f"   [SNAPSHOT-DETECT] Args: {improved_tool_args}")
         is_greeting = False
         print(f"   [SNAPSHOT-DETECT] Tool forced: email_snapshot (will execute in iteration 1)")
-    elif detect_camera_capture_intent(last_user_message) and user_name not in _CHAT_ONLY_USERS:
+    elif detect_camera_capture_intent(_detect_msg) and user_name not in _CHAT_ONLY_USERS:
         print(f"   [CAMERA-DETECT] ✅ Camera capture intent detected!")
         print(f"   [CAMERA-DETECT] Forcing NEW photo capture - bypassing tool selector")
         # Force the capture_camera tool to be called
@@ -11102,7 +11127,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         improved_force_tool = "capture_camera"
         # Carry any aim/zoom the user asked for ("what's to your left",
         # "zoom in on the table") into the forced capture.
-        improved_tool_args = extract_camera_view_args(last_user_message.lower())
+        improved_tool_args = extract_camera_view_args(_detect_low)
         if improved_tool_args:
             print(f"   [CAMERA-DETECT] View control: {improved_tool_args}")
 
@@ -11116,7 +11141,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         improved_tool_args = None
 
     if not improved_force_tool and user_name not in _CHAT_ONLY_USERS:
-        live_query = _live_info_query_from_message(last_user_message, conversation_messages)
+        live_query = _live_info_query_from_message(_detect_msg, conversation_messages)
         if live_query:
             improved_force_tool = "web_search"
             improved_tool_args = {"query": live_query}
@@ -11153,7 +11178,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             print(f"   [SELECTOR] Reusing pre-selection result")
         else:
             recent_history = conversation_messages[-5:] if len(conversation_messages) > 5 else conversation_messages
-            selection_result = TOOL_SELECTOR.select_tool(last_user_message, recent_history)
+            selection_result = TOOL_SELECTOR.select_tool(_intent_text(last_user_message), recent_history)
 
         # Check if disambiguation is needed
         if selection_result.needs_disambiguation:
@@ -13584,10 +13609,15 @@ def chat_completions():
         # If so, skip the expensive history injection and go straight to processing.
         _ZERO_LLM_QUICK = {'control_music', 'control_lights', 'get_local_time',
                            'set_timer', 'music_visualizer', 'play_music'}
-        _quick_result = TOOL_SELECTOR.select_tool(last_user_msg) if last_user_msg else None
+        # Detection runs on the user's ASK only — never on attached document
+        # text — and the zero-LLM shortcut only fires on short imperatives
+        # ("play jazz"), not essays that merely contain a keyword.
+        _intent_msg = _intent_text(last_user_msg)
+        _quick_result = TOOL_SELECTOR.select_tool(_intent_msg) if _intent_msg else None
         _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
         _quick_params = _quick_result.primary_tool.extracted_params if (_quick_result and _quick_result.primary_tool) else {}
-        _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params))
+        _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params)
+                        and len(_intent_msg) <= 120)
         # An attached/queued image must reach the vision model, which only
         # happens on the LLM path — never take the zero-LLM shortcut then.
         if _vision_queue.has_images():

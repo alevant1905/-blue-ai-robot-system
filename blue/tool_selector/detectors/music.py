@@ -229,6 +229,16 @@ class MusicDetector(BaseDetector):
                 confidence = 0.7
                 reasons.append("artist mentioned with music context")
 
+        # Narrative/past "playing" with no bare imperative "play" is a REPORT
+        # about playback, not a request for it. Live 2026-07-10: "...and you
+        # gave me sections of the text and started playing music" re-started
+        # the music it was complaining about. \b keeps "play jazz" unaffected
+        # ("playing" has no word boundary after "play").
+        if confidence > 0.3 and not re.search(r'\bplay\b|\bput on\b|\blisten to\b', msg_lower):
+            if re.search(r'\b(?:started|stopped|was|were|been|kept|keeps?|you|he|she|it)\s+playing\b', msg_lower):
+                confidence = 0.2
+                reasons.append("narrative 'playing', not a request")
+
         return confidence, reasons
 
     def _extract_music_query(
