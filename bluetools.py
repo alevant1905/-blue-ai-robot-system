@@ -5696,6 +5696,13 @@ def _live_info_query_from_message(message: str, history: List[Dict] = None) -> s
     low = text.lower()
     history = history or []
 
+    # A document attachment is never a live-info question, and a real live
+    # ask is a short question: thousands of chars of extracted book text
+    # keyword-match almost any topic list (seen live 2026-07-10 — attaching
+    # Pasquinelli.pdf force-ran a garbage web_search on the book's header).
+    if "[attached document:" in low or len(low) > 600:
+        return ""
+
     def _with_date(q: str) -> str:
         q = _clean_search_query(q)
         if not q:

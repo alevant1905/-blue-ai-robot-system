@@ -60,6 +60,26 @@ def test_exchange_collects_real_tool_outcomes_and_builds_context(bluej_module):
     assert messages[-1]["content"] == "What did we just do?"
 
 
+def test_reflection_salvaged_from_broken_json(bluej_module):
+    # Unescaped inner quotes make json.loads fail; the labelled workspace
+    # must still be recovered instead of losing the whole reflection pass.
+    raw = (
+        '{"workspace": "IDENTITY: I am Blue-J, revising a "phantom" belief\\n'
+        'FOCUS: testing\\nWORKING BELIEFS: x (0.4)\\nOPEN QUESTIONS: -\\n'
+        'COMMITMENTS: -\\nSELF-OBSERVATIONS: -\\nNEXT EXPECTATION: next", '
+        '"changed": "demoted a belief", "episode_summary": "Blue-J revised.", '
+        '"salience": 0.6, "valence": 0.1, '
+        '"drive_deltas": {"curiosity": 0.05}}'
+    )
+    parsed = bluej_module._parse_reflection(raw)
+    assert parsed["workspace"].startswith("IDENTITY:")
+    assert "NEXT EXPECTATION:" in parsed["workspace"]
+    assert "\n" in parsed["workspace"]
+    assert parsed["changed"] == "demoted a belief"
+    assert parsed["salience"] == 0.6
+    assert parsed["drive_deltas"]["curiosity"] == 0.05
+
+
 def test_owner_routes_correct_delete_and_wipe(bluej_module):
     route = bluej_module
     original = route._STORE.append_episode(

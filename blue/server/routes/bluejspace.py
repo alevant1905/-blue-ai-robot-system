@@ -244,6 +244,53 @@ def _episode_for_prompt(episode: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
+    """Salvage a reflection whose JSON won't parse (the local model emits
+    unescaped inner quotes and similar breakage). The workspace's fixed
+    labels make it recoverable straight from the raw text; the numeric
+    fields degrade to safe defaults. Returns None when even the workspace
+    can't be found — the caller then raises as before."""
+    match = re.search(r"IDENTITY:.*NEXT EXPECTATION:[^\"\n]*", text, re.S)
+    if not match:
+        return None
+    workspace = (
+        match.group(0)
+        .replace("\\n", "\n")
+        .replace('\\"', '"')
+        .strip()
+    )
+
+    def _field(name: str) -> str:
+        m = re.search(
+            r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % name, text
+        )
+        return (m.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                if m else "")
+
+    def _number(name: str, default: float) -> float:
+        m = re.search(r'"%s"\s*:\s*(-?[0-9.]+)' % name, text)
+        try:
+            return float(m.group(1)) if m else default
+        except ValueError:
+            return default
+
+    deltas = {
+        m.group(1): m.group(2)
+        for m in re.finditer(
+            r'"(curiosity|uncertainty|connection|commitment|energy)"'
+            r"\s*:\s*(-?[0-9.]+)", text
+        )
+    }
+    return {
+        "workspace": workspace,
+        "changed": _field("changed"),
+        "episode_summary": _field("episode_summary"),
+        "salience": _number("salience", 0.5),
+        "valence": _number("valence", 0.0),
+        "drive_deltas": deltas,
+    }
+
+
 def _parse_reflection(raw: str) -> Dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -260,7 +307,12 @@ def _parse_reflection(raw: str) -> Dict[str, Any]:
         # ("reflection was not valid JSON", 3 attempts, job failed).
         parsed = json.loads(text, strict=False)
     except (TypeError, ValueError) as exc:
-        raise ValueError("reflection was not valid JSON") from exc
+        # Unescaped inner quotes and similar breakage still slip through
+        # (seen live 2026-07-10). The labelled workspace is recoverable
+        # from the raw text; only give up when even that fails.
+        parsed = _reflection_from_broken_json(text)
+        if parsed is None:
+            raise ValueError("reflection was not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ValueError("reflection JSON must be an object")
     workspace = _clip(parsed.get("workspace"), 6000)
