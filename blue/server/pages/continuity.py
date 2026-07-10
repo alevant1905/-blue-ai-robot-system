@@ -1,18 +1,22 @@
-"""Owner-facing continuity console for Blue-J. Pure template data."""
+"""Owner-facing continuity console, one per robot. Pure template data.
+
+Rendered with render_template_string(robot=..., robot_name=..., accent=...,
+back_href=...): the same console serves Blue's and Hexia's j-spaces.
+"""
 
 
-BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
+CONTINUITY_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Blue-J Continuity</title>
+    <title>{{ robot_name }} Continuity</title>
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
     <style>
         :root {
             --bg:#f6f7f4; --paper:#fff; --ink:#17221c; --muted:#64706a;
-            --line:#d8ded8; --blue:#2573c2; --green:#47735a; --amber:#a96f16;
+            --line:#d8ded8; --blue:{{ accent }}; --green:#47735a; --amber:#a96f16;
             --red:#a9433d; --track:#e8ece8;
         }
         * { box-sizing:border-box; }
@@ -119,10 +123,10 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
 <main class="shell">
     <header>
         <div>
-            <h1>Blue-J Continuity</h1>
+            <h1>{{ robot_name }} Continuity</h1>
             <div class="meta" id="status">Loading state...</div>
         </div>
-        <nav class="links"><a href="/bluej">Back to Blue-J</a><a href="/">Home</a></nav>
+        <nav class="links"><a href="{{ back_href }}">Back to {{ robot_name }}</a><a href="/">Home</a></nav>
     </header>
 
     <section>
@@ -266,6 +270,8 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
         document.getElementById('olderBtn').style.display = (items && items.length >= 24) ? '' : 'none';
     }
 
+    var BASE = '/continuity/{{ robot }}';
+
     function render(data) {
         state = data;
         renderWorkspace(data); renderDrives(data.drives); renderEpisodes(data.episodes, false);
@@ -279,7 +285,7 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
 
     async function loadState() {
         try {
-            var response = await fetch('/bluej/state', {cache:'no-store'});
+            var response = await fetch(BASE + '/state', {cache:'no-store'});
             var data = await response.json();
             if (!response.ok || !data.ok) throw new Error(data.error || 'State request failed');
             render(data);
@@ -291,7 +297,7 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
 
     async function loadOlder() {
         if (oldestSeq == null) return;
-        var response = await fetch('/bluej/episodes?limit=24&before=' + encodeURIComponent(oldestSeq));
+        var response = await fetch(BASE + '/episodes?limit=24&before=' + encodeURIComponent(oldestSeq));
         var data = await response.json();
         if (response.ok && data.ok) renderEpisodes(data.episodes || [], true);
     }
@@ -313,7 +319,7 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
         var replacement = document.getElementById('replacement').value.trim();
         var reason = document.getElementById('reason').value.trim();
         if (!replacement) return;
-        var response = await fetch('/bluej/episodes/' + encodeURIComponent(editingId) + '/correct', {
+        var response = await fetch(BASE + '/episodes/' + encodeURIComponent(editingId) + '/correct', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({replacement:replacement, reason:reason})
         });
@@ -323,8 +329,8 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
     }
 
     async function deleteEpisode(item) {
-        if (!confirm('Delete this episode from Blue-J continuity?')) return;
-        var response = await fetch('/bluej/episodes/' + encodeURIComponent(item.id), {
+        if (!confirm('Delete this episode from {{ robot_name }} continuity?')) return;
+        var response = await fetch(BASE + '/episodes/' + encodeURIComponent(item.id), {
             method:'DELETE', headers:{'Content-Type':'application/json'}, body:'{}'
         });
         var data = await response.json();
@@ -337,7 +343,7 @@ BLUEJ_CONTINUITY_HTML = r"""<!DOCTYPE html>
             ? 'Archive the current continuity database and start a new one?'
             : 'Permanently wipe the continuity database and start a new one?';
         if (!confirm(prompt)) return;
-        var response = await fetch('/bluej/reset', {
+        var response = await fetch(BASE + '/reset', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({archive:archive})
         });

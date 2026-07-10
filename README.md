@@ -37,7 +37,7 @@ The duet speakers are the **same Blue and Hexia as in chat**: each turn carries 
 
 - **Shared world, own self** — both robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
 - **Document library + RAG** — drop files in and they're indexed for semantic search; both chat and duet can ground their answers in them.
-- **Blue-J continuity experiment** — `/bluej` adds an auditable episode journal, bounded attentional state, ordered reflection, and owner correction/deletion/reset controls without changing ordinary Blue.
+- **Per-robot continuity** — Blue and Hexia each carry an auditable episode journal, bounded attentional state, ordered reflection, and a persistent self-revising workspace (the j-space), in chat and in duets alike. Owner consoles with correction/deletion/reset controls at `/continuity/blue` and `/continuity/hexia`. (Born as the Blue-J experiment, since folded into both robots.)
 
 ### 🖥️ Web interfaces
 

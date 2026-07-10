@@ -316,11 +316,13 @@ BLUE_JS = r"""
   };
   var NAV = [
     ['Talk', [['/', 'Home', 'home'], ['/chat', 'Chat with Blue', 'chat'],
-              ['/bluej', 'Blue-J', 'chat'], ['/hexia', 'Chat with Hexia', 'chat'],
+              ['/hexia', 'Chat with Hexia', 'chat'],
               ['/duet', 'Duet', 'duet']]],
     ['Know', [['/documents', 'Documents', 'lib'], ['/calendar', 'Calendar', 'cal'],
               ['/contacts', 'Contacts', 'ppl'], ['/visual', 'Visual memory', 'eye'],
-              ['/perspective', 'Perspective', 'persp']]],
+              ['/perspective', 'Perspective', 'persp'],
+              ['/continuity/blue', "Blue's continuity", 'persp'],
+              ['/continuity/hexia', "Hexia's continuity", 'persp']]],
     ['Robots', [['/heads', 'Robot heads', 'bot'], ['/head', "Tune Blue's head", 'tune'],
                 ['/head/hexia', "Tune Hexia's head", 'tune']]]
   ];

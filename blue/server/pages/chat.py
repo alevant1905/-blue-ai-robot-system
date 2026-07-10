@@ -279,7 +279,7 @@ CHAT_HTML = """
             {% else %}
             <h1>Chat with {{ robot_name }}</h1>
             <p>Type to talk with {{ robot_name }}, and attach images or documents to share.</p>
-            <div class="navlinks"><a href="/">&larr; Home</a>{% if is_bluej %}<a href="/bluej/continuity">Continuity</a>{% endif %}<a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
+            <div class="navlinks"><a href="/">&larr; Home</a>{% if continuity_href %}<a href="{{ continuity_href }}">Continuity</a>{% endif %}<a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
             {% endif %}
         </div>
         {% if kid %}

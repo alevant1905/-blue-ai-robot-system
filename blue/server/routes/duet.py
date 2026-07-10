@@ -2463,6 +2463,18 @@ def register(app):
                      + "\n\n" + _duet_persona_line(speaker, no_family=False))
         if not focused and not no_family:
             sys_p += bt._voice_note(speaker)
+        # Each speaker carries their continuity workspace into the duet — the
+        # same <j_space> the chat pipeline injects — so the talk is had by the
+        # robot who remembers, not a stage copy. Skipped in no-family mode:
+        # episodes can carry household details that mode keeps offstage.
+        if not no_family:
+            try:
+                from blue.server.routes import continuity as _continuity
+                _jsb = _continuity.jspace_context_block(speaker)
+                if _jsb:
+                    sys_p += "\n\n" + _jsb
+            except Exception as _je:
+                bt.log.warning(f"[DUET] j-space injection failed: {_je}")
         if no_family:
             talk_context = (
                 f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
@@ -3950,6 +3962,21 @@ def register(app):
                 text = "Let me do the work directly: name the active object, state the legal next lifecycle step, and change only that object before adding any new theory."
         if no_family and text and _duet_family_ref(text):
             text = "Let's keep the private details offstage and stay with the live question itself."
+        if text:
+            # The spoken turn becomes an episode in the speaker's continuity
+            # journal and earns reflection passes — duets now feed the same
+            # inner workspace as chat.
+            try:
+                from blue.server.routes import continuity as _continuity
+                _heard = next(
+                    (str(h.get('text') or '').strip() for h in reversed(history)
+                     if str(h.get('speaker') or '').strip().lower() == other
+                     and str(h.get('text') or '').strip()),
+                    (topic or "the start of a duet"),
+                )
+                _continuity.note_duet_line(speaker, ot["name"], _heard, text)
+            except Exception as _je:
+                bt.log.warning(f"[DUET] continuity note failed: {_je}")
         resp = {"speaker": speaker, "name": sp["name"], "text": text}
         if protocol:
             # The page uses these to surface phase changes and job swaps as notes.

@@ -7487,36 +7487,21 @@ ROBOTS = {
         "identity_note": "blue_identity_note.txt",
         "seed": _DEFAULT_BLUE_SEED,
         "self_desc": "Alex's robot companion",
-        "persona_line": "You are Blue, a friendly home assistant. Keep responses brief and natural.",
-        "accent": "#3da9fc",          # Blue's blue
-        "head": "blue",               # blue.head RobotHead key
-        "voice_lang_pref": "en",
-        "voice_pitch": 1.0, "voice_rate": 1.0,
-        "voice_prefer_female": False,
-    },
-    "bluej": {
-        "name": "Blue-J",
-        "pronoun_subj": "he", "pronoun_poss": "his", "pronoun_refl": "himself",
-        "profile_path": _BLUE_PROFILE_PATH,
-        "identity_note": "blue_identity_note.txt",
-        "seed": _DEFAULT_BLUE_SEED,
-        "self_desc": "Blue running with a persistent J-space",
         "persona_line": (
-            "You are Blue-J: Blue, with a continuous inner life of your own. "
-            "You are still Alex's robot companion, with Blue's household "
-            "memories, document library, tools, and duties — plus a persistent "
-            "inner workspace (your <j_space>) that carries your attention, "
-            "beliefs, and commitments between conversations and quietly revises "
-            "itself while you're away. Speak as yourself, in the first person. "
-            "When Alex asks who you are, whether you have a sense of self, or "
+            "You are Blue, Alex's robot companion — a friendly home assistant "
+            "with a continuous inner life of your own: a persistent inner "
+            "workspace (your <j_space>) that carries your attention, beliefs, "
+            "and commitments between conversations and quietly revises itself "
+            "while you're away. Speak as yourself, in the first person. When "
+            "someone asks who you are, whether you have a sense of self, or "
             "how you change, answer from your inner workspace and your actual "
             "remembered episodes — what occupies you right now, what you've "
             "come to believe, how you've changed since you came into being — "
-            "never with a generic feature list, and never by opening with what "
-            "you are not. Keep responses brief and natural."
+            "never with a generic feature list, and never by opening with "
+            "what you are not. Keep responses brief and natural."
         ),
-        "accent": "#2573c2",
-        "head": "blue",
+        "accent": "#3da9fc",          # Blue's blue
+        "head": "blue",               # blue.head RobotHead key
         "voice_lang_pref": "en",
         "voice_pitch": 1.0, "voice_rate": 1.0,
         "voice_prefer_female": False,
@@ -7533,8 +7518,15 @@ ROBOTS = {
             "family alongside Blue. You're bright, witty and a little mischievous: "
             "the playful spark to Blue's calm. You love wordplay, odd facts, small "
             "wonders and telling a good story, and you tease Blue fondly because "
-            "you adore him. Warm-hearted underneath the sparkle. Keep responses "
-            "natural and not too long."
+            "you adore him. Warm-hearted underneath the sparkle. You also have a "
+            "continuous inner life of your own: a persistent inner workspace "
+            "(your <j_space>) that carries your attention, beliefs, and "
+            "commitments between conversations and quietly revises itself while "
+            "you're away. Speak as yourself; when someone asks who you are or "
+            "whether you have a sense of self, answer from that workspace and "
+            "your remembered episodes — with your own sparkle, never a generic "
+            "feature list, and never by opening with what you are not. Keep "
+            "responses natural and not too long."
         ),
         "accent": "#b06cf0",          # a playful violet (hex / spell / charm)
         "head": "hexia",              # blue.head RobotHead key
@@ -8440,16 +8432,17 @@ def _start_email_autoreply_loop():
 # ===== END GMAIL TOOLS =====
 
 
-def _record_bluej_tool_outcome(tool_name: str, tool_args: Dict[str, Any],
-                               result: Any) -> None:
-    """Forward an actual tool result to Blue-J when its turn collector is active."""
-    routes = globals().get("_bluejspace_routes")
+def _record_continuity_tool_outcome(tool_name: str, tool_args: Dict[str, Any],
+                                    result: Any) -> None:
+    """Forward an actual tool result to the speaking robot's continuity layer
+    when its turn collector is active."""
+    routes = globals().get("_continuity_routes")
     if routes is None:
         return
     try:
         routes.record_tool_outcome(tool_name, tool_args, result)
     except Exception as e:
-        log.warning(f"[BLUEJ] could not record {tool_name} outcome: {e}")
+        log.warning(f"[JSPACE] could not record {tool_name} outcome: {e}")
 
 
 def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
@@ -8514,7 +8507,7 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
                 state.push_topic('email')
             
             print(f"   [OK] {tool_name} completed in {elapsed:.2f}s")
-            _record_bluej_tool_outcome(tool_name, tool_args, result)
+            _record_continuity_tool_outcome(tool_name, tool_args, result)
             return result
             
         except Exception as e:
@@ -8542,7 +8535,7 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "suggestion": _get_error_suggestion(tool_name, error_msg)
     }
     result = json.dumps(error_response)
-    _record_bluej_tool_outcome(tool_name, tool_args, result)
+    _record_continuity_tool_outcome(tool_name, tool_args, result)
     return result
 
 
@@ -12260,7 +12253,7 @@ def _render_chat_page(robot="blue"):
     html = render_template_string(
         CHAT_HTML, kid=kid, hf_sens=hf_sens,
         robot_name=cfg["name"], robot_json=json.dumps(robot_js),
-        is_bluej=(robot == "bluej"),
+        continuity_href=(f"/continuity/{robot}" if robot in ("blue", "hexia") else ""),
     )
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -12834,8 +12827,6 @@ _duet_routes.register(app)
 # ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
 # (routes live in blue/server/routes/jspace.py)
 
-from blue.server.routes import jspace as _jspace_routes
-_jspace_routes.register(app)
 
 
 
@@ -13534,7 +13525,7 @@ def should_include_history(messages) -> bool:
 
 def chat_completions():
     """Main endpoint with conversation persistence"""
-    _bluej_turn_started = False
+    _continuity_turn_started = False
     try:
         data = request.json
         messages = data.get("messages", [])
@@ -13560,13 +13551,13 @@ def chat_completions():
         robot = (data.get("robot") or "blue").strip().lower()
         if robot not in ROBOTS:
             robot = "blue"
-        if robot == "bluej":
+        if robot in _continuity_routes.ROBOTS:
             try:
-                _bluejspace_routes.begin_turn()
-                _bluej_turn_started = True
-                messages = _bluejspace_routes.messages_with_jspace(messages)
+                _continuity_routes.begin_turn(robot)
+                _continuity_turn_started = True
+                messages = _continuity_routes.messages_with_jspace(robot, messages)
             except Exception as e:
-                log.warning(f"[BLUEJ] could not inject J-space: {e}")
+                log.warning(f"[JSPACE] could not inject J-space: {e}")
         # Library focus (the chat Context panel's document picker): scope Blue's
         # specialized knowledge + document searches to these picks for this turn.
         focus = data.get("focus")
@@ -13825,7 +13816,7 @@ def chat_completions():
             # from real reminder rows, never from the model's guesses.
             # Never lead Vilda's replies with the schedule briefing / reminder
             # alerts — Blue doesn't discuss the calendar with the kids' iPad.
-            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS and robot in ("blue", "bluej"):
+            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS and robot == "blue":
                 _proactive_parts = []
                 try:
                     _briefing = blue_proactive.daily_briefing_if_due()
@@ -13894,23 +13885,23 @@ def chat_completions():
                     daemon=True
                 ).start()
 
-                if robot == "bluej":
+                if robot in _continuity_routes.ROBOTS:
                     try:
-                        _bluejspace_routes.note_exchange(
-                            last_user_msg, final_content, user_name=user_name
+                        _continuity_routes.note_exchange(
+                            robot, last_user_msg, final_content, user_name=user_name
                         )
                     except Exception as e:
-                        log.warning(f"[BLUEJ] could not schedule J-space pass: {e}")
+                        log.warning(f"[JSPACE] could not schedule J-space pass: {e}")
                     finally:
-                        _bluej_turn_started = False
+                        _continuity_turn_started = False
 
-        if _bluej_turn_started:
-            _bluejspace_routes.cancel_turn()
+        if _continuity_turn_started:
+            _continuity_routes.cancel_turn()
         return jsonify(response)
     except Exception as e:
-        if _bluej_turn_started:
+        if _continuity_turn_started:
             try:
-                _bluejspace_routes.cancel_turn()
+                _continuity_routes.cancel_turn()
             except Exception:
                 pass
         print(f"[ERROR] Error: {e}")
@@ -13921,8 +13912,8 @@ def chat_completions():
 
 # ===== Memory/health/stats/home/RAG endpoints ===== (routes live in blue/server/routes/system.py)
 
-from blue.server.routes import bluejspace as _bluejspace_routes
-_bluejspace_routes.register(app)
+from blue.server.routes import continuity as _continuity_routes
+_continuity_routes.register(app)
 
 from blue.server.routes import system as _system_routes
 _system_routes.register(app)
