@@ -254,7 +254,11 @@ def _parse_reflection(raw: str) -> Dict[str, Any]:
     if start >= 0 and end > start:
         text = text[start:end + 1]
     try:
-        parsed = json.loads(text)
+        # strict=False: the local model regularly emits the multi-line
+        # workspace string with LITERAL newlines inside the JSON string;
+        # strict parsing rejects those and the whole reflection is lost
+        # ("reflection was not valid JSON", 3 attempts, job failed).
+        parsed = json.loads(text, strict=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("reflection was not valid JSON") from exc
     if not isinstance(parsed, dict):
