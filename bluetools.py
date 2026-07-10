@@ -10157,6 +10157,57 @@ def _build_focus_block() -> str:
         return ""
     lines = [f"- folder: {f} (everything filed under it)" for f in folders]
     lines += [f"- {d}" for d in docs]
+
+    # Resolve folder pins to their documents (same matching rule the scoped
+    # searches use) so the digests below cover them too.
+    all_focused = list(docs)
+    try:
+        for d in load_document_index().get('documents', []):
+            fn = (d.get('filename') or '').strip()
+            if not fn or fn in all_focused:
+                continue
+            if d.get('doc_type') == 'camera' or fn.startswith('camera_'):
+                continue
+            fol = (d.get('folder') or '')
+            if any(fol == f or fol.startswith(f + '/') for f in folders):
+                all_focused.append(fn)
+    except Exception:
+        pass
+
+    # CONTENT, not just names. Conversational turns never run search_documents
+    # (the selector says "no tool needed" and the local model rarely self-calls
+    # tools), so a name-only block meant Blue never actually drew on the
+    # focused material. Inject each focused work's five-line reading digest —
+    # the same mtime-cached store the duet uses, built once per file. At most
+    # two digests are freshly generated per turn (an LLM call each); the rest
+    # of a big folder fills in on later turns from the cache.
+    digests = []
+    fresh = 0
+    try:
+        from blue.server.routes.duet import (
+            _DUET_READ_CACHE, _duet_read_load, _duet_reading_digest)
+        _duet_read_load()
+        for fn in all_focused[:6]:
+            cached = fn in _DUET_READ_CACHE
+            if not cached and fresh >= 2:
+                continue
+            dg = _duet_reading_digest(fn)
+            if dg:
+                digests.append(dg)
+                if not cached:
+                    fresh += 1
+                    log.info(f"[FOCUS] digested focused doc: {fn}")
+    except Exception as e:
+        log.warning(f"[FOCUS] digest injection failed: {e}")
+    digest_section = ""
+    if digests:
+        digest_section = (
+            "\n\nWhat each focused work argues — absorbed digests; ground your "
+            "answers in these, and use search_documents when you need the "
+            "work's own words or specifics beyond them:\n\n"
+            + "\n\n".join(digests)
+        )
+
     return (
         "<focused_documents>\n"
         "For THIS conversation, Alex has focused you on ONLY the specific "
@@ -10167,7 +10218,8 @@ def _build_focus_block() -> str:
         "or remembered material: if something is not in the focused items below, "
         "it is out of scope right now. If his question can't be answered from "
         "them, say so plainly rather than guessing or mixing in another source.\n"
-        + "\n".join(lines) +
+        + "\n".join(lines)
+        + digest_section +
         "\n</focused_documents>"
     )
 
