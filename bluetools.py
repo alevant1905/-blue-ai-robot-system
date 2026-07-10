@@ -10498,10 +10498,17 @@ _CONTINUATION_TWO_WORD = {'of course', 'sounds good', 'do it', 'tell me', 'carry
 
 def _continuation_cue(text: str):
     """Classify a short reply as accepting ('yes') or declining ('no') the
-    assistant's previous offer — or None when it's a normal message."""
+    assistant's previous offer, or asking it to keep going ('more') — or
+    None when it's a normal message."""
     t = (text or '').strip().lower()
     if not t or len(t) > 40:
         return None
+    # "Tell me more (about X)" / "go on" / "keep going": continue the SAME
+    # answer. Without this the model restarts from the top — the classroom
+    # introduction opened "Hi everyone, I'm Blue" twice in a row (2026-07-10).
+    if re.match(r"(?:please\s+)?(?:tell (?:me|us) more|say more|go on|keep going|"
+                r"continue|elaborate|expand on)\b", t):
+        return 'more'
     words = re.findall(r"[a-z']+", t)
     if not words or len(words) > 5:
         return None
@@ -10712,6 +10719,15 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
                 f"question, which ended: \"...{_tail}\". Do what you offered, fully, "
                 "as your reply — same topic, picking up exactly where you left off. "
                 "Do NOT greet, do NOT ask what they need, do NOT change the subject.\n"
+            )
+        elif _cue == 'more':
+            continuation_note = (
+                "\nIMPORTANT — CONTINUE, DON'T RESTART: the user's latest message "
+                f"(\"{_last_user_text.strip()}\") asks you to KEEP GOING on what you "
+                f"were just saying, which ended: \"...{_tail}\". Go deeper or further "
+                "on the SAME thing with NEW material only. Do NOT greet again, do NOT "
+                "re-introduce yourself, and do NOT repeat or rephrase anything you "
+                "already said — pick up where you stopped, as one continuous piece.\n"
             )
         else:
             continuation_note = (
