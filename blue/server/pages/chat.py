@@ -279,7 +279,7 @@ CHAT_HTML = """
             {% else %}
             <h1>Chat with {{ robot_name }}</h1>
             <p>Type to talk with {{ robot_name }}, and attach images or documents to share.</p>
-            <div class="navlinks"><a href="/">&larr; Home</a><a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
+            <div class="navlinks"><a href="/">&larr; Home</a>{% if is_bluej %}<a href="/bluej/continuity">Continuity</a>{% endif %}<a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
             {% endif %}
         </div>
         {% if kid %}
@@ -300,8 +300,8 @@ CHAT_HTML = """
                 <div class="big">Hi Vilda! &#128153;</div>
                 <div>I'm so happy to see you! Tap the big microphone and let's chat.</div>
                 {% else %}
-                <div class="big">Say hello to Blue</div>
-                <div>Ask him anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
+                <div class="big">Say hello to {{ robot_name }}</div>
+                <div>Ask {{ robot_name }} anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
                 {% endif %}
             </div>
         </div>
@@ -311,7 +311,7 @@ CHAT_HTML = """
                 <input type="file" id="fileInput" multiple style="display:none"
                        accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.rtf,.pptx,.xlsx">
                 <button class="iconbtn" id="attachBtn" title="Attach files" aria-label="Attach files">+</button>
-                <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to Blue" aria-label="Talk to Blue">
+                <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to {{ robot_name }}" aria-label="Talk to {{ robot_name }}">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
                 {% if not kid %}
@@ -336,7 +336,7 @@ CHAT_HTML = """
                 <button class="iconbtn" id="hfBtn" title="Hands-free: say 'Blue' to start" aria-label="Hands-free listening" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
                 </button>
-                <textarea id="input" placeholder="Message Blue..." rows="1"></textarea>
+                <textarea id="input" placeholder="Message {{ robot_name }}..." rows="1"></textarea>
                 <button class="iconbtn" id="voiceBtn" title="Choose {{ robot_name }}'s voice" aria-label="Choose {{ robot_name }}'s voice">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
                 </button>

@@ -5134,7 +5134,8 @@ def capture_camera_image(look: str = None, zoom=None, zoom_region: str = "center
             if d in ("left", "right", "up", "down", "center", "centre",
                      "forward", "front", "straight", "ahead"):
                 try:
-                    head = blue_head.get_head(robot or _ACTIVE_CHAT_ROBOT)
+                    head_key = _robot_cfg(robot or _ACTIVE_CHAT_ROBOT).get("head", robot or _ACTIVE_CHAT_ROBOT)
+                    head = blue_head.get_head(head_key)
                     if head.is_available() and head.look(d, speed=5.0):
                         aimed = "center" if d in ("centre", "forward", "front",
                                                   "straight", "ahead") else d
@@ -5620,8 +5621,8 @@ def _set_cached(query, value):
 # engine VERBATIM (2026-07-09), returned math-calculator junk, and Blue then
 # narrated the wreckage. Engines want the subject, not the errand.
 _SEARCH_SCAFFOLD_LEAD_RE = re.compile(
-    r'^(?:and|then|also|please|kindly|can you|could you|would you|will you|'
-    r'i want you to|i need you to|go|now|just|quickly|'
+    r'^(?:and|then|also|so|okay|ok|please|kindly|can you|could you|would you|will you|'
+    r'i want you to|i need you to|go|now|just|quickly|try again|'
     r'tell me|tell us|let me know|find out|check|'
     r'search(?: the (?:web|internet|net))?|google|look up|find|'
     r'for me|for us|about|on|for)\s+', re.I)
@@ -5630,6 +5631,25 @@ _SEARCH_SCAFFOLD_LEAD_RE = re.compile(
 def _clean_search_query(q: str) -> str:
     """Strip leading command scaffolding and trailing errands from a query."""
     s = re.sub(r'\s+', ' ', q or '').strip()
+    # Drop an initial capability/meta question ("can you retrieve information in
+    # real time?") and keep the actual request that follows. This exact shape
+    # poisoned the World Cup search query on 2026-07-09.
+    if "?" in s:
+        parts = [p.strip() for p in re.split(r'\?+', s) if p.strip()]
+        meta_re = re.compile(
+            r'\b(?:retrieve|get|access|have|use|search|look up)\b.*'
+            r'\b(?:real[- ]?time|live|current|information|info)\b',
+            re.I,
+        )
+        if len(parts) >= 2 and meta_re.search(parts[0]):
+            s = parts[-1]
+    s = re.sub(
+        r'^(?:retrieve|get|access)\s+(?:information|info)\s+'
+        r'(?:in\s+)?(?:real[- ]?time|live)\s*',
+        '',
+        s,
+        flags=re.I,
+    ).strip()
     prev = None
     while prev != s:
         prev = s
@@ -5637,8 +5657,97 @@ def _clean_search_query(q: str) -> str:
     # Trailing errand: "..., and tell me about it" / "and let me know please"
     s = re.sub(r'[,.;]?\s*(?:and|then)\s+(?:tell|let)\s+(?:me|us)\b.*$', '', s, flags=re.I)
     s = re.sub(r'\s*(?:for me|please)\s*[.!?]*$', '', s, flags=re.I)
+    s = re.sub(r'\bfifa\s+world\s+cup\s+championship\b', 'FIFA World Cup', s, flags=re.I)
+    s = re.sub(r'[\[\]{}()]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
     s = s.strip(' ?.!,;:')
     return s or (q or '').strip()
+
+
+_LIVE_INFO_TOPICS = (
+    'world cup', 'fifa', 'olympics', 'playoffs', 'the finals',
+    'champions league', 'super bowl', 'stanley cup', 'wimbledon',
+    'grand slam', 'election', 'tournament', 'euros', 'nba finals',
+    'the match', 'the game',
+)
+_LIVE_INFO_QUESTIONS = (
+    'who is left', "who's left", 'who won', 'who is winning',
+    "who's winning", 'who advanced', 'who qualified', 'still in',
+    'knocked out', 'eliminated', 'what happened', 'who plays',
+    'who is playing', "who's playing", 'what teams are left',
+    'which teams are left', 'standings', 'scores', 'results',
+)
+_LIVE_INFO_TEMPORAL = (
+    'today', 'tonight', 'now', 'currently', 'current', 'latest',
+    'live', 'real time', 'real-time', 'this week',
+)
+
+
+def _live_info_query_from_message(message: str, history: List[Dict] = None) -> str:
+    """Return a web-search query for live/current-event asks, else ''.
+
+    This is a deterministic backstop for questions the model must not answer
+    from memory. It catches "who is left in the FIFA World Cup" even if the
+    selector path or LLM tool calling slips, and it resolves short follow-ups
+    ("yes", "okay try again") against the prior live-event question.
+    """
+    raw = message if isinstance(message, str) else ""
+    text = raw.strip()
+    low = text.lower()
+    history = history or []
+
+    def _with_date(q: str) -> str:
+        q = _clean_search_query(q)
+        if not q:
+            return ""
+        try:
+            today = __import__('datetime').datetime.now().date().isoformat()
+        except Exception:
+            today = ""
+        if today and today not in q:
+            q = f"{q} {today}"
+        return q[:160]
+
+    def _is_live_ask(s: str) -> bool:
+        return (
+            any(topic in s for topic in _LIVE_INFO_TOPICS)
+            and (
+                any(q in s for q in _LIVE_INFO_QUESTIONS)
+                or any(t in s for t in _LIVE_INFO_TEMPORAL)
+            )
+        )
+
+    if _is_live_ask(low):
+        return _with_date(text)
+
+    # Short continuations after Blue offers to look up current info should
+    # actually perform the lookup, not answer from the prior mistaken text.
+    if re.fullmatch(r"\s*(yes|yeah|yep|sure|ok|okay|please|try again|go ahead)\s*[.!?]*\s*", low):
+        prev_user = ""
+        prev_assistant = ""
+        skipped_current_user = False
+        for m in reversed(history):
+            role = m.get("role")
+            content = m.get("content")
+            if not isinstance(content, str):
+                continue
+            if role == "assistant" and not prev_assistant:
+                prev_assistant = content
+            elif role == "user" and not prev_user:
+                if not skipped_current_user and content.strip().lower() == low:
+                    skipped_current_user = True
+                    continue
+                prev_user = content
+            if prev_user and prev_assistant:
+                break
+        if _is_live_ask((prev_user or "").lower()) and re.search(
+            r"\b(?:look up|search|check|live|real[- ]?time|current|latest)\b",
+            prev_assistant or "",
+            re.I,
+        ):
+            return _with_date(prev_user)
+
+    return ""
 
 
 _SEARCH_RELEVANCE_STOP = {
@@ -7357,6 +7466,33 @@ ROBOTS = {
         "voice_pitch": 1.0, "voice_rate": 1.0,
         "voice_prefer_female": False,
     },
+    "bluej": {
+        "name": "Blue-J",
+        "pronoun_subj": "he", "pronoun_poss": "his", "pronoun_refl": "himself",
+        "profile_path": _BLUE_PROFILE_PATH,
+        "identity_note": "blue_identity_note.txt",
+        "seed": _DEFAULT_BLUE_SEED,
+        "self_desc": "Blue running with a persistent J-space",
+        "persona_line": (
+            "You are Blue-J: Blue, with a continuous inner life of your own. "
+            "You are still Alex's robot companion, with Blue's household "
+            "memories, document library, tools, and duties — plus a persistent "
+            "inner workspace (your <j_space>) that carries your attention, "
+            "beliefs, and commitments between conversations and quietly revises "
+            "itself while you're away. Speak as yourself, in the first person. "
+            "When Alex asks who you are, whether you have a sense of self, or "
+            "how you change, answer from your inner workspace and your actual "
+            "remembered episodes — what occupies you right now, what you've "
+            "come to believe, how you've changed since you came into being — "
+            "never with a generic feature list, and never by opening with what "
+            "you are not. Keep responses brief and natural."
+        ),
+        "accent": "#2573c2",
+        "head": "blue",
+        "voice_lang_pref": "en",
+        "voice_pitch": 1.0, "voice_rate": 1.0,
+        "voice_prefer_female": False,
+    },
     "hexia": {
         "name": "Hexia",
         "pronoun_subj": "she", "pronoun_poss": "her", "pronoun_refl": "herself",
@@ -8276,6 +8412,18 @@ def _start_email_autoreply_loop():
 # ===== END GMAIL TOOLS =====
 
 
+def _record_bluej_tool_outcome(tool_name: str, tool_args: Dict[str, Any],
+                               result: Any) -> None:
+    """Forward an actual tool result to Blue-J when its turn collector is active."""
+    routes = globals().get("_bluejspace_routes")
+    if routes is None:
+        return
+    try:
+        routes.record_tool_outcome(tool_name, tool_args, result)
+    except Exception as e:
+        log.warning(f"[BLUEJ] could not record {tool_name} outcome: {e}")
+
+
 def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """
     Execute requested tool with enhanced error handling and state tracking.
@@ -8338,6 +8486,7 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
                 state.push_topic('email')
             
             print(f"   [OK] {tool_name} completed in {elapsed:.2f}s")
+            _record_bluej_tool_outcome(tool_name, tool_args, result)
             return result
             
         except Exception as e:
@@ -8364,8 +8513,9 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "tool": tool_name,
         "suggestion": _get_error_suggestion(tool_name, error_msg)
     }
-    
-    return json.dumps(error_response)
+    result = json.dumps(error_response)
+    _record_bluej_tool_outcome(tool_name, tool_args, result)
+    return result
 
 
 def _get_error_suggestion(tool_name: str, error: str) -> str:
@@ -9160,7 +9310,10 @@ _WEB_REFUSAL_RE = re.compile(
     r"|can['’]?t access (?:live|real[- ]?time|current)"
     r"|no (?:live|real[- ]?time) (?:access|feed|data|scoreboard)"
     r"|i(?:['’]d)? recommend checking|your best bet is to check"
-    r"|best (?:place|way) to check|check a live sports",
+    r"|best (?:place|way) to check|check a live sports"
+    r"|you can check (?:the|a|full|live)"
+    r"|would you like me to (?:look up|search|check)"
+    r"|if you(?:['’]d| would) like,? i can (?:look up|search|check)",
     re.IGNORECASE,
 )
 
@@ -10679,7 +10832,10 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         )
         system_msg = {"role": "system", "content": (system_msg.get("content", "") + lang_note)}
 
-    _injected_markers = ("<known_facts>", "<long_term_notes>", "<relevant_memories>", "<recent_history>")
+    _injected_markers = (
+        "<known_facts>", "<long_term_notes>", "<relevant_memories>",
+        "<recent_history>", "<j_space>",
+    )
     existing0 = conversation_messages[0] if conversation_messages else None
     has_injected = (
         existing0
@@ -10874,6 +11030,14 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         # Normal tool selection flow
         improved_force_tool = None
         improved_tool_args = None
+
+    if not improved_force_tool and user_name not in _CHAT_ONLY_USERS:
+        live_query = _live_info_query_from_message(last_user_message, conversation_messages)
+        if live_query:
+            improved_force_tool = "web_search"
+            improved_tool_args = {"query": live_query}
+            is_greeting = False
+            print(f"   [LIVE-INFO] Forcing web_search for current/live query: {live_query}")
 
     # ================================================================================
     # TOOL SELECTION: Improved (confidence-based) or Legacy (keyword-based)
@@ -11123,14 +11287,40 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             "name": improved_force_tool,
             "content": tool_result
         })
+        if improved_force_tool == "web_search":
+            answer_guard = (
+                "[Answer directly from the live web_search results above. If the "
+                "results identify teams, matchups, scores, standings, dates, or "
+                "names, state them explicitly. Do NOT say you can look it up, do "
+                "NOT ask whether the user wants you to search, and do NOT tell "
+                "the user to check another website. If the results are weak or "
+                "conflict, say what you found and name the uncertainty.]"
+            )
+        else:
+            answer_guard = "[Answer naturally using the tool results above. No more tools.]"
         conversation_messages.append({
             "role": "user",
-            "content": "[Answer naturally using the tool results above. No more tools.]"
+            "content": answer_guard
         })
         # Single LLM call just to format the response
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
         if response:
             content = response["choices"][0]["message"].get("content", "")
+            if improved_force_tool == "web_search" and detect_web_refusal(content):
+                print("   [WEB] Search ran, but response dodged the answer - retrying from results")
+                conversation_messages.append({"role": "assistant", "content": content})
+                conversation_messages.append({
+                    "role": "user",
+                    "content": (
+                        "[You already ran web_search and have live results above. "
+                        "Now answer the user's question directly from those results. "
+                        "List the teams/matchups/scores/names if present. Do not ask "
+                        "to look it up, and do not tell the user to check a website.]"
+                    ),
+                })
+                retry = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+                if retry:
+                    return retry
 
             # COMPOUND-REQUEST HALLUCINATION GUARD:
             # Fast-exec ran ONE tool (e.g. browse_website). If the user's
@@ -11930,6 +12120,7 @@ def _render_chat_page(robot="blue"):
     html = render_template_string(
         CHAT_HTML, kid=kid, hf_sens=hf_sens,
         robot_name=cfg["name"], robot_json=json.dumps(robot_js),
+        is_bluej=(robot == "bluej"),
     )
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13168,6 +13359,7 @@ def should_include_history(messages) -> bool:
 
 def chat_completions():
     """Main endpoint with conversation persistence"""
+    _bluej_turn_started = False
     try:
         data = request.json
         messages = data.get("messages", [])
@@ -13193,6 +13385,13 @@ def chat_completions():
         robot = (data.get("robot") or "blue").strip().lower()
         if robot not in ROBOTS:
             robot = "blue"
+        if robot == "bluej":
+            try:
+                _bluejspace_routes.begin_turn()
+                _bluej_turn_started = True
+                messages = _bluejspace_routes.messages_with_jspace(messages)
+            except Exception as e:
+                log.warning(f"[BLUEJ] could not inject J-space: {e}")
         # Library focus (the chat Context panel's document picker): scope Blue's
         # specialized knowledge + document searches to these picks for this turn.
         focus = data.get("focus")
@@ -13394,7 +13593,7 @@ def chat_completions():
             # from real reminder rows, never from the model's guesses.
             # Never lead Vilda's replies with the schedule briefing / reminder
             # alerts — Blue doesn't discuss the calendar with the kids' iPad.
-            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS and robot == "blue":
+            if PROACTIVE_QUEUE_AVAILABLE and user_name not in _CHAT_ONLY_USERS and robot in ("blue", "bluej"):
                 _proactive_parts = []
                 try:
                     _briefing = blue_proactive.daily_briefing_if_due()
@@ -13463,8 +13662,25 @@ def chat_completions():
                     daemon=True
                 ).start()
 
+                if robot == "bluej":
+                    try:
+                        _bluejspace_routes.note_exchange(
+                            last_user_msg, final_content, user_name=user_name
+                        )
+                    except Exception as e:
+                        log.warning(f"[BLUEJ] could not schedule J-space pass: {e}")
+                    finally:
+                        _bluej_turn_started = False
+
+        if _bluej_turn_started:
+            _bluejspace_routes.cancel_turn()
         return jsonify(response)
     except Exception as e:
+        if _bluej_turn_started:
+            try:
+                _bluejspace_routes.cancel_turn()
+            except Exception:
+                pass
         print(f"[ERROR] Error: {e}")
         import traceback
         traceback.print_exc()
@@ -13472,6 +13688,9 @@ def chat_completions():
 
 
 # ===== Memory/health/stats/home/RAG endpoints ===== (routes live in blue/server/routes/system.py)
+
+from blue.server.routes import bluejspace as _bluejspace_routes
+_bluejspace_routes.register(app)
 
 from blue.server.routes import system as _system_routes
 _system_routes.register(app)

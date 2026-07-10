@@ -316,7 +316,8 @@ BLUE_JS = r"""
   };
   var NAV = [
     ['Talk', [['/', 'Home', 'home'], ['/chat', 'Chat with Blue', 'chat'],
-              ['/hexia', 'Chat with Hexia', 'chat'], ['/duet', 'Duet', 'duet']]],
+              ['/bluej', 'Blue-J', 'chat'], ['/hexia', 'Chat with Hexia', 'chat'],
+              ['/duet', 'Duet', 'duet']]],
     ['Know', [['/documents', 'Documents', 'lib'], ['/calendar', 'Calendar', 'cal'],
               ['/contacts', 'Contacts', 'ppl'], ['/visual', 'Visual memory', 'eye'],
               ['/perspective', 'Perspective', 'persp']]],
