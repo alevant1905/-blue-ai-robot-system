@@ -250,7 +250,7 @@ def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
     labels make it recoverable straight from the raw text; the numeric
     fields degrade to safe defaults. Returns None when even the workspace
     can't be found — the caller then raises as before."""
-    match = re.search(r"IDENTITY:.*NEXT EXPECTATION:[^\"\n]*", text, re.S)
+    match = re.search(r"IDENTITY:.*NEXT EXPECTATION:[^\"\n]*", text, re.S | re.I)
     if not match:
         return None
     workspace = (
@@ -312,7 +312,11 @@ def _parse_reflection(raw: str) -> Dict[str, Any]:
         # from the raw text; only give up when even that fails.
         parsed = _reflection_from_broken_json(text)
         if parsed is None:
-            raise ValueError("reflection was not valid JSON") from exc
+            # Carry a preview of what the model actually emitted: the job's
+            # stored error is the only way to diagnose these afterwards.
+            raise ValueError(
+                f"reflection was not valid JSON: {_clip(text, 260)!r}"
+            ) from exc
     if not isinstance(parsed, dict):
         raise ValueError("reflection JSON must be an object")
     workspace = _clip(parsed.get("workspace"), 6000)

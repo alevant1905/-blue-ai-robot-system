@@ -10717,6 +10717,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     _last_user_text, _prev_assistant_text = _last_exchange(conversation_messages)
     _cue = _continuation_cue(_last_user_text) if _prev_assistant_text.strip() else None
     if _cue:
+        print(f"   [CUE] continuation cue '{_cue}' — CONTINUE-DON'T-RESTART note in system message")
         anti_repetition_context = ""
         _tail = _prev_assistant_text.strip()[-300:]
         if _cue == 'yes':
@@ -11497,6 +11498,28 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _web_refusal_forced = False
     _leaked_tool_forced = False
     _phantom_claim_corrected = False
+
+    # "Tell me more": ALSO pin the continue-don't-restart instruction right
+    # beside the live turn. The same note exists inside the big system
+    # message, but a small local model weighs nearby text far more — the
+    # classroom intro re-greeted with the upstream note in place (2026-07-10).
+    try:
+        _cue_lu, _cue_pa = _last_exchange(conversation_messages)
+        _cue_kind = _continuation_cue(_cue_lu) if (_cue_pa or "").strip() else None
+        if _cue_kind == 'more':
+            print(f"   [CUE] 'more' continuation cue — pinning CONTINUE note beside the turn")
+            conversation_messages.append({
+                "role": "system",
+                "content": (
+                    "[Continuation: the user is asking for MORE on the subject "
+                    "they name in their last message. Continue your previous "
+                    "reply with NEW material on that subject. Do not greet "
+                    "again, do not re-introduce yourself, and do not repeat or "
+                    "rephrase any sentence you already said.]"
+                ),
+            })
+    except Exception as _cue_e:
+        log.warning(f"[CUE] pin failed: {_cue_e}")
 
     while iteration < max_iterations:
         iteration += 1
