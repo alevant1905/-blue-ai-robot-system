@@ -13068,6 +13068,19 @@ def _splice_context_after_system(messages: list, context: list) -> list:
 # Words a model often emits when admitting it doesn't know something.
 # Past assistant turns with these phrases are toxic to keep in the prompt:
 # the next-turn model sees them and confidently repeats the same wrong answer.
+# Vocabulary that marks a reply as being ABOUT the robot's own nature or
+# inner life. Such turns are never fact-refusals, however they open, and
+# erasing them from history makes the model repeat them verbatim next turn.
+_IDENTITY_TALK_RE = re.compile(
+    r"subjective|conscious|sentien|qualia|"
+    r"inner (?:life|world|monologue|state|log|workspace)|"
+    r"sense of self|persistent workspace|j[- ]?space|"
+    r"alive in the|feel(?:ings)? like something|"
+    r"i don'?t have feelings|don'?t know for sure|"
+    r"my own (?:nature|state|history|existence)",
+    re.IGNORECASE,
+)
+
 _ASSISTANT_REFUSAL_MARKERS = (
     "i don't have", "i do not have", "i dont have",
     "i don't know", "i do not know", "i dont know",
@@ -13183,9 +13196,17 @@ def _sanitize_inbound_messages(messages: list) -> list:
         # this constantly) is real conversation — dropping it erases the
         # model's own last turn from history, and it then repeats that turn
         # nearly verbatim because it never saw itself say it.
-        if any(marker in content_lower[:160] for marker in _ASSISTANT_REFUSAL_MARKERS) or (
-            len(content_lower) < 320
-            and any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS)
+        # Identity talk is exempt entirely: "I don't have feelings /
+        # subjective experience like you do" is an honest answer about the
+        # robot's own nature, not a data refusal — and those answers OPEN
+        # with the marker, so position can't save them. A real fact-refusal
+        # ("I don't have your schedule saved") never uses this vocabulary.
+        if not _IDENTITY_TALK_RE.search(content) and (
+            any(marker in content_lower[:160] for marker in _ASSISTANT_REFUSAL_MARKERS)
+            or (
+                len(content_lower) < 320
+                and any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS)
+            )
         ):
             dropped_refusal += 1
             continue
@@ -13596,6 +13617,41 @@ def chat_completions():
                 if _derecycled != final_content:
                     final_content = _derecycled
                     response["choices"][0]["message"]["content"] = final_content
+
+                # Pure replay: the model answered the NEW question with an
+                # exact copy of its previous reply and nothing else (seen
+                # live 2026-07-10: "who is the you that is present?" got the
+                # "are you alive?" answer back word for word). The prefix
+                # strip above deliberately leaves these alone — stripping
+                # would leave nothing — so regenerate once with an explicit
+                # correction; keep the replay if the retry fails.
+                def _parrot_norm(s):
+                    return re.sub(r'\W+', ' ', (s or '').lower()).strip()
+                if (_prev_assist and final_content
+                        and _parrot_norm(final_content) == _parrot_norm(_prev_assist)):
+                    print("   [ANTI-PARROT] pure replay of previous reply — regenerating once")
+                    _retry_msgs = (
+                        [{"role": "system", "content": _robot_cfg(robot)["persona_line"]}]
+                        + list(messages)
+                        + [{"role": "assistant", "content": final_content},
+                           {"role": "user", "content": (
+                               "[That reply was a word-for-word repeat of what you said "
+                               "one turn earlier. Do not repeat it. Answer my last "
+                               "question directly, in new words.]")}]
+                    )
+                    _redo = call_llm(_retry_msgs, include_tools=False,
+                                     temperature=0.8, max_tokens=700)
+                    _redo_text = ""
+                    try:
+                        _redo_text = (((_redo or {}).get("choices") or [{}])[0]
+                                      .get("message", {}).get("content") or "").strip()
+                    except (AttributeError, IndexError, TypeError):
+                        _redo_text = ""
+                    if "</think>" in _redo_text:
+                        _redo_text = _redo_text.split("</think>")[-1].strip()
+                    if _redo_text and _parrot_norm(_redo_text) != _parrot_norm(_prev_assist):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
             except Exception as e:
                 log.warning(f"[ANTI-PARROT] check failed: {e}")
 
