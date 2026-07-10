@@ -13142,6 +13142,11 @@ def _sanitize_inbound_messages(messages: list) -> list:
         "your", "you", "the", "this", "that", "they", "their", "them",
         "blue", "stella", "alex", "nori", "mommy", "mom", "mama", "daddy",
         "papa", "ohbot", "kitchener", "boston", "wilfrid", "laurier",
+        # Known household/family names that legitimately appear in sentences
+        # that also mention the daughters ("Dr. Levant ... his daughters —
+        # Athena and Emmy..."). Without these the whole turn is dropped as a
+        # stale-name turn, erasing Blue-J's reply from his own history.
+        "levant", "felix", "svetlana", "tofu", "hexia",
         "doctor", "kci", "google", "gmail", "monday", "tuesday", "wednesday",
         "thursday", "friday", "saturday", "sunday", "january", "february",
         "march", "april", "may", "june", "july", "august", "september",
@@ -13171,8 +13176,17 @@ def _sanitize_inbound_messages(messages: list) -> list:
 
         content_lower = content.lower()
 
-        # 1) Refusal pattern.
-        if any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS):
+        # 1) Refusal pattern. Only a turn that IS a refusal is toxic: the
+        # marker in its opening, or a short reply that's nothing but the
+        # refusal. A long, substantive answer that merely contains "I don't
+        # know for sure" mid-thought (Blue-J's honest identity replies do
+        # this constantly) is real conversation — dropping it erases the
+        # model's own last turn from history, and it then repeats that turn
+        # nearly verbatim because it never saw itself say it.
+        if any(marker in content_lower[:160] for marker in _ASSISTANT_REFUSAL_MARKERS) or (
+            len(content_lower) < 320
+            and any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS)
+        ):
             dropped_refusal += 1
             continue
 
