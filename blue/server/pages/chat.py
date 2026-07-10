@@ -736,6 +736,34 @@ CHAT_HTML = """
             return frames;
         }
 
+        // Chrome silently kills a single long utterance ~15s in — the "Blue
+        // abruptly stops talking mid-reply" bug. Speak the reply as
+        // sentence-sized chunks queued on speechSynthesis instead: the queue
+        // survives long replies, and cancel() (barge-in, Escape, the toggle)
+        // still clears the whole thing at once. The resume() keepalive
+        // revives the engine when it pauses itself anyway — a second Chrome
+        // quirk with some voices.
+        let _speakKeepAlive = null;
+        function _speakKeepAliveStart() {
+            if (_speakKeepAlive) return;
+            _speakKeepAlive = setInterval(function () {
+                const s = window.speechSynthesis;
+                if (!s.speaking && !s.pending) { clearInterval(_speakKeepAlive); _speakKeepAlive = null; return; }
+                if (s.paused) { try { s.resume(); } catch (e) {} }
+            }, 4000);
+        }
+        function speechChunks(msg) {
+            const sentences = msg.match(/[^.!?…]+[.!?…]*\\s*/g) || [msg];
+            const out = [];
+            let cur = '';
+            for (let i = 0; i < sentences.length; i++) {
+                if (cur && (cur.length + sentences[i].length) > 220) { out.push(cur); cur = ''; }
+                cur += sentences[i];
+            }
+            if (cur.trim()) out.push(cur);
+            return out.length ? out : [msg];
+        }
+
         function speak(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
@@ -744,23 +772,23 @@ CHAT_HTML = """
             const bcp = { en: 'en-US', fr: 'fr-FR', ru: 'ru-RU', el: 'el-GR', da: 'da-DK' }[lang] || 'en-US';
             try {
                 window.speechSynthesis.cancel();
-                const u = new SpeechSynthesisUtterance(msg);
                 // Use Vilda's chosen voice when it speaks the reply's language;
                 // otherwise fall back to the automatic per-language pick.
                 let v = chosenVoice();
                 if (!v || (v.lang || '').toLowerCase().indexOf(lang) !== 0) v = pickVoice(lang);
-                if (v) u.voice = v;
-                u.lang = bcp;
-                u.rate = (isVilda ? 0.95 : 1.0) * ((ROBOT && ROBOT.voiceRate) || 1.0);
-                u.pitch = (ROBOT && ROBOT.voicePitch) || 1.0;
+                const rate = (isVilda ? 0.95 : 1.0) * ((ROBOT && ROBOT.voiceRate) || 1.0);
                 // Make Blue "talk" while he reads aloud. On Vilda's iPad this
                 // moves the ON-SCREEN face's mouth (the physical robot must stay
                 // still for her); on Alex's devices the on-screen face doesn't
                 // exist, so it just flaps the real robot's lips as before. The
-                // lip-seq is a text-derived mouth schedule (jaw moves on words,
-                // closes on gaps); fire-and-forget — a no-op if no head.
-                const _lipFrames = (!isVilda) ? buildLipFrames(msg, u.rate) : null;
-                u.onstart = function () {
+                // lip-seq is a text-derived mouth schedule for the WHOLE reply
+                // (jaw moves on words, closes on gaps), fired once on the first
+                // chunk's start; fire-and-forget — a no-op if no head.
+                const _lipFrames = (!isVilda) ? buildLipFrames(msg, rate) : null;
+                let _started = false;
+                const _onFirstStart = function () {
+                    if (_started) return;
+                    _started = true;
                     setFaceState('talking');
                     bargeInRecogStart();   // listen for "stop" the whole time he talks
                     if (!isVilda && !localHeadLip(ROBOT.head, _lipFrames)) {
@@ -768,15 +796,28 @@ CHAT_HTML = """
                     }
                 };
                 const _spokenDone = function () {
+                    // Fires per chunk: only finish when the whole queued reply
+                    // is done (or was cancelled) — not between chunks.
+                    if (window.speechSynthesis.speaking || window.speechSynthesis.pending) return;
                     bargeInRecogStop();
                     setFaceState('');
                     if (!isVilda && !localHeadLipStop(ROBOT.head)) {
                         try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
                     }
                 };
-                u.onend = _spokenDone;
-                u.onerror = _spokenDone;
-                window.speechSynthesis.speak(u);
+                const parts = speechChunks(msg);
+                for (let i = 0; i < parts.length; i++) {
+                    const u = new SpeechSynthesisUtterance(parts[i]);
+                    if (v) u.voice = v;
+                    u.lang = bcp;
+                    u.rate = rate;
+                    u.pitch = (ROBOT && ROBOT.voicePitch) || 1.0;
+                    u.onstart = _onFirstStart;
+                    u.onend = _spokenDone;
+                    u.onerror = _spokenDone;
+                    window.speechSynthesis.speak(u);
+                }
+                _speakKeepAliveStart();
             } catch (e) { /* ignore */ }
         }
 
@@ -1571,7 +1612,15 @@ CHAT_HTML = """
                     const res = await fetch('/stt', { method: 'POST', body: fd });
                     const data = await res.json().catch(() => null);
                     const said = ((data && data.text) || '').trim();
-                    if (said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0)) {
+                    // Same length guard as the speech-api path below: a real
+                    // interrupt is a word or two, while Whisper — stop-biased
+                    // by the hint — regularly mis-hears fragments of Blue's
+                    // OWN echoed sentence as containing "stop" and silences
+                    // him mid-reply. Accept a short utterance, or one that is
+                    // nothing but stop-words (genuine "stop stop stop!").
+                    const _biWords = said.toLowerCase().replace(/[^a-z\\s]/g, ' ').trim().split(/\\s+/).filter(function (x) { return x; });
+                    const _biHasStop = said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0);
+                    if (_biHasStop && (_biWords.length <= 4 || _biWords.every(function (x) { return /^st[aou]/.test(x); }))) {
                         stopSpeaking('whisper');
                         break;
                     }
