@@ -10501,14 +10501,21 @@ def _continuation_cue(text: str):
     assistant's previous offer, or asking it to keep going ('more') — or
     None when it's a normal message."""
     t = (text or '').strip().lower()
-    if not t or len(t) > 40:
+    if not t or len(t) > 60:
         return None
     # "Tell me more (about X)" / "go on" / "keep going": continue the SAME
     # answer. Without this the model restarts from the top — the classroom
     # introduction opened "Hi everyone, I'm Blue" twice in a row (2026-07-10).
-    if re.match(r"(?:please\s+)?(?:tell (?:me|us) more|say more|go on|keep going|"
-                r"continue|elaborate|expand on)\b", t):
+    # Allow a short acknowledgement lead ("cool. but can you tell us more...")
+    # and polite wrappers — those broke the match and brought the restart back.
+    t_more = re.sub(r"^(?:(?:cool|ok|okay|nice|great|good|thanks|thank you|hmm|"
+                    r"well|so|and|but|yes|yeah|sure)[,.!\s]+)+", "", t)
+    if re.match(r"(?:please\s+|can you\s+|could you\s+|would you\s+)*"
+                r"(?:tell (?:me|us) (?:some\s+)?more|say more|go on|keep going|"
+                r"continue|elaborate|expand on)\b", t_more):
         return 'more'
+    if len(t) > 40:
+        return None
     words = re.findall(r"[a-z']+", t)
     if not words or len(words) > 5:
         return None
@@ -10723,11 +10730,12 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         elif _cue == 'more':
             continuation_note = (
                 "\nIMPORTANT — CONTINUE, DON'T RESTART: the user's latest message "
-                f"(\"{_last_user_text.strip()}\") asks you to KEEP GOING on what you "
-                f"were just saying, which ended: \"...{_tail}\". Go deeper or further "
-                "on the SAME thing with NEW material only. Do NOT greet again, do NOT "
-                "re-introduce yourself, and do NOT repeat or rephrase anything you "
-                "already said — pick up where you stopped, as one continuous piece.\n"
+                f"(\"{_last_user_text.strip()}\") asks for MORE. Continue your previous "
+                f"reply (it ended: \"...{_tail}\") with NEW material on the subject THEY "
+                "name in their message — if they ask for more about YOURSELF, give new "
+                "material about yourself, not about whatever your last sentence "
+                "happened to end on. Do NOT greet again, do NOT re-introduce yourself, "
+                "and do NOT repeat or rephrase anything you already said.\n"
             )
         else:
             continuation_note = (
