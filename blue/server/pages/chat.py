@@ -1564,6 +1564,14 @@ CHAT_HTML = """
         // Higher threshold than normal because echo cancellation isn't perfect;
         // we only want to react to the user clearly talking over Blue.
         function bargeInOnSamples(samples) {
+            // While the fast speech-api recognizer (below) is running and
+            // healthy, skip the Whisper clip path entirely: both hear the
+            // same mic, but the recognizer transcribes Blue's echo accurately
+            // as long sentences (blocked by its length guard), while Whisper
+            // hallucinates "stop" out of it. Whisper stays the fallback for
+            // browsers without SpeechRecognition and when the recognition
+            // service dies (biRecogOk drops on error).
+            if (biRecogOk) return;
             // NOTE: keep capturing even while a clip is at /stt (biBusy) — the
             // old early-return made Blue DEAF during each transcription, so a
             // "stop" said while his own echo was being transcribed was lost.
@@ -1612,15 +1620,17 @@ CHAT_HTML = """
                     const res = await fetch('/stt', { method: 'POST', body: fd });
                     const data = await res.json().catch(() => null);
                     const said = ((data && data.text) || '').trim();
-                    // Same length guard as the speech-api path below: a real
-                    // interrupt is a word or two, while Whisper — stop-biased
-                    // by the hint — regularly mis-hears fragments of Blue's
-                    // OWN echoed sentence as containing "stop" and silences
-                    // him mid-reply. Accept a short utterance, or one that is
-                    // nothing but stop-words (genuine "stop stop stop!").
+                    // Whisper — stop-biased by the hint — both mis-hears
+                    // fragments of Blue's OWN echoed sentence as "stop" AND
+                    // hallucinates repetition loops: a 0.9s clip came back as
+                    // "stop. stop. stop. stop. stop. stop." (six stops in
+                    // under a second is physically impossible) and silenced
+                    // him two words into a reply. The clip is capped at
+                    // ~0.84s, so a REAL interrupt fits in one or two words;
+                    // anything longer is echo or hallucination.
                     const _biWords = said.toLowerCase().replace(/[^a-z\\s]/g, ' ').trim().split(/\\s+/).filter(function (x) { return x; });
                     const _biHasStop = said && (BI_STOP.test(said) || said.toLowerCase().indexOf('stop') >= 0);
-                    if (_biHasStop && (_biWords.length <= 4 || _biWords.every(function (x) { return /^st[aou]/.test(x); }))) {
+                    if (_biHasStop && _biWords.length <= 2) {
                         stopSpeaking('whisper');
                         break;
                     }
@@ -1647,7 +1657,7 @@ CHAT_HTML = """
         // fallback — it's the only path on browsers without SpeechRecognition
         // and when there's no internet for the recognition service.
         const _BI_SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
-        let biRecog = null, biRecogWanted = false;
+        let biRecog = null, biRecogWanted = false, biRecogOk = false;
         function bargeInRecogStart() {
             biRecogWanted = true;
             if (!_BI_SR || biRecog) return;
@@ -1655,6 +1665,7 @@ CHAT_HTML = """
             try {
                 const r = new _BI_SR();
                 r.continuous = true; r.interimResults = true; r.lang = 'en-US';
+                r.onstart = function () { biRecogOk = true; };
                 r.onresult = function (ev) {
                     if (!(window.speechSynthesis && window.speechSynthesis.speaking)) return;
                     for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -1665,13 +1676,13 @@ CHAT_HTML = """
                         if (BI_STOP.test(t) && t.trim().split(/\\s+/).length <= 6) { stopSpeaking('speech-api'); break; }
                     }
                 };
-                r.onend = function () { biRecog = null; if (biRecogWanted && window.speechSynthesis.speaking) setTimeout(bargeInRecogStart, 80); };
-                r.onerror = function () { /* onend follows and decides on restart */ };
+                r.onend = function () { biRecog = null; biRecogOk = false; if (biRecogWanted && window.speechSynthesis.speaking) setTimeout(bargeInRecogStart, 80); };
+                r.onerror = function () { biRecogOk = false; /* onend follows and decides on restart */ };
                 r.start(); biRecog = r;
-            } catch (e) { biRecog = null; }
+            } catch (e) { biRecog = null; biRecogOk = false; }
         }
         function bargeInRecogStop() {
-            biRecogWanted = false;
+            biRecogWanted = false; biRecogOk = false;
             if (biRecog) { try { biRecog.stop(); } catch (e) {} biRecog = null; }
         }
         // Escape always shuts him up, mic or no mic.
