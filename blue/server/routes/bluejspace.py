@@ -122,9 +122,11 @@ def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
             ((choices[0].get("message") or {}).get("content") or "")
             if choices else ""
         )
-        if "</think>" in text:
-            text = text.split("</think>")[-1]
-        return text.replace("<think>", "").strip()
+        # Think blocks are NOT stripped here: a reasoning model sometimes
+        # leaves the real reflection JSON inside <think> with only a fragment
+        # after it — _parse_reflection tries the post-think tail first and
+        # falls back to the full text.
+        return text.strip()
     except Exception as exc:
         bt.log.warning(f"[BLUEJ] continuity LLM call failed: {exc}")
         return ""
@@ -292,6 +294,25 @@ def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_reflection(raw: str) -> Dict[str, Any]:
+    """Parse one reflection reply. The text after </think> is tried first;
+    when that fails (seen live: only a drive_deltas fragment leaked out
+    after the think block), the full raw text including the think block is
+    tried second — the real JSON is usually in there."""
+    full = (raw or "").strip()
+    candidates: List[str] = []
+    if "</think>" in full:
+        candidates.append(full.split("</think>")[-1].strip())
+    candidates.append(full.replace("<think>", " ").replace("</think>", " ").strip())
+    last_error: Optional[ValueError] = None
+    for candidate in candidates:
+        try:
+            return _parse_reflection_text(candidate)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error if last_error else ValueError("reflection was empty")
+
+
+def _parse_reflection_text(raw: str) -> Dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)

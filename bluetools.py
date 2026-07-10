@@ -11503,21 +11503,30 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # beside the live turn. The same note exists inside the big system
     # message, but a small local model weighs nearby text far more — the
     # classroom intro re-greeted with the upstream note in place (2026-07-10).
+    # The note rides INSIDE the final user message: the model's chat template
+    # hard-rejects the whole request ("System message must be at the
+    # beginning" → LM Studio 400 → "I'm having trouble connecting") if a
+    # system message follows the conversation.
     try:
         _cue_lu, _cue_pa = _last_exchange(conversation_messages)
         _cue_kind = _continuation_cue(_cue_lu) if (_cue_pa or "").strip() else None
         if _cue_kind == 'more':
-            print(f"   [CUE] 'more' continuation cue — pinning CONTINUE note beside the turn")
-            conversation_messages.append({
-                "role": "system",
-                "content": (
-                    "[Continuation: the user is asking for MORE on the subject "
-                    "they name in their last message. Continue your previous "
-                    "reply with NEW material on that subject. Do not greet "
-                    "again, do not re-introduce yourself, and do not repeat or "
-                    "rephrase any sentence you already said.]"
-                ),
-            })
+            for _cue_i in range(len(conversation_messages) - 1, -1, -1):
+                _cue_m = conversation_messages[_cue_i]
+                if _cue_m.get("role") == "user" and isinstance(_cue_m.get("content"), str):
+                    print("   [CUE] 'more' continuation cue — note pinned inside the live turn")
+                    conversation_messages[_cue_i] = {
+                        "role": "user",
+                        "content": (
+                            "[This asks for MORE on the subject named below. "
+                            "Continue your previous reply with NEW material on "
+                            "that subject. Do not greet again, do not "
+                            "re-introduce yourself, and do not repeat or "
+                            "rephrase any sentence you already said.]\n"
+                            + _cue_m["content"]
+                        ),
+                    }
+                    break
     except Exception as _cue_e:
         log.warning(f"[CUE] pin failed: {_cue_e}")
 
@@ -13736,15 +13745,22 @@ def chat_completions():
                 if (_prev_assist and final_content
                         and _parrot_norm(final_content) == _parrot_norm(_prev_assist)):
                     print("   [ANTI-PARROT] pure replay of previous reply — regenerating once")
-                    _retry_msgs = (
-                        [{"role": "system", "content": _robot_cfg(robot)["persona_line"]}]
-                        + list(messages)
-                        + [{"role": "assistant", "content": final_content},
-                           {"role": "user", "content": (
-                               "[That reply was a word-for-word repeat of what you said "
-                               "one turn earlier. Do not repeat it. Answer my last "
-                               "question directly, in new words.]")}]
-                    )
+                    # The model's chat template only allows ONE system message,
+                    # at position 0 (anything else → LM Studio 400): merge the
+                    # persona into an existing head system message if present.
+                    _retry_msgs = list(messages) + [
+                        {"role": "assistant", "content": final_content},
+                        {"role": "user", "content": (
+                            "[That reply was a word-for-word repeat of what you said "
+                            "one turn earlier. Do not repeat it. Answer my last "
+                            "question directly, in new words.]")},
+                    ]
+                    _persona = _robot_cfg(robot)["persona_line"]
+                    if _retry_msgs and _retry_msgs[0].get("role") == "system":
+                        _retry_msgs[0] = {"role": "system", "content": (
+                            _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
+                    else:
+                        _retry_msgs.insert(0, {"role": "system", "content": _persona})
                     _redo = call_llm(_retry_msgs, include_tools=False,
                                      temperature=0.8, max_tokens=700)
                     _redo_text = ""

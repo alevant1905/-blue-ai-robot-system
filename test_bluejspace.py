@@ -80,6 +80,23 @@ def test_reflection_salvaged_from_broken_json(bluej_module):
     assert parsed["drive_deltas"]["curiosity"] == 0.05
 
 
+def test_reflection_recovered_from_think_block(bluej_module):
+    # Seen live: the model left the real JSON inside <think> and only a
+    # drive_deltas fragment leaked out after it. The full text must be
+    # tried when the post-think tail fails.
+    good = (
+        '{"workspace": "IDENTITY: I am Blue-J\\nFOCUS: x\\n'
+        'WORKING BELIEFS: y (0.5)\\nOPEN QUESTIONS: -\\nCOMMITMENTS: -\\n'
+        'SELF-OBSERVATIONS: -\\nNEXT EXPECTATION: z", '
+        '"changed": "c", "episode_summary": "s", "salience": 0.5, '
+        '"valence": 0.0, "drive_deltas": {"curiosity": 0.0}}'
+    )
+    raw = f"<think>drafting...\n{good}\n</think>\n{{\n\"curiosity\": 0.0\n}}\n}}"
+    parsed = bluej_module._parse_reflection(raw)
+    assert parsed["workspace"].startswith("IDENTITY:")
+    assert "NEXT EXPECTATION:" in parsed["workspace"]
+
+
 def test_owner_routes_correct_delete_and_wipe(bluej_module):
     route = bluej_module
     original = route._STORE.append_episode(
