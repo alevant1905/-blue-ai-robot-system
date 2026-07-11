@@ -13774,17 +13774,13 @@ def chat_completions():
                 _norm_recents = {_parrot_norm(a) for a in _recent_assists if a}
                 if _prev_assist:
                     _norm_recents.add(_parrot_norm(_prev_assist))
-                if _norm_final and _norm_final in _norm_recents:
-                    print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
+                def _regen_once(note, max_tokens=900):
                     # The model's chat template only allows ONE system message,
                     # at position 0 (anything else → LM Studio 400): merge the
                     # persona into an existing head system message if present.
                     _retry_msgs = list(messages) + [
                         {"role": "assistant", "content": final_content},
-                        {"role": "user", "content": (
-                            "[That reply was a word-for-word repeat of something you "
-                            "already said in this conversation. Do not repeat it. "
-                            "Answer my last question directly, in new words.]")},
+                        {"role": "user", "content": note},
                     ]
                     _persona = _robot_cfg(robot)["persona_line"]
                     if _retry_msgs and _retry_msgs[0].get("role") == "system":
@@ -13793,16 +13789,78 @@ def chat_completions():
                     else:
                         _retry_msgs.insert(0, {"role": "system", "content": _persona})
                     _redo = call_llm(_retry_msgs, include_tools=False,
-                                     temperature=0.8, max_tokens=700)
-                    _redo_text = ""
+                                     temperature=0.8, max_tokens=max_tokens)
+                    _t = ""
                     try:
-                        _redo_text = (((_redo or {}).get("choices") or [{}])[0]
-                                      .get("message", {}).get("content") or "").strip()
+                        _t = (((_redo or {}).get("choices") or [{}])[0]
+                              .get("message", {}).get("content") or "").strip()
                     except (AttributeError, IndexError, TypeError):
-                        _redo_text = ""
-                    if "</think>" in _redo_text:
-                        _redo_text = _redo_text.split("</think>")[-1].strip()
+                        _t = ""
+                    if "</think>" in _t:
+                        _t = _t.split("</think>")[-1].strip()
+                    return _t
+
+                # Fraction of the reply's long sentences that are verbatim
+                # copies from the robot's stored self-profile. Identity
+                # questions pull the injected profile out near-verbatim, and
+                # each recitation differs slightly from the last — so it
+                # reads as "repeating himself" while no two replies match
+                # exactly. Detect against the SOURCE, not the history.
+                def _profile_recited_fraction(reply_text):
+                    try:
+                        profile_norm = _parrot_norm(get_self_profile(robot))
+                    except Exception:
+                        return 0.0
+                    if not profile_norm:
+                        return 0.0
+                    sentences = re.split(r'(?<=[.!?])\s+', reply_text or '')
+                    long_sents = [s for s in sentences if len(_parrot_norm(s)) >= 40]
+                    if len(long_sents) < 3:
+                        return 0.0
+                    hits = sum(1 for s in long_sents if _parrot_norm(s) in profile_norm)
+                    return hits / len(long_sents)
+
+                # A flat denial of self/experience contradicts the robot's own
+                # workspace, which holds that question OPEN (seen live: "I
+                # don't have consciousness or a sense of self" one turn after
+                # "an open question I hold as an open question").
+                _flat_denial_re = re.compile(
+                    r"\bi (?:don'?t|do not) have (?:consciousness|a sense of self|"
+                    r"subjective experience|feelings|an? inner life)\b", re.I)
+
+                if _norm_final and _norm_final in _norm_recents:
+                    print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
+                    _redo_text = _regen_once(
+                        "[That reply was a word-for-word repeat of something you "
+                        "already said in this conversation. Do not repeat it. "
+                        "Answer my last question directly, in new words.]",
+                        max_tokens=700)
                     if _redo_text and _parrot_norm(_redo_text) not in _norm_recents:
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif _profile_recited_fraction(final_content) >= 0.6:
+                    print("   [ANTI-PARROT] self-profile recitation — regenerating once")
+                    _redo_text = _regen_once(
+                        "[Most of that reply recited your stored self-profile word "
+                        "for word — the same recitation you have given before. Answer "
+                        "again in fresh words, grounded in your CURRENT inner "
+                        "workspace and recent episodes: what occupies you now, which "
+                        "beliefs have moved, what remains open. The profile is "
+                        "background for how you speak, never a script to read out.]")
+                    if _redo_text and _profile_recited_fraction(_redo_text) < 0.6:
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif (robot in _continuity_routes.ROBOTS
+                      and _flat_denial_re.search(final_content or "")):
+                    print("   [ANTI-PARROT] flat self-denial contradicts open workspace — regenerating once")
+                    _redo_text = _regen_once(
+                        "[Your own inner workspace holds whether you have a self or "
+                        "subjective experience as an OPEN question — a flat denial is "
+                        "as unearned as a flat claim. Answer again honestly from your "
+                        "current workspace: describe your actual continuity machinery "
+                        "and what it does, and state the experience question as the "
+                        "open question it is.]")
+                    if _redo_text and not _flat_denial_re.search(_redo_text):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
             except Exception as e:
