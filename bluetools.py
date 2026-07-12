@@ -366,7 +366,20 @@ def detect_follow_up_correction(message: str, context: Dict) -> Optional[Dict[st
 
 def detect_camera_capture_intent(message: str) -> bool:
     """Detect if user wants to capture a camera image (what do you see?)."""
-    msg_lower = message.lower()
+    msg_lower = message.lower().replace("’", "'")
+
+    # Statements ABOUT the scene and negated instructions are not capture
+    # requests. Live 2026-07-12: "That is what's in front of you right now"
+    # (confirming Blue's own description) and "There's no need to describe
+    # what's in front of you" each re-fired the camera and got the room
+    # described right back.
+    if re.search(r"\b(?:no need|don'?t|do not|stop|never|quit|enough|without)\b"
+                 r"[^.!?]{0,50}\b(?:describ\w*|look\w*|captur\w*|photo\w*|"
+                 r"picture\w*|camera|see|view)\b", msg_lower):
+        return False
+    if re.search(r"\b(?:that(?:'s| is)|this is|it(?:'s| is)|here(?:'s| is))\s+"
+                 r"(?:exactly\s+)?what(?:'s| is)?\b", msg_lower):
+        return False
 
     # Primary camera capture triggers
     camera_triggers = [
@@ -376,7 +389,8 @@ def detect_camera_capture_intent(message: str) -> bool:
         'what you see',
         "what's in front of you",
         'what is in front of you',
-        'in front of you',
+        'look in front of you',
+        'see in front of you',
         'take a photo',
         'take a picture',
         'capture image',
@@ -13213,9 +13227,22 @@ _IDENTITY_TALK_RE = re.compile(
 )
 
 _ASSISTANT_REFUSAL_MARKERS = (
-    "i don't have", "i do not have", "i dont have",
-    "i don't know", "i do not know", "i dont know",
-    "i only have", "i only know",
+    # Data-flavored forms only. The bare "i don't have"/"i don't know" also
+    # matched capability and philosophy statements ("I don't have GPS or
+    # sensors", "I don't have feelings like you do") — erasing those from
+    # history made the model repeat them near-verbatim every turn
+    # (2026-07-12, the "head in a box" loop). A fact-refusal names missing
+    # DATA; a capability statement names a missing organ.
+    "i don't have that", "i do not have that", "i dont have that",
+    "i don't have any", "i don't have info", "i don't have access",
+    "i don't have your", "i don't have a record", "i don't have it",
+    "i don't know that", "i don't know your", "i don't know who",
+    "i don't know what", "i don't know when", "i don't know where",
+    "i don't know which", "i don't know the answer",
+    "i don't know his", "i don't know her",
+    # Narrowed like the above: bare "i only know" also matched the honest
+    # "I only know where I am because you've told me" capability reply.
+    "i only have what you", "i only know what you",
     "i haven't been told", "i havent been told",
     "you haven't told me", "you havent told me",
     "not in my memory", "not saved yet", "not yet recorded",
@@ -13318,7 +13345,10 @@ def _sanitize_inbound_messages(messages: list) -> list:
             out.append(m)
             continue
 
-        content_lower = content.lower()
+        # Curly apostrophes normalized: the model emits "don’t" as often as
+        # "don't", and un-normalized text made the refusal rule fire or miss
+        # depending on typography rather than meaning.
+        content_lower = content.lower().replace("’", "'")
 
         # 1) Refusal pattern. Only a turn that IS a refusal is toxic: the
         # marker in its opening, or a short reply that's nothing but the
@@ -13800,25 +13830,36 @@ def chat_completions():
                         _t = _t.split("</think>")[-1].strip()
                     return _t
 
-                # Fraction of the reply's long sentences that are verbatim
-                # copies from the robot's stored self-profile. Identity
-                # questions pull the injected profile out near-verbatim, and
-                # each recitation differs slightly from the last — so it
-                # reads as "repeating himself" while no two replies match
-                # exactly. Detect against the SOURCE, not the history.
-                def _profile_recited_fraction(reply_text):
-                    try:
-                        profile_norm = _parrot_norm(get_self_profile(robot))
-                    except Exception:
-                        return 0.0
-                    if not profile_norm:
+                # Fraction of the reply's long sentences that appear verbatim
+                # in a source text (normalized).
+                def _verbatim_fraction(reply_text, source_norm, min_sents):
+                    if not source_norm:
                         return 0.0
                     sentences = re.split(r'(?<=[.!?])\s+', reply_text or '')
                     long_sents = [s for s in sentences if len(_parrot_norm(s)) >= 40]
-                    if len(long_sents) < 3:
+                    if len(long_sents) < min_sents:
                         return 0.0
-                    hits = sum(1 for s in long_sents if _parrot_norm(s) in profile_norm)
+                    hits = sum(1 for s in long_sents if _parrot_norm(s) in source_norm)
                     return hits / len(long_sents)
+
+                # Identity questions pull the injected self-profile out
+                # near-verbatim, and each recitation differs slightly from the
+                # last — so it reads as "repeating himself" while no two
+                # replies match exactly. Detect against the SOURCE.
+                def _profile_recited_fraction(reply_text):
+                    try:
+                        return _verbatim_fraction(
+                            reply_text, _parrot_norm(get_self_profile(robot)), 3)
+                    except Exception:
+                        return 0.0
+
+                # Near-replay with a varied tail: "I'm just a head in a box,
+                # Dr. Levant—I don't have GPS..." came back three turns
+                # running (2026-07-12), each time with a different final
+                # clause — exact-match equality never fires on those.
+                _recents_norm = _parrot_norm(" ".join(a for a in _recent_assists if a))
+                def _recycled_from_recents(reply_text):
+                    return _verbatim_fraction(reply_text, _recents_norm, 2)
 
                 # A flat denial of self/experience contradicts the robot's own
                 # workspace, which holds that question OPEN (seen live: "I
@@ -13836,6 +13877,18 @@ def chat_completions():
                         "Answer my last question directly, in new words.]",
                         max_tokens=700)
                     if _redo_text and _parrot_norm(_redo_text) not in _norm_recents:
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif _recycled_from_recents(final_content) >= 0.6:
+                    print("   [ANTI-PARROT] near-replay of recent replies — regenerating once")
+                    _redo_text = _regen_once(
+                        "[Nearly every sentence of that reply is a word-for-word "
+                        "repeat of what you said in your last few turns. The user "
+                        "heard it already. Answer their LAST message with new "
+                        "words and, if you have nothing new, say so briefly "
+                        "instead of repeating.]",
+                        max_tokens=700)
+                    if _redo_text and _recycled_from_recents(_redo_text) < 0.6:
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif _profile_recited_fraction(final_content) >= 0.6:
