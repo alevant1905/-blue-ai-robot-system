@@ -621,6 +621,9 @@ class OhbotSerialDriver {
     this._write('m0'+m+','+absPos+','+sstr+'\\n');
   }
   eyeColour(r,g,b){
+    // The eye LEDs read channels in G,R,B order (red requests lit the eyes
+    // green and vice versa) — swap on the way out, mirroring blue/head.py.
+    if(this._cal('eye_swap_rg',true)){ var _t=r; r=g; g=_t; }
     r=Math.trunc(255/10*_clip(r,0,10)); g=Math.trunc(255/10*_clip(g,0,10)); b=Math.trunc(255/10*_clip(b,0,10));
     this._write('l00,'+r+','+g+','+b+'\\n'); this._write('l01,'+r+','+g+','+b+'\\n');
   }

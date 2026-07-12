@@ -300,6 +300,12 @@ class RobotHead:
             "idle_amplitude": 5,   # how big each motion is (0=subtle, 10=expressive)
             # Hands-free wake-word sensitivity on the chat page (0=strict, 10=sensitive).
             "hf_sensitivity": 5,
+            # The eye LEDs take their channels in G,R,B order, not R,G,B —
+            # asking for red lit the eyes green and vice versa (observed on
+            # Blue's head, 2026-07-12; blue channel unaffected). Swap R and G
+            # on the way out. Per-head so a board with correctly-ordered LEDs
+            # can turn it off in its calibration file.
+            "eye_swap_rg": True,
         }
 
         self._busy_until = 0.0      # Unix time; idle loop skips if now < this.
@@ -329,7 +335,7 @@ class RobotHead:
                         pass
                 if "auto_movement" in data:
                     self._calibration["auto_movement"] = bool(data["auto_movement"])
-                for k in ("lip_invert_top", "lip_invert_bottom"):
+                for k in ("lip_invert_top", "lip_invert_bottom", "eye_swap_rg"):
                     if k in data:
                         self._calibration[k] = bool(data[k])
                 for k in ("idle_frequency", "idle_amplitude", "hf_sensitivity"):
@@ -373,6 +379,7 @@ class RobotHead:
                 "auto_movement": bool(self._calibration["auto_movement"]),
                 "lip_invert_top": bool(self._calibration.get("lip_invert_top", False)),
                 "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
+                "eye_swap_rg": bool(self._calibration.get("eye_swap_rg", True)),
                 "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
                 "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
                 "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
@@ -402,6 +409,7 @@ class RobotHead:
             "auto_movement": bool(self._calibration["auto_movement"]),
             "lip_invert_top": bool(self._calibration.get("lip_invert_top", False)),
             "lip_invert_bottom": bool(self._calibration.get("lip_invert_bottom", False)),
+            "eye_swap_rg": bool(self._calibration.get("eye_swap_rg", True)),
             "lip_top_range": float(self._calibration.get("lip_top_range", _LIP_TOP_RANGE)),
             "lip_bottom_range": float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE)),
             "lip_speed": float(self._calibration.get("lip_speed", _LIP_FLAP_SPEED)),
@@ -873,6 +881,10 @@ class RobotHead:
     def eye_color(self, r: int, g: int, b: int) -> bool:
         if not self.init():
             return False
+        # The eye LEDs read channels in G,R,B order: red requests lit the
+        # eyes green and vice versa. Swap on the way out (see eye_swap_rg).
+        if self._calibration.get("eye_swap_rg", True):
+            r, g = g, r
         try:
             with self._lock:
                 self._ohbot.eyeColour(int(_clip(r, 0, 10)), int(_clip(g, 0, 10)), int(_clip(b, 0, 10)))
