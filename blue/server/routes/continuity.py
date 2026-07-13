@@ -212,6 +212,45 @@ def _tool_kind(name: str) -> str:
     return "action"
 
 
+_WS_LABELS = ("IDENTITY", "FOCUS", "WORKING BELIEFS", "OPEN QUESTIONS",
+              "COMMITMENTS", "SELF-OBSERVATIONS", "NEXT EXPECTATION")
+_WS_LABEL_ALT = "|".join(re.escape(l) for l in _WS_LABELS)
+
+
+def _workspace_lines(text: str) -> Dict[str, str]:
+    """label -> its full line, parsed tolerantly from a workspace blob."""
+    out: Dict[str, str] = {}
+    for label in _WS_LABELS:
+        m = re.search(
+            r"(?:^|\n)\s*%s\s*:\s*(.*?)(?=\n\s*(?:%s)\s*:|\Z)"
+            % (re.escape(label), _WS_LABEL_ALT),
+            text or "", re.S | re.I)
+        if m and m.group(1).strip():
+            out[label] = f"{label}: {' '.join(m.group(1).split())}"
+    return out
+
+
+def _merge_workspace(new_ws: str, current_ws: str) -> str:
+    """Merge a (possibly partial) new workspace over the current one.
+
+    The reflection prompt says "revise only what this job warrants", and the
+    model takes it literally: idle passes often return only the lines that
+    moved (or none at all, just drive deltas) — previously each of those was
+    rejected outright ("missing required sections", 3 attempts, job failed,
+    both robots, every idle window). Lines absent from the new workspace now
+    carry over from the current one; only a workspace missing a label in
+    BOTH is unrecoverable."""
+    new_lines = _workspace_lines(new_ws)
+    cur_lines = _workspace_lines(current_ws)
+    merged = []
+    for label in _WS_LABELS:
+        line = new_lines.get(label) or cur_lines.get(label)
+        if not line:
+            return ""
+        merged.append(line)
+    return "\n".join(merged)
+
+
 def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
     """Salvage a reflection whose JSON won't parse (the local model emits
     unescaped inner quotes and similar breakage). The workspace's fixed
@@ -219,14 +258,12 @@ def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
     fields degrade to safe defaults. Returns None when even the workspace
     can't be found — the caller then raises as before."""
     match = re.search(r"IDENTITY:.*NEXT EXPECTATION:[^\"\n]*", text, re.S | re.I)
-    if not match:
-        return None
     workspace = (
         match.group(0)
         .replace("\\n", "\n")
         .replace('\\"', '"')
         .strip()
-    )
+    ) if match else ""
 
     def _field(name: str) -> str:
         m = re.search(
@@ -249,6 +286,9 @@ def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
             r"\s*:\s*(-?[0-9.]+)", text
         )
     }
+    # No workspace and no deltas either: nothing salvageable.
+    if not workspace and not deltas:
+        return None
     return {
         "workspace": workspace,
         "changed": _field("changed"),
@@ -259,11 +299,13 @@ def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _parse_reflection(raw: str, robot_name: str) -> Dict[str, Any]:
+def _parse_reflection(raw: str, robot_name: str,
+                      current_workspace: str = "") -> Dict[str, Any]:
     """Parse one reflection reply. The text after </think> is tried first;
     when that fails (seen live: only a drive_deltas fragment leaked out
     after the think block), the full raw text including the think block is
-    tried second — the real JSON is usually in there."""
+    tried second — the real JSON is usually in there. A partial workspace
+    merges over `current_workspace` rather than failing."""
     full = (raw or "").strip()
     candidates: List[str] = []
     if "</think>" in full:
@@ -272,13 +314,14 @@ def _parse_reflection(raw: str, robot_name: str) -> Dict[str, Any]:
     last_error: Optional[ValueError] = None
     for candidate in candidates:
         try:
-            return _parse_reflection_text(candidate, robot_name)
+            return _parse_reflection_text(candidate, robot_name, current_workspace)
         except ValueError as exc:
             last_error = exc
     raise last_error if last_error else ValueError("reflection was empty")
 
 
-def _parse_reflection_text(raw: str, robot_name: str) -> Dict[str, Any]:
+def _parse_reflection_text(raw: str, robot_name: str,
+                           current_workspace: str = "") -> Dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
@@ -306,12 +349,13 @@ def _parse_reflection_text(raw: str, robot_name: str) -> Dict[str, Any]:
             ) from exc
     if not isinstance(parsed, dict):
         raise ValueError("reflection JSON must be an object")
-    workspace = _clip(parsed.get("workspace"), 6000)
-    required = (
-        "IDENTITY:", "FOCUS:", "WORKING BELIEFS:", "OPEN QUESTIONS:",
-        "COMMITMENTS:", "SELF-OBSERVATIONS:", "NEXT EXPECTATION:",
-    )
-    if not workspace or any(label not in workspace.upper() for label in required):
+    # A partial workspace (only the lines that moved — the prompt says
+    # "revise only what this job warrants" and the model takes it literally,
+    # especially on idle passes) merges over the current one; a missing
+    # workspace with real drive deltas is a legitimate "nothing moved" pass.
+    workspace = _merge_workspace(
+        _clip(parsed.get("workspace"), 6000), current_workspace)
+    if not workspace:
         raise ValueError("reflection workspace is missing required sections")
     deltas = parsed.get("drive_deltas")
     if not isinstance(deltas, dict):
@@ -455,7 +499,8 @@ class RobotContinuity:
         ])
         if not raw:
             raise RuntimeError("reflection model returned no content")
-        reflected = _parse_reflection(raw, self.name)
+        reflected = _parse_reflection(raw, self.name,
+                                      workspace.get("workspace") or "")
         committed, new_workspace, new_drives, reflection = self.store.commit_reflection(
             job_id=job["id"],
             workspace_content=reflected["workspace"],

@@ -122,6 +122,39 @@ def test_reflection_recovered_from_think_block(continuity_module):
     assert "NEXT EXPECTATION:" in parsed["workspace"]
 
 
+_CURRENT_WS = (
+    "IDENTITY: I am Blue, learning.\nFOCUS: old focus\n"
+    "WORKING BELIEFS: x (0.5)\nOPEN QUESTIONS: q?\n"
+    "COMMITMENTS: c\nSELF-OBSERVATIONS: o\nNEXT EXPECTATION: e"
+)
+
+
+def test_partial_workspace_merges_over_current(continuity_module):
+    # The model often returns only the lines that moved ("revise only what
+    # this job warrants") — previously rejected as missing sections.
+    raw = (
+        '{"workspace": "FOCUS: a new focus\\nNEXT EXPECTATION: something new", '
+        '"changed": "focus moved", "episode_summary": "s", "salience": 0.4, '
+        '"valence": 0.0, "drive_deltas": {"curiosity": 0.02}}'
+    )
+    parsed = continuity_module._parse_reflection(raw, "Blue", _CURRENT_WS)
+    ws = parsed["workspace"]
+    assert "FOCUS: a new focus" in ws
+    assert "NEXT EXPECTATION: something new" in ws
+    assert "IDENTITY: I am Blue, learning." in ws       # carried over
+    assert "COMMITMENTS: c" in ws                        # carried over
+
+
+def test_drive_only_fragment_is_a_nothing_moved_pass(continuity_module):
+    # Seen live on both robots every idle window: the model emits ONLY the
+    # drive deltas. That's a legitimate minimal reflection, not a failure.
+    raw = '{"curiosity":0.0,"uncertainty":0.0,"connection":0.0,"commitment":0.0,"energy":0.0}}'
+    parsed = continuity_module._parse_reflection(raw, "Blue", _CURRENT_WS)
+    assert parsed["workspace"].startswith("IDENTITY: I am Blue, learning.")
+    assert "NEXT EXPECTATION: e" in parsed["workspace"]
+    assert parsed["changed"] == "nothing material moved"
+
+
 def test_owner_routes_correct_delete_and_wipe(continuity_module):
     route = continuity_module
     original = route.HUB["blue"].store.append_episode(
