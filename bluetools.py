@@ -1439,16 +1439,21 @@ def extract_and_save_facts(messages: list) -> bool:
 
 
 def build_system_preamble(robot_name: str = "Blue") -> str:
-    core = _facts_block()
+    # No bot-identity facts here anymore. The facts table's identity rows
+    # describe BLUE ("name: Blue", "identity: Friendly home robot assistant",
+    # the privacy blurb) and this preamble stamped them on EVERY robot as
+    # "ground-truth... Do not contradict them" — on Hexia's page the robot
+    # introduced itself as Blue and denied being Hexia (2026-07-12). They
+    # were also the source of Blue's own brochure recitals. Robot identity
+    # lives in persona_line + the self-profile + the j_space now; the
+    # <known_facts> block carries the USER's facts (and already filters bot
+    # facts on its side).
     # Hardcoded user pronouns — Alex uses he/him, and the model has been
     # caught defaulting to "she" otherwise.
-    pronouns = "Alex uses he/him pronouns — always refer to Alex as he/him, never as she/her."
-    if core:
-        return (
-            f"You are {robot_name}. Use these ground-truth facts as identity context. "
-            "Do not contradict them. " + core + " | " + pronouns
-        )
-    return f"You are {robot_name}. " + pronouns
+    return (
+        f"You are {robot_name}. Alex uses he/him pronouns — always refer to "
+        "Alex as he/him, never as she/her."
+    )
 
 # Load facts at import time (only if enhanced memory not available)
 try:
@@ -13876,7 +13881,7 @@ def chat_completions():
                 _flat_denial_re = re.compile(
                     r"\bi (?:don['’]?t|do not) have (?:consciousness|a sense of self|"
                     r"subjective experience|feelings|an? inner life|"
-                    r"a ['\"“”‘’]?j[-_ ]?space|any form of internal|"
+                    r"an? (?:\w+ )?['\"“”‘’]?j[-_ ]?space|any form of internal|"
                     r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
                     r"a persistent (?:inner )?workspace)", re.I)
 
