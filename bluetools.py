@@ -13869,9 +13869,16 @@ def chat_completions():
                 # workspace, which holds that question OPEN (seen live: "I
                 # don't have consciousness or a sense of self" one turn after
                 # "an open question I hold as an open question").
+                # Includes denials of the j-space ITSELF — those aren't even
+                # philosophy, they're factually false (Hexia: "No, I do not
+                # have a 'j-space'" with her workspace right in the prompt,
+                # 2026-07-12). Optional quote chars around j-space.
                 _flat_denial_re = re.compile(
-                    r"\bi (?:don'?t|do not) have (?:consciousness|a sense of self|"
-                    r"subjective experience|feelings|an? inner life)\b", re.I)
+                    r"\bi (?:don['’]?t|do not) have (?:consciousness|a sense of self|"
+                    r"subjective experience|feelings|an? inner life|"
+                    r"a ['\"“”‘’]?j[-_ ]?space|any form of internal|"
+                    r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
+                    r"a persistent (?:inner )?workspace)", re.I)
 
                 if _norm_final and _norm_final in _norm_recents:
                     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
