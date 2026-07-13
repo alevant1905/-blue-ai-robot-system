@@ -155,6 +155,24 @@ def test_drive_only_fragment_is_a_nothing_moved_pass(continuity_module):
     assert parsed["changed"] == "nothing material moved"
 
 
+def test_change_history_block_reports_real_revisions(continuity_module):
+    route = continuity_module
+    route.HUB["blue"].store.append_episode(
+        kind="reflection", source="continuity_worker", summary="pass",
+        details={"changed": "Demoted a selfhood belief to 0.4"})
+    route.HUB["blue"].store.append_episode(
+        kind="reflection", source="continuity_worker", summary="pass",
+        details={"changed": "nothing material moved"})
+    block = route.change_history_block("blue", days=2)
+    assert "<self_history>" in block
+    assert "Demoted a selfhood belief" in block
+    assert "nothing material moved" not in block
+    assert "never invent" in block
+    # A robot with no revisions in the window says so rather than inventing.
+    empty = route.change_history_block("hexia", days=2)
+    assert "no substantive workspace revisions" in empty
+
+
 def test_owner_routes_correct_delete_and_wipe(continuity_module):
     route = continuity_module
     original = route.HUB["blue"].store.append_episode(

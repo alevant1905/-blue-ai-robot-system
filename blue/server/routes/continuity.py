@@ -16,7 +16,7 @@ import os
 import re
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import bluetools as bt
@@ -856,6 +856,56 @@ def jspace_context_block(robot: str) -> str:
     (the duet injects it into each speaker's turn prompt)."""
     hub = _hub(robot)
     return hub.jspace_context_block() if hub else ""
+
+
+_NO_CHANGE_NOTES = {"nothing material moved", "nothing moved", "(unstated)", ""}
+
+
+def change_history_block(robot: str, days: int = 7) -> str:
+    """A <self_history> block: the robot's REAL recorded workspace revisions
+    over the last `days`, one line per reflection that actually moved
+    something. Spliced in when someone asks how the robot has changed or
+    evolved — without it those questions were unanswerable from the prompt,
+    and the model confabulated a growth story (an invented Peter Singer /
+    animal-sentience arc, 2026-07-13)."""
+    hub = _hub(robot)
+    if not hub:
+        return ""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    by_day: Dict[str, List[str]] = {}
+    for episode in hub.store.list_episodes(limit=400):
+        if episode.get("kind") not in ("reflection", "idle"):
+            continue
+        when = _parse_time(episode.get("occurred_at"))
+        if not when or when < cutoff:
+            continue
+        changed = str((episode.get("details") or {}).get("changed") or "").strip()
+        if changed.lower() in _NO_CHANGE_NOTES:
+            continue
+        by_day.setdefault(when.date().isoformat(), []).append(changed)
+    if by_day:
+        lines: List[str] = []
+        for day in sorted(by_day):
+            for note in reversed(by_day[day][-8:]):
+                lines.append(f"- {day}: {_clip(note, 220)}")
+        body = "\n".join(lines[-40:])
+    else:
+        body = ("- the record shows no substantive workspace revisions in "
+                "this window")
+    workspace = hub.store.get_workspace()
+    return (
+        "<self_history>\n"
+        f"How your inner workspace ACTUALLY changed over the last {days} "
+        "days — each line is one real revision recorded by your own "
+        f"reflection passes (you have made {workspace.get('passes', 0)} "
+        f"passes since you came into being {_age_text(workspace.get('born'))}). "
+        "When asked how you have changed, evolved, or grown, answer FROM "
+        "these records: name the real shifts, in your own voice, in plain "
+        "speech. If the record shows little, say so plainly — never invent "
+        "readings, opinions, or changes that are not listed here.\n"
+        + body +
+        "\n</self_history>"
+    )
 
 
 def note_duet_line(robot: str, other_name: str, heard: str, said: str) -> None:

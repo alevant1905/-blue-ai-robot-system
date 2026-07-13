@@ -13272,6 +13272,19 @@ _ASSISTANT_REFUSAL_MARKERS = (
 )
 
 
+# "How have you changed / evolved / grown?" — a question about the robot's own
+# trajectory, answered from its recorded workspace revisions (<self_history>).
+# Tolerant of typos in the noun ("self-undertanding changed since yesterday"):
+# the changed/evolved + since/over-the-past branch carries those.
+_SELF_EVOLUTION_RE = re.compile(
+    r"how (?:have|did|has) you(?:r \w+)? (?:changed?|evolved?|grown|developed)"
+    r"|have you (?:changed|evolved|grown|developed)"
+    r"|how you(?:['’]ve| have) (?:changed|evolved|grown)"
+    r"|(?:changed|evolved|grown|different|shifted) (?:since|over the (?:past|last)|these past|recently|lately)"
+    r"|your (?:self-?understanding|sense of self|identity|beliefs?|worldview)",
+    re.I)
+
+
 def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
     """Strip past assistant turns that would mislead the model.
 
@@ -13732,6 +13745,24 @@ def chat_completions():
                     if historical_context:
                         print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
                         messages = _splice_context_after_system(messages, historical_context[-6:])
+
+            # Self-evolution questions ("how have you changed?", "has your
+            # self-understanding changed since yesterday?") get the robot's
+            # REAL recorded workspace revisions spliced in. Without this the
+            # question is unanswerable from the prompt — the model either
+            # denied changing at all or confabulated a growth story (the
+            # invented Peter Singer arc, 2026-07-13).
+            if (robot in _continuity_routes.ROBOTS and last_user_msg
+                    and isinstance(last_user_msg, str)
+                    and _SELF_EVOLUTION_RE.search(last_user_msg)):
+                try:
+                    _sh_block = _continuity_routes.change_history_block(robot)
+                    if _sh_block:
+                        print("   [JSPACE] ✓ Injecting recorded self-change history")
+                        messages = _splice_context_after_system(
+                            messages, [{"role": "system", "content": _sh_block}])
+                except Exception as e:
+                    log.warning(f"[JSPACE] self-history injection failed: {e}")
 
             # Visual memory: if the message names a person/place the camera
             # knows, splice in when they were last seen. Gated on the name
