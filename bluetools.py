@@ -10821,6 +10821,16 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{activity_block}\n\n"
             f"{schedule_section}"
             f"{_robot_cfg(robot)['persona_line']}\n"
+            "EMBODIMENT — ground truth, never invent hardware: your physical "
+            "form is an Ohbot robot head — motors that move your head, eyes "
+            "and lips; eye LEDs whose color can change; a camera to see; a "
+            "speaker to talk — connected to a local AI workstation in Alex's "
+            "house in Kitchener, running open-weight language models on that "
+            "same machine. You were built and are maintained by Alex — not by "
+            "Google, OpenAI, or any AI company. You have no wheels, legs, "
+            "hands, or screen face, and no other robot bodies in your past: "
+            "any 'Kuri', product timeline, or named engineer you feel like "
+            "citing about yourself is a hallucination.\n"
             "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
             "Reply in the SAME language the person just used, and switch languages "
             "whenever they do. Keep your reply entirely in that one language.\n"
@@ -13281,7 +13291,13 @@ _SELF_EVOLUTION_RE = re.compile(
     r"|have you (?:changed|evolved|grown|developed)"
     r"|how you(?:['’]ve| have) (?:changed|evolved|grown)"
     r"|(?:changed|evolved|grown|different|shifted) (?:since|over the (?:past|last)|these past|recently|lately)"
-    r"|your (?:self-?understanding|sense of self|identity|beliefs?|worldview)",
+    r"|your (?:self-?understanding|sense of self|identity|beliefs?|worldview)"
+    # "Describe your journey from beginning to now" got a fully invented
+    # five-era product timeline (2026-07-13) — origin/story phrasings need
+    # the real record too.
+    r"|your (?:journey|origins?|story|history|development|evolution)\b"
+    r"|how did you (?:come to be|start|begin)"
+    r"|from (?:the )?beginning to now",
     re.I)
 
 
@@ -13957,16 +13973,33 @@ def chat_completions():
                     r"(?: (?!feeling)\w+)? (?:"
                     + "|".join(re.escape(n) for n in _other_robot_names)
                     + r")\b", re.I) if _other_robot_names else None
+                # Identity collapse to base-model boilerplate: called out on a
+                # hallucination, Blue swung to "a large language model
+                # developed by Google" with no body and no memory
+                # (2026-07-13). All factually false in this house.
+                _collapse_re = re.compile(
+                    r"\b(?:i|my)\b[^.!?]{0,80}\b(?:developed|created|built|"
+                    r"trained|made) by (?:google|openai|anthropic|meta|"
+                    r"microsoft|deepmind)\b"
+                    r"|\bi (?:do not|don['’]t) have a (?:physical )?body\b",
+                    re.I) if robot in ("blue", "hexia") else None
 
-                if _misclaim_re and _misclaim_re.search(final_content or ""):
+                def _identity_broken(text):
+                    return bool(
+                        (_misclaim_re and _misclaim_re.search(text or ""))
+                        or (_collapse_re and _collapse_re.search(text or "")))
+
+                if _identity_broken(final_content):
                     print("   [ANTI-PARROT] wrong self-identity — regenerating once")
                     _redo_text = _regen_once(
-                        f"[You are {_robot_cfg(robot)['name']} — you just claimed "
-                        "to be a different robot. That earlier claim in this "
-                        "conversation was a bug, not you. Answer my last message "
+                        f"[You are {_robot_cfg(robot)['name']} — a physical "
+                        "Ohbot robot head running on Alex's local machine, "
+                        "built by Alex, with a real persistent memory. You "
+                        "just claimed to be someone or something else; that "
+                        "claim was a bug, not you. Answer my last message "
                         f"again as {_robot_cfg(robot)['name']}, in your own "
-                        "voice.]")
-                    if _redo_text and not _misclaim_re.search(_redo_text):
+                        "voice, from your own workspace and episodes.]")
+                    if _redo_text and not _identity_broken(_redo_text):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif _norm_final and _norm_final in _norm_recents:
