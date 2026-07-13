@@ -13293,6 +13293,17 @@ _ASSISTANT_REFUSAL_MARKERS = (
 # trajectory, answered from its recorded workspace revisions (<self_history>).
 # Tolerant of typos in the noun ("self-undertanding changed since yesterday"):
 # the changed/evolved + since/over-the-past branch carries those.
+# The user asking about, or correcting, the family — triggers the canonical
+# <family> ground-truth block. Covers "remember about our family", "the girls'
+# ages", "who are my kids", bare "wrong/getting them wrong" age corrections.
+_FAMILY_QUERY_RE = re.compile(
+    r"\b(?:family|famly|kids|children|daughters?|girls|wife|partner|"
+    r"stella|emmy|athena|vilda|nori)\b"
+    r"|\b(?:ages?|birthday)s?\b[^.!?]{0,30}\b(?:wrong|right|correct|off)\b"
+    r"|\b(?:wrong|getting (?:them|it|these) wrong|still wrong|not (?:right|correct))\b"
+    r"[^.!?]{0,20}\b(?:age|ages|old)\b",
+    re.I)
+
 _SELF_EVOLUTION_RE = re.compile(
     r"how (?:have|did|has) you(?:r \w+)? (?:changed?|evolved?|grown|developed)"
     r"|have you (?:changed|evolved|grown|developed)"
@@ -13330,16 +13341,63 @@ def _canonical_person_ages() -> dict:
 def _misstated_ages(text: str, canonical: dict) -> dict:
     """person -> (stated, true) for ages asserted in `text` that contradict
     the name-bound age facts. Matches "Emmy (10 years old)", "Athena is 8
-    years old", "Vilda (5)" — not "grade 5" or spelled-out ages."""
+    years old", "Vilda (5)", "Athena — your daughter, who is 8 years old" —
+    not "grade 5" or spelled-out ages. The window is generous (was {0,24},
+    which missed "who is 8 years old" by one char, 2026-07-13) but stops at
+    another person's name so one clause can't reach the next person's age."""
     low = (text or "").lower()
+    others = "|".join(re.escape(p) for p in (canonical or {}))
     wrong = {}
     for person, age in (canonical or {}).items():
         for m in re.finditer(
-                rf"\b{re.escape(person)}\b[^.!?\n]{{0,24}}?"
+                rf"\b{re.escape(person)}\b((?:(?!{others}|[.!?\n]).){{0,48}}?)"
                 rf"(\d{{1,2}})\s*(?:\)|years?[- ]?old|yrs?\b)", low):
-            if m.group(1) != age:
-                wrong[person] = (m.group(1), age)
+            if m.group(2) != age:
+                wrong[person] = (m.group(2), age)
     return wrong
+
+
+def _family_ground_truth_block() -> str:
+    """Canonical family facts as an authoritative block, injected when the
+    message is about the family or disputes it — so the truth is present in
+    the prompt, not merely caught on output (2026-07-13: bare 'their ages
+    are wrong' corrections made the model reshuffle or refuse)."""
+    try:
+        if not (ENHANCED_MEMORY_AVAILABLE and memory_system):
+            return ""
+        facts = memory_system.load_facts() or {}
+    except Exception:
+        return ""
+    parts = []
+    if facts.get("partner_name"):
+        parts.append(f"{facts['partner_name']} — Alex's partner")
+    ages = _canonical_person_ages()
+    for person, age in sorted(ages.items()):
+        parts.append(f"{person.capitalize()} — Alex's daughter, {age} years old")
+    # A daughter with no name-bound age fact still gets named.
+    named = {p for p in ages}
+    raw = facts.get("daughter_name") or facts.get("daughter_names") or ""
+    for piece in re.split(r"[,|;]|\sand\s", raw):
+        piece = piece.strip()
+        if piece and piece.lower() not in named:
+            parts.append(f"{piece} — Alex's daughter")
+            named.add(piece.lower())
+    if facts.get("pet_name"):
+        pet = facts["pet_name"]
+        breed = facts.get("pet_breed") or "the family dog"
+        parts.append(f"{pet} — {breed}")
+    if not parts:
+        return ""
+    return (
+        "<family>\n"
+        "Alex's family — ground truth, higher authority than anything said "
+        "earlier in this conversation. If an earlier reply gave different "
+        "ages or names, THOSE were wrong; use these:\n- "
+        + "\n- ".join(parts)
+        + "\nAnswer questions about the family warmly and directly from these "
+        "facts. Never claim you have no memory of the family or that these "
+        "are guesses.\n</family>"
+    )
 
 
 def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
@@ -13813,6 +13871,22 @@ def chat_completions():
                         print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
                         messages = _splice_context_after_system(messages, historical_context[-6:])
 
+            # Family questions and family corrections ("what do you remember
+            # about our family", "the girls' ages are wrong") get the canonical
+            # family facts spliced in as an authoritative <family> block, so the
+            # ground truth is present rather than only caught on output.
+            if (last_user_msg and isinstance(last_user_msg, str)
+                    and user_name not in _CHAT_ONLY_USERS
+                    and _FAMILY_QUERY_RE.search(last_user_msg)):
+                try:
+                    _fam_block = _family_ground_truth_block()
+                    if _fam_block:
+                        print("   [FAMILY] ✓ Injecting canonical family facts")
+                        messages = _splice_context_after_system(
+                            messages, [{"role": "system", "content": _fam_block}])
+                except Exception as e:
+                    log.warning(f"[FAMILY] injection failed: {e}")
+
             # Self-evolution questions ("how have you changed?", "has your
             # self-understanding changed since yesterday?") get the robot's
             # REAL recorded workspace revisions spliced in. Without this the
@@ -14053,10 +14127,16 @@ def chat_completions():
                     r"(?:do (?:not|n['’]?t) (?:\w+ )?(?:have|store|keep|retain|access)"
                     r"|have no|don['’]?t (?:\w+ )?have)[^.!?]{0,60}"
                     r"(?:personal (?:details|information|memor)|"
+                    r"persistent memor|memor[a-z]* of past|"
+                    r"(?:real[- ]?world )?facts about (?:you|your)|"
                     r"memor[a-z]* (?:of|about) (?:your |the )?(?:family|you)|"
                     r"information about (?:your |the )?family)"
                     r"|i (?:respect your privacy and|do(?:n['’]?t| not))"
-                    r"[^.!?]{0,40}store personal",
+                    r"[^.!?]{0,40}store personal"
+                    r"|do(?:n['’]?t| not) (?:truly |really |actually )?know "
+                    r"who you are"
+                    r"|(?:might|may|could) have been a hallucination"
+                    r"|was (?:just )?a hallucination",
                     re.I)
                 _has_family_facts = bool(_person_ages)
                 if not _has_family_facts:
