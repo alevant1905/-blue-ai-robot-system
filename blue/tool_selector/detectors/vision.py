@@ -188,6 +188,25 @@ class VisionDetector(BaseDetector):
         confidence = 0.0
         reasons = []
 
+        # Statements ABOUT the camera/eyes/abilities and negated instructions
+        # are not capture requests: "you already had control of the camera
+        # and now you can change the color of your eyes" got the room
+        # described back (2026-07-12), and "no need to describe what's in
+        # front of you" re-fired a capture. Mirrors the guards in bluetools'
+        # detect_camera_capture_intent.
+        if re.search(r"\b(?:no need|don'?t|do not|stop|never|quit|enough|without)\b"
+                     r"[^.!?]{0,50}\b(?:describ\w*|look\w*|captur\w*|photo\w*|"
+                     r"picture\w*|camera|see|view)\b", msg_lower):
+            return None
+        if re.search(r"\b(?:that(?:'s| is)|this is|it(?:'s| is)|here(?:'s| is))\s+"
+                     r"(?:exactly\s+)?what(?:'s| is)?\b", msg_lower):
+            return None
+        if (re.search(r"\byou (?:can|could|also|now|already|have|had)\b[^.!?]{0,60}"
+                      r"\b(?:camera|eyes?|body)\b", msg_lower)
+                and not any(s in msg_lower for s in live_view_signals)
+                and not any(s in msg_lower for s in strong_signals)):
+            return None
+
         if any(s in msg_lower for s in strong_signals):
             confidence = 0.95
             reasons.append("explicit camera keywords")
