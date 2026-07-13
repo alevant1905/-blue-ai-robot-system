@@ -13301,6 +13301,40 @@ _SELF_EVOLUTION_RE = re.compile(
     re.I)
 
 
+def _canonical_person_ages() -> dict:
+    """name -> age string, from the name-bound *_age facts (emmy_age etc.)."""
+    try:
+        if not (ENHANCED_MEMORY_AVAILABLE and memory_system):
+            return {}
+        facts = memory_system.load_facts() or {}
+    except Exception:
+        return {}
+    out = {}
+    for key, val in facts.items():
+        m = re.match(r"([a-z]+)_age$", str(key or "").lower())
+        if not m:
+            continue
+        digits = re.search(r"\d{1,2}", str(val or ""))
+        if digits:
+            out[m.group(1)] = digits.group(0)
+    return out
+
+
+def _misstated_ages(text: str, canonical: dict) -> dict:
+    """person -> (stated, true) for ages asserted in `text` that contradict
+    the name-bound age facts. Matches "Emmy (10 years old)", "Athena is 8
+    years old", "Vilda (5)" — not "grade 5" or spelled-out ages."""
+    low = (text or "").lower()
+    wrong = {}
+    for person, age in (canonical or {}).items():
+        for m in re.finditer(
+                rf"\b{re.escape(person)}\b[^.!?\n]{{0,24}}?"
+                rf"(\d{{1,2}})\s*(?:\)|years?[- ]?old|yrs?\b)", low):
+            if m.group(1) != age:
+                wrong[person] = (m.group(1), age)
+    return wrong
+
+
 def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
     """Strip past assistant turns that would mislead the model.
 
@@ -13395,6 +13429,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
 
     out, dropped_refusal, dropped_wrong_name = [], 0, 0
     dropped_wrong_identity = 0
+    _person_ages = _canonical_person_ages()
     for m in messages:
         if m.get("role") != "assistant":
             out.append(m)
@@ -13452,6 +13487,15 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
         # 3) Wrong self-identity (see docstring).
         if any(rx.search(content) for rx in _wrong_identity_res):
             dropped_wrong_identity += 1
+            continue
+
+        # 4) Wrong age for a person with a name-bound age fact. "Athena (8
+        # years old)" from an old reply outranks the facts block by sheer
+        # proximity and gets replayed forever — the Annie bug, ages edition
+        # (2026-07-13: Emmy 10/Athena 8/Vilda 5 repeated through three
+        # corrections while the facts said 10/10/8).
+        if _person_ages and _misstated_ages(content, _person_ages):
+            dropped_wrong_name += 1
             continue
 
         out.append(m)
@@ -13989,6 +14033,10 @@ def chat_completions():
                         (_misclaim_re and _misclaim_re.search(text or ""))
                         or (_collapse_re and _collapse_re.search(text or "")))
 
+                _person_ages = _canonical_person_ages()
+                _wrong_ages = (_misstated_ages(final_content, _person_ages)
+                               if _person_ages else {})
+
                 if _identity_broken(final_content):
                     print("   [ANTI-PARROT] wrong self-identity — regenerating once")
                     _redo_text = _regen_once(
@@ -14000,6 +14048,22 @@ def chat_completions():
                         f"again as {_robot_cfg(robot)['name']}, in your own "
                         "voice, from your own workspace and episodes.]")
                     if _redo_text and not _identity_broken(_redo_text):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif _wrong_ages:
+                    # Wrong ages replay from history and reshuffle randomly
+                    # under bare "wrong" corrections — hand the model the
+                    # ground truth explicitly (2026-07-13: three corrections
+                    # never produced the facts' 10/10/8).
+                    print(f"   [ANTI-PARROT] misstated ages {_wrong_ages} — regenerating once")
+                    _truth = ", ".join(
+                        f"{p.capitalize()} is {a}"
+                        for p, a in sorted(_person_ages.items()))
+                    _redo_text = _regen_once(
+                        f"[You stated a wrong age. Ground truth from the "
+                        f"household facts: {_truth}. Answer again using ONLY "
+                        "these ages — do not guess or shuffle.]")
+                    if _redo_text and not _misstated_ages(_redo_text, _person_ages):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif _norm_final and _norm_final in _norm_recents:
