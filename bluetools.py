@@ -13272,10 +13272,17 @@ _ASSISTANT_REFUSAL_MARKERS = (
 )
 
 
-def _sanitize_inbound_messages(messages: list) -> list:
+def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
     """Strip past assistant turns that would mislead the model.
 
-    Two classes of toxic turns are removed:
+    Three classes of toxic turns are removed:
+
+    3. **Wrong self-identity.** During the facts-table incident (2026-07-12)
+       Hexia's page accumulated replies claiming "I'm Blue!". The underlying
+       bug is fixed, but any surviving claim in the thread acts as authority:
+       the model keeps being whoever the history says it was. First-person
+       claims of the OTHER robot's name drop the whole turn ("feeling blue"
+       is exempted).
 
     1. **Refusals.** When Blue answered "I don't have that yet", that line
        in the conversation history acts as authority — the next turn just
@@ -13344,7 +13351,21 @@ def _sanitize_inbound_messages(messages: list) -> list:
         "she", "he", "his", "hers", "her", "its",
     }
 
+    # Wrong self-identity patterns for class 3: first-person claims of the
+    # OTHER robot's name ("feeling blue" exempted).
+    _other_robots = [r for r in ("blue", "hexia")
+                     if r != (robot or "blue").strip().lower()]
+    _wrong_identity_res = [
+        re.compile(
+            r"\b(?:i['’]?m|i am|my name is|this is)"
+            r"(?: (?!feeling)\w+)? " + re.escape(name) + r"\b",
+            re.I,
+        )
+        for name in _other_robots
+    ]
+
     out, dropped_refusal, dropped_wrong_name = [], 0, 0
+    dropped_wrong_identity = 0
     for m in messages:
         if m.get("role") != "assistant":
             out.append(m)
@@ -13399,12 +13420,19 @@ def _sanitize_inbound_messages(messages: list) -> list:
                 dropped_wrong_name += 1
                 continue
 
+        # 3) Wrong self-identity (see docstring).
+        if any(rx.search(content) for rx in _wrong_identity_res):
+            dropped_wrong_identity += 1
+            continue
+
         out.append(m)
 
-    if dropped_refusal or dropped_wrong_name:
+    if dropped_refusal or dropped_wrong_name or dropped_wrong_identity:
         print(
             f"   [SANITIZE] Dropped {dropped_refusal} refusal + "
-            f"{dropped_wrong_name} stale-name assistant turn(s) from inbound history"
+            f"{dropped_wrong_name} stale-name + "
+            f"{dropped_wrong_identity} wrong-identity assistant turn(s) "
+            "from inbound history"
         )
     return out
 
@@ -13659,7 +13687,7 @@ def chat_completions():
             # question wrongly (e.g. "Annie") or admitted ignorance, that text
             # is now in the prompt every turn and overrides the facts block by
             # sheer proximity.
-            messages = _sanitize_inbound_messages(messages)
+            messages = _sanitize_inbound_messages(messages, robot=robot)
 
             # INJECT HISTORICAL CONTEXT (only for LLM-bound requests). Chat-only
             # kids (Vilda's iPad) are skipped on purpose: we never splice Alex's
@@ -13885,7 +13913,32 @@ def chat_completions():
                     r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
                     r"a persistent (?:inner )?workspace)", re.I)
 
-                if _norm_final and _norm_final in _norm_recents:
+                # A reply where this robot claims to be the OTHER robot is the
+                # worst defect of all — check it first. Seen live 2026-07-12:
+                # "I'm Blue! 🤖" on Hexia's page, anchored on poisoned thread
+                # history from the facts-table incident.
+                _other_robot_names = [
+                    _robot_cfg(r)["name"]
+                    for r in ("blue", "hexia") if r != robot
+                ] if robot in ("blue", "hexia") else []
+                _misclaim_re = re.compile(
+                    r"\b(?:i['’]?m|i am|my name is)"
+                    r"(?: (?!feeling)\w+)? (?:"
+                    + "|".join(re.escape(n) for n in _other_robot_names)
+                    + r")\b", re.I) if _other_robot_names else None
+
+                if _misclaim_re and _misclaim_re.search(final_content or ""):
+                    print("   [ANTI-PARROT] wrong self-identity — regenerating once")
+                    _redo_text = _regen_once(
+                        f"[You are {_robot_cfg(robot)['name']} — you just claimed "
+                        "to be a different robot. That earlier claim in this "
+                        "conversation was a bug, not you. Answer my last message "
+                        f"again as {_robot_cfg(robot)['name']}, in your own "
+                        "voice.]")
+                    if _redo_text and not _misclaim_re.search(_redo_text):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif _norm_final and _norm_final in _norm_recents:
                     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
                     _redo_text = _regen_once(
                         "[That reply was a word-for-word repeat of something you "
