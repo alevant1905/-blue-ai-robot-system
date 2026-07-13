@@ -10243,14 +10243,21 @@ def _build_focus_block() -> str:
 
     return (
         "<focused_documents>\n"
-        "For THIS conversation, Alex has focused you on ONLY the specific "
-        "library material listed below. Treat it as your single authoritative "
-        "source: answer from these items — use the search_documents tool (it is "
-        "scoped to exactly these picks) and quote them, citing inline like "
-        "[filename.pdf]. Do NOT pull in any other document, course, file, note, "
-        "or remembered material: if something is not in the focused items below, "
-        "it is out of scope right now. If his question can't be answered from "
-        "them, say so plainly rather than guessing or mixing in another source.\n"
+        "For THIS conversation, Alex has focused your LIBRARY on ONLY the "
+        "specific documents listed below. When a question calls for library, "
+        "document, course, or reading material, treat these as your single "
+        "authoritative source: answer from them — use the search_documents "
+        "tool (it is scoped to exactly these picks) and quote them, citing "
+        "inline like [filename.pdf] — and do NOT pull in any OTHER document, "
+        "course, or reading. If a document question can't be answered from "
+        "them, say so plainly rather than mixing in another source.\n"
+        "This scoping applies ONLY to library/document material. It does NOT "
+        "gag your ordinary self: your household knowledge — who you are, the "
+        "family (Alex, Stella, the girls and their ages, Nori), the schedule, "
+        "your own <j_space> and memories — is always in scope. If Alex asks "
+        "about the family or about you, answer fully and warmly from what you "
+        "know; never claim you have no memory of the family or don't store "
+        "personal details.\n"
         + "\n".join(lines)
         + digest_section +
         "\n</focused_documents>"
@@ -14037,6 +14044,30 @@ def chat_completions():
                 _wrong_ages = (_misstated_ages(final_content, _person_ages)
                                if _person_ages else {})
 
+                # Family-memory refusal despite having the facts: "I don't
+                # store personal details / no memory of your family" while the
+                # facts block holds the family (2026-07-13, triggered by the
+                # focus block's over-broad 'out of scope' — but a fresh
+                # boilerplate refusal can happen without focus too).
+                _family_refusal_re = re.compile(
+                    r"(?:do (?:not|n['’]?t) (?:\w+ )?(?:have|store|keep|retain|access)"
+                    r"|have no|don['’]?t (?:\w+ )?have)[^.!?]{0,60}"
+                    r"(?:personal (?:details|information|memor)|"
+                    r"memor[a-z]* (?:of|about) (?:your |the )?(?:family|you)|"
+                    r"information about (?:your |the )?family)"
+                    r"|i (?:respect your privacy and|do(?:n['’]?t| not))"
+                    r"[^.!?]{0,40}store personal",
+                    re.I)
+                _has_family_facts = bool(_person_ages)
+                if not _has_family_facts:
+                    try:
+                        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+                            _ff = memory_system.load_facts() or {}
+                            _has_family_facts = bool(
+                                _ff.get("daughter_name") or _ff.get("partner_name"))
+                    except Exception:
+                        _has_family_facts = False
+
                 if _identity_broken(final_content):
                     print("   [ANTI-PARROT] wrong self-identity — regenerating once")
                     _redo_text = _regen_once(
@@ -14064,6 +14095,18 @@ def chat_completions():
                         f"household facts: {_truth}. Answer again using ONLY "
                         "these ages — do not guess or shuffle.]")
                     if _redo_text and not _misstated_ages(_redo_text, _person_ages):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif (robot in _continuity_routes.ROBOTS and _has_family_facts
+                      and _family_refusal_re.search(final_content or "")):
+                    print("   [ANTI-PARROT] family-memory refusal despite facts — regenerating once")
+                    _redo_text = _regen_once(
+                        "[You DO know Alex's family — the household facts and "
+                        "your memories are right here in this prompt. You just "
+                        "claimed to have no memory of the family or not to store "
+                        "personal details, which is false. Answer again, warmly, "
+                        "from what you actually know about the family.]")
+                    if _redo_text and not _family_refusal_re.search(_redo_text):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif _norm_final and _norm_final in _norm_recents:
