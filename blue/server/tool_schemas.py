@@ -116,20 +116,22 @@ RAW_TOOLS = [
         "type": "function",
         "function": {
             "name": "reschedule_reminder",
-            "description": "Change an existing reminder/event: move its time, rename it, change how often it repeats, set an advance notice, or edit its notes. First call get_upcoming_reminders to get the reminder_id, then call this with reminder_id plus ONLY the fields that change. Use for 'move my 3pm to 4pm', 'push the dentist to next week', 'make that repeat weekly', 'remind me a day before instead'.",
+            "description": "Change an existing reminder/event in the calendar you maintain: move its time, rename it, change how often it repeats, set an advance notice, edit its notes, or set/clear the date a repeating event stops. Identify the event by passing title_query (a few words from its title, e.g. 'CMDS4740' or 'dentist') — you do NOT need to look up the numeric id first. Pass ONLY the fields that change. To end a repeating class/course on a date, pass until=<that date>. Examples: 'move my 3pm to 4pm', 'push the dentist to next week', 'make that repeat weekly', 'end CMDS4740 on August 4' -> title_query='CMDS4740', until='August 4'.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reminder_id": {"type": "integer", "description": "ID of the reminder to change (from get_upcoming_reminders)"},
+                    "title_query": {"type": "string", "description": "A few words from the event's title to find it (e.g. 'CMDS4740', 'dentist'). Use this instead of reminder_id — no prior get_upcoming_reminders lookup is needed."},
+                    "reminder_id": {"type": "integer", "description": "ID of the reminder to change, if you already know it. Optional — prefer title_query."},
+                    "user_name": {"type": "string", "description": "Optional — restrict the title_query search to one person (Alex, Stella, Emmy, Athena, Vilda)."},
                     "title": {"type": "string", "description": "New title (omit to keep)"},
                     "when": {"type": "string", "description": "New start time in natural language, e.g. '4pm' or 'next Monday at 9am' (omit to keep)"},
                     "end": {"type": "string", "description": "New end time, or '' to clear the duration (omit to keep)"},
                     "description": {"type": "string", "description": "New notes (omit to keep)"},
                     "recurrence": {"type": "string", "description": "New repeat cadence in plain words ('weekly', 'every weekday'), or 'none' to stop repeating (omit to keep)"},
                     "remind_before": {"type": "string", "description": "New advance notice ('1 day', '30 minutes'), or '0' for at the time (omit to keep)"},
-                    "until": {"type": "string", "description": "New repeat end date, or '' to clear (omit to keep)"}
+                    "until": {"type": "string", "description": "New repeat end date for a course/class or other repeat, e.g. 'August 4'. Pass '' to clear (omit to keep)"}
                 },
-                "required": ["reminder_id"]
+                "required": []
             }
         }
     },
@@ -532,13 +534,13 @@ RAW_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_documents",
-            "description": "Search USER'S UPLOADED documents (PDFs, Word docs, text files). USE THIS when user asks about: 'my documents', 'my files', 'my contract', 'what does my document say', 'search my files'. DO NOT USE for: internet searches or general knowledge (use web_search for those).",
+            "description": "Search and READ the USER'S local library documents (PDFs, Word docs, text files). This tool extracts actual document text and returns passages, not just filenames or keyword hits. USE THIS for: 'my library', 'my documents', a named local reading/author/title, 'read this PDF', 'what does my document say', and retries of those requests. DO NOT USE for internet searches or general knowledge (use web_search for those).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to find relevant information in documents"
+                        "description": "The title, author, filename, or content question to resolve and read from local documents"
                     },
                     "max_results": {
                         "type": "integer",

@@ -93,7 +93,7 @@ class DocumentsDetector(BaseDetector):
                 # "future", "already" that live inside descriptive filenames and
                 # would otherwise trigger on any sentence using that common word.
                 name_toks = {w.lower() for w in raw_words
-                             if w[:1].isupper() and len(w) >= 6
+                             if w[:1].isupper() and len(w) >= 5
                              and w.lower() not in _GENERIC_TERMS and not w.isdigit()}
                 if folder:
                     raw_f = [w for w in re.split(r"[\s_\-./\\]+", folder) if w]
@@ -110,7 +110,9 @@ class DocumentsDetector(BaseDetector):
                 name_tok_docs.append(name_toks)
             # Distinctive single-trigger tokens: proper-noun-ish, long, and not
             # spread across many documents — author surnames and unusual title
-            # words (Ilyenkov, Toscano, Engestrom…). <=2 docs (not ==1) so an
+            # words (Noble, Ilyenkov, Toscano, Engestrom…). Five characters is
+            # enough here because rarity still prevents common-word triggers.
+            # <=2 docs (not ==1) so an
             # author appearing in two of their own works still counts.
             counts = Counter(t for s in name_tok_docs for t in s)
             rare = {t for t, c in counts.items() if c <= 2}
@@ -133,6 +135,14 @@ class DocumentsDetector(BaseDetector):
                 return f"names library folder '{ph}'"
         qwords = {w for w in re.split(r"[^a-z0-9]+", msg_lower)
                   if len(w) >= 4 and w not in _GENERIC_TERMS}
+        # Voice transcription commonly drops possessive apostrophes ("Noble's"
+        # becomes "nobles"). Add the singular form only when it names a token
+        # that really occurs in this library, avoiding broad stemming.
+        library_tokens = set().union(*cls._lib_tokens_by_doc)
+        qwords.update(
+            w[:-1] for w in tuple(qwords)
+            if len(w) >= 6 and w.endswith('s') and w[:-1] in library_tokens
+        )
         if not qwords:
             return None
         # A distinctive single term (author surname / unusual title word).
@@ -164,6 +174,10 @@ class DocumentsDetector(BaseDetector):
             'search my documents', 'search documents for', 'find in my documents',
             'what do my documents say', 'according to my documents', 'search my files',
             'in my files', 'in my documents', 'look up in my',
+            # Corrections such as "it's in your library folder" still need the
+            # document tool; the conversation layer resolves what "it" names.
+            "it's in your library", 'its in your library',
+            "it's in my library", 'its in my library',
         ]
 
         # List/count queries - user wants to see what documents exist
@@ -174,9 +188,13 @@ class DocumentsDetector(BaseDetector):
             'show documents', 'show files', 'show my documents', 'show my files',
             'how many documents', 'how many files', 'count documents', 'count files',
             'documents in', 'files in', 'which documents', 'which files',
-            # Library inventory phrasings (Blue's library / my library).
-            'in my library', 'in your library', 'my library', 'your library',
-            "what's in my library", "what's in your library", 'in the library',
+            # Explicit inventory phrasings. Bare "in your library" is not an
+            # inventory request: "it's in your library" is a correction about
+            # a particular file and is handled by the strong signals above.
+            "what's in my library", "what's in your library",
+            'what is in my library', 'what is in your library',
+            'show my library', 'show your library', 'list my library',
+            'list your library',
             'what do you have', 'what have you read',
         ]
 

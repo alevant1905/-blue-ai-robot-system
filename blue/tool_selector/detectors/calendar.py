@@ -79,20 +79,26 @@ class CalendarDetector(BaseDetector):
 
     def _detect_reschedule(self, msg_lower: str) -> Optional[ToolIntent]:
         # "move my 3pm to 4pm", "reschedule the meeting", "push the dentist to
-        # next week". Needs a reschedule verb near a schedule noun. Confidence
-        # stays just below the auto-execute threshold: the reminder_id has to
-        # come from a get_upcoming_reminders lookup first, so this only steers
-        # the model toward reschedule_reminder — it never fires on its own.
+        # next week", "revise my calendar to end CMDS4740 on August 4", "update
+        # my schedule". Needs an edit verb near a schedule/calendar noun.
+        # reschedule_reminder now self-resolves the reminder by title_query
+        # (like cancel_reminder), so forcing it directly is safe — the model no
+        # longer has to look up the numeric id first.
         verbs = (
             'reschedule', 'move my', 'move the', 'move that', 'push back',
             'push the', 'push my', 'postpone', 'bump ', 'shift my',
-            'shift the', 'change the time', 'change my', 'rename the',
+            'shift the', 'change the time', 'change my', 'change the',
+            'rename the', 'revise', 'edit my', 'edit the', 'update my',
+            'update the', 'end my ', 'end the ', 'set the end', 'change the end',
         )
-        nouns = ('reminder', 'appointment', 'meeting', 'event', 'reservation')
+        nouns = (
+            'reminder', 'appointment', 'meeting', 'event', 'reservation',
+            'calendar', 'schedule', 'class', 'course',
+        )
         if any(v in msg_lower for v in verbs) and any(n in msg_lower for n in nouns):
             return ToolIntent(
                 tool_name='reschedule_reminder',
-                confidence=0.78,
+                confidence=0.85,
                 priority=ToolPriority.MEDIUM,
                 reason='reschedule/edit request',
                 extracted_params={},

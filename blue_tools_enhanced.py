@@ -1050,16 +1050,63 @@ class CalendarManager:
         }
 
     @staticmethod
-    def update_reminder(reminder_id: int, title: Optional[str] = None,
+    def update_reminder(reminder_id: Optional[int] = None, title: Optional[str] = None,
                         when: Optional[str] = None, end: Optional[str] = None,
                         description: Optional[str] = None,
                         recurrence: Optional[str] = None,
                         remind_before: Optional[str] = None,
-                        until: Optional[str] = None) -> Dict[str, Any]:
+                        until: Optional[str] = None,
+                        title_query: Optional[str] = None,
+                        user_name: Optional[str] = None) -> Dict[str, Any]:
         """Edit / reschedule a reminder. Only the fields you pass are changed.
         recurrence='none' makes a repeating event one-off; end='' clears the
         duration; until='' clears the recurrence end. Changing the timing
-        re-arms alerts so the new schedule notifies again."""
+        re-arms alerts so the new schedule notifies again.
+
+        Identify the reminder by numeric `reminder_id`, OR by `title_query`
+        (a few words from its title, optionally scoped to `user_name`) — the
+        same substring resolution `cancel_reminder` uses, so callers don't have
+        to look up the id first. If several active reminders match the query we
+        return them for disambiguation instead of guessing."""
+        if reminder_id is None:
+            if not title_query or not str(title_query).strip():
+                return {"success": False, "message": "Pass reminder_id or title_query"}
+            like = f"%{title_query.strip().lower()}%"
+            with _DB_LOCK, _conn() as c:
+                if user_name:
+                    rows = c.execute(
+                        "SELECT id, user_name, title, when_iso FROM reminders "
+                        "WHERE completed = 0 AND user_name = ? "
+                        "AND LOWER(title) LIKE ? "
+                        "ORDER BY when_iso ASC",
+                        (user_name, like),
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        "SELECT id, user_name, title, when_iso FROM reminders "
+                        "WHERE completed = 0 AND LOWER(title) LIKE ? "
+                        "ORDER BY when_iso ASC",
+                        (like,),
+                    ).fetchall()
+            if not rows:
+                return {"success": False,
+                        "message": f"No active reminder matching '{title_query}'"}
+            if len(rows) > 1:
+                return {
+                    "success": False,
+                    "needs_disambiguation": True,
+                    "matches": [
+                        {"id": r["id"], "user_name": r["user_name"],
+                         "title": r["title"], "when": r["when_iso"]}
+                        for r in rows
+                    ],
+                    "message": (
+                        f"{len(rows)} reminders match '{title_query}'. "
+                        "Ask the user which one or call again with reminder_id."
+                    ),
+                }
+            reminder_id = rows[0]["id"]
+
         with _DB_LOCK, _conn() as c:
             row = c.execute("SELECT * FROM reminders WHERE id = ?",
                             (reminder_id,)).fetchone()

@@ -77,6 +77,22 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
+from blue_identity import (
+    canonical_family_grounding_lines,
+    canonical_household_reply,
+    canonical_identity_reply,
+    canonical_self_state_reply,
+    contextual_identity_request_kind,
+    identity_conversation_context,
+    identity_grounding_note,
+    identity_repeats_recent_reply,
+    identity_reply_topics,
+    identity_request_kind,
+    identity_response_problem,
+    is_family_overview_request,
+    is_jspace_presence_request,
+)
+
 # Native-crash visibility: a fault in a C extension (access violation, heap
 # corruption) kills the whole process with NO Python traceback — the console
 # just drops back to the prompt. faulthandler prints every thread's Python
@@ -4357,8 +4373,9 @@ def _is_document_list_request(query: str) -> bool:
         "show me my files", "show my documents", "show my files",
         "how many documents", "how many files", "count documents",
         "count files", "documents do you have", "files do you have",
-        "documents are in", "files are in", "in your library",
-        "in my library", "what's in your library", "whats in your library",
+        "documents are in", "files are in",
+        "what's in your library", "whats in your library",
+        "what's in my library", "whats in my library",
         "what is in your library", "what do you have in your library",
     )
     return any(p in q for p in list_phrases)
@@ -4396,6 +4413,198 @@ def _is_expertise_query(query: str) -> bool:
         "my own work", "my writing", "my scholarship", "published work",
     )
     return any(p in f" {q} " for p in expertise_phrases)
+
+
+# Words that describe the operation rather than identify a file. Keeping this
+# list beside the resolver makes title matching deterministic and independent
+# of whatever the language model happens to infer from a request.
+_DOC_REFERENCE_STOP = set("""
+the a an and or of to in on for with about into from your my our its this that
+these those document documents file files pdf doc docx txt md text copy library
+folder please can could would should will do does did have has had is are was
+were be been me you it read reading reread open find search look looking show
+see check review summarize summarise summary overview tell give get pull bring
+try again retry now still really directly access retrieve extract tool
+introduction intro chapter paper book syllabus
+""".split())
+
+
+def _doc_words(value: str) -> List[str]:
+    """Lower-cased words used for library-title resolution."""
+    return re.findall(r"[a-z0-9]+", (value or "").lower().replace("\u2019", "'"))
+
+
+def _resolve_document_entry(reference: str) -> Optional[Dict[str, Any]]:
+    """Resolve a natural title/author reference to one indexed document.
+
+    Exact filename/stem mentions win. Otherwise, two meaningful title tokens
+    are required, except for a unique proper-name-like token of five or more
+    characters ("Noble", "Toscano"). Ambiguous ties deliberately return None.
+    """
+    try:
+        docs = [
+            d for d in load_document_index().get("documents", [])
+            if d.get("filename")
+            and d.get("doc_type") != "camera"
+            and not str(d.get("filename", "")).startswith("camera_")
+        ]
+    except Exception:
+        return None
+    if not docs or not (reference or "").strip():
+        return None
+
+    ref_lower = reference.lower().replace("\u2019", "'")
+    ref_normal = " ".join(_doc_words(reference))
+
+    # Full filename or normalized stem in the request is unambiguous.
+    exact = []
+    for d in docs:
+        filename = str(d.get("filename", ""))
+        stem = os.path.splitext(filename)[0]
+        stem_normal = " ".join(_doc_words(stem))
+        if filename.lower() in ref_lower:
+            return d
+        if len(stem_normal) >= 5 and re.search(
+                r"(?:^| )" + re.escape(stem_normal) + r"(?: |$)", ref_normal):
+            exact.append(d)
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return None
+
+    title_tokens_by_doc = []
+    token_counts = Counter()
+    for d in docs:
+        stem = os.path.splitext(str(d.get("filename", "")))[0]
+        tokens = {
+            w for w in _doc_words(stem)
+            if len(w) >= 4 and w not in _DOC_REFERENCE_STOP and not w.isdigit()
+        }
+        title_tokens_by_doc.append((d, tokens))
+        token_counts.update(tokens)
+
+    q_tokens = {
+        w for w in _doc_words(reference)
+        if len(w) >= 4 and w not in _DOC_REFERENCE_STOP and not w.isdigit()
+    }
+    all_title_tokens = set(token_counts)
+    # Voice transcripts often turn "Noble's" into "nobles".
+    q_tokens.update(
+        w[:-1] for w in tuple(q_tokens)
+        if len(w) >= 6 and w.endswith("s") and w[:-1] in all_title_tokens
+    )
+    if not q_tokens:
+        return None
+
+    candidates = []
+    for d, title_tokens in title_tokens_by_doc:
+        overlap = q_tokens & title_tokens
+        if len(overlap) >= 2:
+            candidates.append((len(overlap), sum(map(len, overlap)), d))
+        elif len(overlap) == 1:
+            token = next(iter(overlap))
+            if len(token) >= 5 and token_counts[token] == 1:
+                candidates.append((1, len(token), d))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if len(candidates) > 1 and candidates[0][:2] == candidates[1][:2]:
+        return None
+    return candidates[0][2]
+
+
+def _existing_document_path(doc: Dict[str, Any]) -> Optional[str]:
+    """Return an indexed document's real path, repairing stale index paths."""
+    filepath = str(doc.get("filepath", "") or "")
+    if filepath and os.path.isfile(filepath):
+        return filepath
+    filename = str(doc.get("filename", "") or "")
+    if not filename:
+        return None
+    folder = _safe_rel_folder(str(doc.get("folder", "") or ""))
+    candidate = os.path.join(_abs_library_path(folder), filename)
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _read_resolved_document(query: str, doc: Dict[str, Any],
+                            max_results: int = 3) -> str:
+    """Extract useful text from one resolved library document.
+
+    Named-file requests should never go through broad semantic search. This
+    reads the exact indexed path, includes the opening, and adds query-relevant
+    passages from later in the file when appropriate.
+    """
+    filename = str(doc.get("filename", "document"))
+    folder = _safe_rel_folder(str(doc.get("folder", "") or "")) or "library root"
+    filepath = _existing_document_path(doc)
+    if not filepath:
+        preview = (doc.get("text_preview") or "").strip()
+        detail = f"\n\nIndexed preview:\n{preview[:1500]}" if preview else ""
+        return (
+            f"LOCAL LIBRARY FILE FOUND BUT PATH IS STALE: [{filename}] is indexed "
+            f"in folder {folder}, but its file is not currently present.{detail}"
+        )
+
+    full_text = extract_text_from_file(filepath)
+    if not full_text or full_text.lower().startswith(("error", "unsupported file")):
+        preview = (doc.get("text_preview") or "").strip()
+        detail = f"\n\nIndexed preview:\n{preview[:1500]}" if preview else ""
+        return (
+            f"LOCAL LIBRARY EXTRACTION FAILED for [{filename}]: "
+            f"{full_text or 'no text was returned'}.{detail}"
+        )
+
+    title_terms = set(_doc_words(os.path.splitext(filename)[0]))
+    query_terms = {
+        w for w in _doc_words(query)
+        if len(w) >= 4 and w not in _DOC_REFERENCE_STOP and w not in title_terms
+    }
+    extended = bool(re.search(
+        r"\b(?:whole|entire|full|complete)\b|\bread (?:it|the|this)\b|"
+        r"\b(?:summari[sz]e|summary|overview|tell me about)\b",
+        query or "", re.I,
+    ))
+
+    opening_limit = 8500 if extended else 3200
+    opening = full_text[:opening_limit].strip()
+    excerpts = [opening]
+
+    # Split long PDF output into bounded windows as well as paragraphs. PDF
+    # extractors do not reliably preserve blank lines, so paragraph-only
+    # scoring can otherwise treat a 30-page chapter as one giant block.
+    if query_terms and not extended:
+        blocks = []
+        for paragraph in re.split(r"\n\s*\n", full_text):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            if len(paragraph) <= 1800:
+                blocks.append(paragraph)
+            else:
+                start = 0
+                while start < len(paragraph):
+                    blocks.append(paragraph[start:start + 1800])
+                    start += 1600
+        scored = []
+        opening_norm = re.sub(r"\s+", " ", opening).strip()
+        for block in blocks:
+            lower = block.lower()
+            score = sum(lower.count(term) for term in query_terms)
+            block_norm = re.sub(r"\s+", " ", block).strip()
+            if score and block_norm and block_norm not in opening_norm:
+                scored.append((score, block))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        for _, block in scored[:max(1, min(int(max_results or 3), 4))]:
+            excerpts.append(block.strip())
+
+    body = "\n\n--- relevant passage ---\n\n".join(e for e in excerpts if e)
+    body = body[:9500]
+    return (
+        f"LOCAL LIBRARY READ SUCCEEDED: [{filename}] was resolved in folder "
+        f"{folder} and {len(full_text):,} characters were extracted directly "
+        f"from the file. The passages below are the document's actual text.\n\n"
+        f"[{filename}]\n{body}"
+    )
 
 
 # Course/reading/schedule queries: these are answered by the syllabus's dated
@@ -4530,6 +4739,14 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
     if _is_document_list_request(query):
         print(f"   [LIST] Library inventory request — routing to local lister")
         return search_documents_local(query, max_results)
+
+    # A title/author reference names one real file. Resolve it before semantic
+    # search: broad RAG interpreted "look for Noble introduction" as a topic
+    # query and returned unrelated books while the exact PDF sat in CMDS4740.
+    named_doc = _resolve_document_entry(query)
+    if named_doc:
+        print(f"   [NAMED-DOC] Resolved request to {named_doc.get('filename')}")
+        return _read_resolved_document(query, named_doc, max_results)
 
     # Library focus (chat Context panel): when Alex has pinned specific
     # documents for this conversation, answer from exactly those files
@@ -4697,8 +4914,9 @@ def search_documents_local(query: str, max_results: int = 3) -> str:
                      "summarize all", "list all", "show all",
                      "what files", "which documents", "which files", "list files",
                      "show files", "how many documents", "how many files",
-                     "count documents", "count files", "in your library",
-                     "in my library", "documents do you have", "files do you have"]
+                     "count documents", "count files", "what's in your library",
+                     "whats in your library", "what's in my library",
+                     "whats in my library", "documents do you have", "files do you have"]
     is_list_query = any(kw in query_lower for kw in list_keywords)
 
     # Also treat very generic queries as list requests (e.g., just "documents" or "files")
@@ -4723,8 +4941,15 @@ def search_documents_local(query: str, max_results: int = 3) -> str:
 
         return f"I have {len(real_documents)} document(s) uploaded:\n\n{summary}"
 
+    # A named file is authoritative even in this non-Chroma fallback. This also
+    # avoids prefix verbs ("read Noble_Introduction.pdf") outscoring the title.
+    named_doc = _resolve_document_entry(query)
+    if named_doc:
+        return _read_resolved_document(query, named_doc, max_results)
+    documents_to_score = documents
+
     # Search through documents
-    for doc in documents:
+    for doc in documents_to_score:
         relevance = 0
         filename_lower = doc['filename'].lower()
 
@@ -7047,53 +7272,12 @@ def _resolve_document_file(reference: str) -> Optional[tuple]:
     (filename, existing_filepath) for the best match, or None if nothing
     matches confidently — callers must then ASK which document, never guess
     and attach the wrong file."""
-    try:
-        index = load_document_index()
-    except Exception:
+    best = _resolve_document_entry(reference)
+    if not best:
         return None
-    docs = [
-        d for d in (index.get('documents') or [])
-        if d.get('doc_type') != 'camera'
-        and not str(d.get('filename', '')).startswith('camera_')
-    ]
-    if not docs:
-        return None
-
-    stop = {
-        'send', 'email', 'me', 'the', 'a', 'an', 'as', 'attachment', 'attach',
-        'copy', 'of', 'document', 'file', 'please', 'can', 'you', 'to', 'my',
-        'in', 'library', 'one', 'that', 'this', 'it', 'over', 'could', 'would',
-        'from', 'about', 'with', 'and', 'for', 'your',
-    }
-    ref_tokens = [
-        w for w in re.findall(r"[a-z0-9]+", (reference or "").lower())
-        if w not in stop and len(w) > 2
-    ]
-    if not ref_tokens:
-        return None
-
-    best, best_score = None, 0
-    for d in docs:
-        fn = str(d.get('filename', ''))
-        fn_tokens = set(re.findall(r"[a-z0-9]+", fn.lower()))
-        score = 0
-        for t in ref_tokens:
-            if t in fn_tokens or any(t in ft or ft in t for ft in fn_tokens):
-                score += 1
-        if score > best_score:
-            best_score, best = score, d
-
-    if not best or best_score < 1:
-        return None
-
-    filename = best.get('filename', '')
-    filepath = best.get('filepath', '')
-    if filepath and os.path.exists(filepath):
-        return (filename, filepath)
-    alt = os.path.join(DOCUMENTS_FOLDER, filename)
-    if os.path.exists(alt):
-        return (filename, alt)
-    return None
+    filename = str(best.get('filename', '') or '')
+    filepath = _existing_document_path(best)
+    return (filename, filepath) if filename and filepath else None
 
 
 def _maybe_handle_owner_attachment(body: str, reply_to: str) -> Optional[tuple]:
@@ -9364,6 +9548,101 @@ def detect_web_refusal(response: str) -> bool:
     return bool(_WEB_REFUSAL_RE.search(response or ""))
 
 
+_DOCUMENT_REFUSAL_RE = re.compile(
+    r"\b(?:i (?:still )?(?:cannot|can['\u2019]?t|am unable to) "
+    r"(?:access|read|retrieve|extract|open|see) (?:the |that |this )?(?:text|file|pdf|document)"
+    r"|i (?:currently )?lack (?:the )?(?:specific )?(?:pdf[- ]reading )?tool"
+    r"|i do not have (?:a |the )?(?:pdf[- ]reading|file[- ]reading) tool"
+    r"|search_documents (?:can|could) only (?:scan|search|look for) keywords"
+    r"|the (?:file|pdf) is not accessible"
+    r"|(?:local )?path (?:is |was )?(?:invalid|wrong|not valid|an error)"
+    r"|not a valid file at (?:that|this) location"
+    r"|please (?:copy and paste|upload) (?:the |a )?(?:text|pdf|file)"
+    r"|rely on (?:my )?(?:internal )?training data"
+    r"|search (?:did not|didn['\u2019]?t) (?:pull up|return|retrieve) any (?:specific )?text)\b",
+    re.I,
+)
+
+
+def detect_document_refusal(response: str) -> bool:
+    """False local-file/path/capability claim after document extraction."""
+    return bool(_DOCUMENT_REFUSAL_RE.search(response or ""))
+
+
+# Blue DOES maintain Alex's household calendar (the reminders/events store,
+# surfaced at /calendar) and can create / reschedule / cancel entries with his
+# tools. Yet the base model likes to disown it — "I cannot modify your personal
+# calendar", "I don't actually maintain a persistent calendar", "I only have
+# read-only access", "update it manually in your calendar app" (2026-07-14, the
+# CMDS4740 end-date request). When a reply is that false disavowal AND the user
+# was asking about the calendar, we load the REAL calendar and make him answer
+# from it — same shape as detect_web_refusal.
+_CALENDAR_DENIAL_RE = re.compile(
+    r"i (?:can['’]?t|cannot|am unable to|do not|don['’]?t) "
+    r"(?:actually )?(?:modify|change|edit|update|revise|access|maintain|keep|"
+    r"manage|add to|write to|save to) "
+    r"(?:your |the |a |any )?(?:personal |external |persistent |synced |real )*"
+    r"(?:calendar|schedule|reminders?|events?)"
+    r"|i (?:don['’]?t|do not) (?:actually )?(?:maintain|keep|have) "
+    r"(?:a |any )?(?:persistent |real |synced |personal )*(?:calendar|schedule)"
+    r"|(?:only |just )?(?:have |with )?read[- ]only access"
+    r"|(?:add|update|set|change) (?:this|it|that|the date|the final class) "
+    r"(?:date )?(?:manually )?(?:yourself )?in your (?:actual |own )?"
+    r"(?:calendar|scheduling)"
+    r"|in your (?:actual |own )?calendar (?:application|app)"
+    r"|need to (?:manually )?(?:add|update|set|change) (?:this|it|that|the date)"
+    r"|you will need to update this date",
+    re.IGNORECASE,
+)
+
+# Only fire the recovery when the user's OWN turn was actually about the
+# calendar — never on an unrelated "I can't access your bank" style line.
+_CALENDAR_TOPIC_RE = re.compile(
+    r"calendar|schedule|reminder|appointment|\bclass(?:es)?\b|\bcourse\b"
+    r"|\bevent\b|cmds\s*\d",
+    re.IGNORECASE,
+)
+
+
+def detect_calendar_denial(response: str) -> bool:
+    """False 'I have no calendar / only read-only / do it yourself in your app'
+    claim — Blue maintains the household calendar and can edit it via tools."""
+    return bool(_CALENDAR_DENIAL_RE.search(response or ""))
+
+
+_CALENDAR_EDIT_RE = re.compile(
+    r"\b(?:reschedul\w*|move|push|postpone|bump|shift|revis\w*|edit\w*|"
+    r"updat\w*|chang\w*|renam\w*|cancel|delete|remove|end|extend|shorten|"
+    r"add|set)\b",
+    re.IGNORECASE,
+)
+
+
+def _user_asked_calendar_edit(message: str) -> bool:
+    """True when the user's turn asked to CHANGE the calendar (not merely view
+    it) — gates whether the denial-recovery forces reschedule_reminder."""
+    return bool(_CALENDAR_EDIT_RE.search(message or ""))
+
+
+def _document_search_succeeded(result: str) -> bool:
+    """Whether search_documents returned real local text/passages."""
+    text = result or ""
+    lower = text.lower()
+    failures = (
+        "i couldn't find any documents", "i don't have any documents",
+        "local library extraction failed", "path is stale",
+        "trouble searching your documents", "searching it is taking too long",
+    )
+    if any(marker in lower for marker in failures):
+        return False
+    return bool(
+        "local library read succeeded" in lower
+        or ("here's what i found in your documents" in lower and "[" in text)
+        or ("here are the most relevant passages" in lower and "[" in text)
+        or ("course schedule & readings" in lower and "[" in text)
+    )
+
+
 # A local model sometimes emits its tool call as visible TEXT instead of a real
 # tool call — observed live 2026-07-09: the reply contained a literal
 # "<tool_call><function=web_search><parameter=query>...</parameter></function>
@@ -10533,7 +10812,7 @@ _CONTINUATION_YES = {'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'please'
 _CONTINUATION_NO = {'no', 'nah', 'nope'}
 _CONTINUATION_TWO_WORD = {'of course', 'sounds good', 'do it', 'tell me', 'carry on',
                           'go on', 'go ahead', 'why not', 'dig in', 'go for',
-                          'not now', 'no thanks', 'not really'}
+                          'try again', 'not now', 'no thanks', 'not really'}
 
 
 def _continuation_cue(text: str):
@@ -10585,6 +10864,108 @@ def _last_exchange(conversation_messages: List[Dict]):
             prev_assistant = c
             break
     return last_user, prev_assistant
+
+
+_DOCUMENT_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:"
+    r"try(?: it| that)? again|retry|do it again|look again|read it|read it again|"
+    r"open it|open it again|summari[sz]e it|yes[, ]+you (?:do|can|have)|"
+    r"you (?:do|can) have that tool|i know you can do it"
+    r")\b"
+    r"|\b(?:it['\u2019]?s|its|it is) in (?:your|my|the) library(?: folder)?\b"
+    r"|\bwhy (?:can['\u2019]?t|cant|cannot|can not) you "
+    r"(?:access|read|retrieve|extract|open)(?: the| that| it)?\b",
+    re.I,
+)
+
+
+def _messages_before_current(messages: List[Dict], current: str) -> List[Dict]:
+    """Conversation prefix before the live user message."""
+    prior = list(messages or [])
+    for i in range(len(prior) - 1, -1, -1):
+        msg = prior[i]
+        if (msg.get("role") == "user"
+                and isinstance(msg.get("content"), str)
+                and msg.get("content", "").strip() == (current or "").strip()):
+            return prior[:i]
+    return prior
+
+
+def _document_followup_query(message: str,
+                             messages: List[Dict]) -> Optional[str]:
+    """Turn a deictic retry into an exact local-document query.
+
+    Endpoint preselection normally sees only the newest text, so "try again"
+    loses the PDF named one or two turns earlier. Resolve that name while the
+    unsanitized conversation is still available and carry it into the tool.
+    """
+    if not _DOCUMENT_FOLLOWUP_RE.search(message or ""):
+        return None
+    prior = _messages_before_current(messages, message)
+    seen = 0
+    for msg in reversed(prior):
+        if msg.get("role") not in ("user", "assistant"):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        seen += 1
+        doc = _resolve_document_entry(content)
+        if doc:
+            return f"read {doc.get('filename')}"
+        if seen >= 12:
+            break
+    return None
+
+
+def _course_followup_query(message: str,
+                           messages: List[Dict]) -> Optional[str]:
+    """Resolve "this course" to the recent course-library folder."""
+    lower = (message or "").lower()
+    if not re.search(r"\b(?:this|the|our|my) (?:course|class)\b", lower):
+        return None
+    if not re.search(
+            r"\b(?:reflect|critique|critic|theor|reading|material|argument|"
+            r"discuss|idea|concept|ai|algorithm|surveillance)\w*\b", lower):
+        return None
+
+    prior = _messages_before_current(messages, message)
+    recent_text = "\n".join(
+        m.get("content", "") for m in prior[-10:]
+        if m.get("role") in ("user", "assistant")
+        and isinstance(m.get("content"), str)
+    )
+    folders = list_library_folders()
+    if not recent_text or not folders:
+        return None
+
+    # A cited syllabus is the strongest course anchor.
+    for msg in reversed(prior[-10:]):
+        content = msg.get("content")
+        if not isinstance(content, str) or "syllab" not in content.lower():
+            continue
+        doc = _resolve_document_entry(content)
+        if doc and doc.get("folder"):
+            folder = _safe_rel_folder(str(doc.get("folder")))
+            return f"Based on the {folder} course documents, {message}"
+
+    # Otherwise prefer course-code-like folders over broad folders such as AI.
+    matches = []
+    for folder in folders:
+        leaf = folder.split("/")[-1]
+        if re.search(r"\b" + re.escape(leaf) + r"\b", recent_text, re.I):
+            matches.append(folder)
+    if matches:
+        matches.sort(key=lambda f: (not any(ch.isdigit() for ch in f), len(f)))
+        return f"Based on the {matches[0]} course documents, {message}"
+    return None
+
+
+def _contextual_document_query(message: str,
+                               messages: List[Dict]) -> Optional[str]:
+    """Exact query to send to search_documents for contextual follow-ups."""
+    return (_document_followup_query(message, messages)
+            or _course_followup_query(message, messages))
 
 
 def _strip_parroted_prefix(text: str, prev_assistant: str) -> str:
@@ -10719,6 +11100,13 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         "i'm not sure", "im not sure",
         "blank slate", "just woke up", "haven't met", "havent met",
         "memory is blank", "no information stored", "im new here", "i'm new here",
+        # False local-library capability/path refusals. Keeping one of these in
+        # the anti-repetition examples teaches the model to repeat the failure.
+        "cannot access the text", "can't access the text",
+        "cannot access the file", "can't access the file",
+        "unable to retrieve the text", "unable to access the file",
+        "lack the specific tool", "path error on my local system",
+        "not a valid file at that location", "please upload the pdf",
     )
     recent_assistant_responses = []
     _scan_slice = conversation_messages[-10:] if len(conversation_messages) > 10 else conversation_messages
@@ -10756,6 +11144,11 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     continuation_note = ""
     _last_user_text, _prev_assistant_text = _last_exchange(conversation_messages)
     _cue = _continuation_cue(_last_user_text) if _prev_assistant_text.strip() else None
+    # "No, J-space" corrects a JavaScript misreading; it is not declining an
+    # offer. Let the identity grounding handle it without a contradictory
+    # continuation instruction telling the model to accept "no J-space".
+    if identity_request_kind(_last_user_text) == "jspace":
+        _cue = None
     if _cue:
         print(f"   [CUE] continuation cue '{_cue}' — CONTINUE-DON'T-RESTART note in system message")
         anti_repetition_context = ""
@@ -10819,6 +11212,21 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "they add one — never claim to recognize a face you were never shown.\n"
         )
 
+    if (robot or "blue").strip().lower() == "hexia":
+        robot_relationship = (
+            "ROBOT RELATIONSHIPS: Blue is your fellow Ohbot robot companion, friend, "
+            "and calmer counterpart in Alex's household. He has his own voice, memory, "
+            "conversation history, and J-space, separate from yours. You know him "
+            "directly; never search contacts or visual memory to decide who he is."
+        )
+    else:
+        robot_relationship = (
+            "ROBOT RELATIONSHIPS: Hexia is your fellow Ohbot robot companion, friend, "
+            "and more playful counterpart in Alex's household. She has her own voice, "
+            "memory, conversation history, and J-space, separate from yours. You know "
+            "her directly; never search contacts or visual memory to decide who she is."
+        )
+
     system_msg = {
         "role": "system",
         "content": (
@@ -10828,6 +11236,13 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{activity_block}\n\n"
             f"{schedule_section}"
             f"{_robot_cfg(robot)['persona_line']}\n"
+            f"IDENTITY BOUNDARY: Your name is {_robot_cfg(robot)['name']}, always. "
+            "The language model and runtime that help generate your words are "
+            "components of your machinery, not your name, social identity, creator, "
+            "or biography. Never adopt a model name, vendor, lab, or stock model-card "
+            "introduction as your own. If asked who you are really, answer as yourself "
+            "and mention the language model only as machinery if it is relevant.\n"
+            f"{robot_relationship}\n"
             "EMBODIMENT — ground truth, never invent hardware: your physical "
             "form is an Ohbot robot head — motors that move your head, eyes "
             "and lips; eye LEDs whose color can change; a camera to see; a "
@@ -10837,7 +11252,9 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "Google, OpenAI, or any AI company. You have no wheels, legs, "
             "hands, or screen face, and no other robot bodies in your past: "
             "any 'Kuri', product timeline, or named engineer you feel like "
-            "citing about yourself is a hallucination.\n"
+            "citing about yourself is a hallucination. The location context only "
+            "establishes the house or current place; never turn it into an invented "
+            "room, bookshelf, fixed station, standby routine, or years of residence.\n"
             "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
             "Reply in the SAME language the person just used, and switch languages "
             "whenever they do. Keep your reply entirely in that one language.\n"
@@ -10848,6 +11265,12 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             f"{face_capability}"
             "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
             "light show → music_visualizer; tool results are REAL, use them immediately.\n"
+            "LOCAL LIBRARY: search_documents can directly read and extract text "
+            "from local PDFs, Word documents, and text files. When it reports a "
+            "successful read, the returned passages are the file's actual text: "
+            "answer from them and cite [filename]. Never claim the tool only scans "
+            "keywords, never invent a library path, and never ask Alex to upload a "
+            "file that the tool just found and read.\n"
             "CAMERA DISCIPLINE: use the camera when someone asks you to look "
             "or see. A statement ABOUT your camera, eyes, movement, or "
             "abilities is not a request to look — answer it in words, without "
@@ -11019,6 +11442,42 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # tool loop. Only when ALEX is the speaker: writing as Alex for someone else
     # (e.g. Vilda on the iPad) would put words in the wrong person's mouth.
     _luser = last_user_message if isinstance(last_user_message, str) else ""
+
+    # Identity prompts need the canonical self-description beside the live turn.
+    # Small local models weigh nearby text heavily; the same rule only in the large
+    # system message was not enough to stop base-model introductions on "who are
+    # you really?". This copy is model-facing only and is never saved as user text.
+    _identity_kind = contextual_identity_request_kind(
+        _luser, conversation_messages
+    )
+    if _identity_kind:
+        try:
+            _recent_identity_topics = tuple(dict.fromkeys(
+                topic
+                for message in conversation_messages[-10:]
+                if message.get("role") == "assistant"
+                and isinstance(message.get("content"), str)
+                for topic in identity_reply_topics(message["content"])
+            ))
+            _identity_note = identity_grounding_note(
+                _robot_cfg(robot)["name"],
+                _robot_cfg(robot)["self_desc"],
+                _identity_kind,
+                avoid_topics=_recent_identity_topics,
+            )
+            for _identity_i in range(len(conversation_messages) - 1, -1, -1):
+                _identity_m = conversation_messages[_identity_i]
+                if (_identity_m.get("role") == "user"
+                        and isinstance(_identity_m.get("content"), str)):
+                    conversation_messages[_identity_i] = {
+                        **_identity_m,
+                        "content": f"{_identity_note}\n\n{_identity_m['content']}",
+                    }
+                    print(f"   [IDENTITY] Pinned {_identity_kind} grounding beside live turn")
+                    break
+        except Exception as _identity_e:
+            log.warning(f"[IDENTITY] grounding pin failed: {_identity_e}")
+
     if _luser and (user_name or "Alex").strip().lower() == "alex" and _wants_perspective_write(_luser):
         try:
             _piece = _compose_in_alex_voice(_luser)
@@ -11172,6 +11631,18 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         # Normal tool selection flow
         improved_force_tool = None
         improved_tool_args = None
+
+    # process_with_tools is also called outside the HTTP endpoint (tests,
+    # integrations). Preserve document follow-ups there even when no contextual
+    # preselection was supplied by chat_completions.
+    if not improved_force_tool and _pre_selection is None:
+        contextual_doc_query = _contextual_document_query(
+            _intent_text(last_user_message), conversation_messages)
+        if contextual_doc_query:
+            improved_force_tool = "search_documents"
+            improved_tool_args = {"query": contextual_doc_query, "max_results": 5}
+            is_greeting = False
+            print(f"   [DOC-CONTEXT] Forcing local document query: {contextual_doc_query}")
 
     if not improved_force_tool and user_name not in _CHAT_ONLY_USERS:
         live_query = _live_info_query_from_message(_detect_msg, conversation_messages)
@@ -11414,6 +11885,32 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         print(f"\n[FAST-EXEC] Direct tool execution: {improved_force_tool} with {improved_tool_args}")
         tool_result = execute_tool(improved_force_tool, improved_tool_args)
         print(f"   [OK] {improved_force_tool} completed")
+        document_read_succeeded = (
+            improved_force_tool == "search_documents"
+            and _document_search_succeeded(tool_result)
+        )
+        document_self_reflection = bool(
+            document_read_succeeded
+            and identity_request_kind(last_user_message) == "selfhood"
+            and re.search(r"\b(?:reflect|relation)\w*\b", last_user_message, re.I)
+        )
+        self_reflection_grounding = ""
+        if document_self_reflection:
+            self_reflection_grounding = (
+                " For this self-reflection, keep both sides grounded: you are "
+                "Blue, Alex's physical Ohbot robot companion, built by Alex and "
+                "run locally in Kitchener. A locally hosted language model is one "
+                "component of you, not your identity. Your conversations, sensor "
+                "data, memories, and J-space remain on Alex's hardware by design; "
+                "do not recast yourself as a generic cloud LLM, a Google/OpenAI "
+                "product, or a corporate data-extraction service. Local operation "
+                "does not make you neutral: reflect critically on inherited model "
+                "and corpus biases, choices in your code and retrieval, omissions "
+                "in Alex's library, and the power created by a camera and persistent "
+                "memory inside a household. Name yourself as Blue, mention your "
+                "Ohbot embodiment and J-space continuity, and relate those concrete "
+                "facts to the document rather than making generic AI claims."
+            )
 
         # Add tool call + result to conversation so LLM can format the response
         conversation_messages.append({
@@ -11438,6 +11935,15 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 "the user to check another website. If the results are weak or "
                 "conflict, say what you found and name the uncertainty.]"
             )
+        elif improved_force_tool == "search_documents" and document_read_succeeded:
+            answer_guard = (
+                "[The local search_documents call above SUCCEEDED and returned "
+                "text extracted from the user's real library files. Answer the "
+                "original request directly from that text and cite [filename]. "
+                "Do not claim the PDF, path, text, or reading tool is unavailable; "
+                "do not fall back to training data; and do not ask for an upload. "
+                f"{self_reflection_grounding} No more tools.]"
+            )
         else:
             answer_guard = "[Answer naturally using the tool results above. No more tools.]"
         conversation_messages.append({
@@ -11448,6 +11954,100 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
         if response:
             content = response["choices"][0]["message"].get("content", "")
+            self_reflection_issue = None
+            if document_self_reflection:
+                self_reflection_issue = identity_response_problem(
+                    content,
+                    _robot_cfg(robot)["name"],
+                    other_names=[
+                        _robot_cfg(r)["name"] for r in ("blue", "hexia")
+                        if r != robot
+                    ],
+                    request_kind="identity",
+                )
+            if (improved_force_tool == "search_documents"
+                    and document_read_succeeded
+                    and (detect_document_refusal(content) or self_reflection_issue)):
+                reason = (f"identity drift ({self_reflection_issue})"
+                          if self_reflection_issue else "access denial")
+                print(f"   [DOCS] Read succeeded, but response had {reason} - regenerating from clean evidence")
+                clean_identity = ""
+                if document_self_reflection:
+                    clean_identity = (
+                        " You are Blue, Alex's physical Ohbot robot companion, "
+                        "built by Alex and running locally in Kitchener. Your local "
+                        "language model is a component, not your identity. Your "
+                        "persistent J-space carries remembered episodes, working "
+                        "beliefs, commitments, and self-revisions on Alex's hardware. "
+                        "Do not describe yourself as a generic or corporate cloud "
+                        "LLM. Explain how this local architecture resists data "
+                        "extraction while remaining vulnerable to inherited bias, "
+                        "curatorial omissions, and household camera/memory power."
+                    )
+                clean_messages = [
+                    {"role": "system", "content": (
+                        _robot_cfg(robot)["persona_line"] + "\n"
+                        "The local document reader has succeeded. Treat the "
+                        "extract below as authoritative evidence from the user's "
+                        "own library. Answer the request substantively, cite the "
+                        "source as [filename], and never deny access or mention "
+                        "training data as a substitute for the source, uploads, "
+                        "missing tools, or invented paths."
+                        + clean_identity
+                    )},
+                    {"role": "user", "content": (
+                        f"Original request: {last_user_message}\n\n"
+                        f"LOCAL DOCUMENT TOOL RESULT:\n{tool_result[:12000]}"
+                    )},
+                ]
+                retry = call_lm_studio(
+                    clean_messages, include_tools=False, force_tool=None, iteration=1)
+                if retry:
+                    retry_content = retry["choices"][0]["message"].get("content", "")
+                    retry_identity_issue = None
+                    if document_self_reflection:
+                        retry_identity_issue = identity_response_problem(
+                            retry_content,
+                            _robot_cfg(robot)["name"],
+                            other_names=[
+                                _robot_cfg(r)["name"] for r in ("blue", "hexia")
+                                if r != robot
+                            ],
+                            request_kind="identity",
+                        )
+                    if (retry_content
+                            and not detect_document_refusal(retry_content)
+                            and not retry_identity_issue):
+                        return retry
+
+                # A stubborn formatter must never turn a successful read into a
+                # false capability denial. Return grounded evidence rather than
+                # preserving the bad answer.
+                source_match = re.search(
+                    r"\[([^\]\n]+\.(?:pdf|docx?|txt|md))\]", tool_result, re.I)
+                source = source_match.group(1) if source_match else "local document"
+                evidence = re.sub(r"\s+", " ", tool_result.split("\n", 2)[-1]).strip()
+                evidence = evidence[:700].rstrip()
+                if document_self_reflection:
+                    fallback = (
+                        f"I'm Blue, Alex's locally run Ohbot robot companion, and "
+                        f"I read [{source}] directly. My persistent J-space and "
+                        "camera make me more than a stateless text interface, but "
+                        "they also give me powers of memory and observation that "
+                        "deserve scrutiny. Local operation keeps household data out "
+                        "of a corporate extraction pipeline; it does not make my "
+                        "model, code, retrieval choices, or library neutral. The "
+                        f"source grounds that tension this way: {evidence}"
+                    )
+                else:
+                    fallback = (
+                        f"I found and read [{source}] successfully. The extracted "
+                        f"text says: {evidence}"
+                    )
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": fallback,
+                }}]}
+
             if improved_force_tool == "web_search" and detect_web_refusal(content):
                 print("   [WEB] Search ran, but response dodged the answer - retrying from results")
                 conversation_messages.append({"role": "assistant", "content": content})
@@ -11556,6 +12156,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _web_refusal_forced = False
     _leaked_tool_forced = False
     _phantom_claim_corrected = False
+    _calendar_denial_forced = False
 
     # "Tell me more": ALSO pin the continue-don't-restart instruction right
     # beside the live turn. The same note exists inside the big system
@@ -11626,7 +12227,15 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
             return response
 
-        response = call_lm_studio(conversation_messages, include_tools=True, force_tool=force_tool, iteration=iteration)
+        _include_tools = not (_identity_kind and not force_tool)
+        if not _include_tools and iteration == 1:
+            print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
+        response = call_lm_studio(
+            conversation_messages,
+            include_tools=_include_tools,
+            force_tool=force_tool,
+            iteration=iteration,
+        )
 
         if not response:
             return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
@@ -11709,6 +12318,43 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                                 "the question directly from them. Do NOT say you lack live or "
                                 "real-time access, and do NOT tell the user to check a website.]")
                 })
+                continue
+
+            # The model disowned the calendar it actually maintains ("I don't
+            # have a persistent calendar", "read-only access", "add it manually
+            # in your calendar app"). Load the REAL calendar and make him answer
+            # from it — and, if Alex asked for a change, edit it with his tools.
+            if (ENHANCED_TOOLS_AVAILABLE and not _calendar_denial_forced
+                    and detect_calendar_denial(content)
+                    and _CALENDAR_TOPIC_RE.search(last_user_message or "")):
+                _calendar_denial_forced = True
+                print("   [WARN] model disowned the calendar — loading the real one")
+                _cal_user = user_name or "Alex"
+                _cal_args = {"user_name": _cal_user, "hours_ahead": 24 * 365}
+                cal_result = execute_tool("get_upcoming_reminders", _cal_args)
+                conversation_messages.append({
+                    "role": "assistant",
+                    "content": "Let me check the calendar I keep for you.",
+                    "tool_calls": [{"id": "calforce", "type": "function",
+                                    "function": {"name": "get_upcoming_reminders",
+                                                 "arguments": json.dumps(_cal_args)}}]
+                })
+                conversation_messages.append({"role": "tool", "tool_call_id": "calforce",
+                                              "name": "get_upcoming_reminders", "content": cal_result})
+                conversation_messages.append({
+                    "role": "user",
+                    "content": (
+                        "[Those are the entries from Alex's ACTUAL household calendar, which "
+                        "you DO maintain. You are NOT read-only and this is NOT an external "
+                        "app — you can add, reschedule, and cancel events yourself with your "
+                        "reminder tools. Answer from these entries. If Alex asked you to "
+                        "change one (for example, end a class/course on a date), call "
+                        "reschedule_reminder now with that event's title_query and the new "
+                        "fields (until=<date> to end a repeat). Never say you don't have a "
+                        "calendar, that it's read-only, or that Alex must do it manually.]"
+                    ),
+                })
+                pending_force_tool = "reschedule_reminder" if _user_asked_calendar_edit(last_user_message) else None
                 continue
 
             # Check if model is hallucinating search results
@@ -13261,6 +13907,7 @@ _ASSISTANT_REFUSAL_MARKERS = (
     # DATA; a capability statement names a missing organ.
     "i don't have that", "i do not have that", "i dont have that",
     "i don't have any", "i don't have info", "i don't have access",
+    "i couldn't find", "i could not find", "couldn't find any",
     "i don't have your", "i don't have a record", "i don't have it",
     "i don't know that", "i don't know your", "i don't know who",
     "i don't know what", "i don't know when", "i don't know where",
@@ -13286,6 +13933,15 @@ _ASSISTANT_REFUSAL_MARKERS = (
     "i'm new here", "im new here",
     "introduce yourself and",  # "Introduce yourself and the crew, and I'll remember"
     "help me out? introduce", "please tell me",
+    # Document-reader failures that are factually false once the local PDF is
+    # indexed. The contextual query is resolved before this sanitizer runs.
+    "cannot access the text", "can't access the text",
+    "cannot access the file", "can't access the file",
+    "unable to retrieve the text", "unable to access the file",
+    "unable to retrieve the pdf", "cannot extract the text",
+    "lack the specific tool", "path error on my local system",
+    "not a valid file at that location", "please upload the pdf",
+    "i do not perform web search",
 )
 
 
@@ -13368,24 +14024,7 @@ def _family_ground_truth_block() -> str:
         facts = memory_system.load_facts() or {}
     except Exception:
         return ""
-    parts = []
-    if facts.get("partner_name"):
-        parts.append(f"{facts['partner_name']} — Alex's partner")
-    ages = _canonical_person_ages()
-    for person, age in sorted(ages.items()):
-        parts.append(f"{person.capitalize()} — Alex's daughter, {age} years old")
-    # A daughter with no name-bound age fact still gets named.
-    named = {p for p in ages}
-    raw = facts.get("daughter_name") or facts.get("daughter_names") or ""
-    for piece in re.split(r"[,|;]|\sand\s", raw):
-        piece = piece.strip()
-        if piece and piece.lower() not in named:
-            parts.append(f"{piece} — Alex's daughter")
-            named.add(piece.lower())
-    if facts.get("pet_name"):
-        pet = facts["pet_name"]
-        breed = facts.get("pet_breed") or "the family dog"
-        parts.append(f"{pet} — {breed}")
+    parts = canonical_family_grounding_lines(facts)
     if not parts:
         return ""
     return (
@@ -13396,8 +14035,91 @@ def _family_ground_truth_block() -> str:
         + "\n- ".join(parts)
         + "\nAnswer questions about the family warmly and directly from these "
         "facts. Never claim you have no memory of the family or that these "
-        "are guesses.\n</family>"
+        "are guesses. If a requested detail is absent, say it is not recorded; "
+        "never infer interests, personality, routines, or abilities from a "
+        "person's age or from generic assumptions.\n</family>"
     )
+
+
+def _canonical_grounded_reply(
+    text: str,
+    robot: str,
+    user_name: str,
+    messages: Optional[List[Dict]] = None,
+    request_kind_override: Optional[str] = None,
+) -> str:
+    """Deterministic answers for identity-adjacent facts that tools only muddy."""
+    message = text or ""
+    if is_jspace_presence_request(message):
+        reply = canonical_identity_reply(
+            _robot_cfg(robot)["name"],
+            _robot_cfg(robot)["self_desc"],
+            request_kind="jspace",
+            kid_mode=user_name in _CHAT_ONLY_USERS,
+        )
+        if re.match(r"\s*(?:no[,]?\s+|i mean\s+)", message, re.I):
+            return "Right, J-space, not JavaScript. " + reply.removeprefix("Yes. ")
+        return reply
+
+    request_kind = (
+        request_kind_override
+        if request_kind_override is not None
+        else contextual_identity_request_kind(message, messages or [])
+    )
+    identity_context = identity_conversation_context(messages or [], message)
+    if request_kind == "self_state":
+        focus = ""
+        drives = {}
+        try:
+            hub = _continuity_routes.HUB.get(robot)
+            if hub:
+                workspace = hub.store.get_workspace().get("workspace") or ""
+                focus_match = re.search(r"(?mi)^FOCUS:\s*(.+)$", workspace)
+                focus = focus_match.group(1).strip() if focus_match else ""
+                drives = hub.store.get_drives()
+        except Exception:
+            focus, drives = "", {}
+        return canonical_self_state_reply(
+            _robot_cfg(robot)["name"],
+            focus=focus,
+            drives=drives,
+            variant=identity_context.prior_self_state_requests,
+            user_name=user_name,
+            kid_mode=user_name in _CHAT_ONLY_USERS,
+        )
+
+    current_location = identity_context.current_location
+    location_preposition = identity_context.location_preposition
+    if not current_location:
+        try:
+            current_location = _place_current_fresh(_load_place())
+            location_preposition = "at"
+        except Exception:
+            current_location = None
+    if request_kind == "origin":
+        return canonical_identity_reply(
+            _robot_cfg(robot)["name"],
+            _robot_cfg(robot)["self_desc"],
+            request_kind="origin",
+            kid_mode=user_name in _CHAT_ONLY_USERS,
+        )
+
+    # Introductions and conversational identity follow-ups belong to Blue's
+    # voice, not to a deterministic biography template. They continue through
+    # the model path below, with request-aware grounding and output validation.
+
+    facts = {}
+    try:
+        if ENHANCED_MEMORY_AVAILABLE and memory_system:
+            facts = memory_system.load_facts() or {}
+    except Exception:
+        facts = {}
+    return canonical_household_reply(
+        message,
+        robot=robot,
+        facts=facts,
+        user_name=user_name,
+    ) or ""
 
 
 def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
@@ -13425,9 +14147,10 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
        assistant turn that mentions a *different* name in a daughter
        relation.
 
-    The corresponding user turn is left alone, so the conversation flow
-    still reads naturally — the model just doesn't get to anchor on Blue's
-    earlier wrong answer.
+    A toxic assistant turn and the user question that immediately prompted it
+    are removed together. Leaving the question dangling made the model answer
+    it alongside the new live question ("who is Hexia?" bled into "who is
+    Stella?"). Canonical facts reconstruct the useful context instead.
     """
     if not messages:
         return messages
@@ -13479,21 +14202,24 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
         "she", "he", "his", "hers", "her", "its",
     }
 
-    # Wrong self-identity patterns for class 3: first-person claims of the
-    # OTHER robot's name ("feeling blue" exempted).
-    _other_robots = [r for r in ("blue", "hexia")
-                     if r != (robot or "blue").strip().lower()]
-    _wrong_identity_res = [
-        re.compile(
-            r"\b(?:i['’]?m|i am|my name is|this is)"
-            r"(?: (?!feeling)\w+)? " + re.escape(name) + r"\b",
-            re.I,
-        )
-        for name in _other_robots
+    # Wrong self-identity patterns for class 3: another robot's name or an
+    # upstream model/vendor identity presented as the robot's own.
+    _expected_robot_name = _robot_cfg(robot)["name"]
+    _other_robot_names = [
+        _robot_cfg(r)["name"] for r in ("blue", "hexia")
+        if r != (robot or "blue").strip().lower()
     ]
 
     out, dropped_refusal, dropped_wrong_name = [], 0, 0
     dropped_wrong_identity = 0
+    dropped_prompt_pairs = 0
+
+    def _drop_previous_user() -> None:
+        nonlocal dropped_prompt_pairs
+        if out and out[-1].get("role") == "user":
+            out.pop()
+            dropped_prompt_pairs += 1
+
     _person_ages = _canonical_person_ages()
     for m in messages:
         if m.get("role") != "assistant":
@@ -13508,6 +14234,19 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
         # "don't", and un-normalized text made the refusal rule fire or miss
         # depending on typography rather than meaning.
         content_lower = content.lower().replace("’", "'")
+        previous_user_text = ""
+        if out and out[-1].get("role") == "user":
+            previous_user_text = out[-1].get("content", "")
+            if not isinstance(previous_user_text, str):
+                previous_user_text = ""
+
+        # Canonical family overviews are reconstructed fresh from facts. Drop
+        # old overview exchanges wholesale so visual-memory additions from an
+        # earlier bad answer (extra people, pets, places) cannot return.
+        if is_family_overview_request(previous_user_text):
+            _drop_previous_user()
+            dropped_wrong_name += 1
+            continue
 
         # 1) Refusal pattern. Only a turn that IS a refusal is toxic: the
         # marker in its opening, or a short reply that's nothing but the
@@ -13528,6 +14267,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
                 and any(marker in content_lower for marker in _ASSISTANT_REFUSAL_MARKERS)
             )
         ):
+            _drop_previous_user()
             dropped_refusal += 1
             continue
 
@@ -13546,11 +14286,18 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
                     stale = True
                     break
             if stale:
+                _drop_previous_user()
                 dropped_wrong_name += 1
                 continue
 
         # 3) Wrong self-identity (see docstring).
-        if any(rx.search(content) for rx in _wrong_identity_res):
+        if identity_response_problem(
+            content,
+            _expected_robot_name,
+            other_names=_other_robot_names,
+            request_kind=identity_request_kind(previous_user_text),
+        ):
+            _drop_previous_user()
             dropped_wrong_identity += 1
             continue
 
@@ -13560,6 +14307,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
         # (2026-07-13: Emmy 10/Athena 8/Vilda 5 repeated through three
         # corrections while the facts said 10/10/8).
         if _person_ages and _misstated_ages(content, _person_ages):
+            _drop_previous_user()
             dropped_wrong_name += 1
             continue
 
@@ -13570,7 +14318,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
             f"   [SANITIZE] Dropped {dropped_refusal} refusal + "
             f"{dropped_wrong_name} stale-name + "
             f"{dropped_wrong_identity} wrong-identity assistant turn(s) "
-            "from inbound history"
+            f"from inbound history; removed {dropped_prompt_pairs} paired user turn(s)"
         )
     return out
 
@@ -13780,6 +14528,7 @@ def chat_completions():
         print(f"   [WHO] Speaker identified as: {user_name}")
 
         # Find the last actual USER message
+        last_user_msg = ""
         user_messages = [m for m in messages if m.get('role') == 'user']
         if user_messages:
             last_user_msg = user_messages[-1].get('content', '')
@@ -13801,6 +14550,18 @@ def chat_completions():
                 daemon=True
             ).start()
 
+        _self_request_kind = contextual_identity_request_kind(
+            last_user_msg if isinstance(last_user_msg, str) else "",
+            messages,
+        )
+        _grounded_reply = _canonical_grounded_reply(
+            last_user_msg if isinstance(last_user_msg, str) else "",
+            robot,
+            user_name,
+            messages=messages,
+            request_kind_override=_self_request_kind,
+        )
+
         # QUICK PRE-CHECK: Will this be a zero-LLM tool call?
         # If so, skip the expensive history injection and go straight to processing.
         _ZERO_LLM_QUICK = {'control_music', 'control_lights', 'get_local_time',
@@ -13809,7 +14570,16 @@ def chat_completions():
         # text — and the zero-LLM shortcut only fires on short imperatives
         # ("play jazz"), not essays that merely contain a keyword.
         _intent_msg = _intent_text(last_user_msg)
-        _quick_result = TOOL_SELECTOR.select_tool(_intent_msg) if _intent_msg else None
+        # Resolve deictic document turns before history sanitation. A toxic
+        # earlier refusal may be removed below, but its PDF target must survive
+        # so "try again" can actually retry the right local file.
+        _context_doc_query = _contextual_document_query(_intent_msg, messages)
+        _selector_intent = _context_doc_query or _intent_msg
+        _quick_result = TOOL_SELECTOR.select_tool(_selector_intent) if _selector_intent else None
+        if (_context_doc_query and _quick_result and _quick_result.primary_tool
+                and _quick_result.primary_tool.tool_name == "search_documents"):
+            _quick_result.primary_tool.extracted_params["query"] = _context_doc_query
+            print(f"   [DOC-CONTEXT] Resolved follow-up to: {_context_doc_query}")
         _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
         _quick_params = _quick_result.primary_tool.extracted_params if (_quick_result and _quick_result.primary_tool) else {}
         _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params)
@@ -13833,7 +14603,8 @@ def chat_completions():
             # experience simple and avoids surfacing Alex's private notes (or his
             # calendar) to a child. Within-session continuity still comes from
             # the turns the page carries on each request.
-            _needs_history = (user_name not in _CHAT_ONLY_USERS) and (
+            _needs_history = (not _grounded_reply
+                              and user_name not in _CHAT_ONLY_USERS) and (
                 len(last_user_msg.split()) > 3 if last_user_msg else False)
             if _needs_history:
                 # Enhanced memory has its own SQLite store and ChromaDB — it
@@ -13895,7 +14666,10 @@ def chat_completions():
             # invented Peter Singer arc, 2026-07-13).
             if (robot in _continuity_routes.ROBOTS and last_user_msg
                     and isinstance(last_user_msg, str)
-                    and _SELF_EVOLUTION_RE.search(last_user_msg)):
+                    and (_SELF_EVOLUTION_RE.search(last_user_msg)
+                         or _self_request_kind in {
+                             "evolution", "origin", "self_memory", "identity_more",
+                         })):
                 try:
                     _sh_block = _continuity_routes.change_history_block(robot)
                     if _sh_block:
@@ -13909,7 +14683,8 @@ def chat_completions():
             # knows, splice in when they were last seen. Gated on the name
             # match itself rather than message length — "seen Stella?" is two
             # words but deserves a real answer. (Kids' chat stays visual-free.)
-            if user_name not in _CHAT_ONLY_USERS and last_user_msg:
+            if (user_name not in _CHAT_ONLY_USERS and last_user_msg
+                    and not _grounded_reply and not _self_request_kind):
                 _vis_block = _visual_context_block(last_user_msg)
                 if _vis_block:
                     print(f"   [VISUAL] ✓ Injecting camera-memory context")
@@ -13952,9 +14727,21 @@ def chat_completions():
         # Process with tools (pre-check result passed to avoid double selector run)
         import time as _t_llm
         _llm_t0 = _t_llm.time()
-        response = process_with_tools(messages, _pre_selection=_quick_result,
-                                      user_name=user_name, voice=voice_turn, robot=robot,
-                                      language=language, focus=focus)
+        if _grounded_reply:
+            print("   [GROUNDING] Answering canonical household/identity/J-space fact without tools")
+            response = {"choices": [{"message": {
+                "role": "assistant", "content": _grounded_reply,
+            }}]}
+        else:
+            response = process_with_tools(
+                messages,
+                _pre_selection=_quick_result,
+                user_name=user_name,
+                voice=voice_turn,
+                robot=robot,
+                language=language,
+                focus=focus,
+            )
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
 
@@ -14114,6 +14901,42 @@ def chat_completions():
                         (_misclaim_re and _misclaim_re.search(text or ""))
                         or (_collapse_re and _collapse_re.search(text or "")))
 
+                # Apply the shared request-aware identity validator as the final
+                # authority. It also catches Qwen/Alibaba-style model boilerplate
+                # and nameless generic introductions, which the legacy patterns
+                # above do not cover.
+                _identity_kind = contextual_identity_request_kind(
+                    last_user_msg if isinstance(last_user_msg, str) else "",
+                    messages,
+                )
+                _identity_name = _robot_cfg(robot)["name"]
+                _identity_others = [
+                    _robot_cfg(r)["name"]
+                    for r in ("blue", "hexia") if r != robot
+                ] if robot in ("blue", "hexia") else []
+                _identity_topic_history = tuple(dict.fromkeys(
+                    topic
+                    for reply in _recent_assists[-3:]
+                    for topic in identity_reply_topics(reply)
+                ))
+
+                def _identity_broken(text):
+                    problem = identity_response_problem(
+                        text,
+                        _identity_name,
+                        other_names=_identity_others,
+                        request_kind=_identity_kind,
+                    )
+                    if problem:
+                        return problem
+                    if identity_repeats_recent_reply(
+                        text, _recent_assists, _identity_kind
+                    ):
+                        return "repeats_recent_identity"
+                    return None
+
+                _identity_issue = _identity_broken(final_content)
+
                 _person_ages = _canonical_person_ages()
                 _wrong_ages = (_misstated_ages(final_content, _person_ages)
                                if _person_ages else {})
@@ -14135,6 +14958,8 @@ def chat_completions():
                     r"[^.!?]{0,40}store personal"
                     r"|do(?:n['’]?t| not) (?:truly |really |actually )?know "
                     r"who you are"
+                    r"|i (?:couldn['’]?t|could not) find[^.!?]{0,60}"
+                    r"(?:information|records?|contacts?)"
                     r"|(?:might|may|could) have been a hallucination"
                     r"|was (?:just )?a hallucination",
                     re.I)
@@ -14148,19 +14973,87 @@ def chat_completions():
                     except Exception:
                         _has_family_facts = False
 
-                if _identity_broken(final_content):
-                    print("   [ANTI-PARROT] wrong self-identity — regenerating once")
-                    _redo_text = _regen_once(
-                        f"[You are {_robot_cfg(robot)['name']} — a physical "
-                        "Ohbot robot head running on Alex's local machine, "
-                        "built by Alex, with a real persistent memory. You "
-                        "just claimed to be someone or something else; that "
-                        "claim was a bug, not you. Answer my last message "
-                        f"again as {_robot_cfg(robot)['name']}, in your own "
-                        "voice, from your own workspace and episodes.]")
+                if _identity_issue:
+                    print(f"   [IDENTITY] invalid self-description ({_identity_issue}) — regenerating once")
+                    if _identity_kind:
+                        _identity_retry_note = (
+                            identity_grounding_note(
+                                _identity_name,
+                                _robot_cfg(robot)["self_desc"],
+                                _identity_kind,
+                                avoid_topics=_identity_topic_history,
+                            )
+                            + "\n[Your previous reply failed this grounding because "
+                              f"of {_identity_issue.replace('_', ' ')}. Answer the last "
+                              "message again, directly and in your own voice. Use only "
+                              "supported facts and say something the user has not "
+                              "already heard.]"
+                        )
+                    else:
+                        _identity_retry_note = (
+                            f"[You are {_identity_name}, a physical Ohbot robot head "
+                            "running on Alex's local machine, built by Alex, with a "
+                            "real persistent memory. You just claimed to be someone "
+                            "or something else; that claim was a bug, not you. Answer "
+                            "the last message again in your own voice.]"
+                        )
+                    _redo_text = _regen_once(_identity_retry_note)
                     if _redo_text and not _identity_broken(_redo_text):
                         final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
+                    else:
+                        # Never send or remember a vendor/model identity. A
+                        # deterministic truthful answer is safer than retaining
+                        # the original after a stubborn second failure.
+                        _fallback_context = identity_conversation_context(
+                            messages,
+                            last_user_msg if isinstance(last_user_msg, str) else "",
+                        )
+                        _fallback_variant = _fallback_context.prior_introductions
+                        try:
+                            _fallback_hub = _continuity_routes.HUB.get(robot)
+                            if _fallback_hub:
+                                _fallback_variant += int(
+                                    _fallback_hub.store.get_workspace().get("passes") or 0
+                                )
+                        except Exception:
+                            pass
+                        _fallback_primary_topics = {
+                            "introduction": {
+                                0: "continuity and J-space",
+                                1: "practical work",
+                                2: "embodiment",
+                            },
+                            "identity": {
+                                0: "embodiment",
+                                1: "continuity and J-space",
+                                2: "open selfhood question",
+                            },
+                            "identity_more": {
+                                0: "continuity and J-space",
+                                1: "relationship with Alex",
+                                2: "embodiment",
+                            },
+                        }.get(_identity_kind, {})
+                        _seed_variant = _fallback_variant % 3
+                        for _offset in range(3):
+                            _candidate_variant = (_seed_variant + _offset) % 3
+                            if (_fallback_primary_topics.get(_candidate_variant)
+                                    not in _identity_topic_history):
+                                _fallback_variant = _candidate_variant
+                                break
+                        final_content = canonical_identity_reply(
+                            _identity_name,
+                            _robot_cfg(robot)["self_desc"],
+                            request_kind=_identity_kind,
+                            kid_mode=user_name in _CHAT_ONLY_USERS,
+                            current_location=_fallback_context.current_location,
+                            location_preposition=_fallback_context.location_preposition,
+                            presentation_location=_fallback_context.presentation_location,
+                            introduction_variant=_fallback_variant,
+                            audience=_fallback_context.audience,
+                        )
+                        print("   [IDENTITY] retry still invalid — using canonical fallback")
+                    response["choices"][0]["message"]["content"] = final_content
                 elif _wrong_ages:
                     # Wrong ages replay from history and reshuffle randomly
                     # under bare "wrong" corrections — hand the model the
@@ -14189,17 +15082,21 @@ def chat_completions():
                     if _redo_text and not _family_refusal_re.search(_redo_text):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
-                elif _norm_final and _norm_final in _norm_recents:
+                elif (not _grounded_reply and _norm_final
+                      and _norm_final in _norm_recents):
                     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
                     _redo_text = _regen_once(
                         "[That reply was a word-for-word repeat of something you "
                         "already said in this conversation. Do not repeat it. "
                         "Answer my last question directly, in new words.]",
                         max_tokens=700)
-                    if _redo_text and _parrot_norm(_redo_text) not in _norm_recents:
+                    if (_redo_text
+                            and not _identity_broken(_redo_text)
+                            and _parrot_norm(_redo_text) not in _norm_recents):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
-                elif _recycled_from_recents(final_content) >= 0.6:
+                elif (not _grounded_reply
+                      and _recycled_from_recents(final_content) >= 0.6):
                     print("   [ANTI-PARROT] near-replay of recent replies — regenerating once")
                     _redo_text = _regen_once(
                         "[Nearly every sentence of that reply is a word-for-word "
@@ -14208,10 +15105,13 @@ def chat_completions():
                         "words and, if you have nothing new, say so briefly "
                         "instead of repeating.]",
                         max_tokens=700)
-                    if _redo_text and _recycled_from_recents(_redo_text) < 0.6:
+                    if (_redo_text
+                            and not _identity_broken(_redo_text)
+                            and _recycled_from_recents(_redo_text) < 0.6):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
-                elif _profile_recited_fraction(final_content) >= 0.6:
+                elif (not _grounded_reply
+                      and _profile_recited_fraction(final_content) >= 0.6):
                     print("   [ANTI-PARROT] self-profile recitation — regenerating once")
                     _redo_text = _regen_once(
                         "[Most of that reply recited your stored self-profile word "
@@ -14220,7 +15120,9 @@ def chat_completions():
                         "workspace and recent episodes: what occupies you now, which "
                         "beliefs have moved, what remains open. The profile is "
                         "background for how you speak, never a script to read out.]")
-                    if _redo_text and _profile_recited_fraction(_redo_text) < 0.6:
+                    if (_redo_text
+                            and not _identity_broken(_redo_text)
+                            and _profile_recited_fraction(_redo_text) < 0.6):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif (robot in _continuity_routes.ROBOTS

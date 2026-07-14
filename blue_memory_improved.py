@@ -27,6 +27,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from blue_identity import (
+    identity_request_kind,
+    identity_response_problem,
+    is_family_overview_request,
+)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -2109,6 +2115,7 @@ class EnhancedMemorySystem:
     _ASSISTANT_REFUSAL_MARKERS = (
         "i don't have", "i do not have", "i dont have",
         "i don't know", "i do not know", "i dont know",
+        "i couldn't find", "i could not find", "couldn't find any",
         "i only have", "i only know",
         "i haven't been told", "i havent been told",
         "you haven't told me", "you havent told me",
@@ -2125,6 +2132,15 @@ class EnhancedMemorySystem:
         "haven't stored", "havent stored",
         "my records are empty", "no records",
         "i'm new here", "im new here",
+        # False document/web capability refusals should not become remembered
+        # history and anchor the next attempt on the same failure.
+        "cannot access the text", "can't access the text",
+        "cannot access the file", "can't access the file",
+        "unable to retrieve the text", "unable to access the file",
+        "unable to retrieve the pdf", "cannot extract the text",
+        "lack the specific tool", "path error on my local system",
+        "not a valid file at that location", "please upload the pdf",
+        "i do not perform web search",
     )
 
     @classmethod
@@ -2166,22 +2182,39 @@ class EnhancedMemorySystem:
         if not rows:
             return []
 
+        expected_robot_name = "Hexia" if (robot or "blue").lower() == "hexia" else "Blue"
+        other_robot_names = ["Blue" if expected_robot_name == "Hexia" else "Hexia"]
         out: List[Dict[str, Any]] = []
-        for r in rows:
+        # Work oldest-first so a toxic assistant reply can remove the user
+        # question that immediately prompted it. Keeping that question without
+        # its answer made it look like a second live request on the next turn.
+        for r in reversed(rows):
             content = (r["content"] or "").strip()
             if not content or len(content) < 4:
                 continue
             if content.startswith(("{", "[", "```")):
                 continue
-            # Drop assistant refusals; keep the user turn that prompted them
-            # so the surrounding flow still reads coherently.
-            if r["role"] == "assistant" and self._is_assistant_refusal(content):
-                continue
+            if r["role"] == "assistant":
+                previous_user_text = ""
+                if out and out[-1].get("role") == "user":
+                    previous_user_text = out[-1].get("content", "") or ""
+                toxic = (
+                    is_family_overview_request(previous_user_text)
+                    or self._is_assistant_refusal(content)
+                    or bool(identity_response_problem(
+                        content,
+                        expected_robot_name,
+                        other_names=other_robot_names,
+                        request_kind=identity_request_kind(previous_user_text),
+                    ))
+                )
+                if toxic:
+                    if out and out[-1].get("role") == "user":
+                        out.pop()
+                    continue
             out.append({"role": r["role"], "content": content,
                         "ts": r["timestamp"]})
 
-        # Reverse to chronological order (we ORDER BY id DESC above)
-        out = list(reversed(out))
         return out[-limit:]
 
     @staticmethod

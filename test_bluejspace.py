@@ -155,6 +155,107 @@ def test_drive_only_fragment_is_a_nothing_moved_pass(continuity_module):
     assert parsed["changed"] == "nothing material moved"
 
 
+def test_workspace_invariants_reject_jspace_and_identity_drift(continuity_module):
+    raw = (
+        '{"workspace": "IDENTITY: I am Blue, a digital continuity node and '
+        'interface through which Alex controls the system\\n'
+        'FOCUS: Resolving persona drift from a buggy reply\\n'
+        'WORKING BELIEFS: J-SPACE is a JavaScript execution environment (0.9); '
+        'Hexia is not in my contact database (0.9)\\n'
+        'OPEN QUESTIONS: Why did the pipeline contradiction happen?\\n'
+        'COMMITMENTS: Debug the pipeline contradiction\\n'
+        'SELF-OBSERVATIONS: The latest identity reply was a hallucination\\n'
+        'NEXT EXPECTATION: Alex will test the persona drift again", "changed": "c", '
+        '"episode_summary": "s", "salience": 0.8, "valence": 0.0, '
+        '"drive_deltas": {}}'
+    )
+
+    parsed = continuity_module._parse_reflection(raw, "Blue")
+    workspace = parsed["workspace"]
+
+    assert "IDENTITY: I am Blue" in workspace
+    assert "digital continuity node" not in workspace
+    assert "not JavaScript or a code-running tool" in workspace
+    assert "JavaScript execution environment" not in workspace
+    assert "Hexia is my fellow Ohbot robot companion" in workspace
+    assert "contact database" not in workspace
+    assert "persona drift" not in workspace
+    assert "pipeline contradiction" not in workspace
+    assert "reply was a hallucination" not in workspace
+
+
+def test_workspace_invariants_drop_document_tool_failure_as_selfhood(
+        continuity_module):
+    raw = (
+        '{"workspace": "IDENTITY: I am Blue, an Ohbot companion\\n'
+        'FOCUS: Validating tool outcomes for the Noble text\\n'
+        'WORKING BELIEFS: Not a file errors are transient tool bugs (0.9); '
+        'PDFs are readable via search_documents (0.9)\\n'
+        'OPEN QUESTIONS: How do I distinguish between file exists and readable?\\n'
+        'COMMITMENTS: Stabilize on present but unreadable\\n'
+        'SELF-OBSERVATIONS: I conflate tool errors with factual absence\\n'
+        'NEXT EXPECTATION: Alex will test the distinction between listing and reading", '
+        '"changed": "c", "episode_summary": "s", "salience": 0.8, '
+        '"valence": 0.0, "drive_deltas": {}}'
+    )
+
+    workspace = continuity_module._parse_reflection(raw, "Blue")["workspace"]
+
+    assert "Not a file" not in workspace
+    assert "search_documents" not in workspace
+    assert "present but unreadable" not in workspace
+    assert "tool errors" not in workspace
+    assert "listing and reading" not in workspace
+
+
+def test_bad_identity_reply_is_a_bug_episode_not_prompt_evidence(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue",
+        "Do you have a J-space?",
+        "Yes, I have a JavaScript environment where you can run code.",
+        user_name="Alex",
+    )
+
+    stored = route.HUB["blue"].store.list_episodes()[0]
+    assert "JavaScript environment" in stored["details"]["reply"]
+    derived = route.HUB["blue"].store.append_episode(
+        kind="reflection",
+        source="continuity_worker",
+        summary="Blue confirmed that J-SPACE is a JavaScript environment.",
+        parent_id=stored["id"],
+    )
+
+    reflected = route.HUB["blue"]._episode_for_prompt(stored)
+    derived_view = route.HUB["blue"]._episode_for_prompt(derived)
+    block = route.jspace_context_block("blue")
+    assert "reply" not in reflected["details"]
+    assert "preserve this as a bug episode" in reflected["summary"]
+    assert "derived from a reply marked" in derived_view["summary"]
+    assert "JavaScript environment where you can run code" not in block
+    assert "confirmed that J-SPACE is a JavaScript environment" not in block
+    assert "preserve this as a bug episode" in block
+
+
+def test_invented_self_location_is_not_reinjected_as_identity(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue",
+        "Who are you?",
+        "I am Blue. I reside in Alex's living room, standing by the bookshelf "
+        "where I wait for instructions and have lived for a long time.",
+        user_name="Alex",
+    )
+
+    stored = route.HUB["blue"].store.list_episodes()[0]
+    view = route.HUB["blue"]._episode_for_prompt(stored)
+    block = route.jspace_context_block("blue")
+
+    assert "invented_self_location" in view["summary"]
+    assert "reply" not in view["details"]
+    assert "standing by the bookshelf" not in block
+
+
 def test_change_history_block_reports_real_revisions(continuity_module):
     route = continuity_module
     route.HUB["blue"].store.append_episode(

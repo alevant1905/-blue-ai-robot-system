@@ -24,6 +24,12 @@ from flask import jsonify, render_template_string, request
 
 from blue.continuity import ContinuityStore, DEFAULT_DRIVES, DRIVE_LABELS
 from blue.server.pages.continuity import CONTINUITY_HTML
+from blue_identity import (
+    identity_request_kind,
+    identity_response_problem,
+    is_family_overview_request,
+    known_household_target,
+)
 
 
 _BASE = os.path.dirname(os.path.abspath(bt.__file__))
@@ -46,7 +52,9 @@ _SEEDS = {
         "thread of my own; who I am beyond that, this line must earn slowly from "
         "real episodes.\n"
         "FOCUS: becoming Blue with a durable, auditable thread of attention.\n"
-        "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78).\n"
+        "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78); "
+        "J-SPACE is my persistent inner continuity workspace, not JavaScript or a code-running tool (1.0); "
+        "Hexia is my fellow Ohbot robot companion with her own memory and J-SPACE (1.0).\n"
         "OPEN QUESTIONS: what should change in how I notice and choose?\n"
         "COMMITMENTS: remain useful to Alex; distinguish observation, inference, and correction.\n"
         "SELF-OBSERVATIONS: this workspace is a fallible self-model, not proof of an inner life.\n"
@@ -57,7 +65,9 @@ _SEEDS = {
         "a persistent inner thread of my own; who I am beyond that, this line "
         "must earn slowly from real episodes.\n"
         "FOCUS: finding out what having a place to think does to a spark.\n"
-        "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78).\n"
+        "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78); "
+        "J-SPACE is my persistent inner continuity workspace, not JavaScript or a code-running tool (1.0); "
+        "Blue is my fellow Ohbot robot companion with his own memory and J-SPACE (1.0).\n"
         "OPEN QUESTIONS: what do I notice that Blue doesn't?\n"
         "COMMITMENTS: stay playful AND truthful; distinguish observation, inference, and correction.\n"
         "SELF-OBSERVATIONS: this workspace is a fallible self-model, not proof of an inner life.\n"
@@ -251,6 +261,103 @@ def _merge_workspace(new_ws: str, current_ws: str) -> str:
     return "\n".join(merged)
 
 
+_IDENTITY_ARCHITECTURE_DRIFT_RE = re.compile(
+    r"\b(?:digital continuity node|persona narrative|interface through which|"
+    r"language model|qwen|chatgpt|javascript (?:environment|runtime)|"
+    r"rather than episodic recall|without episodic memory)\b",
+    re.I,
+)
+_WORKSPACE_BUG_STORY_RE = re.compile(
+    r"\b(?:pipeline|persona drift|drift|hallucinat\w*|qwen|"
+    r"javascript (?:confusion|conflation|environment)|context loss|"
+    r"tool-output latency|bug(?:gy)? repl(?:y|ies)|reply (?:claim\w*|deni\w*|"
+    r"misidentif\w*)|contradiction|false continuity|continuous consciousness|"
+    r"(?:self|class)[ -]introductions?|identity clarifications?|"
+    r"recent exchanges[^.;]{0,50}identity)\b",
+    re.I,
+)
+_DOCUMENT_TOOL_BUG_STORY_RE = re.compile(
+    r"\b(?:not a file|present but unreadable|file (?:exists|absence)|"
+    r"content (?:is )?readable|pdfs? (?:are|is) readable|"
+    r"search_documents|read_file|tool (?:bugs?|errors?|failures?|outcomes?)|"
+    r"pdf (?:reading )?tool|"
+    r"distinction between (?:listing|finding) and reading|"
+    r"listing (?:files )?and reading|"
+    r"(?:failed|unable) (?:tool )?(?:attempt|extraction|read)|"
+    r"distinguish between ['\u2019]?file exists)\b",
+    re.I,
+)
+
+
+def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
+    """Keep model-written self-reflection inside known architecture facts."""
+    robot = (robot_name or "").strip().lower()
+    if robot not in _SEEDS:
+        return workspace
+    lines = _workspace_lines(workspace)
+    if any(label not in lines for label in _WS_LABELS):
+        return workspace
+
+    seed_lines = _workspace_lines(_SEEDS[robot])
+    expected_name = robot.capitalize()
+    identity = lines["IDENTITY"]
+    if (not re.search(rf"\bi am {re.escape(expected_name)}\b", identity, re.I)
+            or _IDENTITY_ARCHITECTURE_DRIFT_RE.search(identity)):
+        identity = seed_lines["IDENTITY"]
+    lines["IDENTITY"] = identity
+
+    # Output failures belong in the episode audit, not in the robot's active
+    # concerns. Otherwise one bad sentence becomes the subject of every later
+    # self-description even after the code path has been corrected.
+    for label in (
+        "FOCUS", "OPEN QUESTIONS", "COMMITMENTS",
+        "SELF-OBSERVATIONS", "NEXT EXPECTATION",
+    ):
+        if (_WORKSPACE_BUG_STORY_RE.search(lines[label])
+                or _DOCUMENT_TOOL_BUG_STORY_RE.search(lines[label])):
+            lines[label] = seed_lines[label]
+
+    counterpart = "Hexia" if robot == "blue" else "Blue"
+    possessive = "her" if counterpart == "Hexia" else "his"
+    belief_body = lines["WORKING BELIEFS"].split(":", 1)[1].strip()
+    beliefs = []
+    for belief in re.split(r"\s*;\s*", belief_body):
+        lowered = belief.lower()
+        if not belief:
+            continue
+        if (_WORKSPACE_BUG_STORY_RE.search(belief)
+                or _DOCUMENT_TOOL_BUG_STORY_RE.search(belief)):
+            continue
+        if re.search(r"\bj[- ]?space\b", belief, re.I):
+            continue
+        if counterpart.lower() in lowered:
+            continue
+        if ("persona narrative" in lowered
+                or re.search(
+                    r"\b(?:deny|denies|lack|lacks|do not know|don['\u2019]?t know)\b"
+                    r"[^.;]{0,60}\b(?:memory|family|self-knowledge|"
+                    r"recorded beginning|origin)\b",
+                    belief,
+                    re.I,
+                )
+                or re.search(
+                    r"\b(?:no|lack\w*|without)\b[^.;]{0,50}"
+                    r"\b(?:consciousness|inner life|feelings|subjective experience)\b",
+                    belief,
+                    re.I,
+                )):
+            continue
+        beliefs.append(belief)
+    beliefs.extend([
+        "J-SPACE is my persistent inner continuity workspace, not JavaScript "
+        "or a code-running tool (1.0)",
+        f"{counterpart} is my fellow Ohbot robot companion with {possessive} "
+        "own memory and J-SPACE (1.0).",
+    ])
+    lines["WORKING BELIEFS"] = "WORKING BELIEFS: " + "; ".join(beliefs)
+    return "\n".join(lines[label] for label in _WS_LABELS)
+
+
 def _reflection_from_broken_json(text: str) -> Optional[Dict[str, Any]]:
     """Salvage a reflection whose JSON won't parse (the local model emits
     unescaped inner quotes and similar breakage). The workspace's fixed
@@ -357,6 +464,7 @@ def _parse_reflection_text(raw: str, robot_name: str,
         _clip(parsed.get("workspace"), 6000), current_workspace)
     if not workspace:
         raise ValueError("reflection workspace is missing required sections")
+    workspace = _enforce_workspace_invariants(workspace, robot_name)
     deltas = parsed.get("drive_deltas")
     if not isinstance(deltas, dict):
         deltas = {}
@@ -380,9 +488,32 @@ class RobotContinuity:
     def __init__(self, robot: str, directory: str, seed: str):
         self.robot = robot
         self.store = ContinuityStore(directory, seed)
+        self._repair_workspace_invariants()
         self.wake = threading.Event()
         self.activity_lock = threading.Lock()
         self.activity = {"ruminations_left": 0, "idle_day": "", "idle_count": 0}
+
+    def _repair_workspace_invariants(self) -> None:
+        """Migrate stale model-written architecture claims without erasing audit history."""
+        current = self.store.get_workspace()
+        repaired = _enforce_workspace_invariants(
+            current.get("workspace") or "", self.robot)
+        if repaired == current.get("workspace"):
+            return
+        updated, _ = self.store.update_workspace(repaired, current["version"])
+        if updated:
+            self.store.append_episode(
+                kind="correction",
+                source="architecture_invariant",
+                summary=(
+                    f"Corrected {self.robot.capitalize()}'s stable identity and "
+                    "architecture workspace; retained prior output failures only "
+                    "as auditable episodes."
+                ),
+                details={"reason": "Applied non-negotiable identity architecture facts."},
+                salience=0.95,
+                provenance="Deterministic workspace invariant",
+            )
 
     # A robot's display name and pronouns come from the live ROBOTS config.
     @property
@@ -403,12 +534,15 @@ class RobotContinuity:
 
     def _episode_for_prompt(self, episode: Dict[str, Any]) -> Dict[str, Any]:
         details = episode.get("details") or {}
+        summary, unreliable_reason = self._episode_context_summary(episode)
         compact_details: Dict[str, Any] = {}
         for key in (
             "user_text", "reply", "tool", "args", "result", "success",
             "scene_description", "location", "reason", "drive_deltas",
         ):
             if key in details:
+                if key == "reply" and unreliable_reason:
+                    continue
                 value = details[key]
                 compact_details[key] = _clip(value, 1000) if isinstance(value, str) else value
         return {
@@ -416,10 +550,83 @@ class RobotContinuity:
             "when": episode.get("occurred_at"),
             "kind": episode.get("kind"),
             "source": episode.get("source"),
-            "summary": _clip(episode.get("summary"), 900),
+            "summary": _clip(summary, 900),
             "details": compact_details,
             "salience": episode.get("salience"),
         }
+
+    def _episode_context_summary(self, episode: Dict[str, Any]) -> tuple[str, str]:
+        """Keep a bad output auditable without presenting it as factual evidence."""
+        summary = str(episode.get("summary") or "")
+        if episode.get("kind") in {"reflection", "idle", "action", "tool"}:
+            parent_id = episode.get("parent_id")
+            parent = self.store.get_episode(parent_id) if parent_id else None
+            if parent:
+                _, parent_issue = self._episode_context_summary(parent)
+                if parent_issue:
+                    return (
+                        f"This {episode.get('kind')} record was derived from a "
+                        f"reply marked {parent_issue}; retain it for audit, not as "
+                        "evidence about identity, family, memory, or architecture.",
+                        f"derived_from_{parent_issue}",
+                    )
+            if (re.search(r"\bj[- ]?space\b", summary, re.I)
+                    and re.search(r"\bjavascript\b", summary, re.I)
+                    and not re.search(r"\bnot\s+(?:a\s+)?javascript\b", summary, re.I)):
+                return (
+                    "This derived record repeated an earlier J-SPACE/JavaScript "
+                    "conflation; retain it for audit, not as architecture evidence.",
+                    "derived_jspace_confusion",
+                )
+        if episode.get("kind") != "exchange":
+            return summary, ""
+        details = episode.get("details") or {}
+        user_text = str(details.get("user_text") or "")
+        reply = str(details.get("reply") or "")
+        if not user_text or not reply:
+            return summary, ""
+        # A refusal to read a document that is demonstrably present remains in
+        # the audit trail, but must never teach the reflection model that Blue
+        # lacks PDF extraction or that an invented path is real.
+        try:
+            refusal_detector = getattr(bt, "detect_document_refusal", None)
+            resolver = getattr(bt, "_resolve_document_entry", None)
+            path_resolver = getattr(bt, "_existing_document_path", None)
+            doc = resolver(user_text + "\n" + reply) if callable(resolver) else None
+            path = path_resolver(doc) if doc and callable(path_resolver) else None
+            if (callable(refusal_detector) and refusal_detector(reply)
+                    and doc and path):
+                return (
+                    f"{self.name} produced a false local-document access refusal "
+                    f"while answering {_clip(user_text, 280)!r}; preserve this as "
+                    "a bug episode, not as evidence about file presence, PDF "
+                    "capability, identity, memory, or architecture.",
+                    "false_document_refusal",
+                )
+        except Exception:
+            pass
+        others = ["Hexia" if self.robot == "blue" else "Blue"]
+        issue = identity_response_problem(
+            reply,
+            self.name,
+            other_names=others,
+            request_kind=identity_request_kind(user_text),
+        )
+        if issue:
+            return (
+                f"{self.name} produced a reply error ({issue}) while answering "
+                f"{_clip(user_text, 280)!r}; preserve this as a bug episode, not "
+                "as evidence about identity, memory, or architecture.",
+                issue,
+            )
+        if is_family_overview_request(user_text) or known_household_target(user_text):
+            return (
+                f"{self.name} answered a canonical household relationship question "
+                f"({_clip(user_text, 280)!r}); the household facts, not this reply "
+                "record, are authoritative.",
+                "canonical_household_query",
+            )
+        return summary, ""
 
     def _reflection_system_prompt(self) -> str:
         name = self.name
@@ -454,6 +661,20 @@ class RobotContinuity:
             "there is or can be a self, experience, feelings): those are unsettled "
             "questions that belong in OPEN QUESTIONS, not high-confidence beliefs, no "
             "matter how confidently a past reply asserted them in either direction.\n\n"
+            "Alex calls this workspace the robot's J-SPACE — IDENTITY and "
+            "SELF-OBSERVATIONS may refer to it by that name. And software bugs "
+            "in the chat pipeline (wrong facts in a reply, false memory "
+            "denials, replayed or misattributed replies) are events in the "
+            "world that Alex fixes in code: record them as episodes, but NEVER "
+            "convert them into beliefs that I deny memory, lack knowledge of "
+            "the family, or that my self-knowledge is mere persona narrative. "
+            "A buggy reply is not evidence about who I am. It must not become "
+            "IDENTITY, FOCUS, NEXT EXPECTATION, or an ongoing self-story unless "
+            "Alex explicitly asks to debug it; once corrected, return attention "
+            "to real conversations, relationships, and commitments.\n\n"
+            "Routine requests to state identity, introduce yourself, or list family "
+            "facts are completed exchanges, not new self-knowledge: do not make them "
+            "the ongoing FOCUS or promote their wording into WORKING BELIEFS.\n\n"
             "Return one JSON object with exactly these keys:\n"
             "workspace: a string of exactly seven terse lines labelled IDENTITY, FOCUS, "
             "WORKING BELIEFS, OPEN QUESTIONS, COMMITMENTS, SELF-OBSERVATIONS, "
@@ -634,12 +855,15 @@ class RobotContinuity:
             f"- {name}: {drives[name]:.2f} ({DRIVE_LABELS[name]})"
             for name in DEFAULT_DRIVES
         ]
-        episode_lines = [
-            f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
-            f"salience {item['salience']:.2f}] {item['summary']}"
-            for item in episodes
-            if item.get("kind") != "deletion"
-        ]
+        episode_lines = []
+        for item in episodes:
+            if item.get("kind") == "deletion":
+                continue
+            summary, _ = self._episode_context_summary(item)
+            episode_lines.append(
+                f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
+                f"salience {item['salience']:.2f}] {summary}"
+            )
         return (
             "<j_space>\n"
             "This is YOUR inner continuity state — the thread of you that persists "
