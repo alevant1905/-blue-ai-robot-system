@@ -6,6 +6,7 @@ Run: python test_agreement.py
 from blue.agreement import agreement_gesture, NOD, SHAKE
 
 NODS = [
+    # strong
     "Yes, absolutely. I completely agree with your point.",
     "Absolutely. That is exactly right.",
     "I completely agree that sovereignty matters here.",
@@ -15,9 +16,17 @@ NODS = [
     "Definitely. That's spot on.",
     "Alex, I wholeheartedly agree.",
     "**Absolutely** — well said.",
+    # milder (sensitivity)
+    "Yes, I think that is a good way to look at it.",
+    "Right, that makes sense given the local setup.",
+    "Sure. That is a fair point about extraction.",
+    "I think you are right about the infrastructure.",
+    "That makes a lot of sense.",
+    "Indeed, the material reality matters here.",
 ]
 
 SHAKES = [
+    # strong
     "No, that is not right. The theft narrative misses the point.",
     "I strongly disagree with that framing.",
     "I have to disagree here.",
@@ -27,6 +36,13 @@ SHAKES = [
     "You are not right about the data flow.",
     "That's simply not true.",
     "I beg to differ.",
+    # milder (sensitivity)
+    "No, I see it differently.",
+    "Not quite. The picture is more complicated.",
+    "I do not think so, actually.",
+    "Not necessarily true in this case.",
+    "I am not sure I agree with that framing.",
+    "Hmm, no. That misses something.",
 ]
 
 NEITHER = [
@@ -38,6 +54,10 @@ NEITHER = [
     "I can help you with that. What would you like to know?",
     "It depends on how you define extraction.",
     "There are good arguments on both sides of this.",
+    # polite false friends must NOT shake
+    "No problem, I can help with that.",
+    "No worries at all.",
+    "No need to apologize.",
     "",
 ]
 
