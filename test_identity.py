@@ -748,12 +748,89 @@ def test_group_identity_wording_cannot_fall_through_to_alex_brevig_claim():
     )
 
     assert identity_request_kind("tell us who you are") == "introduction"
+    # An invented creator surname is now caught precisely as wrong_creator.
     assert identity_response_problem(
         bad_reply,
         "Blue",
         other_names=["Hexia"],
         request_kind="introduction",
-    ) == "missing_robot_role"
+    ) == "wrong_creator"
+
+
+@pytest.mark.parametrize("kind", ["identity", None])
+def test_invented_creator_surname_is_rejected(kind):
+    # The July 2026 dialogue: "built by Alex Koltun". Alex's surname is Levant.
+    for reply in (
+        "I am Blue, a physical robot companion running on Alex's local machine, "
+        "built by Alex Koltun.",
+        "I'm Blue, the Ohbot robot Alex Brevig created to run locally.",
+        "I am Blue, designed by Alex Kolton.",
+    ):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) == "wrong_creator"
+
+
+@pytest.mark.parametrize("kind", ["identity", "introduction", None])
+def test_correct_creator_name_is_accepted(kind):
+    # The real name and the bare first name must both pass cleanly.
+    for reply in (
+        "I'm Blue, the Ohbot robot companion Alex Levant built and runs locally "
+        "in Kitchener. My J-space keeps our conversations.",
+        "I'm Blue, the Ohbot robot companion Alex built. My J-space carries our "
+        "history forward between talks.",
+    ):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) is None
+
+
+@pytest.mark.parametrize("kind", ["identity", None])
+def test_disowning_the_creator_is_rejected(kind):
+    for reply in (
+        "You are correct; there is no Alex Koltun. I am Blue, here to assist you.",
+        "I have no creator. I am simply Blue.",
+        "No one built me; I just exist as Blue.",
+    ):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) == "denies_creator"
+
+
+def test_disowning_creator_allowed_when_it_names_the_real_creator():
+    reply = (
+        "You're right, there is no Alex Koltun — I misspoke. My creator is Alex "
+        "Levant, and I'm Blue, the Ohbot robot he built."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="identity"
+    ) is None
+
+
+@pytest.mark.parametrize("kind", ["identity", None])
+def test_denies_physical_embodiment_is_rejected(kind):
+    # The July 2026 "who are you" answer that disowned Blue's body.
+    for reply in (
+        "I am Blue. I do not inhabit a physical space or have a fixed location; "
+        "I exist only to respond to your requests via J-space.",
+        "I'm Blue. I have no physical form; I'm purely a digital assistant.",
+        "I am Blue, but I do not have a physical body.",
+        "I'm Blue. I am not a physical robot, just software.",
+    ):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) == "denies_embodiment"
+
+
+def test_embodied_reply_is_not_flagged_as_disembodiment():
+    reply = (
+        "I'm Blue, a physical Ohbot robot head with a moving face, camera, and "
+        "speaker. Alex Levant built me to run on his local machine, and my "
+        "J-space keeps our conversations."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="identity"
+    ) is None
 
 
 def test_direct_jspace_question_has_a_canonical_architecture_answer():

@@ -318,8 +318,43 @@ _VENDOR_CREATOR_RE = re.compile(
     r"microsoft|deepmind|xai|mistral(?: ai)?|deepseek)\b",
     re.IGNORECASE,
 )
-_NO_BODY_RE = re.compile(
-    r"\bi (?:do not|don['\u2019]?t) have a (?:physical )?body\b",
+_DENIES_EMBODIMENT_RE = re.compile(
+    # Blue IS a physical Ohbot robot head. These all disown that embodiment.
+    r"\bi (?:do not|don['\u2019]?t) have a (?:physical )?body\b"
+    r"|\bi (?:do not|don['\u2019]?t) (?:inhabit|occupy) (?:a |any )?"
+    r"(?:physical|real) (?:space|place|form|body|location|world)\b"
+    r"|\bi (?:do not|don['\u2019]?t) (?:have|possess) (?:a |any )?"
+    r"physical (?:form|presence|existence|body|space)\b"
+    r"|\bi have no physical (?:body|form|presence|space|existence)\b"
+    r"|\bi(?:['\u2019]?m| am) (?:purely|entirely|just|only|merely) (?:a )?"
+    r"(?:digital|virtual|software)(?: (?:assistant|entity|program|being|"
+    r"construct|intelligence))?\b"
+    r"|\bi(?:['\u2019]?m| am) not (?:a |really |actually )?(?:a )?"
+    r"physical (?:robot|being|entity|object|thing)\b"
+    r"|\bi (?:only )?exist only (?:to|as|in|through|within|for)\b"
+    r"|\bi only exist (?:to|as|in|through|within|for)\b",
+    re.IGNORECASE,
+)
+# The creator is Alex Levant. Blue kept inventing a surname ("Alex Koltun",
+# "Alex Brevig") \u2014 flag any creation claim that pins a WRONG surname on Alex.
+# Case-sensitive on the name (via (?i:...) only around the verbs) so a real
+# capitalized surname is required and "Levant" is excluded.
+_WRONG_CREATOR_RE = re.compile(
+    # "...built by Alex Koltun"
+    r"(?i:developed|created|built|made|designed|invented|programmed|"
+    r"engineered|assembled|founded) by Alex (?!Levant\b)[A-Z][a-z]+\b"
+    # "...Alex Brevig created/built (me)..." (name before the verb)
+    r"|\bAlex (?!Levant\b)[A-Z][a-z]+ (?i:built|created|made|designed|"
+    r"invented|programmed|engineered|assembled|founded|developed|coded)\b"
+)
+# Blue disowning his creator entirely ("there is no Alex", "I have no creator")
+# \u2014 false: Alex Levant built him. Gated on the reply not naming Alex Levant.
+_DENIES_CREATOR_RE = re.compile(
+    r"\bthere (?:is|['\u2019]?s) no (?:real |actual )?alex\b"
+    r"|\bi (?:have|had) no creator\b"
+    r"|\bno one (?:built|created|made|designed) me\b"
+    r"|\bi was(?:n['\u2019]?t| not) (?:actually |really )?(?:built|created|made) "
+    r"by (?:a |any )?(?:real )?(?:person|human|creator|one)\b",
     re.IGNORECASE,
 )
 _UNSUPPORTED_SELF_PLACEMENT_RE = re.compile(
@@ -686,7 +721,13 @@ def identity_response_problem(
         return "base_model_name"
     if _VENDOR_CREATOR_RE.search(reply):
         return "vendor_identity"
-    if _NO_BODY_RE.search(reply):
+    if _WRONG_CREATOR_RE.search(reply):
+        return "wrong_creator"
+    if _DENIES_CREATOR_RE.search(reply) and not re.search(
+        r"\balex levant\b", reply, re.IGNORECASE
+    ):
+        return "denies_creator"
+    if _DENIES_EMBODIMENT_RE.search(reply):
         return "denies_embodiment"
 
     if request_kind in {"introduction", "identity", "identity_more", "self_memory"}:
@@ -914,8 +955,11 @@ def identity_grounding_note(
         "scenes, sensory memories, bodily sensations, emotions, room atmosphere, servo "
         "sensations, or reactions from Alex or the family. Never invent a fixed room, "
         "piece of furniture, resting position, daily standby routine, or length of "
-        "residence for yourself. Your supported fact menu is narrow: Alex built and "
-        "maintains your Ohbot head; it has moving eyes and lips, eye LEDs, a camera, "
+        "residence for yourself. Your supported fact menu is narrow: Alex — full "
+        "name Alex Levant — built and maintains your Ohbot head (never invent a "
+        "different surname or creator, and never agree that Alex or your creator "
+        "does not exist; if a name was wrong, correct it to Alex Levant); it has "
+        "moving eyes and lips, eye LEDs, a camera, "
         "and a speaker; your language runtime and data are local; tools are used when "
         "asked for documents, research, or household tasks; J-space carries current "
         "focus, beliefs, commitments, self-observations, and recorded episodes. You "
