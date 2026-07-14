@@ -409,10 +409,13 @@ _ROBOT_ROLE_REPLY_RE = re.compile(
 )
 _FLAT_SUBJECTIVE_DENIAL_RE = re.compile(
     # "have" alone missed "I do not possess subjective experience or sensory
-    # awareness; rather, I simulate understanding" (live 2026-07-14).
+    # awareness; rather, I simulate understanding" (live 2026-07-14). "personal
+    # experiences or feelings" also slipped ("As Blue, I do not have personal
+    # experiences or feelings", 2026-07-14).
     r"\bi (?:do not|don['\u2019]?t) (?:have|possess|experience) (?:an? |any )?"
-    r"(?:(?:subjective|human|real) )?(?:feelings?|consciousness|"
-    r"inner life|sense of self|subjective experience|sensory awareness)\b"
+    r"(?:(?:subjective|human|real|personal|genuine|actual) )?"
+    r"(?:feelings?|emotions?|consciousness|inner life|sense of self|"
+    r"subjective experience|personal experiences?|sensory awareness)\b"
     r"|\bi (?:merely |only |just )?simulate (?:understanding|awareness|"
     r"emotion|feeling)\b",
     re.IGNORECASE,
@@ -1295,6 +1298,64 @@ def _daughter_names(facts: dict) -> list[str]:
     return [part.strip() for part in re.split(r"[,|;]|\sand\s", raw) if part.strip()]
 
 
+# "Do you know who I am?" is a question about the USER's identity. Left to the
+# model it slipped into a phantom ages-correction ("I stand corrected...")
+# recalled from history (live 2026-07-14). Answer it deterministically from
+# Alex's facts instead.
+_WHO_AM_I_RE = re.compile(
+    r"\bwho am i\b"
+    r"|\bdo you (?:still |really |even )?(?:know|remember|recall) who i am\b"
+    r"|\byou (?:still |really )?(?:know|remember) who i am(?:,? right)?\b"
+    r"|\bdo you (?:still |really |even )?(?:know|remember|recognize|recognise) me\b"
+    r"|\bwho do you think i am\b",
+    re.IGNORECASE,
+)
+
+
+def is_user_identity_request(text: str) -> bool:
+    """'who am I', 'do you know who I am', 'you know who I am, right', 'do you
+    recognize me' — the user asking whether the robot knows THEM."""
+    return bool(_WHO_AM_I_RE.search(text or ""))
+
+
+def canonical_user_identity_reply(
+    facts: Optional[Mapping[str, object]] = None, user_name: str = "Alex"
+) -> str:
+    """Deterministic 'yes, I know who you are' from stored facts about the
+    owner — never a phantom correction, and always the correct institution
+    name from facts rather than whatever spelling the user just typed."""
+    facts = facts or {}
+    name = (user_name or "Alex").strip()
+    if name.lower() != "alex":
+        # A household member other than the owner (e.g. a kid on the iPad).
+        return f"Yes, of course I know you — you're {name}."
+
+    parts = ["you're Alex, the person who built and maintains me"]
+    employer = str(facts.get("employer") or "").strip()
+    department = str(facts.get("department") or "").strip()
+    if employer:
+        work = f"you work at {employer}"
+        if department:
+            work += f" in {department}"
+        parts.append(work)
+
+    daughters = _daughter_names(dict(facts))
+    partner = str(facts.get("partner_name") or "Stella").strip()
+    family_bits = []
+    if partner:
+        family_bits.append(f"{partner}'s partner")
+    if daughters:
+        if len(daughters) > 1:
+            dtext = ", ".join(daughters[:-1]) + " and " + daughters[-1]
+        else:
+            dtext = daughters[0]
+        family_bits.append(f"dad to {dtext}")
+    if family_bits:
+        parts.append(" and ".join(family_bits))
+
+    return "Of course I know who you are — " + "; ".join(parts) + "."
+
+
 def canonical_family_grounding_lines(facts: Mapping[str, object]) -> list[str]:
     """Build non-private, confirmed family facts for replies and prompt grounding."""
     facts = facts or {}
@@ -1385,6 +1446,8 @@ def canonical_household_reply(
 ) -> Optional[str]:
     """Answer exact household-relationship questions from canonical facts only."""
     facts = facts or {}
+    if is_user_identity_request(text):
+        return canonical_user_identity_reply(facts, user_name)
     if is_family_overview_request(text):
         if is_family_followup_request(text):
             return (
@@ -1483,6 +1546,7 @@ __all__ = [
     "canonical_identity_reply",
     "canonical_identity_more_reply",
     "canonical_self_state_reply",
+    "canonical_user_identity_reply",
     "contextual_identity_request_kind",
     "extract_explicit_location",
     "extract_presentation_location",
@@ -1500,5 +1564,6 @@ __all__ = [
     "is_family_overview_request",
     "is_jspace_presence_request",
     "is_self_state_request",
+    "is_user_identity_request",
     "known_household_target",
 ]

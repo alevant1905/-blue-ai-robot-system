@@ -919,6 +919,51 @@ def test_durable_recent_history_drops_correction_acks(tmp_path):
     assert any("Wilfrid Laurier" in c for c in contents)
 
 
+def test_who_am_i_gets_a_deterministic_grounded_answer():
+    from blue_identity import is_user_identity_request, canonical_user_identity_reply
+
+    facts = {
+        "employer": "Wilfrid Laurier University",
+        "department": "Communication Studies",
+        "partner_name": "Stella",
+        "daughter_name": "Athena, Emmy, Vilda",
+        "athena_age": "10", "emmy_age": "10", "vilda_age": "8",
+    }
+    for q in ("You know who I am, right?", "Do you know who I am?", "who am i",
+              "do you recognize me", "do you still remember who I am"):
+        assert is_user_identity_request(q), q
+
+    reply = canonical_user_identity_reply(facts, "Alex")
+    # Grounded, correct institution name, no phantom correction language.
+    assert "Alex" in reply
+    assert "Wilfrid Laurier University" in reply
+    assert "Stella" in reply
+    assert "I stand corrected" not in reply
+    assert "updated my records" not in reply
+    # Routed through the household entry point that the server calls.
+    assert canonical_household_reply(
+        "You know who I am, right?", "blue", facts, "Alex"
+    ) == reply
+    # A kid on the iPad gets a simple, warm identification (not Alex's bio).
+    kid = canonical_user_identity_reply(facts, "Vilda")
+    assert "Vilda" in kid and "Wilfrid Laurier" not in kid
+
+    # Must not hijack an unrelated household question.
+    assert not is_user_identity_request("who is Stella?")
+    assert not is_user_identity_request("what do you remember about our family")
+
+
+def test_personal_experiences_denial_is_flagged():
+    reply = (
+        "As Blue, I do not have personal experiences or feelings, but I am "
+        "designed to be a thoughtful companion."
+    )
+    for kind in ("self_memory", "identity_more", "selfhood"):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) == "flat_subjective_denial"
+
+
 def test_self_memory_canonical_reply_interpolates_description():
     reply = canonical_identity_reply(
         "Blue", "Alex's robot companion", "self_memory"
