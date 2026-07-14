@@ -1583,6 +1583,7 @@ from blue.tool_selector import (
 # isn't connected, all head calls are no-ops, so the rest of Blue keeps running.
 from blue import head as blue_head
 from blue.mood_eyes import mood_eye_color
+from blue.agreement import agreement_gesture
 
 # Connect the head at module load (covers both entry points: `python
 # bluetools.py` directly AND `python run.py` which imports this module). Make
@@ -15278,6 +15279,11 @@ def chat_completions():
                 )
                 if _reply_text:
                     response["eye_mood"] = mood_eye_color(_reply_text)
+                    # Nod on a strong agreement opener, shake on a strong
+                    # disagreement — the chat page fires it as speech starts.
+                    _gesture = agreement_gesture(_reply_text)
+                    if _gesture:
+                        response["head_gesture"] = _gesture
         except Exception as _eye_e:
             log.warning(f"[EYES] mood colour failed: {_eye_e}")
 

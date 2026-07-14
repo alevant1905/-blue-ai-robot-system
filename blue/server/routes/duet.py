@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 import bluetools as bt
 from flask import Response, jsonify, render_template_string, request
 
+from blue.agreement import agreement_gesture
 from blue.mood_eyes import mood_eye_color
 from blue.server.pages.duet import DUET_HTML
 
@@ -3983,6 +3984,11 @@ def register(app):
             # Mood eyes: colour the SPEAKER's eye LEDs to match this line, applied
             # by the duet page when it speaks the turn (same as chat mode).
             resp["eye_mood"] = mood_eye_color(text)
+            # Nod / head-shake if this line opens with strong agreement or
+            # disagreement with the other robot.
+            _gesture = agreement_gesture(text)
+            if _gesture:
+                resp["head_gesture"] = _gesture
         if protocol:
             # The page uses these to surface phase changes and job swaps as notes.
             resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})

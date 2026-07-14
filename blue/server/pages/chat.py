@@ -604,6 +604,8 @@ CHAT_HTML = """
                 // Tint Blue's eyes to the mood of this reply (server-computed),
                 // then speak — the eyes revert to rest when he finishes talking.
                 try { applyEyeMood(data && data.eye_mood, (reply.match(/\\S+/g) || []).length); } catch (e) {}
+                // Nod / shake his head at the start if he strongly agrees / disagrees.
+                try { doHeadGesture(data && data.head_gesture); } catch (e) {}
                 speak(reply);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
@@ -799,6 +801,21 @@ CHAT_HTML = """
                 const ms = Math.max(3500, Math.min(20000, (wordCount || 12) * 380));
                 _eyeRevertTimer = setTimeout(revertEyes, ms);
             }
+        }
+
+        // ===== Head gesture: nod on strong agreement, shake on strong
+        // disagreement, at the start of the reply. Server sends the action name
+        // (nod_yes / shake_no) as data.head_gesture; we drive it like lip-sync
+        // (local Web Serial head else the server head). Vilda's iPad never moves
+        // the physical robot.
+        function doHeadGesture(gesture) {
+            if (isVilda || !gesture) return;
+            const body = { action: gesture, times: 2 };
+            try {
+                if (!localHeadControl(ROBOT.head, '/head/action', body)) {
+                    fetch('/head/' + ROBOT.head + '/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                }
+            } catch (e) {}
         }
 
         function speak(text) {
