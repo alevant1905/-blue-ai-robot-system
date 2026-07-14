@@ -601,6 +601,9 @@ CHAT_HTML = """
                 if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
                 thinking.querySelector('.bubble').textContent = reply;
                 setFaceState('');
+                // Tint Blue's eyes to the mood of this reply (server-computed),
+                // then speak — the eyes revert to rest when he finishes talking.
+                try { applyEyeMood(data && data.eye_mood, (reply.match(/\\S+/g) || []).length); } catch (e) {}
                 speak(reply);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
@@ -764,6 +767,40 @@ CHAT_HTML = """
             return out.length ? out : [msg];
         }
 
+        // ===== Mood eyes: tint the LEDs to match the reply, revert when done =====
+        // The server computes a colour from the sentiment of each reply and
+        // returns it as data.eye_mood {r,g,b,name} (0-10 scale). We drive it the
+        // same way lip-sync is driven: a Web Serial head plugged into THIS device
+        // wins (localHeadControl), else the PC-connected head over the server
+        // route. Vilda's iPad never moves the physical robot.
+        const REST_EYES = { r: 0, g: 0, b: 0 };   // eyes dark when he's not talking (head reset baseline)
+        let _eyeRevertTimer = null;
+        function _setEyes(c) {
+            if (isVilda || !c) return;
+            try {
+                const body = { r: c.r | 0, g: c.g | 0, b: c.b | 0 };
+                if (!localHeadControl(ROBOT.head, '/head/eye-color', body)) {
+                    fetch('/head/' + ROBOT.head + '/eye-color', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                }
+            } catch (e) {}
+        }
+        function revertEyes() {
+            if (_eyeRevertTimer) { clearTimeout(_eyeRevertTimer); _eyeRevertTimer = null; }
+            _setEyes(REST_EYES);
+        }
+        function applyEyeMood(mood, wordCount) {
+            if (isVilda || !mood) return;
+            if (_eyeRevertTimer) { clearTimeout(_eyeRevertTimer); _eyeRevertTimer = null; }
+            _setEyes(mood);
+            // When he speaks aloud, _spokenDone reverts at the true end of the
+            // reply. When replies are silent (speak off), fall back to a timer
+            // sized to the reply length so the eyes don't stay tinted forever.
+            if (!speakOn) {
+                const ms = Math.max(3500, Math.min(20000, (wordCount || 12) * 380));
+                _eyeRevertTimer = setTimeout(revertEyes, ms);
+            }
+        }
+
         function speak(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
             const msg = cleanForSpeech(text);
@@ -801,6 +838,7 @@ CHAT_HTML = """
                     if (window.speechSynthesis.speaking || window.speechSynthesis.pending) return;
                     bargeInRecogStop();
                     setFaceState('');
+                    revertEyes();   // back to the calm rest colour once he's done talking
                     if (!isVilda && !localHeadLipStop(ROBOT.head)) {
                         try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
                     }

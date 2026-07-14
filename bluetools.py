@@ -1581,6 +1581,7 @@ from blue.tool_selector import (
 # head). The module is defensive: if the library isn't installed or the board
 # isn't connected, all head calls are no-ops, so the rest of Blue keeps running.
 from blue import head as blue_head
+from blue.mood_eyes import mood_eye_color
 
 # Connect the head at module load (covers both entry points: `python
 # bluetools.py` directly AND `python run.py` which imports this module). Make
@@ -15230,6 +15231,23 @@ def chat_completions():
 
         if _continuity_turn_started:
             _continuity_routes.cancel_turn()
+
+        # Mood eyes: tint Blue's eye LEDs to match the sentiment of THIS reply.
+        # We only COMPUTE the colour here and hand it back in the payload; the
+        # chat page applies it when he starts speaking and reverts to a calm
+        # rest colour when he's done (mirroring how lip-sync is browser-driven,
+        # so it reaches both the PC-connected head and a Web Serial head).
+        try:
+            if isinstance(response, dict):
+                _reply_text = (
+                    (response.get("choices") or [{}])[0]
+                    .get("message", {}).get("content", "")
+                )
+                if _reply_text:
+                    response["eye_mood"] = mood_eye_color(_reply_text)
+        except Exception as _eye_e:
+            log.warning(f"[EYES] mood colour failed: {_eye_e}")
+
         return jsonify(response)
     except Exception as e:
         if _continuity_turn_started:
