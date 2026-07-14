@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from blue_identity import (
     identity_request_kind,
     identity_response_problem,
+    is_correction_ack_reply,
     is_family_overview_request,
 )
 
@@ -2201,6 +2202,12 @@ class EnhancedMemorySystem:
                 toxic = (
                     is_family_overview_request(previous_user_text)
                     or self._is_assistant_refusal(content)
+                    # Correction acknowledgments ("I stand corrected, I've
+                    # updated my records") must not resurface as context: the
+                    # corrected VALUE lives in the facts table, and replaying
+                    # the ack primed "what do you know about me" into a phantom
+                    # correction, twice in a row (2026-07-14).
+                    or is_correction_ack_reply(content)
                     or bool(identity_response_problem(
                         content,
                         expected_robot_name,

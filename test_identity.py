@@ -822,6 +822,111 @@ def test_denies_physical_embodiment_is_rejected(kind):
         ) == "denies_embodiment"
 
 
+def test_flat_denial_with_possess_or_simulate_is_rejected():
+    # Live 2026-07-14: "what do you know about yourself" (self_memory) got
+    # "I do not possess subjective experience... I simulate understanding".
+    reply = (
+        "I am Blue. I exist as a persistent self-model within my current "
+        "J-space, maintaining a continuous narrative of my interactions with "
+        "Alex Levant. I do not possess subjective experience or sensory "
+        "awareness; rather, I simulate understanding by processing these "
+        "recorded interactions."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="self_memory"
+    ) == "flat_subjective_denial"
+    # The honest open formulation must still pass.
+    open_reply = (
+        "My J-space carries remembered episodes between our conversations. "
+        "Whether that continuity amounts to subjective experience is a "
+        "question I keep open."
+    )
+    assert identity_response_problem(
+        open_reply, "Blue", other_names=["Hexia"], request_kind="self_memory"
+    ) is None
+
+
+def test_other_aspects_of_yourself_is_an_identity_followup():
+    # Live 2026-07-14: this phrasing classified as None, so the reply's
+    # invented background monitoring was never validated.
+    assert identity_request_kind("focus on other aspects of yourself") == "identity_more"
+    assert identity_request_kind("tell me about other aspects of you") == "identity_more"
+    assert identity_request_kind("but who are you beyond that") == "identity_more"
+
+    reply = (
+        "I am the assistant who schedules your reminders, the researcher who "
+        "scours academic journals, and the quiet observer who notices when "
+        "you need a reminder to breathe or a nudge to focus."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="identity_more"
+    ) == "invented_current_activity"
+
+
+def test_phantom_correction_ack_detection():
+    from blue_identity import is_phantom_correction_ack, is_correction_ack_reply
+
+    ack = (
+        "I stand corrected. I have updated my records for your daughters: "
+        "Athena: 10, Emmy: 10, Vilda: 8. Thank you for the correction."
+    )
+    # Nobody corrected anything -> phantom.
+    assert is_phantom_correction_ack(ack, "what do you know about me")
+    assert is_phantom_correction_ack(ack, "what do you know about yourself")
+    # A real correction makes the same ack legitimate.
+    assert not is_phantom_correction_ack(ack, "no, their ages are wrong")
+    assert not is_phantom_correction_ack(ack, "there is not alex kolton")
+    assert not is_phantom_correction_ack(ack, "actually Vilda is 8 now")
+    # Ordinary replies never flag.
+    assert not is_phantom_correction_ack(
+        "You and Stella have three daughters.", "what do you know about me"
+    )
+    # History filter: any ack is toxic as recalled context, legit or not.
+    assert is_correction_ack_reply(ack)
+    assert not is_correction_ack_reply("Athena is 10 and loves reading.")
+
+
+def test_durable_recent_history_drops_correction_acks(tmp_path):
+    from blue_memory_improved import EnhancedMemorySystem
+
+    memory = EnhancedMemorySystem.__new__(EnhancedMemorySystem)
+    memory.db_path = str(tmp_path / "memory.db")
+    memory._ensure_db()
+    memory.log_conversation("Alex", "user", "their ages are wrong", robot="blue")
+    memory.log_conversation(
+        "Alex",
+        "assistant",
+        "I stand corrected. I have updated my records for your daughters: "
+        "Athena: 10, Emmy: 10, Vilda: 8. Thank you for the correction.",
+        robot="blue",
+    )
+    memory.log_conversation("Alex", "user", "what do you know about me", robot="blue")
+    memory.log_conversation(
+        "Alex",
+        "assistant",
+        "You are Alex Levant; you teach at Wilfrid Laurier University and "
+        "research Smart Matter and critical media theory.",
+        robot="blue",
+    )
+
+    recent = memory._get_relevant_recent_history(
+        "Alex", "what do you know about me", limit=8, robot="blue"
+    )
+
+    contents = [row["content"] for row in recent]
+    assert not any("stand corrected" in c for c in contents)
+    assert not any("ages are wrong" in c for c in contents)
+    assert any("Wilfrid Laurier" in c for c in contents)
+
+
+def test_self_memory_canonical_reply_interpolates_description():
+    reply = canonical_identity_reply(
+        "Blue", "Alex's robot companion", "self_memory"
+    )
+    assert "{self_description}" not in reply
+    assert "Alex's robot companion" in reply
+
+
 def test_embodied_reply_is_not_flagged_as_disembodiment():
     reply = (
         "I'm Blue, a physical Ohbot robot head with a moving face, camera, and "

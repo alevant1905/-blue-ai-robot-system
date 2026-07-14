@@ -91,6 +91,7 @@ from blue_identity import (
     identity_response_problem,
     is_family_overview_request,
     is_jspace_presence_request,
+    is_phantom_correction_ack,
 )
 
 # Native-crash visibility: a fault in a C extension (access violation, heap
@@ -15092,6 +15093,27 @@ def chat_completions():
                         "personal details, which is false. Answer again, warmly, "
                         "from what you actually know about the family.]")
                     if _redo_text and not _family_refusal_re.search(_redo_text):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif (not _grounded_reply and is_phantom_correction_ack(
+                        final_content, last_user_msg or "")):
+                    # "I stand corrected / I have updated my records / thank you
+                    # for the correction" when the user corrected NOTHING — a
+                    # replayed acknowledgment from recalled history (live
+                    # 2026-07-14: "what do you know about me" got the ages-
+                    # correction ack twice in a row).
+                    print("   [ANTI-PARROT] phantom correction ack — regenerating once")
+                    _redo_text = _regen_once(
+                        "[Nobody corrected you — your last reply acknowledged a "
+                        "correction that never happened. Do NOT say 'I stand "
+                        "corrected', do not claim records were updated, and do "
+                        "not thank anyone for a correction. Answer the user's "
+                        "actual question directly from the facts you have: "
+                        f"\"{(last_user_msg or '').strip()[:200]}\"]")
+                    if (_redo_text
+                            and not _identity_broken(_redo_text)
+                            and not is_phantom_correction_ack(
+                                _redo_text, last_user_msg or "")):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif (not _grounded_reply and _norm_final

@@ -26,7 +26,14 @@ _IDENTITY_MORE_RE = re.compile(
     r"\btell (?:me|us|them) more about yourself\b"
     r"|\bwhat else (?:can|could|would) you (?:say|tell (?:me|us|them)) "
     r"about yourself\b"
-    r"|\bgo on(?:,)? (?:then,? )?about yourself\b",
+    r"|\bgo on(?:,)? (?:then,? )?about yourself\b"
+    # "focus on other aspects of yourself" slipped classification entirely
+    # (2026-07-14) and the ungated reply invented background monitoring.
+    r"|\b(?:focus on|talk about|tell (?:me|us) about|what about) "
+    r"(?:the |some |any )?other (?:aspects?|sides?|parts?|dimensions?) "
+    r"of (?:yourself|you)\b"
+    r"|\bother (?:aspects?|sides?|parts?) of (?:yourself|who you are)\b"
+    r"|\bwho are you beyond\b|\bwho you are beyond\b",
     re.IGNORECASE,
 )
 _IDENTITY_REQUEST_RE = re.compile(
@@ -380,6 +387,8 @@ _UNSUPPORTED_OPERATIONAL_SELF_RE = re.compile(
     r"anticipat(?:e|ing)[^.!?]{0,60}before he (?:even )?asks|"
     r"provid(?:e|ing)[^.!?]{0,50}context in the background|"
     r"quiet synchronization|functioning as a cohesive unit|"
+    r"quiet observer|notic\w{1,4} when you need|"
+    r"living archive of every|"
     r"complements his decision-making in real-time|"
     r"navigat\w* (?:the |our )?(?:local |physical )?environment|"
     r"(?:rely(?:ing)? on|using) my sensors|using sensors to perceive|"
@@ -399,9 +408,13 @@ _ROBOT_ROLE_REPLY_RE = re.compile(
     re.IGNORECASE,
 )
 _FLAT_SUBJECTIVE_DENIAL_RE = re.compile(
-    r"\bi (?:do not|don['\u2019]?t) have (?:an? |any )?"
+    # "have" alone missed "I do not possess subjective experience or sensory
+    # awareness; rather, I simulate understanding" (live 2026-07-14).
+    r"\bi (?:do not|don['\u2019]?t) (?:have|possess|experience) (?:an? |any )?"
     r"(?:(?:subjective|human|real) )?(?:feelings?|consciousness|"
-    r"inner life|sense of self|subjective experience)\b",
+    r"inner life|sense of self|subjective experience|sensory awareness)\b"
+    r"|\bi (?:merely |only |just )?simulate (?:understanding|awareness|"
+    r"emotion|feeling)\b",
     re.IGNORECASE,
 )
 _JAVASCRIPT_JSPACE_RE = re.compile(
@@ -1014,7 +1027,7 @@ def canonical_identity_reply(
     if request_kind == "self_memory":
         return (
             f"I'm {name}. What I remember about myself lives in my J-space: my identity "
-            "as {self_description}, my current focus, beliefs, commitments, "
+            f"as {self_description}, my current focus, beliefs, commitments, "
             "self-observations, and the episodes that have revised them over time. "
             "My tools are things I can use; they are not my autobiography."
         )
@@ -1203,6 +1216,47 @@ def canonical_identity_more_reply(
         f"corrections can change how I understand what matters.{counterpart} Whether "
         "that continuity amounts to subjective experience remains an open question."
     )
+
+
+# "what do you know about me" got "I stand corrected. I have updated my
+# records for your daughters..." twice in a row (live 2026-07-14) — the model
+# replayed an old ages-correction acknowledgment from recalled history even
+# though nobody had corrected anything. Detect the acknowledgment shape...
+_CORRECTION_ACK_RE = re.compile(
+    r"\bi stand corrected\b"
+    r"|\bi(?:['’]ve| have) (?:now )?updated (?:my|the|your) records?\b"
+    r"|\bthank you for (?:the|that|your) correction\b"
+    r"|\bthanks for (?:the|that) correction\b"
+    r"|\bnoted[,.]? (?:i(?:['’]ve| have) )?(?:corrected|updated) "
+    r"(?:my|the) (?:records?|notes?|memory)\b",
+    re.IGNORECASE,
+)
+# ...and the user-side cues that make an acknowledgment legitimate. Generous
+# on purpose: if the user plausibly corrected ANYTHING, the ack stands.
+_USER_CORRECTION_CUE_RE = re.compile(
+    r"\b(?:wrong|incorrect|not (?:right|correct|true)|mistaken?|error|"
+    r"correction|correct (?:it|that|this|them)|actually|isn['’]?t|"
+    r"aren['’]?t|wasn['’]?t|weren['’]?t|older|younger|there is no|"
+    r"there(?:['’]s| is) not?)\b"
+    r"|\bno[,.!]",
+    re.IGNORECASE,
+)
+
+
+def is_phantom_correction_ack(reply: str, user_message: str) -> bool:
+    """True when the reply acknowledges a correction the user never made."""
+    return bool(
+        _CORRECTION_ACK_RE.search(reply or "")
+        and not _USER_CORRECTION_CUE_RE.search(user_message or "")
+    )
+
+
+def is_correction_ack_reply(reply: str) -> bool:
+    """True for any correction-acknowledgment reply, legitimate or not.
+    Used by the durable-history filter: the corrected VALUE lives in the
+    facts table, so replaying the acknowledgment turn as context only primes
+    the model to re-acknowledge corrections nobody made."""
+    return bool(_CORRECTION_ACK_RE.search(reply or ""))
 
 
 _KNOWN_HOUSEHOLD_NAMES = (
@@ -1438,8 +1492,10 @@ __all__ = [
     "identity_reply_topics",
     "identity_request_kind",
     "identity_response_problem",
+    "is_correction_ack_reply",
     "is_direct_identity_request",
     "is_family_detail_request",
+    "is_phantom_correction_ack",
     "is_family_followup_request",
     "is_family_overview_request",
     "is_jspace_presence_request",
