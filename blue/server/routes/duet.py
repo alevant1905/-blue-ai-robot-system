@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 import bluetools as bt
 from flask import Response, jsonify, render_template_string, request
 
+from blue.mood_eyes import mood_eye_color
 from blue.server.pages.duet import DUET_HTML
 
 
@@ -3978,6 +3979,10 @@ def register(app):
             except Exception as _je:
                 bt.log.warning(f"[DUET] continuity note failed: {_je}")
         resp = {"speaker": speaker, "name": sp["name"], "text": text}
+        if text:
+            # Mood eyes: colour the SPEAKER's eye LEDs to match this line, applied
+            # by the duet page when it speaks the turn (same as chat mode).
+            resp["eye_mood"] = mood_eye_color(text)
         if protocol:
             # The page uses these to surface phase changes and job swaps as notes.
             resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})

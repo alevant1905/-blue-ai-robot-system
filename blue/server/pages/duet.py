@@ -679,6 +679,17 @@ function headLipStop(cfg){
   if(!DRIVES_HEADS) return;
   try{ fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}); }catch(e){}
 }
+// Tint a head's eye LEDs to the mood of the line it's speaking (server-computed
+// eye_mood {r,g,b} on the 0-10 scale), then dark it again when the turn ends —
+// same local-head-else-server routing as the lips.
+function headEyeSet(cfg,r,g,b){
+  var body={r:r|0,g:g|0,b:b|0};
+  if(localHeadControl(cfg.head,'/head/eye-color',body)) return;
+  if(!DRIVES_HEADS) return;
+  try{ fetch('/head/'+cfg.head+'/eye-color',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }catch(e){}
+}
+function headEye(cfg,mood){ if(mood) headEyeSet(cfg,mood.r,mood.g,mood.b); }
+function headEyeRest(cfg){ headEyeSet(cfg,0,0,0); }
 
 function addTurn(cfg,text){ const d=document.createElement('div'); d.className='turn '+cfg.id;
   const w=document.createElement('div'); w.className='who'; w.textContent=cfg.name;
@@ -686,15 +697,15 @@ function addTurn(cfg,text){ const d=document.createElement('div'); d.className='
   TRANSCRIPT.push({kind:'turn', name:cfg.name, text:text}); saveBtn.disabled=false;
   logEl.appendChild(d); window.scrollTo(0,document.body.scrollHeight); return d; }
 
-function speakAs(cfg,text,el){ return new Promise(resolve=>{
+function speakAs(cfg,text,el,mood){ return new Promise(resolve=>{
   const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
   const rate=voiceRateFor(cfg.id);
   const frames=buildLipFrames(cleanForSpeech(text), rate);   // lips track what's actually SPOKEN
   const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
   let done=false, keepAlive=null;
-  const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); headEyeRest(cfg); if(el)el.classList.remove('speaking'); resolve(); };
   ACTIVE_SPEECH_FINISH=finish;
-  if(el)el.classList.add('speaking'); headLip(cfg,frames);
+  if(el)el.classList.add('speaking'); headLip(cfg,frames); headEye(cfg,mood);
   if(!useTTS){ setTimeout(finish, Math.max(1500, est+400)); return; }   // no audio: wait out the lip-flap
   try{
     window.speechSynthesis.cancel();
@@ -916,7 +927,7 @@ async function oneTurn(speaker, closing){
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
   maybeReflect();                 // take stock of the direction in the background, while this head speaks
-  await speakAs(cfg,d.text,el); return true;
+  await speakAs(cfg,d.text,el,d.eye_mood); return true;
 }
 // ---- Live duet mail: email with "duet" in the subject joins the conversation ----
 // While a duet runs (and the checkbox is on), poll Blue's inbox in the background;
