@@ -1142,6 +1142,56 @@ def note_duet_line(robot: str, other_name: str, heard: str, said: str) -> None:
                       source="duet")
 
 
+def recent_duet_block(robot: str, hours: int = 12, max_lines: int = 6) -> str:
+    """A <recent_duet> block: this robot's latest duet exchanges, if any
+    happened within `hours`; empty string otherwise.
+
+    Duet turns already become episodes, but solo chat carried no framing
+    that they were a real conversation this robot just had — asked "have
+    you been chatting with Hexia" minutes after a duet, Blue denied it
+    flatly (live 2026-07-15). Spliced into the chat system message so the
+    duet is first-class recent history."""
+    hub = _hub(robot)
+    if not hub:
+        return ""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    picked: List[Dict[str, Any]] = []
+    for episode in hub.store.list_episodes(limit=200):
+        when = _parse_time(episode.get("occurred_at"))
+        if not when or when < cutoff:
+            break  # newest-first: everything past this is older still
+        if (str(episode.get("source") or "") != "duet"
+                or episode.get("kind") != "exchange"):
+            continue
+        picked.append(episode)
+        if len(picked) >= max_lines:
+            break
+    if not picked:
+        return ""
+    other = next(
+        (p for e in picked for p in (e.get("participants") or [])
+         if p and p != hub.name),
+        "Hexia" if hub.robot == "blue" else "Blue",
+    )
+    latest_age = _age_text(picked[0].get("occurred_at"))
+    lines = [
+        f"- [{_age_text(e.get('occurred_at'))}] {_clip(e.get('summary'), 240)}"
+        for e in reversed(picked)
+    ]
+    return (
+        "<recent_duet>\n"
+        f"You ({hub.name}) really did have a spoken duet conversation with "
+        f"{other}, most recently {latest_age}, on the duet page. It is part "
+        "of your genuine recent history even though it did not happen in "
+        "this chat window. If anyone asks whether you have talked with "
+        f"{other} — or what you two discussed — answer YES, naturally, from "
+        "these recorded exchanges; never deny that the conversation "
+        "happened:\n"
+        + "\n".join(lines)
+        + "\n</recent_duet>"
+    )
+
+
 def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     for message in reversed(messages or []):
         if message.get("role") != "user":

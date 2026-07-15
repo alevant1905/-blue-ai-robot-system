@@ -14214,6 +14214,17 @@ def _misstated_current_date(text: str) -> list:
     return wrong
 
 
+# "I haven't been chatting with Hexia today" minutes after a duet with her
+# (live 2026-07-15). First-person only — the user saying "you haven't talked
+# to Hexia" must not trip it.
+_ROBOT_CHAT_DENIAL_RE = re.compile(
+    r"\bi (?:haven['’]?t|have not|hadn['’]?t|didn['’]?t|did not|never)\b"
+    r"[^.!?]{0,40}\b(?:chat(?:s|ted|ting)?|talk(?:ed|ing)?|speak(?:ing)?|"
+    r"spoke(?:n)?|convers\w+)\b"
+    r"[^.!?]{0,30}\b(?:with|to)\s+(?:hexia|blue)\b",
+    re.I)
+
+
 # "I don't have the actual course syllabus or your uploaded materials" while
 # CMDS4740_Syllabus_2026_S2.docx sits in the library (live 2026-07-15, drawn
 # by a bare "wrong"). Same family as the family-memory refusal: a false
@@ -14741,6 +14752,21 @@ def chat_completions():
         # PC, iPhone, and the physical robot are Alex.
         user_name = _identify_user_from_request()
         print(f"   [WHO] Speaker identified as: {user_name}")
+
+        # Recent duet awareness: a duet with the other robot is real recent
+        # history, but it happens outside this chat window — without this
+        # block Blue flatly denied a duet he'd finished minutes earlier
+        # (2026-07-15). Merged into the system message (never a second
+        # system message — the chat template 400s on those).
+        if robot in _continuity_routes.ROBOTS and user_name not in _CHAT_ONLY_USERS:
+            try:
+                _duet_block = _continuity_routes.recent_duet_block(robot)
+                if _duet_block:
+                    print("   [DUET] ✓ Injecting recent duet context")
+                    messages = _splice_context_after_system(
+                        messages, [{"role": "system", "content": _duet_block}])
+            except Exception as e:
+                log.warning(f"[DUET] recent-duet injection failed: {e}")
 
         # Find the last actual USER message
         last_user_msg = ""
@@ -15357,6 +15383,28 @@ def chat_completions():
                             "message directly from this schedule:\n"
                             + _syl_text[:6000] + "]")
                         if _redo_text and not _SYLLABUS_REFUSAL_RE.search(_redo_text):
+                            final_content = _redo_text
+                            response["choices"][0]["message"]["content"] = final_content
+                elif (not _grounded_reply and robot in _continuity_routes.ROBOTS
+                      and _ROBOT_CHAT_DENIAL_RE.search(final_content or "")):
+                    # "I haven't been chatting with Hexia" minutes after a
+                    # duet (live 2026-07-15). Only a duet actually on record
+                    # makes the denial false — with no recent duet the reply
+                    # stands.
+                    try:
+                        _duet_evidence = _continuity_routes.recent_duet_block(robot)
+                    except Exception:
+                        _duet_evidence = ""
+                    if _duet_evidence:
+                        print("   [ANTI-PARROT] duet denial despite recorded duet — regenerating once")
+                        _redo_text = _regen_once(
+                            "[You just claimed you haven't talked with your "
+                            "fellow robot, but your own continuity record "
+                            "shows you did:\n" + _duet_evidence[:4000] +
+                            "\nAnswer the user's last message again "
+                            "truthfully from this record — that conversation "
+                            "really happened.]")
+                        if _redo_text and not _ROBOT_CHAT_DENIAL_RE.search(_redo_text):
                             final_content = _redo_text
                             response["choices"][0]["message"]["content"] = final_content
                 elif (not _grounded_reply and is_phantom_correction_ack(

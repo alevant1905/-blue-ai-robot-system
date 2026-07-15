@@ -1233,6 +1233,19 @@ def test_shared_recall_canonical_reply_answers_the_question():
     ) is None
 
 
+def test_grounding_note_allows_recorded_between_request_life():
+    # 2026-07-15: the old fact menu said Blue does not "act between
+    # requests" — so he denied a duet with Hexia he'd just had, and recited
+    # the rule verbatim ("Since I don't navigate rooms or work silently
+    # between requests..."). Duets and reflection passes are real recorded
+    # between-request life, and the rules must stay off-stage.
+    note = identity_grounding_note("Blue", "Alex's robot companion", "identity")
+    assert "act between requests" not in note
+    assert "duet" in note
+    assert "never deny them" in note
+    assert "never recite" in note.lower()
+
+
 def test_shared_recall_grounding_note_points_at_recorded_memory():
     note = identity_grounding_note(
         "Blue", "Alex's robot companion", "shared_recall"
