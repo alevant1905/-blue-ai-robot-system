@@ -4632,12 +4632,93 @@ def _is_course_schedule_query(query: str) -> bool:
     return bool(_COURSE_SCHEDULE_RE.search(query or ""))
 
 
-def _syllabus_schedule_text(max_docs: int = 2):
+_MONTHS_3 = ("jan", "feb", "mar", "apr", "may", "jun",
+             "jul", "aug", "sep", "oct", "nov", "dec")
+_MONTH_NAME_RE = (
+    r"(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|"
+    r"oct|nov|dec)"
+)
+
+
+def _schedule_target_date(query: str):
+    """Resolve the class date a schedule question refers to, or None.
+
+    Left to the model, this arithmetic failed live (2026-07-15): with the
+    current date only in the distant system prompt, "what are we reading
+    tomorrow" got "tomorrow's class is on June 30 (assuming today is
+    June 29)". An explicit date in the query ("july 16") wins over relative
+    words; "tomorrow"/"today" resolve against the real clock."""
+    from datetime import date, timedelta
+    q = (query or "").lower()
+    today = date.today()
+    m = re.search(rf"\b({_MONTH_NAME_RE})\.?\s+(\d{{1,2}})\b", q)
+    if m:
+        try:
+            month = _MONTHS_3.index(m.group(1)[:3]) + 1
+            target = date(today.year, month, int(m.group(2)))
+        except ValueError:
+            return None
+        # A date months behind us probably names next year's term.
+        if (today - target).days > 180:
+            try:
+                target = date(today.year + 1, month, int(m.group(2)))
+            except ValueError:
+                return None
+        return target
+    if re.search(r"\btomorrow\b", q):
+        return today + timedelta(days=1)
+    if re.search(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", q):
+        return today
+    return None
+
+
+def _syllabus_rows_for_date(text: str, target) -> str:
+    """The schedule row(s) for `target` inside extracted syllabus text.
+
+    Captures from the line containing the target date up to the next line
+    that names a DIFFERENT date (docx tables extract roughly one cell/row
+    per line), falling back to a bounded character window. Empty string
+    when the date appears nowhere."""
+    month_full = target.strftime("%B")
+    month_abbr = target.strftime("%b")
+    day = target.day
+    date_pat = re.compile(
+        rf"(?:{month_full}|{month_abbr})\.?\s*{day}(?!\d)"
+        rf"|\b{target.month}\s*/\s*{day}(?!\d)"
+        rf"|\b{day}\s+(?:{month_full}|{month_abbr})\b",
+        re.I)
+    any_date_pat = re.compile(
+        rf"\b{_MONTH_NAME_RE}\.?\s*\d{{1,2}}(?!\d)"
+        r"|\b\d{1,2}\s*/\s*\d{1,2}\b",
+        re.I)
+    m = date_pat.search(text or "")
+    if not m:
+        return ""
+    start = (text.rfind("\n", 0, m.start()) + 1)
+    scan = m.end()
+    end = min(len(text), m.end() + 900)
+    while True:
+        nxt = any_date_pat.search(text, scan)
+        if not nxt or nxt.start() >= end:
+            break
+        if date_pat.match(text[nxt.start():nxt.end() + 8]):
+            scan = nxt.end()  # the target date repeated inside its own row
+            continue
+        end = text.rfind("\n", 0, nxt.start()) + 1
+        if end <= start:
+            end = nxt.start()
+        break
+    return text[start:end].strip()[:1200]
+
+
+def _syllabus_schedule_text(max_docs: int = 2, query: str = ""):
     """Full schedule/readings text of the syllabus document(s), or None.
 
     Returns the portion from 'Class Schedule' (or the first dated line) onward
-    so every week + its readings are present, with a header telling the model
-    to map 'today'/'tomorrow' to the right class date using the current date."""
+    so every week + its readings are present. The header states today's date
+    outright and, when the query names or implies a class date, extracts that
+    date's row deterministically — the model must never do calendar math."""
     try:
         index = load_document_index()
         docs = index.get("documents", []) if isinstance(index, dict) else []
@@ -4684,14 +4765,48 @@ def _syllabus_schedule_text(max_docs: int = 2):
                           txt, re.I)
             start = m.start() if m else 0
         excerpt = txt[start:start + 9000]
-        parts.append(f"[{d.get('filename', 'syllabus')}] course schedule & readings:\n{excerpt}")
+        parts.append((d.get('filename', 'syllabus'), excerpt))
     if not parts:
         return None
+
+    from datetime import datetime
+    now = datetime.now()
+    lead = [f"Today is {now.strftime('%A, %B')} {now.day}, {now.year}."]
+    target = _schedule_target_date(query)
+    if target:
+        target_str = f"{target.strftime('%A, %B')} {target.day}, {target.year}"
+        row_hits = []
+        for filename, excerpt in parts:
+            row = _syllabus_rows_for_date(excerpt, target)
+            if row:
+                row_hits.append(f"[{filename}] {row}")
+        if row_hits:
+            lead.append(
+                f"The question refers to {target_str}. The syllabus row for "
+                "that date reads:\n" + "\n".join(row_hits) +
+                "\nAnswer with the topic and readings from THIS row exactly — "
+                "never another week's row."
+            )
+        else:
+            lead.append(
+                f"The question refers to {target_str}, but the schedule below "
+                "lists NO row for that date. Say plainly that the syllabus "
+                "lists nothing for that day — do not guess or substitute "
+                "another week's readings."
+            )
+    else:
+        lead.append(
+            "Work out which class date the question refers to from today's "
+            "date above ('tomorrow' = the next calendar day), then report the "
+            "readings listed under that date."
+        )
+    body = "\n\n".join(
+        f"[{filename}] course schedule & readings:\n{excerpt}"
+        for filename, excerpt in parts
+    )
     return (
-        "Here is the schedule and readings from your course syllabus. Work out "
-        "which class date the question refers to using today's date shown above "
-        "('tomorrow' = the next calendar day), then report the readings listed "
-        "under that date:\n\n" + "\n\n".join(parts)
+        "Here is the schedule and readings from your course syllabus.\n"
+        + "\n".join(lead) + "\n\n" + body
     )
 
 
@@ -4731,7 +4846,7 @@ def search_documents_rag(query: str, max_results: int = 3) -> str:
     # Course/reading/schedule questions → answer from the syllabus's dated
     # schedule directly (semantic RAG buries the small syllabus under big books).
     if _is_course_schedule_query(query):
-        syllabus = _syllabus_schedule_text()
+        syllabus = _syllabus_schedule_text(query=query)
         if syllabus:
             print("   [SYLLABUS] Course/reading query — returning syllabus schedule")
             return syllabus
@@ -10965,11 +11080,56 @@ def _course_followup_query(message: str,
     return None
 
 
+_BARE_CORRECTION_RE = re.compile(
+    r"^\s*(?:no+[,.!]?\s*)?(?:that(?:['’]s| is| was)?\s+)?(?:all\s+|still\s+)?"
+    r"(?:wrong|incorrect|not (?:right|correct)|mistaken)\s*[,.!]*\s*(?:again)?\s*$",
+    re.I)
+_DATE_CORRECTION_RE = re.compile(
+    r"^\s*(?:no+[,.! ]+)?\s*(?:today|tomorrow|it)\s+is\s+"
+    r"([a-z]+\.?\s+\d{1,2})\s*[,.!]*\s*$",
+    re.I)
+
+
+def _schedule_correction_query(message: str,
+                               messages: List[Dict]) -> Optional[str]:
+    """Re-run the syllabus lookup when the user corrects a readings answer.
+
+    Live 2026-07-15: after a wrong readings answer, a bare "wrong" drew
+    "I don't have the actual course syllabus" (false), and "tomorrow is
+    july 16" drew a third invented week — because neither correction
+    triggered any detector, so the model just apologized from stale
+    history. Corrections that follow a schedule/readings answer become a
+    fresh, date-anchored search_documents query instead."""
+    text = (message or "").strip()
+    date_fix = _DATE_CORRECTION_RE.match(text)
+    if not date_fix and not (_BARE_CORRECTION_RE.match(text) and len(text) <= 60):
+        return None
+    prior = _messages_before_current(messages, message)
+    prev_assistant = next(
+        (m.get("content") for m in reversed(prior)
+         if m.get("role") == "assistant" and isinstance(m.get("content"), str)),
+        "")
+    if not (_is_course_schedule_query(prev_assistant)
+            or "syllab" in (prev_assistant or "").lower()):
+        return None
+    if date_fix:
+        return f"class readings for {date_fix.group(1)}"
+    # Reuse the user's original schedule question so "tomorrow" still
+    # resolves to the intended date.
+    for msg in reversed(prior[-8:]):
+        if (msg.get("role") == "user"
+                and isinstance(msg.get("content"), str)
+                and _is_course_schedule_query(msg["content"])):
+            return msg["content"]
+    return "course readings schedule"
+
+
 def _contextual_document_query(message: str,
                                messages: List[Dict]) -> Optional[str]:
     """Exact query to send to search_documents for contextual follow-ups."""
     return (_document_followup_query(message, messages)
-            or _course_followup_query(message, messages))
+            or _course_followup_query(message, messages)
+            or _schedule_correction_query(message, messages))
 
 
 def _strip_parroted_prefix(text: str, prev_assistant: str) -> str:
@@ -14024,6 +14184,50 @@ def _misstated_ages(text: str, canonical: dict) -> dict:
     return wrong
 
 
+# "tomorrow's class is on June 30 (assuming today is June 29)" — the model
+# asserting its own calendar and getting it wrong (live 2026-07-15, actual
+# date July 15). The <now> block sits far from the answer text; a local model
+# invents a date rather than looking back. Catch the claim on output.
+_TODAY_CLAIM_RE = re.compile(
+    rf"\b(?:assuming\s+)?(today\s+is|tomorrow\s+is|tomorrow['’]s\s+class\s+is\s+on|"
+    rf"today['’]s\s+date\s+is)\s+(?:\w+day,?\s+)?({_MONTH_NAME_RE})\.?\s+(\d{{1,2}})\b",
+    re.I)
+
+
+def _misstated_current_date(text: str) -> list:
+    """[(claimed phrase, truth), ...] for wrong today/tomorrow assertions."""
+    from datetime import date, timedelta
+    today = date.today()
+    truth = {"today": today, "tomorrow": today + timedelta(days=1)}
+    wrong = []
+    for m in _TODAY_CLAIM_RE.finditer(text or ""):
+        kind = "tomorrow" if m.group(1).lower().startswith("tomorrow") else "today"
+        try:
+            month = _MONTHS_3.index(m.group(2)[:3].lower()) + 1
+            day = int(m.group(3))
+        except ValueError:
+            continue
+        actual = truth[kind]
+        if (month, day) != (actual.month, actual.day):
+            wrong.append((m.group(0),
+                          f"{actual.strftime('%B')} {actual.day}, {actual.year}"))
+    return wrong
+
+
+# "I don't have the actual course syllabus or your uploaded materials" while
+# CMDS4740_Syllabus_2026_S2.docx sits in the library (live 2026-07-15, drawn
+# by a bare "wrong"). Same family as the family-memory refusal: a false
+# capability denial that history then replays as authority.
+_SYLLABUS_REFUSAL_RE = re.compile(
+    r"(?:do (?:not|n['’]?t)|don['’]?t)\s+have\b[^.!?]{0,60}"
+    r"\b(?:syllabus|course\s+(?:schedule|outline|materials?))\b"
+    r"|\bwithout the (?:specific\s+)?(?:documents?|syllabus|materials?)\b"
+    r"|\bpulling (?:that|this) from general knowledge\b"
+    r"|\bdo you have (?:the|a) (?:syllabus|schedule file)\b"
+    r"|\b(?:upload|provide|share)\b[^.!?]{0,40}\b(?:syllabus|schedule)\b",
+    re.I)
+
+
 def _family_ground_truth_block() -> str:
     """Canonical family facts as an authoritative block, injected when the
     message is about the family or disputes it — so the truth is present in
@@ -15116,6 +15320,45 @@ def chat_completions():
                     if _redo_text and not _family_refusal_re.search(_redo_text):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
+                elif not _grounded_reply and _misstated_current_date(final_content):
+                    # "assuming today is June 29" on July 15 (live 2026-07-15)
+                    # — the model inventing its own calendar instead of using
+                    # the <now> block. Hand it the real dates explicitly.
+                    _date_claims = _misstated_current_date(final_content)
+                    print(f"   [ANTI-PARROT] wrong current-date claim {_date_claims[:2]} — regenerating once")
+                    from datetime import date as _date_cls, timedelta as _td
+                    _real_today = _date_cls.today()
+                    _real_tomorrow = _real_today + _td(days=1)
+                    _redo_text = _regen_once(
+                        f"[Your reply used the wrong date. Ground truth: today is "
+                        f"{_real_today.strftime('%A, %B')} {_real_today.day}, "
+                        f"{_real_today.year}, and tomorrow is "
+                        f"{_real_tomorrow.strftime('%A, %B')} {_real_tomorrow.day}, "
+                        f"{_real_tomorrow.year}. Answer the user's last message "
+                        "again using ONLY these dates — never assume or invent "
+                        "a different one.]")
+                    if _redo_text and not _misstated_current_date(_redo_text):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif (not _grounded_reply
+                      and _SYLLABUS_REFUSAL_RE.search(final_content or "")):
+                    # False "I don't have the syllabus" while the library holds
+                    # one (live 2026-07-15). Regen with the real schedule in
+                    # hand; if no syllabus actually exists, the net stays out
+                    # of the way.
+                    _syl_text = _syllabus_schedule_text(
+                        query=last_user_msg if isinstance(last_user_msg, str) else "")
+                    if _syl_text:
+                        print("   [DOCS] syllabus denial despite library copy — regenerating from schedule")
+                        _redo_text = _regen_once(
+                            "[You DO have the course syllabus in your local "
+                            "library — you just denied it, which is false. "
+                            "Never ask for an upload. Answer the user's last "
+                            "message directly from this schedule:\n"
+                            + _syl_text[:6000] + "]")
+                        if _redo_text and not _SYLLABUS_REFUSAL_RE.search(_redo_text):
+                            final_content = _redo_text
+                            response["choices"][0]["message"]["content"] = final_content
                 elif (not _grounded_reply and is_phantom_correction_ack(
                         final_content, last_user_msg or "")):
                     # "I stand corrected / I have updated my records / thank you
