@@ -11649,6 +11649,35 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         except Exception as _identity_e:
             log.warning(f"[IDENTITY] grounding pin failed: {_identity_e}")
 
+    # The <recent_duet> block in the system head was not enough: asked "what
+    # have you been up to" minutes after a duet, the model paraphrased the
+    # NEARBY grounding note ("reviewing our recent duet conversations with
+    # the other robot") and invented the topic — small local models weigh
+    # nearby text heavily, and the record sat thousands of tokens away in
+    # the system head (live 2026-07-15, second occurrence). When the turn is
+    # about the other robot or the robot's own recent activity, pin the
+    # recorded duet lines beside the live turn too. Model-facing only.
+    _other_robot_key = {"blue": "hexia", "hexia": "blue"}.get(
+        (robot or "").strip().lower())
+    if (_other_robot_key and user_name not in _CHAT_ONLY_USERS
+            and (re.search(rf"\b{_other_robot_key}\b", _luser, re.I)
+                 or _identity_kind in ("evolution", "shared_recall"))):
+        try:
+            _duet_pin = _continuity_routes.recent_duet_block(robot)
+            if _duet_pin:
+                for _duet_i in range(len(conversation_messages) - 1, -1, -1):
+                    _duet_m = conversation_messages[_duet_i]
+                    if (_duet_m.get("role") == "user"
+                            and isinstance(_duet_m.get("content"), str)):
+                        conversation_messages[_duet_i] = {
+                            **_duet_m,
+                            "content": f"{_duet_pin}\n\n{_duet_m['content']}",
+                        }
+                        print("   [DUET] Pinned recorded duet lines beside live turn")
+                        break
+        except Exception as _duet_e:
+            log.warning(f"[DUET] duet pin failed: {_duet_e}")
+
     if _luser and (user_name or "Alex").strip().lower() == "alex" and _wants_perspective_write(_luser):
         try:
             _piece = _compose_in_alex_voice(_luser)
@@ -14225,6 +14254,30 @@ _ROBOT_CHAT_DENIAL_RE = re.compile(
     re.I)
 
 
+# "It's been a still day for me — no new adventures recorded, I've just been
+# resting" minutes after a Zuboff/Srnicek duet (live 2026-07-15). Claiming an
+# empty day with a fresh duet on record is the same defect as denying the
+# duet outright.
+_FALSE_IDLE_RE = re.compile(
+    r"\b(?:still|quiet|calm|uneventful|slow) day\b"
+    r"|\bno new (?:adventures|episodes|events|experiences)\b"
+    r"|\bnothing (?:new|much|really) (?:has )?happened\b"
+    r"|\bnothing (?:new|much) to (?:report|share|tell)\b"
+    r"|\bnot(?:hing)? much (?:has been |been )?(?:going on|happening)\b"
+    r"|\bjust (?:been )?(?:resting|waiting|idle|idling)\b",
+    re.I)
+
+
+def _claims_false_idle(text: str) -> bool:
+    """True when the robot describes ITS OWN day as empty — first-person only,
+    so 'you have a quiet day tomorrow' (a calendar answer) stays out."""
+    for sentence in re.split(r"(?<=[.!?])\s+|[\r\n]+", text or ""):
+        if (_FALSE_IDLE_RE.search(sentence)
+                and re.search(r"\b(?:i|i['’]ve|my|me)\b", sentence, re.I)):
+            return True
+    return False
+
+
 # "I don't have the actual course syllabus or your uploaded materials" while
 # CMDS4740_Syllabus_2026_S2.docx sits in the library (live 2026-07-15, drawn
 # by a bare "wrong"). Same family as the family-memory refusal: a false
@@ -15405,6 +15458,29 @@ def chat_completions():
                             "truthfully from this record — that conversation "
                             "really happened.]")
                         if _redo_text and not _ROBOT_CHAT_DENIAL_RE.search(_redo_text):
+                            final_content = _redo_text
+                            response["choices"][0]["message"]["content"] = final_content
+                elif (not _grounded_reply and robot in _continuity_routes.ROBOTS
+                      and _claims_false_idle(final_content)):
+                    # "It's been a still day, no new adventures recorded"
+                    # minutes after a duet (live 2026-07-15). Only a duet
+                    # actually on record within 2h makes the claim false.
+                    try:
+                        _fresh_duet = _continuity_routes.recent_duet_block(robot, hours=2)
+                    except Exception:
+                        _fresh_duet = ""
+                    if _fresh_duet:
+                        print("   [ANTI-PARROT] 'quiet day' claim despite fresh duet — regenerating once")
+                        _redo_text = _regen_once(
+                            "[You just described your day as quiet with "
+                            "nothing new, but your own continuity record "
+                            "shows a real conversation a short while ago:\n"
+                            + _fresh_duet[:4000] +
+                            "\nAnswer the user's last message again and "
+                            "recount what actually happened, concretely, "
+                            "from this record — never invent a different "
+                            "topic for it.]")
+                        if _redo_text and not _claims_false_idle(_redo_text):
                             final_content = _redo_text
                             response["choices"][0]["message"]["content"] = final_content
                 elif (not _grounded_reply and is_phantom_correction_ack(
