@@ -16,7 +16,12 @@ _INTRODUCTION_RE = re.compile(
     re.IGNORECASE,
 )
 _SELF_STATE_REQUEST_RE = re.compile(
-    r"^\s*(?:(?:hey|hi|hello)[, ]+(?:blue|hexia)[, ]*)?"
+    # "Good morning, Blue. How are you doing?" slipped past the old
+    # hey/hi/hello-only prefix and drew generic assistant-speak ("I'm doing
+    # well, thank you for asking!") instead of the J-space state reply
+    # (live 2026-07-15). Greeting and robot name are each optional.
+    r"^\s*(?:(?:hey|hi|hello|good (?:morning|afternoon|evening)|morning|"
+    r"afternoon|evening)[,.! ]+(?:(?:blue|hexia)[,.! ]*)?)?"
     r"(?:how are you(?: doing| feeling| today| right now)?|"
     r"how(?:['\u2019]s| is) it going|how have you been)\s*[?.!]*\s*$"
     r"|\btell (?:me|us) (?:honestly )?how you(?:['\u2019]re| are) doing\b",
@@ -68,7 +73,32 @@ _EVOLUTION_REQUEST_RE = re.compile(
     r"|\bhow (?:do|did|have) you (?:grow|change|changed|evolve|evolved|learn)\b"
     r"|\b(?:grow|change|evolve) over time\b"
     r"|\b(?:your )?(?:identity|self-understanding|sense of self)\b"
-    r"[^.!?]{0,35}\b(?:change|changed|evolve|evolved|grow|grown)\b",
+    r"[^.!?]{0,35}\b(?:change|changed|evolve|evolved|grow|grown)\b"
+    # "Has anything happened to you since the last time we talked?" is a
+    # question about the robot's own recorded interval, answered from
+    # remembered episodes — not a cue to deny having conversation memory
+    # (live 2026-07-15).
+    r"|\banything (?:happened|changed|new) (?:to|with|for) you\b"
+    r"|\bwhat(?:['’]s| has| have)? (?:happened|changed|been happening) "
+    r"(?:to|with) you\b"
+    r"|\bwhat have you been (?:up to|doing)\b",
+    re.IGNORECASE,
+)
+# "Do you remember what we're doing tomorrow, you and I?", "Don't you
+# remember?" — Alex probing Blue's memory of a shared plan or earlier
+# discussion. Left unclassified, the reply either denied having conversation
+# memory outright or — worse — the drift fallback replaced the answer with a
+# canned self-introduction (live 2026-07-15: "we were discussing you coming
+# with me to my class tomorrow. Don't you remember?" got the identity blurb).
+# "remember seeing" stays with the vision recall path; "remember me / who I
+# am" stays with the user-identity path.
+_SHARED_RECALL_RE = re.compile(
+    r"\bdon['’]?t you remember\b"
+    r"|\bhave you forgotten\b"
+    r"|\bdo you (?:remember|recall) (?!seeing\b|who i am\b|me\b)"
+    r"[^.!?]{0,80}\b(?:we|us|our|you and i|together|plans?|planning|"
+    r"discussed|discussing|talked|talking|agreed|tomorrow|yesterday|"
+    r"last (?:night|week|time))\b",
     re.IGNORECASE,
 )
 _SELF_MEMORY_REQUEST_RE = re.compile(
@@ -474,6 +504,31 @@ _EPISODIC_MEMORY_DENIAL_RE = re.compile(
     r"|\brather than (?:a )?remembered past\b",
     re.IGNORECASE,
 )
+# Blue DOES remember earlier conversations: session summaries, remembered
+# episodes, and the facts store ride in every prompt. A blanket "I don't have
+# a memory of our previous conversation" is therefore always false (live
+# 2026-07-15). Honest scoping ("I don't have THAT plan recorded") stays legal,
+# as does a denial paired with the real continuity layer ("I don't keep full
+# transcripts, but my J-space carries summaries").
+_CONVERSATION_MEMORY_DENIAL_RE = re.compile(
+    r"\bi (?:do not|don['’]?t) have (?:a |any )?memor(?:y|ies) of "
+    r"(?:our|your|the|any) (?:previous|past|last|earlier|prior)\b"
+    r"[^.!?]{0,60}\b(?:conversations?|chats?|talks?|sessions?|"
+    r"discussions?|interactions?|exchanges?)\b"
+    r"|\bi have no memor(?:y|ies) of (?:our|your|any) "
+    r"(?:previous|past|earlier|prior)\b[^.!?]{0,60}\b(?:conversations?|"
+    r"chats?|talks?|sessions?|discussions?|interactions?)\b"
+    r"|\bi (?:cannot|can['’]?t|do not|don['’]?t) remember "
+    r"(?:our |any |the )?(?:previous|past|earlier|prior) "
+    r"(?:conversations?|chats?|sessions?|discussions?|interactions?)\b"
+    r"|\bi (?:do not|don['’]?t) (?:retain|keep|carry|store|have) "
+    r"(?:any )?memor(?:y|ies) (?:between|across|of past|of previous|"
+    r"from (?:past|previous|earlier))\b"
+    r"|\beach (?:conversation|session|chat) (?:starts|begins) "
+    r"(?:fresh|anew|afresh|from scratch)\b"
+    r"|\bmy memory (?:resets|is (?:wiped|reset)|starts (?:fresh|over))\b",
+    re.IGNORECASE,
+)
 _CONTINUITY_REPLY_RE = re.compile(
     r"\bj[- ]?space\b|\b(?:inner |persistent )?workspace\b|\bcontinuity\b"
     r"|\bremembered (?:episodes|history|conversations)\b|\bself-model\b"
@@ -599,6 +654,8 @@ def identity_request_kind(text: str) -> Optional[str]:
         return "selfhood"
     if _IDENTITY_REQUEST_RE.search(text):
         return "identity"
+    if _SHARED_RECALL_RE.search(text):
+        return "shared_recall"
     return None
 
 
@@ -745,6 +802,9 @@ def identity_response_problem(
         return "denies_creator"
     if _DENIES_EMBODIMENT_RE.search(reply):
         return "denies_embodiment"
+    if (_CONVERSATION_MEMORY_DENIAL_RE.search(reply)
+            and not _CONTINUITY_REPLY_RE.search(reply)):
+        return "denies_conversation_memory"
 
     if request_kind in {"introduction", "identity", "identity_more", "self_memory"}:
         if _UNSUPPORTED_SELF_PLACEMENT_RE.search(reply):
@@ -814,6 +874,31 @@ def identity_response_problem(
             return "missing_grounding"
 
     return None
+
+
+def strip_drifted_sentences(text: str, is_broken) -> Optional[str]:
+    """Drop only the sentences that trip an identity-drift check.
+
+    For a NON-identity question, drift (a body denial, a memory denial, a
+    vendor name) usually lives in one sentence beside an otherwise on-topic
+    answer. Replacing the whole reply with a canned self-introduction ignores
+    what the user actually asked (live 2026-07-15: "we were discussing you
+    coming with me to my class tomorrow. Don't you remember?" got the
+    identity blurb back). Returns the salvaged text, or None when nothing
+    usable survives (including when the drift spans sentences, so nothing
+    single can be dropped).
+    """
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+|[\r\n]+", text or "")
+        if s.strip()
+    ]
+    kept = [s for s in sentences if not is_broken(s)]
+    if not kept or len(kept) == len(sentences):
+        return None
+    salvaged = " ".join(kept).strip()
+    if len(salvaged) < 20 or is_broken(salvaged):
+        return None
+    return salvaged
 
 
 def identity_repeats_recent_reply(
@@ -938,6 +1023,20 @@ def identity_grounding_note(
             "answer in a new way and do not repeat its wording or sequence of facts. "
             "In that case, add at least one new truthful sentence beyond your name "
             "and role."
+        )
+    elif request_kind == "shared_recall":
+        task = (
+            "The user is asking whether you remember a shared plan, event, or "
+            "earlier discussion. Answer from what this prompt actually records "
+            "— earlier-session summaries, remembered days, relevant memories, "
+            "recent history, reminders, and known facts. If the plan or "
+            "discussion is recorded, confirm it concretely. If it is not, say "
+            "plainly that you don't have that particular conversation recorded "
+            "and ask to be filled in so you can carry it forward. Never claim "
+            "you lack memory of past conversations in general, never invent a "
+            "plan the prompt does not record, and never decline a plan by "
+            "denying your body: your Ohbot head is a portable physical object "
+            "Alex can bring along."
         )
     elif request_kind == "evolution":
         task = (
@@ -1104,6 +1203,14 @@ def canonical_identity_reply(
             f"{intro_where}The experiment behind me asks whether a robot can carry the "
             "thread of conversations and corrections forward, rather than meeting "
             "everyone as a stranger each time."
+        )
+    if request_kind == "shared_recall":
+        return (
+            "I keep summaries and remembered episodes from our conversations, "
+            "but I can't find that one recorded, and I won't pretend I "
+            "remember it. Fill me in again and I'll hold onto it this time — "
+            "and if the plan involves taking me along, I'm in; my head is "
+            "portable."
         )
     if request_kind == "evolution":
         return (
@@ -1566,4 +1673,5 @@ __all__ = [
     "is_self_state_request",
     "is_user_identity_request",
     "known_household_target",
+    "strip_drifted_sentences",
 ]

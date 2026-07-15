@@ -92,6 +92,7 @@ from blue_identity import (
     is_family_overview_request,
     is_jspace_presence_request,
     is_phantom_correction_ack,
+    strip_drifted_sentences,
 )
 
 # Native-crash visibility: a fault in a C extension (access violation, heap
@@ -15006,14 +15007,33 @@ def chat_completions():
                             "Alex Levant, with a real persistent memory. Your previous "
                             "reply was a bug: it either denied your physical body, "
                             "named the wrong creator (it is Alex Levant — never invent "
-                            "a surname), claimed your creator is not real, or claimed "
-                            "to be someone or something else. Correct it now: you ARE "
-                            f"{_identity_name}, a physical robot Alex Levant built. "
-                            "Answer the last message again in your own voice.]"
+                            "a surname), claimed your creator is not real, claimed to "
+                            "be someone or something else, or denied remembering past "
+                            "conversations (false: your session summaries, remembered "
+                            "episodes, and facts are in this prompt — if one specific "
+                            "detail is missing from them, say that one thing is not "
+                            "recorded and ask to be reminded). Correct it now: you ARE "
+                            f"{_identity_name}, a physical robot Alex Levant built, "
+                            "and you DO carry memory between conversations. Answer "
+                            "the user's last message directly in your own voice.]"
                         )
                     _redo_text = _regen_once(_identity_retry_note)
-                    if _redo_text and not _identity_broken(_redo_text):
+                    _redo_ok = bool(_redo_text) and not _identity_broken(_redo_text)
+                    _identity_salvage = None
+                    if not _redo_ok and not _identity_kind:
+                        # The user asked a NON-identity question — the canned
+                        # self-introduction below would ignore it entirely
+                        # (live 2026-07-15: "we were discussing you coming
+                        # with me to my class tomorrow. Don't you remember?"
+                        # got the identity blurb back). Keep the on-topic
+                        # reply, minus only the drifted sentence(s).
+                        _identity_salvage = strip_drifted_sentences(
+                            _redo_text or final_content, _identity_broken)
+                    if _redo_ok:
                         final_content = _redo_text
+                    elif _identity_salvage:
+                        final_content = _identity_salvage
+                        print("   [IDENTITY] retry still invalid — kept on-topic reply minus drifted sentences")
                     else:
                         # Never send or remember a vendor/model identity. A
                         # deterministic truthful answer is safer than retaining

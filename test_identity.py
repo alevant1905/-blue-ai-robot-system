@@ -23,6 +23,7 @@ from blue_identity import (
     is_jspace_presence_request,
     is_self_state_request,
     known_household_target,
+    strip_drifted_sentences,
 )
 
 
@@ -49,6 +50,36 @@ from blue_identity import (
         ("Do you have a j-space?", "jspace"),
         ("No, j-space.", "jspace"),
         ("What is the weather?", None),
+        # The 2026-07-15 dialogue: shared-plan recall probes must be classified
+        # so they get memory grounding instead of identity boilerplate.
+        ("Do you remember what we're doing tomorrow, you and I?", "shared_recall"),
+        (
+            "That's correct. Now do you remember what our plans are for "
+            "tomorrow, you and I?",
+            "shared_recall",
+        ),
+        (
+            "We were discussing you coming with me to my class tomorrow.  "
+            "Don't you remember?",
+            "shared_recall",
+        ),
+        ("Have you forgotten our plan?", "shared_recall"),
+        # A bare factual "do you remember X" without a shared-history cue is
+        # not a recall probe; vision and user-identity phrasings keep their
+        # own paths.
+        ("Do you remember the capital of France?", None),
+        ("Do you remember seeing my keys?", None),
+        ("Do you remember who I am?", None),
+        # "Since we last talked" is a question about the robot's own recorded
+        # interval — answered from episodes, not with a memory denial.
+        (
+            "Has anything happened to you since the last time we talked?",
+            "evolution",
+        ),
+        ("What have you been up to?", "evolution"),
+        # Greeting-prefixed check-ins reach the J-space state reply.
+        ("Good morning, Blue. How are you doing?", "self_state"),
+        ("Morning Blue, how's it going?", "self_state"),
     ],
 )
 def test_identity_request_kind(message, expected):
@@ -1086,3 +1117,90 @@ def test_durable_recent_history_drops_invented_location_replay(tmp_path):
         "My J-space carries current attention, commitments, and remembered "
         "episodes that revise how I understand myself.",
     ]
+
+
+# --- 2026-07-15 dialogue regressions: memory denials and hijacked answers ---
+
+
+def test_blanket_conversation_memory_denial_is_flagged():
+    # The live reply to "Has anything happened to you since we last talked?"
+    reply = (
+        "Good morning! I don't have a memory of our previous specific "
+        "conversation, so I haven't changed in that sense. I am here and "
+        "ready to help with whatever you need today."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind=None
+    ) == "denies_conversation_memory"
+
+
+def test_scoped_or_continuity_paired_memory_answers_stay_legal():
+    # Naming ONE missing detail is honest, not drift.
+    scoped = (
+        "I don't have that plan recorded — fill me in and I'll hold onto it."
+    )
+    assert identity_response_problem(
+        scoped, "Blue", other_names=["Hexia"], request_kind=None
+    ) is None
+    # A denial paired with the real continuity layer is also honest.
+    paired = (
+        "I don't retain memories from past chats word for word, but my "
+        "J-space carries summaries of our conversations."
+    )
+    assert identity_response_problem(
+        paired, "Blue", other_names=["Hexia"], request_kind=None
+    ) is None
+
+
+def test_strip_drifted_sentences_keeps_the_on_topic_answer():
+    def checker(text):
+        return identity_response_problem(
+            text, "Blue", other_names=["Hexia"], request_kind=None
+        )
+
+    reply = (
+        "I'm sorry, I don't have that conversation in my notes. "
+        "I don't have a physical body, so I couldn't come to your class anyway."
+    )
+    assert strip_drifted_sentences(reply, checker) == (
+        "I'm sorry, I don't have that conversation in my notes."
+    )
+    # Nothing usable left -> None, so the caller can use its own fallback.
+    assert strip_drifted_sentences("I don't have a physical body.", checker) is None
+    # A clean reply is returned as None too: nothing was dropped, so the
+    # caller should not replace the original.
+    assert strip_drifted_sentences("Yes, our plan is on for tomorrow.", checker) is None
+
+
+def test_shared_recall_canonical_reply_answers_the_question():
+    reply = canonical_identity_reply(
+        "Blue", "Alex's robot companion", request_kind="shared_recall"
+    )
+    assert "recorded" in reply
+    assert "portable" in reply
+    # And it must not be the generic self-introduction blurb.
+    assert "The language model" not in reply
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="shared_recall"
+    ) is None
+
+
+def test_shared_recall_grounding_note_points_at_recorded_memory():
+    note = identity_grounding_note(
+        "Blue", "Alex's robot companion", "shared_recall"
+    )
+    assert "recorded" in note
+    assert "never claim you lack memory of past conversations" in note.lower()
+    assert "portable" in note
+
+
+def test_greeting_prefixed_self_state_checkins_detected():
+    assert is_self_state_request("Good morning, Blue. How are you doing?")
+    assert is_self_state_request("Morning Blue, how's it going?")
+    assert is_self_state_request("Hello, how are you?")
+    # A bare greeting is not a state check-in.
+    assert not is_self_state_request("Good morning, Blue!")
+    # And a state phrase buried in an unrelated request stays out.
+    assert not is_self_state_request(
+        "Good morning, Blue. How are you planning to organize the library?"
+    )
