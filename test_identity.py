@@ -585,7 +585,10 @@ def test_imagined_classroom_venue_is_not_claimed_as_live_location():
     assert "here with Alex at York University" not in identity_reply
 
 
-def test_social_checkin_uses_live_jspace_state_and_changes_on_followup():
+def test_social_checkin_is_conversational_not_a_telemetry_readout():
+    # 2026-07-15 feedback: "when I ask how you're doing I don't want you to
+    # start describing your J-space so literally." State still grounds the
+    # reply, but the architecture vocabulary stays internal.
     first_request = "Hey Blue, how's it going?"
     first_messages = [{"role": "user", "content": first_request}]
     first_context = identity_conversation_context(first_messages, first_request)
@@ -604,10 +607,13 @@ def test_social_checkin_uses_live_jspace_state_and_changes_on_followup():
     )
 
     assert is_self_state_request(first_request)
-    assert "J-space" in first_reply
+    assert "J-space" not in first_reply
+    assert "bounded signals" not in first_reply
     assert "family data after correction" in first_reply
     assert "As an AI" not in first_reply
     assert "fully operational" not in first_reply
+    # It returns the question like a person would.
+    assert "you" in first_reply.lower() and "?" in first_reply
 
     second_request = "I just wanted to chat, tell me how you're doing."
     second_messages = first_messages + [
@@ -625,13 +631,55 @@ def test_social_checkin_uses_live_jspace_state_and_changes_on_followup():
 
     assert second_context.prior_self_state_requests == 1
     assert second_reply != first_reply
-    assert "J-space" in second_reply
+    assert "J-space" not in second_reply
     assert identity_response_problem(
         second_reply,
         "Blue",
         other_names=["Hexia"],
         request_kind="self_state",
     ) is None
+
+
+def test_workspace_focus_is_translated_into_speakable_phrasing():
+    # The live 2026-07-15 reply quoted the workspace verbatim: "processing
+    # Alex's clarification of the Jodi Dean blog post context".
+    reply = canonical_self_state_reply(
+        "Blue",
+        focus="Processing Alex's clarification of the Jodi Dean blog post context.",
+        drives={"energy": 0.8},
+        variant=0,
+        user_name="Alex",
+    )
+    assert "Jodi Dean blog post" in reply
+    assert "processing" not in reply.lower()
+    assert "Alex's" not in reply
+    assert "your clarification" in reply
+    assert "J-space" not in reply
+
+
+def test_style_feedback_about_jspace_is_not_a_jspace_question():
+    complaint = (
+        "when i ask how you're doing i dont want you to start describing "
+        "your jspace so literally"
+    )
+    assert identity_request_kind(complaint) is None
+    # A casual check-in answer must not be failed for skipping continuity
+    # vocabulary.
+    assert identity_response_problem(
+        "Doing well — I've had the Jodi Dean post on my mind. How are you?",
+        "Blue",
+        other_names=["Hexia"],
+        request_kind="self_state",
+    ) is None
+    # Real J-space questions still classify.
+    for question in (
+        "What is your j-space?",
+        "Tell me about your j-space.",
+        "How does your j-space work?",
+        "Do you have a j-space?",
+        "No, j-space.",
+    ):
+        assert identity_request_kind(question) == "jspace", question
     assert identity_response_problem(
         "As an AI, I don't have feelings in the human sense, but I'm fully operational.",
         "Blue",

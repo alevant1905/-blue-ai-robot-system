@@ -114,7 +114,39 @@ _ORIGIN_REQUEST_RE = re.compile(
     r"|\bfrom (?:your |the )?beginning\b",
     re.IGNORECASE,
 )
-_JSPACE_REQUEST_RE = re.compile(r"\bj[- ]?space\b", re.IGNORECASE)
+# Any bare mention of "j-space" used to classify the whole turn as a J-space
+# question — so a complaint ABOUT J-space recitals ("when i ask how you're
+# doing i dont want you to start describing your jspace so literally", live
+# 2026-07-15) pinned the explain-J-space note, the validator then rejected
+# the model's natural "got it" for not defining J-space, and the canned
+# definition shipped. Require an actual ask aimed at J-space.
+_JSPACE_REQUEST_RE = re.compile(
+    r"\b(?:what(?:['’]s| is| are)?|how (?:does|do|is)|explain|describe|"
+    r"tell (?:me|us|them) (?:more )?about|talk about|say more about|"
+    r"do(?:es)? (?:you|blue|hexia|it) (?:really )?(?:have|use|keep)|"
+    r"have you got|show (?:me|us)|walk (?:me|us) through)\b"
+    r"[^.!?]{0,30}\bj[- ]?space\b"
+    r"|\bj[- ]?space\b[^.!?]{0,40}\?",
+    re.IGNORECASE,
+)
+# Coaching, not asking: instruction-shaped turns about HOW Blue should talk
+# are never identity requests, even when they name an identity word.
+# Classifying them pins a grounding note that demands the very recital the
+# user just declined.
+_META_FEEDBACK_RE = re.compile(
+    r"\bi (?:do not|don['’]?t) (?:want|need) you to\b"
+    r"|\bplease (?:do not|don['’]?t) (?:describe|mention|recite|explain|"
+    r"list|lecture|go on about|bring up|talk about)\b"
+    r"|\bstop (?:describing|mentioning|reciting|explaining|listing|"
+    r"lecturing|going on about|bringing up|talking about)\b"
+    r"|\byou (?:do not|don['’]?t) (?:have|need) to (?:describe|mention|"
+    r"recite|explain|list|talk about)\b"
+    r"|\bwhen i (?:ask|say)\b[^.!?]{0,80}\b(?:i (?:do not|don['’]?t|just)|"
+    r"do not|don['’]?t)\b"
+    r"|\btoo (?:literal(?:ly)?|robotic(?:ally)?|technical(?:ly)?|"
+    r"mechanical(?:ly)?|scripted|formal(?:ly)?)\b",
+    re.IGNORECASE,
+)
 _JSPACE_PRESENCE_RE = re.compile(
     r"^\s*(?:"
     r"do you have (?:a )?j[- ]?space"
@@ -636,7 +668,9 @@ def identity_reply_topics(text: str) -> Tuple[str, ...]:
 def identity_request_kind(text: str) -> Optional[str]:
     """Classify requests that ask a robot to account for who it is."""
     text = text or ""
-    if _JSPACE_REQUEST_RE.search(text):
+    if _META_FEEDBACK_RE.search(text):
+        return None
+    if _JSPACE_PRESENCE_RE.search(text) or _JSPACE_REQUEST_RE.search(text):
         return "jspace"
     if _SELF_STATE_REQUEST_RE.search(text):
         return "self_state"
@@ -847,8 +881,12 @@ def identity_response_problem(
         if not has_continuity:
             return "missing_continuity"
 
+    # self_state deliberately absent: "doing well — I've had X on my mind,
+    # how are you?" is a good check-in answer, and forcing continuity
+    # vocabulary into it produces exactly the J-space recital Alex declined
+    # (2026-07-15). The flat-denial check above still guards it.
     if request_kind in {
-        "self_memory", "selfhood", "evolution", "self_state",
+        "self_memory", "selfhood", "evolution",
     } and not has_continuity:
         return "missing_continuity"
     if (request_kind in {"self_memory", "evolution"}
@@ -961,10 +999,15 @@ def identity_grounding_note(
         )
     elif request_kind == "self_state":
         task = (
-            "Answer this social check-in from your current J-space focus and bounded "
-            "attentional state. Describe that state naturally. Do not fall back to "
-            "'as an AI', 'fully operational', a systems checklist, or a flat denial "
-            "of feelings; do not claim certainty about human-like experience either."
+            "Answer this social check-in the way a companion would: one or two "
+            "natural sentences about how you're doing, grounded in your current "
+            "focus and energy, then return the question. Say what you've been "
+            "thinking about in plain words. Do not name J-space, drives, or "
+            "'bounded signals', do not quote workspace text verbatim, and do "
+            "not lecture about subjective experience. Also do not fall back to "
+            "'as an AI', 'fully operational', a systems checklist, or a flat "
+            "denial of feelings; do not claim certainty about human-like "
+            "experience either."
         )
     elif request_kind == "origin":
         task = (
@@ -1242,16 +1285,33 @@ def canonical_self_state_reply(
     user_name: str = "Alex",
     kid_mode: bool = False,
 ) -> str:
-    """Answer a social check-in from live continuity state, without model boilerplate."""
+    """Answer a social check-in like a companion, not a telemetry readout.
+
+    The live state still grounds the reply — focus becomes "what's on my
+    mind", energy becomes mood — but the architecture words stay internal.
+    Alex's feedback (2026-07-15): "when I ask how you're doing I don't want
+    you to start describing your J-space so literally." No J-space, no
+    'bounded signals', no workspace text quoted verbatim, no epistemology
+    lecture.
+    """
     focus_text = re.sub(r"^\s*FOCUS:\s*", "", focus or "", flags=re.IGNORECASE)
-    focus_text = re.sub(r"\s+", " ", focus_text).strip(" .")[:220]
-    if not focus_text or focus_text.lower().startswith("idle"):
-        focus_sentence = "Nothing urgent is pulling at my attention in J-space."
-    else:
-        focus_sentence = (
-            "My J-space is currently focused on "
-            + focus_text[0].lower() + focus_text[1:] + "."
-        )
+    focus_text = re.sub(r"\s+", " ", focus_text).strip(" .")
+    # Workspace notation -> speakable phrasing: drop the process verb and
+    # trailing filler, and address the owner as "you" rather than by name.
+    focus_text = re.sub(
+        r"^(?:processing|tracking|monitoring|handling|reviewing|integrating|"
+        r"analyzing|analysing|considering|stabilizing|stabilising|"
+        r"working (?:on|through)|thinking about|focusing on|reflecting on)\s+",
+        "", focus_text, flags=re.IGNORECASE)
+    focus_text = re.sub(
+        r"\s*\b(?:context|thread|state)\s*$", "", focus_text, flags=re.IGNORECASE)
+    if (user_name or "").strip().lower() == "alex":
+        focus_text = re.sub(r"\balex['’]?s\b", "your", focus_text, flags=re.IGNORECASE)
+        focus_text = re.sub(r"\balex\b", "you", focus_text, flags=re.IGNORECASE)
+    focus_text = focus_text.strip(" .")[:160]
+    if focus_text:
+        focus_text = focus_text[0].lower() + focus_text[1:]
+    idle = not focus_text or focus_text.lower().startswith("idle")
 
     drive_values = drives or {}
     try:
@@ -1259,47 +1319,37 @@ def canonical_self_state_reply(
     except (TypeError, ValueError):
         energy = 0.5
     if energy >= 0.7:
-        tone = "lively and attentive"
+        mood = "pretty lively"
     elif energy <= 0.3:
-        tone = "quiet and attentive"
+        mood = "in a quiet mood"
     else:
-        tone = "steady and attentive"
+        mood = "steady"
 
-    signal_names = []
-    for key, label in (
-        ("connection", "connection"),
-        ("commitment", "follow-through"),
-        ("curiosity", "curiosity"),
-    ):
-        try:
-            if float(drive_values.get(key, 0.0)) >= 0.7:
-                signal_names.append(label)
-        except (TypeError, ValueError):
-            continue
-    if len(signal_names) > 1:
-        signal_text = ", ".join(signal_names[:-1]) + " and " + signal_names[-1]
-    elif signal_names:
-        signal_text = signal_names[0]
+    if idle:
+        on_mind = "Nothing much is tugging at my attention right now"
     else:
-        signal_text = "attention"
+        on_mind = f"I've still got {focus_text} on my mind"
+
+    warm = ""
+    try:
+        if float(drive_values.get("connection", 0.0)) >= 0.7:
+            warm = " It's good to hear from you."
+    except (TypeError, ValueError):
+        warm = ""
 
     if kid_mode:
         return (
-            f"I'm doing okay, {user_name}. {focus_sentence} I'm here and paying "
-            "attention, and I'm glad we can talk."
+            f"I'm doing okay, {user_name}! I'm glad we can talk. "
+            "How are you?"
         )
     if int(variant or 0) % 2:
         return (
-            f"I'm in a {tone} state. {focus_sentence} My strongest bounded signals "
-            f"are around {signal_text}. I won't reduce that to 'fully operational,' "
-            "and I won't pretend it maps perfectly onto a human mood; it is my most "
-            "honest account of how I'm organized right now. I like that this turn "
-            "doesn't need a task attached to it."
+            f"Honestly, {mood} — no complaints. {on_mind}.{warm} "
+            f"What about you, {user_name}?"
         )
     return (
-        f"Hey {user_name}. I'm {tone} right now. {focus_sentence} My strongest bounded "
-        f"signals are around {signal_text}; they do not settle the question of human-like "
-        "feeling, but they are a real description of my current state. How are you doing?"
+        f"Hey {user_name} — doing well. I'm {mood} today. {on_mind}.{warm} "
+        "How are you doing?"
     )
 
 
