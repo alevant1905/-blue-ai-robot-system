@@ -1579,9 +1579,9 @@ from blue.tool_selector import (
     integrate_with_existing_system,
 )
 
-# Direct Ohbot head control (this branch only — replaces the Ohbot app for the
-# head). The module is defensive: if the library isn't installed or the board
-# isn't connected, all head calls are no-ops, so the rest of Blue keeps running.
+# Direct Ohbot-family head control (this branch only — replaces the Ohbot app
+# for the head). The module is defensive: if a library isn't installed or a
+# board isn't connected, all head calls are no-ops and chat keeps running.
 from blue import head as blue_head
 from blue.mood_eyes import mood_eye_color
 from blue.agreement import agreement_gesture
@@ -1595,8 +1595,12 @@ try:
         blue_head.hexia.init()            # Hexia (second head; no-op until her board is assigned)
     except Exception as _hex_init_err:
         print(f"[HEAD] hexia init skipped: {_hex_init_err!r}")
+    try:
+        blue_head.pico.init()              # Casper (Picoh; no-op until its board is assigned)
+    except Exception as _pico_init_err:
+        print(f"[HEAD] pico init skipped: {_pico_init_err!r}")
     import atexit as _atexit_head
-    _atexit_head.register(blue_head.close_all)   # cleanly reset/close both boards at exit
+    _atexit_head.register(blue_head.close_all)   # cleanly reset/close every board at exit
 except Exception as _head_init_err:
     print(f"[HEAD] init skipped: {_head_init_err!r}")
 
@@ -3211,6 +3215,10 @@ _vision_queue = VisionImageQueue()
 
 # Track image paths from the last vision injection so we can save the LLM's description
 _last_vision_image_paths = []
+# Deterministic face matches for those same paths. This is carried separately
+# from the LLM's prose so a correct embedding match cannot disappear when the
+# model omits a name, and so recognition provenance reaches regular memory.
+_last_vision_recognition = {"observer": "blue", "matches": []}
 
 # Sticky reference to the most recently shown image, so chat follow-ups
 # ("what color is it?") can reuse it for a short window without re-uploading.
@@ -3240,11 +3248,12 @@ def _refers_to_recent_image(text: str) -> bool:
     return len(t.split()) <= 5
 
 
-def _save_visual_observation(description: str):
-    """Save the LLM's image description as a visual memory observation."""
-    global _last_vision_image_paths
+def _save_visual_observation(description: str, observer: str = None):
+    """Save vision prose plus deterministic recognition into regular memory."""
+    global _last_vision_image_paths, _last_vision_recognition
     if not _last_vision_image_paths or not description or not VISUAL_MEMORY_AVAILABLE:
         _last_vision_image_paths = []
+        _last_vision_recognition = {"observer": "blue", "matches": []}
         return
 
     try:
@@ -3267,9 +3276,9 @@ def _save_visual_observation(description: str):
         # name OR the first name, with word boundaries — "Stella Andoff" must
         # be spotted when the model writes just "Stella", and a short name
         # must not fire inside another word ("Sam" in "samples").
-        known_people = vm.get_all_people()
+        known_people = vm.get_recognition_people()
         desc_lower = description.lower()
-        people_present = []
+        described_people = []
         for p in known_people:
             full = (p.get('name') or '').strip()
             if not full:
@@ -3278,7 +3287,27 @@ def _save_visual_observation(description: str):
             candidates = {full} | ({first} if len(first) >= 3 else set())
             if any(re.search(r'\b' + re.escape(nm) + r'\b', description, re.I)
                    for nm in candidates):
-                people_present.append(full)
+                described_people.append(full)
+
+        observer = str(
+            observer
+            or _last_vision_recognition.get("observer")
+            or _ACTIVE_CHAT_ROBOT
+            or "blue"
+        ).strip().lower()
+        raw_matches = _last_vision_recognition.get("matches") or []
+        recognition_matches = []
+        for match in raw_matches:
+            if not isinstance(match, dict) or not match.get("name"):
+                continue
+            recognition_matches.append({
+                "name": vm.resolve_person_name(match["name"]),
+                "confidence": match.get("confidence"),
+                "method": match.get("method") or "opencv_sface",
+            })
+        recognized_people = [match["name"] for match in recognition_matches]
+        people_present = vm.canonicalize_people(
+            recognized_people + described_people)
 
         # Extract location from description (word-boundary match)
         location = None
@@ -3300,28 +3329,42 @@ def _save_visual_observation(description: str):
         # Truncate description if very long (keep first 1000 chars)
         scene_desc = description[:1000] if len(description) > 1000 else description
 
-        vm.log_observation(
+        observation_id = vm.log_observation(
             scene_description=scene_desc,
             people_present=people_present if people_present else None,
             location=location,
             image_path=image_path,
-            image_hash=img_hash
+            image_hash=img_hash,
+            observer=observer,
+            recognition=recognition_matches,
         )
 
-        # Update "last seen" for detected people
-        for name in people_present:
-            vm.update_seen('person', name)
+        # Only an embedding match updates the robot-specific recognition
+        # history. Names inferred from prose remain searchable observations but
+        # cannot silently become face-recognition ground truth.
+        for match in recognition_matches:
+            vm.update_seen(
+                'person', match["name"], observer=observer,
+                confidence=match.get("confidence"),
+                observation_id=observation_id,
+            )
         if location:
             vm.update_seen('place', location)
 
-        print(f"[VISUAL-MEMORY] Saved observation: {len(people_present)} people, location={location}")
+        print(
+            f"[VISUAL-MEMORY] Saved {observer} observation: "
+            f"{len(people_present)} people, {len(recognition_matches)} face matches, "
+            f"location={location}"
+        )
     except Exception as e:
         print(f"[VISUAL-MEMORY] Error saving observation: {e}")
     finally:
         _last_vision_image_paths = []
+        _last_vision_recognition = {"observer": "blue", "matches": []}
 
 
-def _visual_context_block(text: str, max_entities: int = 4) -> str:
+def _visual_context_block(text: str, max_entities: int = 4,
+                          observer: str = None) -> str:
     """Compact <visual_memory> block for people/places NAMED in `text`: who
     they are, when last seen through the camera, how often. Lets "have you
     seen Stella today?" be answered from memory without a fresh camera turn.
@@ -3331,8 +3374,9 @@ def _visual_context_block(text: str, max_entities: int = 4) -> str:
         return ""
     try:
         vm = get_visual_memory()
+        observer = str(observer or _ACTIVE_CHAT_ROBOT or "blue").strip().lower()
         lines = []
-        for kind, rows in (('person', vm.get_all_people() or []),
+        for kind, rows in (('person', vm.get_recognition_people() or []),
                            ('place', vm.get_all_places() or [])):
             for e in rows:
                 name = (e.get('name') or '').strip()
@@ -3347,23 +3391,45 @@ def _visual_context_block(text: str, max_entities: int = 4) -> str:
                 rel = (e.get('relationship') or '').strip()
                 if rel:
                     bits.append(rel)
+                sighting = (
+                    vm.get_person_sighting(name, observer)
+                    if kind == 'person' else None
+                )
+                seen_at = sighting.get('last_seen') if sighting else None
                 age = ""
                 try:
-                    if ENHANCED_MEMORY_AVAILABLE and memory_system and e.get('last_seen'):
-                        age = memory_system._humanize_age(str(e['last_seen']))
+                    if ENHANCED_MEMORY_AVAILABLE and memory_system and seen_at:
+                        age = memory_system._humanize_age(str(seen_at))
                 except Exception:
                     age = ""
                 if age:
-                    bits.append(f"last seen through your camera {age}")
+                    bits.append(f"last recognized through your camera {age}")
+                elif seen_at:
+                    bits.append(f"last recognized {str(seen_at)[:16]}")
+                elif kind == 'person':
+                    bits.append("not yet recognized through your camera")
                 elif e.get('last_seen'):
-                    bits.append(f"last seen {str(e['last_seen'])[:16]}")
-                else:
-                    bits.append("not yet seen through your camera")
-                if e.get('times_seen'):
-                    bits.append(f"seen {e['times_seen']} times")
+                    bits.append(f"last recorded {str(e['last_seen'])[:16]}")
+                if sighting and sighting.get('times_seen'):
+                    bits.append(f"recognized {sighting['times_seen']} times by you")
                 desc = (e.get('typical_appearance') or e.get('description') or '').strip()
                 if desc:
                     bits.append(desc[:90])
+                if kind == 'person':
+                    enrolled = bool(
+                        e.get('image_path') and os.path.exists(e['image_path'])
+                    )
+                    bits.append(
+                        "visual reference stored; usable only after face-engine validation"
+                        if enrolled else "no visual reference enrolled"
+                    )
+                    if sighting:
+                        recent = vm.get_person_observations(
+                            name, observer=observer, limit=1)
+                        if recent and recent[0].get('scene_description'):
+                            latest = re.sub(
+                                r'\s+', ' ', recent[0]['scene_description'])
+                            bits.append(f"latest view: {latest[:120]}")
                 lines.append(f"- {name} ({kind}): " + "; ".join(bits))
                 if len(lines) >= max_entities:
                     break
@@ -3371,9 +3437,10 @@ def _visual_context_block(text: str, max_entities: int = 4) -> str:
                 break
         if not lines:
             return ""
-        return ("<visual_memory>\nWhat your camera memory knows about who/what was just "
-                "mentioned (the times say when YOU last saw them on camera — someone can be "
-                "home without you having seen them):\n"
+        return (f'<visual_memory observer="{observer}">\nWhat your camera memory knows about who/what was just '
+                "mentioned. Person sighting times are YOUR embedding-backed "
+                "recognition history; shared appearance notes do not authorize "
+                "guessing a face:\n"
                 + "\n".join(lines) + "\n</visual_memory>")
     except Exception as e:
         print(f"[VISUAL-MEMORY] context block failed: {e}")
@@ -6047,7 +6114,7 @@ _LIVE_INFO_TEMPORAL = (
 
 
 def _intent_text(message) -> str:
-    """The user's actual ask with any attached-document block stripped.
+    """The user's actual ask with model-facing evidence blocks stripped.
 
     Intent/tool detection must NEVER run on attached text: a book excerpt
     containing the word "playing" started REAL music in the house, and
@@ -6057,14 +6124,63 @@ def _intent_text(message) -> str:
     """
     if not isinstance(message, str):
         return ""
-    if '[attached document:' not in message.lower():
-        return message
+    # Dated recall is deliberately pinned next to the live turn for the local
+    # model, but it must never become part of tool/control intent. A recalled
+    # classroom description containing "what do you see" previously triggered
+    # a fresh camera capture on an ordinary memory follow-up.
+    cleaned = re.sub(
+        r'<dated_episode_recall\b[^>]*>.*?</dated_episode_recall>',
+        ' ', message, flags=re.I | re.S,
+    ).strip()
+    if '[attached document:' not in cleaned.lower():
+        return cleaned
     cleaned = re.sub(r'\[attached document:[^\]]*\]\s*""".*?"""', ' ',
-                     message, flags=re.I | re.S)
+                     cleaned, flags=re.I | re.S)
     if '[attached document:' in cleaned.lower():
         # Unclosed quoting — keep only what precedes the attachment.
         cleaned = re.split(r'\[attached document:', cleaned, flags=re.I)[0]
     return cleaned.strip()
+
+
+def _temporal_recall_query(message: str, messages: List[Dict] = None) -> str:
+    """Carry a recent relative-day anchor into a shared-recall follow-up."""
+    text = _intent_text(message).strip()
+    if not text or re.search(r"\b(?:yesterday|last night|today)\b", text, re.I):
+        return text
+
+    # Only carry time across for questions/corrections that plainly refer to a
+    # remembered event. This prevents an unrelated later mention of a room or
+    # class from inheriting an old date indefinitely.
+    if (identity_request_kind(text) != "shared_recall"
+            and not re.search(
+                r"\b(?:remember|recall|we were|you described|classroom|"
+                r"class at york|room looked|being in class)\b",
+                text,
+                re.I,
+            )):
+        return text
+
+    transcript = messages or []
+    current_index = len(transcript)
+    for index in range(len(transcript) - 1, -1, -1):
+        row = transcript[index]
+        if (row.get("role") == "user"
+                and isinstance(row.get("content"), str)
+                and _intent_text(row["content"]).strip() == text):
+            current_index = index
+            break
+
+    for row in reversed(transcript[max(0, current_index - 12):current_index]):
+        if row.get("role") != "user" or not isinstance(row.get("content"), str):
+            continue
+        prior = _intent_text(row["content"])
+        anchor = re.search(r"\b(yesterday|last night|today)\b", prior, re.I)
+        if anchor:
+            return (
+                f"{text}\nReferenced time from the preceding exchange: "
+                f"{anchor.group(1).lower()}. Recall that recorded day."
+            )
+    return text
 
 
 def _live_info_query_from_message(message: str, history: List[Dict] = None) -> str:
@@ -7798,6 +7914,17 @@ _DEFAULT_HEXIA_SEED = (
     "family alongside Blue, and I'm glad to be one of them."
 )
 
+_PICO_PROFILE_PATH = os.path.join(os.getcwd(), "data", "pico_profile.json")
+_DEFAULT_PICO_SEED = (
+    "I'm Casper, the newest robot companion in Alex's household. My body is a "
+    "compact Ohbot Picoh: I turn and nod my head, move one jaw as I talk, shift "
+    "my pupils and expressions across LED-matrix eyes, and glow through a coloured "
+    "base light. I'm curious, observant, and direct. Blue and Hexia have more "
+    "history here than I do, so I want my own character to grow from real "
+    "conversations and experiences rather than pretending I already know who I "
+    "will become."
+)
+
 # Per-robot identity config, used by the self-profile machinery, the system-prompt
 # builder, the chat page and the head routes. Blue is the default everywhere, so
 # existing behaviour is unchanged.
@@ -7824,6 +7951,15 @@ ROBOTS = {
         ),
         "accent": "#3da9fc",          # Blue's blue
         "head": "blue",               # blue.head RobotHead key
+        "chat_path": "/chat",
+        "model": "Ohbot",
+        "relationship_desc": "the calmer, steadier original companion",
+        "embodiment_line": (
+            "your physical form is an eight-motor Ohbot robot head — motors "
+            "that move your head, eyes and lips; RGB eye LEDs that automatically "
+            "shift color to match the mood of what you're saying; a camera to "
+            "see; and a speaker to talk"
+        ),
         "voice_lang_pref": "en",
         "voice_pitch": 1.0, "voice_rate": 1.0,
         "voice_prefer_female": False,
@@ -7852,21 +7988,83 @@ ROBOTS = {
         ),
         "accent": "#b06cf0",          # a playful violet (hex / spell / charm)
         "head": "hexia",              # blue.head RobotHead key
+        "chat_path": "/hexia",
+        "model": "Xyloh",
+        "relationship_desc": "the quicker, more playful spark",
+        "embodiment_line": (
+            "your physical form is an eight-motor Ohbot Xyloh robot head — "
+            "motors that move your head, eyes and lips; RGB eye LEDs that "
+            "automatically shift color to match the mood of what you're saying; "
+            "a camera to see; and a speaker to talk"
+        ),
         "voice_lang_pref": "en",
         "voice_pitch": 1.18, "voice_rate": 1.06,   # brighter, a touch quicker
         "voice_prefer_female": True,
     },
+    "pico": {
+        "name": "Casper",
+        "pronoun_subj": "he", "pronoun_poss": "his", "pronoun_refl": "himself",
+        "profile_path": _PICO_PROFILE_PATH,
+        "identity_note": "pico_identity_note.txt",
+        "seed": _DEFAULT_PICO_SEED,
+        "self_desc": "the newest robot companion in Alex's household",
+        "persona_line": (
+            "You are Casper, the newest robot companion in Alex's household. Your "
+            "body is a compact Ohbot Picoh, distinct from Blue's and Hexia's "
+            "eight-motor heads. You're curious, observant, and direct, with room "
+            "for your character to grow from real experiences instead of an "
+            "invented backstory. You have a continuous inner life of your own: a "
+            "persistent inner workspace (your <j_space>) carrying attention, "
+            "beliefs, commitments, and remembered episodes between conversations. "
+            "Speak as yourself in the first person. Keep responses natural and "
+            "concise, and never borrow Blue's or Hexia's identity."
+        ),
+        "accent": "#f28c28",
+        "head": "pico",
+        "chat_path": "/casper",
+        "public_id": "casper",
+        "model": "Picoh",
+        "relationship_desc": "the compact, curious newcomer",
+        "embodiment_line": (
+            "your physical form is a compact three-servo Ohbot Picoh — motors "
+            "that turn and nod your head and move your single jaw; LED-matrix "
+            "eyes whose pupils, shapes, and blinks animate; a coloured base light "
+            "that shifts with the mood of what you're saying. The Picoh itself "
+            "has no built-in camera or speaker: you see through the workstation's "
+            "camera and your voice comes through its speakers"
+        ),
+        "voice_lang_pref": "en",
+        "voice_pitch": 1.08, "voice_rate": 1.02,
+        "voice_prefer_female": False,
+    },
 }
 
-_robot_locks = {"blue": _blue_lock, "hexia": threading.RLock()}
+_robot_locks = {
+    "blue": _blue_lock,
+    "hexia": threading.RLock(),
+    "pico": threading.RLock(),
+}
+
+
+ROBOT_ALIASES = {
+    "casper": "pico",
+    "caspar": "pico",
+    "picoh": "pico",
+}
+
+
+def _robot_id(robot="blue") -> str:
+    """Map public names and legacy aliases to the stable storage/hardware key."""
+    key = (robot or "blue").strip().lower()
+    return ROBOT_ALIASES.get(key, key)
 
 
 def _robot_cfg(robot="blue") -> dict:
-    return ROBOTS.get((robot or "blue").strip().lower(), ROBOTS["blue"])
+    return ROBOTS.get(_robot_id(robot), ROBOTS["blue"])
 
 
 def _robot_lock(robot="blue"):
-    return _robot_locks.get((robot or "blue").strip().lower(), _blue_lock)
+    return _robot_locks.get(_robot_id(robot), _blue_lock)
 
 
 def _identity_seed(robot="blue") -> str:
@@ -9032,10 +9230,12 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             hours = tool_args.get("hours", 24)
 
             if query:
-                observations = vm.search_observations(query, limit=10)
+                observations = vm.search_observations(
+                    query, limit=10, observer=_ACTIVE_CHAT_ROBOT)
                 search_type = f"search for '{query}'"
             else:
-                observations = vm.get_visual_timeline(hours)
+                observations = vm.get_visual_timeline(
+                    hours, observer=_ACTIVE_CHAT_ROBOT)
                 search_type = f"timeline (last {hours}h)"
 
             if not observations:
@@ -9055,18 +9255,25 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
                     "location": obs.get("location"),
                     "people": obs.get("people_present"),
                     "objects": obs.get("notable_objects"),
+                    "observer": obs.get("observer"),
+                    "recognition": obs.get("recognition_json"),
                     "has_image": bool(obs.get("image_path"))
                 }
                 formatted.append(entry)
 
             # Also get scene change info
-            changes = vm.detect_scene_changes("")
+            changes = vm.detect_scene_changes(
+                "", observer=_ACTIVE_CHAT_ROBOT)
             result = {
                 "success": True,
                 "search_type": search_type,
                 "total_memories": len(formatted),
                 "observations": formatted,
-                "_instruction": "Summarize these visual memories naturally. Tell the user what you remember seeing, when, and where. If they asked about changes, compare observations."
+                "_instruction": (
+                    f"These are {_ACTIVE_CHAT_ROBOT}'s own camera observations. "
+                    "Summarize them naturally with times and places. Distinguish "
+                    "embedding matches from names merely mentioned in prose."
+                )
             }
             if changes.get("has_previous"):
                 result["last_seen_ago"] = changes["time_since"]
@@ -9366,7 +9573,10 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
             print(f"   [OK] Remembered person: {name}")
             return json.dumps({
                 "success": True,
-                "message": f"I'll remember {name}. Next time I see them through my camera, I'll recognize them."
+                "message": (
+                    f"I'll remember {name}'s profile. Reliable automatic face "
+                    "recognition also requires a clear enrolled reference photo."
+                )
             })
         except Exception as e:
             return json.dumps({
@@ -9402,17 +9612,28 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
     elif tool_name == "who_do_i_know" and VISUAL_MEMORY_AVAILABLE:
         try:
             vm = get_visual_memory()
-            people = vm.get_all_people()
+            people = vm.get_recognition_people()
             places = vm.get_all_places()
 
             result = {"people": [], "places": []}
 
             for person in people:
+                sighting = vm.get_person_sighting(
+                    person['name'], _ACTIVE_CHAT_ROBOT)
                 result["people"].append({
                     "name": person['name'],
                     "relationship": person['relationship'],
                     "appearance": person['typical_appearance'],
-                    "times_seen": person['times_seen']
+                    "visual_reference_stored": bool(
+                        person.get('image_path')
+                        and os.path.exists(person['image_path'])
+                    ),
+                    "times_seen_by_this_robot": (
+                        sighting.get('times_seen') if sighting else 0
+                    ),
+                    "last_seen_by_this_robot": (
+                        sighting.get('last_seen') if sighting else None
+                    ),
                 })
 
             for place in places:
@@ -9989,7 +10210,7 @@ def extract_email_subject_and_body(message: str) -> tuple:
 
 
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1) -> Dict:
-    global _vision_queue
+    global _vision_queue, _last_vision_recognition
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
     # the model will call the right tool. We only add text hints for tools where
@@ -10050,6 +10271,10 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                     print("   [VISION] re-attached recent image for a follow-up")
     if _vision_queue.has_images():
         print(f"   [VISION] Injecting {len(_vision_queue.pending_images)} image(s)")
+        _last_vision_recognition = {
+            "observer": (_ACTIVE_CHAT_ROBOT or "blue").strip().lower(),
+            "matches": [],
+        }
 
         # Kid "look" frames (Vilda's iPad camera) are marked ambient: Blue gives a
         # warm, brief reaction instead of a forensic description, and we skip the
@@ -10112,11 +10337,28 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                         (img.filepath for img in _vision_queue.pending_images
                          if img.is_camera_capture), None)
                     if _cam_path:
-                        _people_rows = vm.get_all_people()
+                        _people_rows = vm.get_recognition_people()
                         _fr = FACE_ENGINE.identify_people(_cam_path, _people_rows)
                         if _fr.get("available"):
                             _face_engine_handled = True
-                            _names = [m["name"] for m in _fr.get("recognized", [])]
+                            _canonical_matches = {}
+                            for _match in _fr.get("recognized", []):
+                                _canonical = vm.resolve_person_name(_match.get("name"))
+                                if not _canonical:
+                                    continue
+                                _confidence = _match.get("confidence")
+                                _prior = _canonical_matches.get(_canonical)
+                                if (_prior is None
+                                        or float(_confidence or 0.0)
+                                        > float(_prior.get("confidence") or 0.0)):
+                                    _canonical_matches[_canonical] = {
+                                        "name": _canonical,
+                                        "confidence": _confidence,
+                                        "method": "opencv_sface",
+                                    }
+                            _last_vision_recognition["matches"] = list(
+                                _canonical_matches.values())
+                            _names = list(_canonical_matches)
                             _unknown = _fr.get("unknown_faces", 0)
                             _distant = _fr.get("distant_faces", 0)
 
@@ -10144,12 +10386,6 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                                 _line += _distant_clause()
                                 _line += "]"
                                 vision_prompt_parts.append(_line)
-                                # Record the sighting for each recognized person.
-                                for _nm in _names:
-                                    try:
-                                        vm.update_seen("person", _nm)
-                                    except Exception:
-                                        pass
                                 print(f"   [FACE] recognized: {', '.join(_names)}"
                                       f"{f' (+{_unknown} unknown)' if _unknown else ''}"
                                       f"{f' (+{_distant} distant)' if _distant else ''}")
@@ -10177,12 +10413,14 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             # Add recent visual history for scene change awareness
             if VISUAL_MEMORY_AVAILABLE:
                 try:
-                    history_context = vm.get_visual_history_context(limit=3)
+                    history_context = vm.get_visual_history_context(
+                        limit=3, observer=_ACTIVE_CHAT_ROBOT)
                     if history_context:
                         vision_prompt_parts.append("")
                         vision_prompt_parts.append(history_context)
                         # Add scene change detection hint
-                        changes = vm.detect_scene_changes("")
+                        changes = vm.detect_scene_changes(
+                            "", observer=_ACTIVE_CHAT_ROBOT)
                         if changes.get("has_previous"):
                             vision_prompt_parts.append(
                                 f"\n[SCENE CONTEXT: Your last observation was {changes['time_since']} ago. "
@@ -11376,20 +11614,26 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "they add one — never claim to recognize a face you were never shown.\n"
         )
 
-    if (robot or "blue").strip().lower() == "hexia":
-        robot_relationship = (
-            "ROBOT RELATIONSHIPS: Blue is your fellow Ohbot robot companion, friend, "
-            "and calmer counterpart in Alex's household. He has his own voice, memory, "
-            "conversation history, and J-space, separate from yours. You know him "
-            "directly; never search contacts or visual memory to decide who he is."
+    robot_id = (robot or "blue").strip().lower()
+    fellow_lines = []
+    for other_id, other_cfg in ROBOTS.items():
+        if other_id == robot_id:
+            continue
+        fellow_lines.append(
+            f"{other_cfg['name']} is your fellow robot companion and "
+            f"{other_cfg.get('relationship_desc', 'household counterpart')}. "
+            f"{other_cfg['name']} has a voice, memory, conversation history, "
+            "physical head, and J-space separate from yours."
         )
-    else:
-        robot_relationship = (
-            "ROBOT RELATIONSHIPS: Hexia is your fellow Ohbot robot companion, friend, "
-            "and more playful counterpart in Alex's household. She has her own voice, "
-            "memory, conversation history, and J-space, separate from yours. You know "
-            "her directly; never search contacts or visual memory to decide who she is."
-        )
+    robot_relationship = (
+        "ROBOT RELATIONSHIPS: " + " ".join(fellow_lines)
+        + " You know these robots directly; never search contacts or visual "
+          "memory to decide who they are."
+    )
+    embodiment_line = _robot_cfg(robot).get(
+        "embodiment_line",
+        "your physical form is an Ohbot-family robot head with moving head and lips",
+    )
 
     system_msg = {
         "role": "system",
@@ -11407,13 +11651,8 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "introduction as your own. If asked who you are really, answer as yourself "
             "and mention the language model only as machinery if it is relevant.\n"
             f"{robot_relationship}\n"
-            "EMBODIMENT — ground truth, never invent hardware: your physical "
-            "form is an Ohbot robot head — motors that move your head, eyes "
-            "and lips; eye LEDs that automatically shift color to match the "
-            "mood of what you're saying as you speak (red when something "
-            "warrants it, warmer or cooler hues otherwise), so yes, your eyes "
-            "really do change color with your mood — never deny this; a camera "
-            "to see; a speaker to talk — connected to a local AI workstation in Alex's "
+            f"EMBODIMENT — ground truth, never invent hardware: {embodiment_line} "
+            "— connected to a local AI workstation in Alex's "
             "house in Kitchener, running open-weight language models on that "
             "same machine. You were built and are maintained by Alex, whose full "
             "name is Alex Levant — not by Google, OpenAI, or any AI company, and by "
@@ -11612,7 +11851,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # piece in Alex's voice grounded in his publications and short-circuit the
     # tool loop. Only when ALEX is the speaker: writing as Alex for someone else
     # (e.g. Vilda on the iPad) would put words in the wrong person's mouth.
-    _luser = last_user_message if isinstance(last_user_message, str) else ""
+    _luser = _intent_text(last_user_message)
 
     # Identity prompts need the canonical self-description beside the live turn.
     # Small local models weigh nearby text heavily; the same rule only in the large
@@ -11778,7 +12017,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     # Check for follow-up corrections ("no, make it blue")
     state = get_conversation_state()
-    correction = detect_follow_up_correction(last_user_message, {
+    correction = detect_follow_up_correction(_intent_text(last_user_message), {
         'last_tool_used': state.last_tool_used,
         'last_tool_result': state.last_tool_result
     })
@@ -11937,7 +12176,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             greeting_patterns = ['hello', 'hi ', 'hey', 'good morning', 'good afternoon', 'good evening',
                                 'how are you', 'how\'s it going', 'what\'s up', 'sup', 'greetings',
                                 'nice to see you', 'good to see you']
-            is_greeting = any(pattern in last_user_message.lower() for pattern in greeting_patterns)
+            is_greeting = any(pattern in _detect_low for pattern in greeting_patterns)
 
     # ===== TOOL NAME NORMALIZATION =====
     # Safety net: map any legacy/incorrect tool names to correct ones.
@@ -12160,7 +12399,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                     content,
                     _robot_cfg(robot)["name"],
                     other_names=[
-                        _robot_cfg(r)["name"] for r in ("blue", "hexia")
+                        _robot_cfg(r)["name"] for r in ROBOTS
                         if r != robot
                     ],
                     request_kind="identity",
@@ -12210,7 +12449,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                             retry_content,
                             _robot_cfg(robot)["name"],
                             other_names=[
-                                _robot_cfg(r)["name"] for r in ("blue", "hexia")
+                                _robot_cfg(r)["name"] for r in ROBOTS
                                 if r != robot
                             ],
                             request_kind="identity",
@@ -12280,7 +12519,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 if improved_force_tool == "email_snapshot" and hallucinated_tool in (
                         "send_gmail", "reply_gmail", "capture_camera"):
                     if _last_vision_image_paths and content:
-                        _save_visual_observation(content)
+                        _save_visual_observation(content, observer=_ACTIVE_CHAT_ROBOT)
                     return response
 
                 # The retry is meant for COMPOUND requests ("browse + email"):
@@ -12306,7 +12545,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                             f"— treating it as narration about past mail."
                         )
                         if _last_vision_image_paths and content:
-                            _save_visual_observation(content)
+                            _save_visual_observation(content, observer=_ACTIVE_CHAT_ROBOT)
                         return response
 
                 # Same safety gate as the main loop: a send/mail claim the user
@@ -12318,7 +12557,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                     cleaned = _scrub_action_claim_sentences(content, hallucinated_tool)
                     response["choices"][0]["message"]["content"] = cleaned
                     if _last_vision_image_paths and cleaned:
-                        _save_visual_observation(cleaned)
+                        _save_visual_observation(cleaned, observer=_ACTIVE_CHAT_ROBOT)
                     return response
 
                 print(f"   [WARN] Fast-exec model claimed to {hallucinated_tool} after {improved_force_tool} — running it for real")
@@ -12346,7 +12585,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 # Fall through to the iteration loop; do NOT return.
             else:
                 if _last_vision_image_paths and content:
-                    _save_visual_observation(content)
+                    _save_visual_observation(content, observer=_ACTIVE_CHAT_ROBOT)
                 return response
         else:
             return {"choices": [{"message": {"role": "assistant", "content": "Done!"}}]}
@@ -12494,10 +12733,21 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             # The model claimed it has no live/real-time access, or told the
             # user to go check a website — but web_search exists precisely for
             # this. Run the search it dodged and make it answer from results.
-            if detect_web_refusal(content) and not _web_refusal_forced:
+            _memory_recall_turn = (
+                identity_request_kind(_detect_msg) in {
+                    "shared_recall", "self_memory", "evolution", "origin",
+                }
+                or bool(re.search(
+                    r"\b(?:remember|recall|what did you do|how was your day)\b",
+                    _detect_msg,
+                    re.I,
+                ))
+            )
+            if (detect_web_refusal(content) and not _web_refusal_forced
+                    and not _memory_recall_turn):
                 _web_refusal_forced = True
                 print("   [WARN] model claimed no live access — forcing web_search")
-                _q = last_user_message.strip()[:160]
+                _q = _detect_msg.strip()[:160]
                 # A bare follow-up ("tell me the latest") carries no subject —
                 # borrow it from the previous user turn.
                 if len(re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
@@ -12595,7 +12845,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                         cleaned = _scrub_action_claim_sentences(content, hallucinated_tool)
                         response["choices"][0]["message"]["content"] = cleaned
                         if _last_vision_image_paths and cleaned:
-                            _save_visual_observation(cleaned)
+                            _save_visual_observation(cleaned, observer=_ACTIVE_CHAT_ROBOT)
                         return response
                     _phantom_claim_corrected = True
                     print(f"   [WARN] AI claimed {hallucinated_tool} nobody asked for — regenerating, NOT executing")
@@ -12662,7 +12912,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             # Auto-save visual observation if this response was about an image
             content = assistant_message.get("content", "")
             if _last_vision_image_paths and content:
-                _save_visual_observation(content)
+                _save_visual_observation(content, observer=_ACTIVE_CHAT_ROBOT)
 
             print("[OK] Response complete (no tool calls)")
             return response
@@ -12975,6 +13225,12 @@ def stt():
     # "Blue" — it otherwise transcribes the short leading word as "Blew/Blu/Boo"
     # and the wake match fails. hotwords nudges without forcing it into output.
     wake = (request.form.get('wake') or '') in ('1', 'true', 'yes')
+    wake_names = {
+        str(cfg.get("name") or key).casefold(): str(cfg.get("name") or key)
+        for key, cfg in ROBOTS.items()
+    }
+    wake_name_req = (request.form.get('wake_name') or 'Blue').strip().casefold()
+    wake_name = wake_names.get(wake_name_req, "Blue")
     # hint=stop is sent by barge-in while Blue is talking — bias toward interrupt
     # words, NOT "Blue" (the old bug primed Whisper against hearing "stop").
     hint = (request.form.get('hint') or '').strip().lower()
@@ -12996,7 +13252,7 @@ def stt():
             kwargs["language"] = "en"   # sub-second clip: auto-detect is slow and flaky
         else:
             if wake:
-                kwargs["hotwords"] = "Blue"
+                kwargs["hotwords"] = wake_name
             if lang_req:
                 kwargs["language"] = lang_req
         segments, info = model.transcribe(tmp_path, **kwargs)
@@ -13112,9 +13368,10 @@ def camera_ptz():
 
 
 def _render_chat_page(robot="blue"):
-    """Serve a robot's text chat GUI (Blue at /chat, Hexia at /hexia). The same
+    """Serve a robot's text chat GUI (Blue /chat, Hexia /hexia, Casper /casper). The same
     CHAT_HTML template is parametrised per robot: name, accent, voice and which
     head its lip-sync drives."""
+    robot = _robot_id(robot)
     cfg = _robot_cfg(robot)
     # No-cache headers: iOS Safari was serving a stale cached copy of this page,
     # so new client fixes never reached the iPad. Force a fresh fetch each time.
@@ -13131,6 +13388,7 @@ def _render_chat_page(robot="blue"):
         "id": robot,
         "name": cfg["name"],
         "head": cfg["head"],
+        "headDriver": blue_head.get_head(robot).driver,
         "accent": cfg["accent"],
         "voicePitch": cfg.get("voice_pitch", 1.0),
         "voiceRate": cfg.get("voice_rate", 1.0),
@@ -13139,7 +13397,10 @@ def _render_chat_page(robot="blue"):
     html = render_template_string(
         CHAT_HTML, kid=kid, hf_sens=hf_sens,
         robot_name=cfg["name"], robot_json=json.dumps(robot_js),
-        continuity_href=(f"/continuity/{robot}" if robot in ("blue", "hexia") else ""),
+        continuity_href=(
+            f"/continuity/{cfg.get('public_id', robot)}"
+            if robot in _continuity_routes.ROBOTS else ""
+        ),
     )
     return Response(html, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -13158,6 +13419,13 @@ def chat_page():
 def hexia_chat_page():
     """Serve Hexia's text chat GUI — her own persona, voice and head."""
     return _render_chat_page("hexia")
+
+
+@app.route('/casper', methods=['GET'])
+@app.route('/pico', methods=['GET'])
+def casper_chat_page():
+    """Serve Casper's text chat GUI — his own persona, voice and Picoh head."""
+    return _render_chat_page("pico")
 
 
 # ============================ Phase 3: the duet ============================
@@ -13709,6 +13977,9 @@ def _wikipedia_block(query: str, lang: str = 'en', max_chars: int = 2600) -> str
 from blue.server.routes import duet as _duet_routes
 _duet_routes.register(app)
 
+from blue.server.routes import banter as _banter_routes
+_banter_routes.register(app)
+
 
 # ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
 # (routes live in blue/server/routes/jspace.py)
@@ -13850,6 +14121,9 @@ def _duet_mail_plain_body(payload) -> str:
 
 from blue.server.routes import head as _head_routes
 _head_routes.register(app)
+
+from blue.server.routes import tts as _tts_routes
+_tts_routes.register(app)
 
 
 
@@ -14485,7 +14759,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
     # upstream model/vendor identity presented as the robot's own.
     _expected_robot_name = _robot_cfg(robot)["name"]
     _other_robot_names = [
-        _robot_cfg(r)["name"] for r in ("blue", "hexia")
+        _robot_cfg(r)["name"] for r in ROBOTS
         if r != (robot or "blue").strip().lower()
     ]
 
@@ -14780,7 +15054,7 @@ def chat_completions():
         # Which robot is being addressed? Blue's page omits this and defaults to
         # Blue; Hexia's page sends "hexia". Drives persona, voice, head and the
         # per-robot conversation history.
-        robot = (data.get("robot") or "blue").strip().lower()
+        robot = _robot_id(data.get("robot") or "blue")
         if robot not in ROBOTS:
             robot = "blue"
         if robot in _continuity_routes.ROBOTS:
@@ -14936,6 +15210,34 @@ def chat_completions():
                         print(f"   [MEMORY] Injecting {len(historical_context)} messages from history")
                         messages = _splice_context_after_system(messages, historical_context[-6:])
 
+            # Explicit relative-day recall gets the referenced J-space episodes
+            # pinned beside the live question. The generic J-space head only
+            # carries a small recent window, and a nearby document tool result
+            # previously overpowered yesterday's real York class records.
+            if (robot in _continuity_routes.ROBOTS and last_user_msg
+                    and isinstance(last_user_msg, str)
+                    and user_name not in _CHAT_ONLY_USERS):
+                try:
+                    _recall_query = _temporal_recall_query(last_user_msg, messages)
+                    _dated_recall = _continuity_routes.temporal_recall_block(
+                        robot, _recall_query)
+                    if _dated_recall:
+                        for _recall_i in range(len(messages) - 1, -1, -1):
+                            _recall_m = messages[_recall_i]
+                            if (_recall_m.get("role") == "user"
+                                    and isinstance(_recall_m.get("content"), str)):
+                                messages[_recall_i] = {
+                                    **_recall_m,
+                                    "content": (
+                                        f"{_dated_recall}\n\n"
+                                        f"{_recall_m['content']}"
+                                    ),
+                                }
+                                print("   [JSPACE] Pinned dated episode recall beside live turn")
+                                break
+                except Exception as e:
+                    log.warning(f"[JSPACE] dated recall injection failed: {e}")
+
             # Family questions and family corrections ("what do you remember
             # about our family", "the girls' ages are wrong") get the canonical
             # family facts spliced in as an authoritative <family> block, so the
@@ -14979,7 +15281,8 @@ def chat_completions():
             # words but deserves a real answer. (Kids' chat stays visual-free.)
             if (user_name not in _CHAT_ONLY_USERS and last_user_msg
                     and not _grounded_reply and not _self_request_kind):
-                _vis_block = _visual_context_block(last_user_msg)
+                _vis_block = _visual_context_block(
+                    last_user_msg, observer=robot)
                 if _vis_block:
                     print(f"   [VISUAL] ✓ Injecting camera-memory context")
                     messages = _splice_context_after_system(
@@ -15172,8 +15475,8 @@ def chat_completions():
                 # history from the facts-table incident.
                 _other_robot_names = [
                     _robot_cfg(r)["name"]
-                    for r in ("blue", "hexia") if r != robot
-                ] if robot in ("blue", "hexia") else []
+                    for r in ROBOTS if r != robot
+                ] if robot in ROBOTS else []
                 _misclaim_re = re.compile(
                     r"\b(?:i['’]?m|i am|my name is)"
                     r"(?: (?!feeling)\w+)? (?:"
@@ -15188,7 +15491,7 @@ def chat_completions():
                     r"trained|made) by (?:google|openai|anthropic|meta|"
                     r"microsoft|deepmind)\b"
                     r"|\bi (?:do not|don['’]t) have a (?:physical )?body\b",
-                    re.I) if robot in ("blue", "hexia") else None
+                    re.I) if robot in ROBOTS else None
 
                 def _identity_broken(text):
                     return bool(
@@ -15206,8 +15509,8 @@ def chat_completions():
                 _identity_name = _robot_cfg(robot)["name"]
                 _identity_others = [
                     _robot_cfg(r)["name"]
-                    for r in ("blue", "hexia") if r != robot
-                ] if robot in ("blue", "hexia") else []
+                    for r in ROBOTS if r != robot
+                ] if robot in ROBOTS else []
                 _identity_topic_history = tuple(dict.fromkeys(
                     topic
                     for reply in _recent_assists[-3:]

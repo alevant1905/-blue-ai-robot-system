@@ -306,6 +306,7 @@ BLUE_JS = r"""
     home:'<svg viewBox="0 0 24 24"><path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/></svg>',
     chat:'<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg>',
     duet:'<svg viewBox="0 0 24 24"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg>',
+    banter:'<svg viewBox="0 0 24 24"><circle cx="6" cy="8" r="3"/><circle cx="18" cy="8" r="3"/><circle cx="12" cy="16" r="3"/><path d="M8.5 9.5 10 13m5.5-3.5L14 13M9 7h6"/></svg>',
     lib:'<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>',
     cal:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>',
     ppl:'<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
@@ -317,14 +318,18 @@ BLUE_JS = r"""
   var NAV = [
     ['Talk', [['/', 'Home', 'home'], ['/chat', 'Chat with Blue', 'chat'],
               ['/hexia', 'Chat with Hexia', 'chat'],
-              ['/duet', 'Duet', 'duet']]],
+              ['/casper', 'Chat with Casper', 'chat'],
+              ['/duet', 'Duet', 'duet'],
+              ['/banter', 'Comedic Banter', 'banter']]],
     ['Know', [['/documents', 'Documents', 'lib'], ['/calendar', 'Calendar', 'cal'],
               ['/contacts', 'Contacts', 'ppl'], ['/visual', 'Visual memory', 'eye'],
               ['/perspective', 'Perspective', 'persp'],
               ['/continuity/blue', "Blue's continuity", 'persp'],
-              ['/continuity/hexia', "Hexia's continuity", 'persp']]],
+              ['/continuity/hexia', "Hexia's continuity", 'persp'],
+              ['/continuity/casper', "Casper's continuity", 'persp']]],
     ['Robots', [['/heads', 'Robot heads', 'bot'], ['/head', "Tune Blue's head", 'tune'],
-                ['/head/hexia', "Tune Hexia's head", 'tune']]]
+                ['/head/hexia', "Tune Hexia's head", 'tune'],
+                ['/head/casper', "Tune Casper's head", 'tune']]]
   ];
   function buildNav(){
     if (location.pathname === '/login') return;

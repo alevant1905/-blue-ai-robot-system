@@ -35,6 +35,23 @@ CASES = [
     ("I made a cake yesterday and stopped by the store.", "neutral"),
 ]
 
+EXPECTED_EXPRESSIONS = {
+    "alert": "alert",
+    "somber": "sad",
+    "affection": "affection",
+    "cheerful": "happy",
+    "curious": "curious",
+    "positive": "positive",
+    "neutral": "neutral",
+}
+
+
+def test_every_reply_mood_includes_a_picoh_expression():
+    for text, expected_mood in CASES:
+        mood = mood_eye_color(text)
+        assert mood["name"] == expected_mood
+        assert mood["expression"] == EXPECTED_EXPRESSIONS[expected_mood]
+
 
 def main():
     failures = []

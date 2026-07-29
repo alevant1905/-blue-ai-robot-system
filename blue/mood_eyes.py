@@ -71,6 +71,19 @@ _MOODS: List[Tuple[str, Tuple[int, int, int], Tuple[str, ...], Tuple[str, ...]]]
 # also reverts to a rest colour when Blue stops talking.
 _NEUTRAL = ("neutral", (5, 5, 6))
 
+# Picoh's LED-matrix eyes use a small set of readable shapes.  The browser
+# sends this alongside the RGB mood colour so Casper can change face and base
+# light together without trying to infer the mapping a second time.
+_EXPRESSION_BY_MOOD = {
+    "alert": "alert",
+    "somber": "sad",
+    "affection": "affection",
+    "cheerful": "happy",
+    "curious": "curious",
+    "positive": "positive",
+    "neutral": "neutral",
+}
+
 # Negators immediately before a cue word flip its meaning ("not angry", "no
 # danger", "isn't sad"). Small window, mirroring the detectors' approach.
 _NEGATORS = (
@@ -135,13 +148,19 @@ def mood_eye_color(text: str) -> Dict[str, object]:
 
     if not scores:
         name, (r, g, b) = _NEUTRAL
-        return {"r": r, "g": g, "b": b, "name": name}
+        return {
+            "r": r, "g": g, "b": b, "name": name,
+            "expression": _EXPRESSION_BY_MOOD[name],
+        }
 
     # Highest score wins; ties resolved by _MOODS order (priority).
     order = {name: i for i, (name, *_rest) in enumerate(_MOODS)}
     best = max(scores, key=lambda n: (scores[n], -order[n]))
     rgb = next(rgb for name, rgb, *_ in _MOODS if name == best)
-    return {"r": rgb[0], "g": rgb[1], "b": rgb[2], "name": best}
+    return {
+        "r": rgb[0], "g": rgb[1], "b": rgb[2], "name": best,
+        "expression": _EXPRESSION_BY_MOOD[best],
+    }
 
 
 def rest_eye_color() -> Dict[str, object]:
