@@ -2183,8 +2183,12 @@ class EnhancedMemorySystem:
         if not rows:
             return []
 
-        expected_robot_name = "Hexia" if (robot or "blue").lower() == "hexia" else "Blue"
-        other_robot_names = ["Blue" if expected_robot_name == "Hexia" else "Hexia"]
+        robot_key = (robot or "blue").lower()
+        robot_names = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper"}
+        expected_robot_name = robot_names.get(robot_key, "Blue")
+        other_robot_names = [
+            name for key, name in robot_names.items() if key != robot_key
+        ]
         out: List[Dict[str, Any]] = []
         # Work oldest-first so a toxic assistant reply can remove the user
         # question that immediately prompted it. Keeping that question without
@@ -2702,7 +2706,7 @@ class EnhancedMemorySystem:
                          session_id: str = None, importance: int = 5,
                          robot: str = "blue"):
         """Log a conversation message for context building. `robot` namespaces
-        the recent-history thread so Blue and Hexia don't cross-contaminate."""
+        each robot's recent-history thread so their identities don't cross-contaminate."""
         conn = self._conn()
         conn.execute("""
             INSERT INTO conversation_log (timestamp, user_name, role, content, session_id, importance, robot)

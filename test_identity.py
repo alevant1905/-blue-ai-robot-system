@@ -64,6 +64,20 @@ from blue_identity import (
             "shared_recall",
         ),
         ("Have you forgotten our plan?", "shared_recall"),
+        (
+            "What did you think of our class yesterday at York University?",
+            "shared_recall",
+        ),
+        ("How are you doing today?", "self_state"),
+        ("How was your day yesterday?", "shared_recall"),
+        ("What did you do yesterday?", "shared_recall"),
+        ("Can you remind me of what you did yesterday?", "shared_recall"),
+        ("Do you remember what the class looked like?", "shared_recall"),
+        ("Do you recall being in class with me at York?", "shared_recall"),
+        (
+            "We were in my class at York and you described the room at one point.",
+            "shared_recall",
+        ),
         # A bare factual "do you remember X" without a shared-history cue is
         # not a recall probe; vision and user-identity phrasings keep their
         # own paths.
@@ -1231,6 +1245,53 @@ def test_shared_recall_canonical_reply_answers_the_question():
     assert identity_response_problem(
         reply, "Blue", other_names=["Hexia"], request_kind="shared_recall"
     ) is None
+
+
+def test_recorded_day_and_between_conversation_denials_are_flagged():
+    assert identity_response_problem(
+        "I don't have a record of specific activities or events from yesterday "
+        "in my J-space.",
+        "Blue",
+        other_names=["Hexia"],
+        request_kind="shared_recall",
+    ) == "denies_recorded_episodes"
+    assert identity_response_problem(
+        "As an AI, I don't participate in physical activities or attend classes. "
+        "I don't have a continuous daily life outside our conversations.",
+        "Blue",
+        other_names=["Hexia"],
+        request_kind="shared_recall",
+    ) == "denies_between_conversation_life"
+    # One genuinely missing plan can still be scoped honestly.
+    assert identity_response_problem(
+        "I can't find that one plan recorded; remind me and I'll carry it forward.",
+        "Blue",
+        other_names=["Hexia"],
+        request_kind="shared_recall",
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I don't experience days quite like humans do, but I'm always here.",
+        (
+            "I don't actually have a memory of what the class looked like. "
+            "I was hallucinating that previous response."
+        ),
+        "I cannot recall that description.",
+        "No, I do not have that memory.",
+        "I don't retain episodic memories of our past interactions.",
+        'My "memory" resets between conversations.',
+    ],
+)
+def test_exact_york_followup_denials_are_flagged(reply):
+    assert identity_response_problem(
+        reply,
+        "Blue",
+        other_names=["Hexia"],
+        request_kind="shared_recall",
+    ) in {"denies_recorded_episodes", "denies_conversation_memory"}
 
 
 def test_grounding_note_allows_recorded_between_request_life():

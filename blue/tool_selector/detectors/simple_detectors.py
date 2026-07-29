@@ -122,12 +122,13 @@ class TimersDetector(BaseDetector):
     """Detects timer and reminder intents."""
 
     def detect(self, message: str, msg_lower: str, context: Dict) -> List[ToolIntent]:
+        import re
+
         timer_signals = ['set timer', 'start timer', 'timer for', 'countdown']
         reminder_signals = ['remind me', 'set reminder', 'reminder to', 'reminder for']
 
         if any(s in msg_lower for s in timer_signals):
             # Extract duration text for the timer tool
-            import re
             duration_match = re.search(r'(?:for\s+)?(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)', msg_lower)
             params = {}
             if duration_match:
@@ -149,6 +150,19 @@ class TimersDetector(BaseDetector):
                 extracted_params=params
             )]
         elif any(s in msg_lower for s in reminder_signals):
+            # "Remind me of what you did yesterday" asks for memory recall;
+            # it does not authorize creating a future reminder. Scheduling
+            # requests still route normally ("remind me tomorrow to call").
+            if (re.search(r'\bremind me (?:of|about|what|who|where|when)\b', msg_lower)
+                    and re.search(
+                        r'\b(?:yesterday|last (?:night|week|time)|earlier|previously)\b',
+                        msg_lower,
+                    )
+                    and not re.search(
+                        r'\b(?:tomorrow|tonight|next (?:week|month)|in \d+|at \d{1,2})\b',
+                        msg_lower,
+                    )):
+                return []
             return [ToolIntent(
                 tool_name='create_reminder',
                 confidence=0.90,

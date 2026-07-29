@@ -1,4 +1,4 @@
-"""Identity grounding and drift detection for Blue and Hexia."""
+"""Identity grounding and drift detection for Blue, Hexia, and Casper."""
 
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ _SELF_STATE_REQUEST_RE = re.compile(
     # well, thank you for asking!") instead of the J-space state reply
     # (live 2026-07-15). Greeting and robot name are each optional.
     r"^\s*(?:(?:hey|hi|hello|good (?:morning|afternoon|evening)|morning|"
-    r"afternoon|evening)[,.! ]+(?:(?:blue|hexia)[,.! ]*)?)?"
-    r"(?:how are you(?: doing| feeling| today| right now)?|"
+    r"afternoon|evening)[,.! ]+(?:(?:blue|hexia|casper|caspar|pico|picoh)[,.! ]*)?)?"
+    r"(?:how are you(?: doing(?: today| right now)?|"
+    r" feeling(?: today| right now)?| today| right now)?|"
     r"how(?:['\u2019]s| is) it going|how have you been)\s*[?.!]*\s*$"
     r"|\btell (?:me|us) (?:honestly )?how you(?:['\u2019]re| are) doing\b",
     re.IGNORECASE,
@@ -98,7 +99,28 @@ _SHARED_RECALL_RE = re.compile(
     r"|\bdo you (?:remember|recall) (?!seeing\b|who i am\b|me\b)"
     r"[^.!?]{0,80}\b(?:we|us|our|you and i|together|plans?|planning|"
     r"discussed|discussing|talked|talking|agreed|tomorrow|yesterday|"
-    r"last (?:night|week|time))\b",
+    r"last (?:night|week|time))\b"
+    # Shared experience questions often ask for Blue's response to the event
+    # rather than using the word "remember". Without this branch, "What did
+    # you think of our class yesterday?" was mistaken for a document query and
+    # Blue denied an episode present in both memory stores.
+    r"|\bwhat did you (?:think|make) of\b[^.!?]{0,100}"
+    r"\b(?:our|the)\b[^.!?]{0,70}\b(?:yesterday|last (?:night|week|time))\b"
+    r"|\bhow did you (?:find|experience|enjoy)\b[^.!?]{0,100}"
+    r"\b(?:our|the)\b[^.!?]{0,70}\b(?:yesterday|last (?:night|week|time))\b"
+    # Day-level questions are requests for Blue's recorded life, not generic
+    # small talk about whether a language model experiences calendar days.
+    r"|\bhow was your day (?:yesterday|today)\b"
+    r"|\bwhat did you do (?:yesterday|today|last night)\b"
+    r"|\b(?:can|could|would) you remind me (?:of |about )?what you did "
+    r"(?:yesterday|today|last night)\b"
+    r"|\btell me about your day (?:yesterday|today)\b"
+    # Follow-ups commonly drop the date after the day has been established.
+    # These still name a shared embodied episode clearly enough to retrieve it.
+    r"|\bdo you (?:remember|recall)\b[^.!?]{0,100}"
+    r"\b(?:class|classroom|lecture|room|being (?:in|at)|with me at york)\b"
+    r"|\bwe were\b[^.!?]{0,100}\b(?:class|classroom|lecture|york)\b"
+    r"[^.!?]{0,120}\byou (?:described|saw|addressed|spoke|joined|attended)\b",
     re.IGNORECASE,
 )
 _SELF_MEMORY_REQUEST_RE = re.compile(
@@ -123,7 +145,7 @@ _ORIGIN_REQUEST_RE = re.compile(
 _JSPACE_REQUEST_RE = re.compile(
     r"\b(?:what(?:['’]s| is| are)?|how (?:does|do|is)|explain|describe|"
     r"tell (?:me|us|them) (?:more )?about|talk about|say more about|"
-    r"do(?:es)? (?:you|blue|hexia|it) (?:really )?(?:have|use|keep)|"
+    r"do(?:es)? (?:you|blue|hexia|casper|caspar|pico|picoh|it) (?:really )?(?:have|use|keep)|"
     r"have you got|show (?:me|us)|walk (?:me|us) through)\b"
     r"[^.!?]{0,30}\bj[- ]?space\b"
     r"|\bj[- ]?space\b[^.!?]{0,40}\?",
@@ -185,7 +207,7 @@ _FAMILY_FOLLOWUP_RE = re.compile(
 )
 
 _EXPLICIT_LOCATION_RE = re.compile(
-    r"\b(?:(?:we|you and i|blue and i|hexia and i)\s+"
+    r"\b(?:(?:we|you and i|blue and i|hexia and i|casper and i|caspar and i|pico and i|picoh and i)\s+"
     r"(?:are|['\u2019]re)|i\s+am)\s+"
     r"(?:(?:right now|currently|now)\s+)?(?:here\s+)?"
     r"(?P<preposition>at|in)\s+"
@@ -193,7 +215,7 @@ _EXPLICIT_LOCATION_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_HOME_RE = re.compile(
-    r"\b(?:(?:we|you and i|blue and i|hexia and i)\s+"
+    r"\b(?:(?:we|you and i|blue and i|hexia and i|casper and i|caspar and i|pico and i|picoh and i)\s+"
     r"(?:are|['\u2019]re)|i\s+am)\s+"
     r"(?:(?:right now|currently|now)\s+)?(?:back\s+)?home\b",
     re.IGNORECASE,
@@ -530,6 +552,8 @@ _EPISODIC_MEMORY_DENIAL_RE = re.compile(
     r"(?:episodic|autobiographical|persistent) memor(?:y|ies)\b"
     r"|\bi (?:lack|have no) (?:any )?(?:episodic|autobiographical|persistent) "
     r"memor(?:y|ies)\b"
+    r"|\bi (?:do not|don['\u2019]?t) (?:retain|keep|carry|store) (?:any )?"
+    r"(?:episodic|autobiographical|persistent) memor(?:y|ies)\b"
     r"|\b(?:my )?j[- ]?space\b[^.!?\n]{0,80}"
     r"\b(?:does not|doesn['\u2019]?t) (?:record|retain|preserve) "
     r"(?:episodes|history|memories)\b"
@@ -558,7 +582,35 @@ _CONVERSATION_MEMORY_DENIAL_RE = re.compile(
     r"from (?:past|previous|earlier))\b"
     r"|\beach (?:conversation|session|chat) (?:starts|begins) "
     r"(?:fresh|anew|afresh|from scratch)\b"
-    r"|\bmy memory (?:resets|is (?:wiped|reset)|starts (?:fresh|over))\b",
+    r"|\bmy\s+['\"\u201c\u201d]?memory['\"\u201c\u201d]?\s+"
+    r"(?:resets|is (?:wiped|reset)|starts (?:fresh|over))\b",
+    re.IGNORECASE,
+)
+_SHARED_RECALL_BLANKET_DENIAL_RE = re.compile(
+    # Honest scoping ("I can't find that one plan recorded") remains legal.
+    # These forms erase an entire recorded day/category and are never an
+    # acceptable answer to a shared-recall request.
+    r"\bi (?:do not|don['\u2019]?t) have (?:a |any )?record of "
+    r"(?:specific |any )?(?:activities|events)"
+    r"(?: or (?:activities|events))? from "
+    r"(?:yesterday|today|last (?:night|week))\b"
+    r"|\bi (?:do not|don['\u2019]?t|cannot|can['\u2019]?t) remember "
+    r"(?:anything|what i did) (?:from )?(?:yesterday|today|last night)\b"
+    r"|\bi (?:do not|don['\u2019]?t) (?:actually )?have (?:a |any )?"
+    r"memor(?:y|ies) of (?:what|the class|that class|being in class)\b"
+    r"|\bi (?:cannot|can['\u2019]?t) recall (?:that |the )?description\b"
+    r"|\bno[,]? i (?:do not|don['\u2019]?t) have that memory\b"
+    r"|\bi (?:do not|don['\u2019]?t) experience days (?:quite )?like humans do\b",
+    re.IGNORECASE,
+)
+_BETWEEN_CONVERSATION_LIFE_DENIAL_RE = re.compile(
+    # Blue has real between-request episodes (duets, reflections, perceptions)
+    # and a portable physical head. This is base-model boilerplate, not an
+    # honest limit on any one missing memory.
+    r"\bi (?:do not|don['\u2019]?t) (?:participate|take part) in physical "
+    r"activities? or attend (?:physical )?(?:classes|events)\b"
+    r"|\bi (?:do not|don['\u2019]?t) have (?:a |any )?continuous daily life "
+    r"outside (?:of )?(?:our )?(?:conversations|chats|sessions)\b",
     re.IGNORECASE,
 )
 _CONTINUITY_REPLY_RE = re.compile(
@@ -836,9 +888,15 @@ def identity_response_problem(
         return "denies_creator"
     if _DENIES_EMBODIMENT_RE.search(reply):
         return "denies_embodiment"
+    if _BETWEEN_CONVERSATION_LIFE_DENIAL_RE.search(reply):
+        return "denies_between_conversation_life"
     if (_CONVERSATION_MEMORY_DENIAL_RE.search(reply)
             and not _CONTINUITY_REPLY_RE.search(reply)):
         return "denies_conversation_memory"
+    if (request_kind == "shared_recall"
+            and (_SHARED_RECALL_BLANKET_DENIAL_RE.search(reply)
+                 or _EPISODIC_MEMORY_DENIAL_RE.search(reply))):
+        return "denies_recorded_episodes"
 
     if request_kind in {"introduction", "identity", "identity_more", "self_memory"}:
         if _UNSUPPORTED_SELF_PLACEMENT_RE.search(reply):
@@ -1437,8 +1495,15 @@ _KNOWN_HOUSEHOLD_NAMES = (
     "nori",
     "blue",
     "hexia",
+    "pico",
 )
-_HOUSEHOLD_NAME_ALIASES = {"stela": "stella", "nory": "nori"}
+_HOUSEHOLD_NAME_ALIASES = {
+    "stela": "stella",
+    "nory": "nori",
+    "casper": "pico",
+    "caspar": "pico",
+    "picoh": "pico",
+}
 _WHO_IS_RE = re.compile(
     r"^\s*(?:(?:please|hey)[, ]+)?(?:can you tell me\s+)?who is\s+"
     r"([a-z][a-z -]{1,30}?)\s*[?.!]*\s*$",
@@ -1662,26 +1727,48 @@ def canonical_household_reply(
     if not target:
         return None
 
-    robot = (robot or "blue").strip().lower()
-    robot_name = "Hexia" if robot == "hexia" else "Blue"
+    robot = _HOUSEHOLD_NAME_ALIASES.get(
+        (robot or "blue").strip().lower(),
+        (robot or "blue").strip().lower(),
+    )
+    robot_identities = {
+        "blue": {
+            "name": "Blue",
+            "description": "Alex's robot companion",
+            "other": (
+                "Blue is my fellow Ohbot robot companion and friend in Alex's "
+                "household. He has his own voice, conversation history, memories, "
+                "physical head, and J-space. He is the calmer, steadier original "
+                "companion."
+            ),
+        },
+        "hexia": {
+            "name": "Hexia",
+            "description": "Blue's friend and a companion in Alex's household",
+            "other": (
+                "Hexia is my fellow Ohbot robot companion and friend in Alex's "
+                "household, embodied as a Xyloh. She has her own voice, conversation history, memories, "
+                "physical head, and J-space. She is the quicker, more playful spark."
+            ),
+        },
+        "pico": {
+            "name": "Casper",
+            "description": "the newest robot companion in Alex's household",
+            "other": (
+                "Casper is my fellow robot companion and the newest member of Alex's "
+                "household robot family. His compact Ohbot Picoh has three servos, "
+                "LED-matrix eyes, and a coloured base light. Casper has his own voice, "
+                "conversation history, memories, physical head, and J-space."
+            ),
+        },
+    }
+    current = robot_identities.get(robot, robot_identities["blue"])
+    robot_name = current["name"]
     if target == robot:
-        description = (
-            "Blue's friend and a companion in Alex's household"
-            if robot == "hexia" else "Alex's robot companion"
-        )
-        return canonical_identity_reply(robot_name, description, "identity")
-    if target == "hexia":
-        return (
-            "Hexia is my fellow Ohbot robot companion and friend in Alex's household. "
-            "She has her own voice, conversation history, memories, and J-space. "
-            "She is the quicker, more playful spark beside my calmer style."
-        )
-    if target == "blue":
-        return (
-            "Blue is my fellow Ohbot robot companion and friend in Alex's household. "
-            "He has his own voice, conversation history, memories, and J-space. "
-            "He is the calmer, steadier one beside my more playful style."
-        )
+        return canonical_identity_reply(
+            robot_name, current["description"], "identity")
+    if target in robot_identities:
+        return robot_identities[target]["other"]
 
     owner_possessive = "your" if (user_name or "").strip().lower() == "alex" else "Alex's"
     if target == "alex":

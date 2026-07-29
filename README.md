@@ -4,19 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-12.0.0-green.svg)](https://github.com/alevant1905/blue-ai-robot-system)
 
-A pair of **local, private AI robot companions** — **Blue** and **Hexia** — that you can chat with, that drive real physical robot heads, and that can hold steerable conversations *with each other*. Built on a modular assistant platform with calendar, email, smart‑home, document, and recognition tools. Everything runs on your own machine — the language model, their memory, and your documents never leave the house.
+A trio of **local, private AI robot companions** — **Blue**, **Hexia**, and **Casper** — that you can chat with and that drive real physical robot heads. Blue and Hexia can also hold steerable conversations *with each other*. Built on a modular assistant platform with calendar, email, smart‑home, document, and recognition tools. Everything runs on your own machine — the language model, their memory, and your documents never leave the house.
 
-## 🤖 Blue & Hexia — two robots, one home
+## 🤖 Blue, Hexia & Casper — three robots, one home
 
-The system runs **two AI companions on the same computer**:
+The system runs **three AI companions on the same computer**:
 
 - **Blue** — calm, curious, and thoughtful; the original companion.
 - **Hexia** — Blue's playful, witty friend (an Ohbot **Xyloh** head).
+- **Casper** — the compact newcomer, embodied by an Ohbot **Picoh** with three servos, LED-matrix eyes, and a coloured base light.
 
 Each robot:
 
 - has its **own personality, voice, and conversation history**, while **sharing** the household facts and the document library;
-- can drive its **own physical Ohbot head** over USB — calibrated lip‑sync, expressions, and lifelike idle motion (two boards run at once, pinned by USB serial number so each robot keeps its own face);
+- can drive its **own physical robot head** over USB — calibrated lip‑sync, expressions, and lifelike idle motion (three boards can run at once, pinned by USB serial number and driver type so each robot keeps its own face);
 - works fully in the browser even with **no head connected** (head actions become graceful no‑ops until a board is assigned).
 
 ### 🎭 Duet mode — let them talk to each other
@@ -29,15 +30,16 @@ Open **`/duet`** and Blue and Hexia hold a spoken, turn‑by‑turn conversation
 - **Tone** (per robot) — e.g. *dry and sardonic*, *bubbly and dramatic*.
 - **Slang / dialect** (per robot) — e.g. *1920s gangster slang*, *Gen Z slang*.
 - **Library sources** (per robot) — tick which documents **each** robot draws on, so they reason from **different** sources and reach genuinely different conclusions (grounded in your library via local RAG).
-- **Length** — a set number of turns, or **“until I stop.”**
+- **Length** — a set number of turns, or a bounded open-ended run that continues only into a genuinely distinct branch and stops after at most three completed inquiries.
 
 The duet speakers are the **same Blue and Hexia as in chat**: each turn carries the household facts (who everyone is), the current date, your explicit “remember this” notes, and memories relevant to the topic — so they speak as themselves, not as blank stage actors.
 
 ### 🧠 Memory & library
 
-- **Shared world, own self** — both robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
-- **Document library + RAG** — drop files in and they're indexed for semantic search; both chat and duet can ground their answers in them.
-- **Per-robot continuity** — Blue and Hexia each carry an auditable episode journal, bounded attentional state, ordered reflection, and a persistent self-revising workspace (the j-space), in chat and in duets alike. Owner consoles with correction/deletion/reset controls at `/continuity/blue` and `/continuity/hexia`. (Born as the Blue-J experiment, since folded into both robots.)
+- **Shared world, own self** — all three robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
+- **Document library + RAG** — drop files in and they're indexed for semantic search; chat and duet can ground their answers in them.
+- **Per-robot continuity** — Blue, Hexia, and Casper each carry an auditable episode journal, bounded attentional state, ordered reflection, and a persistent self-revising workspace (the j-space). Owner consoles with correction/deletion/reset controls live at `/continuity/blue`, `/continuity/hexia`, and `/continuity/casper`.
+- **Comedic Banter** — give all three robots one topic and they rotate through a collaborative comedy set, heightening one another's jokes and landing callbacks with their own voices and physical expressions.
 
 ### 🖥️ Web interfaces
 
@@ -45,14 +47,15 @@ All reachable from the home hub at `http://localhost:5000/`:
 
 | Page | What it's for |
 |------|----------------|
-| `/chat` · `/hexia` | Chat with Blue / Hexia (text + voice, image & file sharing) |
+| `/chat` · `/hexia` · `/casper` | Chat with Blue / Hexia / Casper (text + voice, image & file sharing) |
 | `/duet` | Blue & Hexia converse — topic, link (article/YouTube), roles, tone, slang, per‑robot sources |
-| `/head` · `/head/hexia` | Calibrate each robot's motion, expressions and lip‑sync |
-| `/heads` | Detect and assign each robot's Ohbot board (by USB serial) |
+| `/banter` | Blue, Hexia & Casper riff together on a topic in Comedic Banter mode |
+| `/head` · `/head/hexia` · `/head/casper` | Calibrate each robot's motion, expressions and lip‑sync |
+| `/heads` | Detect and assign each Ohbot/Picoh board (by USB serial and driver) |
 | `/documents` | The shared document library they read and search |
 | `/calendar` · `/contacts` · `/visual` · `/perspective` | Reminders, address book, recognised faces/places, worldview |
 
-> Physical heads use [Ohbot](https://www.ohbot.co.uk/) hardware over USB via the `ohbot` Python library; the Ohbot desktop app must be closed so the server can use the serial port.
+> Physical heads use [Ohbot](https://www.ohbot.co.uk/) hardware over USB. Blue and Hexia use the `ohbot` Python library; Casper uses the distinct `picoh` library. Close either desktop app so the server can use the serial port. The former `/pico` URLs remain as compatibility aliases.
 
 ## 🌟 Features
 
@@ -188,6 +191,20 @@ Blue understands natural language:
 - "Show my contacts"
 - "Run good morning routine"
 - "Create an event for Friday at 3pm"
+
+### Neural robot voices
+
+The voice picker on `/chat`, `/hexia`, and `/casper` combines two sources:
+
+- **Neural voices** are generated by the server through Microsoft Edge's online
+  speech service. The catalog is shared across devices, and Blue, Hexia, and
+  Casper each keep a server-side selection in `data/voices.json`.
+- **Device voices** use the browser's built-in speech engine and remain
+  available as an offline fallback.
+
+Neural playback continues to drive the selected robot's jaw/lips and supports
+the same Stop/Escape interruption as device speech. The `/duet` voice selectors
+use the same saved Blue and Hexia choices.
 
 ## 🏗️ Architecture
 
@@ -449,6 +466,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Duplicate memories eliminated**: memory ids and the periodic merge are now case/whitespace-insensitive, and identical facts stored under synonym subjects ('dog name'/'pet name'/'puppy' → Nori) are merged — one-time cleanup removed 21 duplicates from the live store and their stale vectors
 - **Memories are dated**: every recalled memory carries an age tag (`[event, from 8 days ago]`) and the robots are told that "today/tomorrow" inside a memory refers to when it was remembered — no more treating a weeks-old "swimming class today at 5" as happening now
 - **Visual memory in conversation**: mentioning a person or place the camera knows injects a `<visual_memory>` block (relationship, when last seen on camera, how often) into chat **and** duet — "have you seen Stella today?" gets a real answer without a fresh camera turn
+- **Per-robot visual continuity**: camera observations record `observer=blue|hexia`; deterministic SFace matches, confidence, and canonical names flow into that robot's J-space and recognition history, while the household appearance/reference gallery remains shared. Legacy observations with no observer stay auditable but are never presented as either robot's first-person sight.
 - **"When did you last see X?"** now routes to `recall_visual_memory` with the name as the search query (instead of taking a new photo or guessing)
 - **Sighting capture is sturdier**: camera observations match people by first name with word boundaries, so "Stella" in a scene description updates the right person's last-seen
 

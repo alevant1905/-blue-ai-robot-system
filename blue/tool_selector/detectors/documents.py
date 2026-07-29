@@ -19,6 +19,7 @@ document documents file files pdf docx doc txt md paper papers book books note n
 theory learning research design technology machine human humans power politics future world
 talk talks script scripts lecture lectures report reports essay essays draft drafts manuscript
 chapter chapters syllabus release journal version copy summary final intro introduction
+university universities college colleges campus classroom
 tell read show find search looking look give get open review according say says said argue argues
 me you it please new old here there thing things stuff topic content help know need want
 """.split())
@@ -38,6 +39,18 @@ _COURSE_RE = re.compile(
     r"|\b(?:lecture|seminar)\s+(?:notes|reading|readings|material|materials)\b"
     r"|\bcourse\s+(?:material|materials|outline|schedule|reading|readings)\b"
     r"|\bdue\b(?!\s+to\b)",   # "what is due this week", "due tomorrow" — but not "due to"
+    re.I,
+)
+
+# A reflection on a shared, dated event is episodic recall, not a request to
+# inspect course files. Library-aware title matching used to see a generic
+# token such as "University" and force search_documents for questions like
+# "What did you think of our class yesterday at York University?".
+_SHARED_PAST_EXPERIENCE_RE = re.compile(
+    r"\b(?:yesterday|last (?:night|week|time))\b"
+    r"[^.!?]{0,100}\b(?:our|we|together)\b"
+    r"|\b(?:our|we|together)\b[^.!?]{0,100}"
+    r"\b(?:yesterday|last (?:night|week|time))\b",
     re.I,
 )
 
@@ -277,6 +290,8 @@ class DocumentsDetector(BaseDetector):
         # Toscano argue", "the AI folder"). This is the main fix for Blue
         # hallucinating instead of retrieving — those phrasings used to match
         # no tool at all.
+        if confidence <= 0 and _SHARED_PAST_EXPERIENCE_RE.search(msg_lower):
+            return None
         if confidence < 0.90:
             lib_reason = self._library_match(msg_lower)
             if lib_reason:
