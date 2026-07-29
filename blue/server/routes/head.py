@@ -1,10 +1,12 @@
-"""Head/heads control routes, extracted verbatim from bluetools.py.
+"""Ohbot-family head control and board-assignment routes.
 
 Shared state (ROBOTS, _robot_cfg, log) stays in bluetools and is read
 via bt.<name> at request time; blue_head is the blue.head module and
 is imported directly. /chat/attach and /chat/eyes stay in bluetools
 (chat/vision subsystem).
 """
+import json
+
 import bluetools as bt
 from flask import Response, jsonify, render_template_string, request
 
@@ -21,12 +23,15 @@ from blue.server.pages.head import HEAD_HTML, HEADS_HTML, OHBOT_HEADS_JS
 
 
 def _render_head_page(robot="blue"):
-    """Serve the head-tuning GUI for a robot (Blue at /head, Hexia at
-    /head/hexia). Same HEAD_HTML; every control targets this robot's head."""
+    """Serve the shared tuning GUI for an Ohbot, Xyloh, or Picoh head."""
+    robot = bt._robot_id(robot)
     cfg = bt._robot_cfg(robot)
+    h = blue_head.get_head(robot)
     return Response(render_template_string(
         HEAD_HTML, head_robot=(robot if robot in bt.ROBOTS else "blue"),
         head_robot_name=cfg["name"],
+        head_model=cfg.get("model", "Ohbot"),
+        head_color_label=("Base light colour" if h.color_target == "base" else "Eye colour"),
     ), headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     })
@@ -151,6 +156,29 @@ def register(app):
             h.lip_stop()
         return jsonify({"ok": True, "lip_active": h.lip_is_active()})
 
+    @app.route('/head/mood', methods=['POST'])
+    @app.route('/head/<robot>/mood', methods=['POST'])
+    def head_mood(robot='blue'):
+        """Apply reply colour and, on Picoh, a matrix-eye expression together."""
+        h = blue_head.get_head(robot)
+        d = request.get_json(silent=True) or {}
+        try:
+            r = max(0, min(10, int(d.get('r', 0))))
+            g = max(0, min(10, int(d.get('g', 0))))
+            b = max(0, min(10, int(d.get('b', 0))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "r, g and b must be numbers"}), 400
+        expression = (d.get('expression') or d.get('name') or 'neutral').lower().strip()
+        color_ok = h.eye_color(r, g, b)
+        expression_ok = True
+        if getattr(h, 'driver', '') == 'picoh':
+            expression_ok = h.eye_expression(expression)
+        return jsonify({
+            "ok": bool(color_ok and expression_ok),
+            "color": {"r": r, "g": g, "b": b},
+            "expression": expression,
+        })
+
 
     @app.route('/head/lip-seq', methods=['POST'])
     @app.route('/head/<robot>/lip-seq', methods=['POST'])
@@ -186,7 +214,7 @@ def register(app):
     @app.route('/head/<robot>/restore-defaults', methods=['POST'])
     def head_restore_defaults(robot='blue'):
         h = blue_head.get_head(robot)
-        for m, c in blue_head._DEFAULT_CENTERS.items():
+        for m, c in h.factory_centers.items():
             h.set_center(m, c)
         h.reset()
         return jsonify({"ok": True, "centers": h.get_calibration()["centers"]})
@@ -365,8 +393,18 @@ def register(app):
 
     @app.route('/heads', methods=['GET'])
     def heads_page():
-        """Setup UI: list connected boards and assign each to a robot (Blue/Hexia)."""
-        return Response(render_template_string(HEADS_HTML), headers={
+        """Setup UI: list connected boards and assign each to a robot."""
+        roles = [
+            {
+                "id": role,
+                "name": cfg["name"],
+                "driver": blue_head.get_head(role).driver,
+            }
+            for role, cfg in bt.ROBOTS.items()
+        ]
+        return Response(render_template_string(
+            HEADS_HTML, robots_json=json.dumps(roles)
+        ), headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         })
 
@@ -383,14 +421,14 @@ def register(app):
         """Pin a board (by USB serial number) to a robot role, then reconnect that
         head so the change takes effect immediately."""
         d = request.get_json(silent=True) or {}
-        role = (d.get('role') or '').strip().lower()
+        role = bt._robot_id(d.get('role') or '')
         serial = (d.get('serial_number') or '').strip()
         if role not in bt.ROBOTS:
             return jsonify({"ok": False, "error": "unknown robot role"}), 400
         if not serial:
             return jsonify({"ok": False, "error": "missing serial_number"}), 400
-        blue_head.assign_board(role, serial)
         h = blue_head.get_head(role)
+        blue_head.assign_board(role, serial, driver=h.driver)
         try:
             h.reconnect()
         except Exception as e:

@@ -39,6 +39,7 @@ watchdog>=3.0.0             # Filesystem watcher for auto-indexing dropped docum
 # for moving Blue's head/face from this server). The Ohbot desktop app MUST be
 # closed or it will hold the serial port and our connect will fail.
 ohbot>=4.0                  # Ohbot board serial protocol + lip-synced SAPI speech
+picoh>=1.276                # Official three-motor Picoh + LED-matrix serial driver
 
 # Voice Input (Recommended - lets kids/non-readers talk to Blue on the iPad)
 # The browser records audio over HTTPS and posts it to /stt; Blue transcribes
@@ -46,6 +47,7 @@ ohbot>=4.0                  # Ohbot board serial protocol + lip-synced SAPI spee
 # Override the model with BLUE_WHISPER_MODEL (default base.en; small.en = more
 # accurate, slower). Model files auto-download from HuggingFace on first use.
 faster-whisper>=1.0.0       # Local speech-to-text (Whisper, CTranslate2 + PyAV)
+edge-tts>=7.2.8             # Server-side neural voices shared across every device
 
 # Advanced Features (Optional)
 python-dateutil>=2.8.2      # Better date/time parsing

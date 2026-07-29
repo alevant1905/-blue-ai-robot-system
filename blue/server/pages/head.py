@@ -79,7 +79,7 @@ HEAD_HTML = """<!DOCTYPE html>
         <button class="btn" id="reconnectBtn" style="margin-left:10px;">Reconnect</button>
         <button class="btn" id="connHeadBtn" style="margin-left:10px; display:none;">Connect head (USB-C)</button>
         <label class="toggle"><input type="checkbox" id="autoToggle"><span>Thoughtful idle movement</span></label>
-        <div class="hint">If "Not connected," close the Ohbot desktop app, then click Reconnect (no full restart needed).</div>
+        <div class="hint">{{ head_model }} hardware. If "Not connected," close the Ohbot desktop app, then click Reconnect (no full restart needed).</div>
         <div id="idleBox" style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--line);">
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How often</span><input type="range" id="idleFreq" min="0" max="10" step="0.5" value="7"><span class="val" id="vIdleFreq">7</span></div>
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">How big</span><input type="range" id="idleAmp" min="0" max="10" step="0.5" value="5"><span class="val" id="vIdleAmp">5</span></div>
@@ -89,7 +89,7 @@ HEAD_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>Live direction</h2>
-        <div class="sub">Drag inside the squares — left pad steers Blue's <b>head</b> (turn + nod), right pad steers his <b>eyes</b> (look + tilt). Tap <b>Snap to neutral</b> to recentre both.</div>
+        <div class="sub">Drag inside the squares — left pad steers {{ head_robot_name }}'s <b>head</b> (turn + nod), right pad steers the <b>eyes</b> (look + tilt). Tap <b>Snap to neutral</b> to recentre both.</div>
         <div class="pads-row">
             <div class="pad-block">
                 <div class="lbl">HEAD</div>
@@ -109,7 +109,7 @@ HEAD_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>Calibration</h2>
-        <div class="sub">Drag a slider to move that motor. When it looks right, tap <b>Save as neutral</b> — that becomes the rest position the rest of Blue uses. Saved automatically; survives restarts.</div>
+        <div class="sub">Drag a slider to move that motor. When it looks right, tap <b>Save as neutral</b> — that becomes the rest position {{ head_robot_name }} uses. Saved automatically; survives restarts.</div>
         <div id="motors"></div>
         <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap;">
             <button class="btn" id="parkBtn">Park all at neutral</button>
@@ -141,9 +141,9 @@ HEAD_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="card">
-        <h2>Lip-sync polarity</h2>
-        <div class="sub">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
-        <div class="row" style="grid-template-columns: 130px 1fr; margin:6px 0 10px;">
+        <h2 id="lipTitle">Lip-sync polarity</h2>
+        <div class="sub" id="lipIntro">If when {{ head_robot_name }} talks both lips move in the same direction together, flip one of these. Tap <b>Test lip-sync</b> to watch the mouth open and close for 4 seconds without speaking.</div>
+        <div class="row" id="lipDriveRow" style="grid-template-columns: 130px 1fr; margin:6px 0 10px;">
             <span class="name">Talking drive</span>
             <select id="lipDrive" style="padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card,#1b1b1b);color:var(--fg,#eee);font:inherit;">
                 <option value="both">Both lips</option>
@@ -151,11 +151,11 @@ HEAD_HTML = """<!DOCTYPE html>
                 <option value="bottom">Jaw only (bottom lip)</option>
             </select>
         </div>
-        <div class="hint">Which lip(s) move while {{ head_robot_name }} talks. The lip you <i>don't</i> pick is <b>powered off</b> so it can't strain. If one lip jams against a stop and won't move without straining, switch to <b>Jaw only</b> — the jaw alone reads clearly as talking, and the stuck lip goes quiet instead of buzzing.</div>
-        <label class="toggle"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
+        <div class="hint" id="lipDriveHint">Which lip(s) move while {{ head_robot_name }} talks. The lip you <i>don't</i> pick is <b>powered off</b> so it can't strain. If one lip jams against a stop and won't move without straining, switch to <b>Jaw only</b> — the jaw alone reads clearly as talking, and the stuck lip goes quiet instead of buzzing.</div>
+        <label class="toggle" id="invTopRow"><input type="checkbox" id="invTop"><span>Invert top lip direction</span></label>
         <label class="toggle"><input type="checkbox" id="invBot"><span>Invert bottom lip direction</span></label>
         <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);">
-            <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Top lip travel</span><input type="range" id="lipRngTop" min="0.2" max="3" step="0.1" value="1.8"><span class="val" id="vLipRngTop">1.8</span></div>
+            <div class="row" id="lipTopRow" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Top lip travel</span><input type="range" id="lipRngTop" min="0.2" max="3" step="0.1" value="1.8"><span class="val" id="vLipRngTop">1.8</span></div>
             <div class="row" style="grid-template-columns: 130px 1fr 56px;"><span class="name">Jaw travel</span><input type="range" id="lipRngBot" min="0.2" max="4" step="0.1" value="3.0"><span class="val" id="vLipRngBot">3.0</span></div>
             <div class="hint">How far each lip swings from its neutral while talking. <b>If a lip reaches a mechanical stop and sticks mid-speech, turn its travel down</b> until it never gets there; turn up for a more expressive mouth. Press Test lip-sync after each change.</div>
             <div class="row" style="grid-template-columns: 130px 1fr 56px; margin-top:8px;"><span class="name">Lip speed</span><input type="range" id="lipSpeed" min="1" max="10" step="0.5" value="10"><span class="val" id="vLipSpeed">10</span></div>
@@ -166,12 +166,12 @@ HEAD_HTML = """<!DOCTYPE html>
             <button class="btn" id="sweepLipBtn">Full-range lip sweep (~8 sec)</button>
             <button class="btn" id="relaxLipBtn">Relax lip servos</button>
         </div>
-        <div class="hint">The talking flap only moves each lip a small way from its saved neutral — if a lip's neutral sits where the mechanism is jammed against a stop, talking looks frozen. The sweep drives the <b>top lip</b> slowly through its usable range, then the <b>bottom lip</b>. Watch where each lip really moves, then set that lip's neutral (Calibration sliders above) inside the moving zone. A lip that stays still for the whole sweep has a loose servo arm or linkage. <b>Note:</b> sliders reach positions the mouth physically can't — the top lip rests on a centre stop near mid-range and can't go below it unless the jaw is wide open, so dragging it low with the mouth closed just stalls the motor and "sticks" until you drag back past the stop.</div>
-        <div class="hint"><b>Relax lip servos</b> powers off just the two lip motors so a jammed mouth can be moved by hand without the motors fighting back (a stalled servo strains, buzzes and overheats). They wake again on the next lip command — talking, a lip slider, the test or sweep buttons — or a reset.</div>
+        <div class="hint" id="lipMechanicsHint">The talking flap only moves each lip a small way from its saved neutral — if a lip's neutral sits where the mechanism is jammed against a stop, talking looks frozen. The sweep drives the <b>top lip</b> slowly through its usable range, then the <b>bottom lip</b>. Watch where each lip really moves, then set that lip's neutral (Calibration sliders above) inside the moving zone. A lip that stays still for the whole sweep has a loose servo arm or linkage. <b>Note:</b> sliders reach positions the mouth physically can't — the top lip rests on a centre stop near mid-range and can't go below it unless the jaw is wide open, so dragging it low with the mouth closed just stalls the motor and "sticks" until you drag back past the stop.</div>
+        <div class="hint" id="lipRelaxHint"><b>Relax lip servos</b> powers off just the two lip motors so a jammed mouth can be moved by hand without the motors fighting back (a stalled servo strains, buzzes and overheats). They wake again on the next lip command — talking, a lip slider, the test or sweep buttons — or a reset.</div>
     </div>
 
     <div class="card">
-        <h2>Eye colour</h2>
+        <h2>{{ head_color_label }}</h2>
         <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Red</span><input type="range" id="cR" min="0" max="10" step="1" value="0"><span class="val" id="vR">0</span></div>
         <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Green</span><input type="range" id="cG" min="0" max="10" step="1" value="0"><span class="val" id="vG">0</span></div>
         <div class="row" style="grid-template-columns: 110px 1fr 56px;"><span class="name">Blue</span><input type="range" id="cB" min="0" max="10" step="1" value="0"><span class="val" id="vB">0</span></div>
@@ -220,9 +220,11 @@ async function getJSON(url) {
     try { const r = await fetch(_hurl(url)); return await r.json(); } catch (e) { return null; }
 }
 
-function buildMotors(centers) {
+function buildMotors(centers, supported) {
     const cont = document.getElementById('motors'); cont.innerHTML = '';
+    supported = Array.isArray(supported) ? supported.map(Number) : MOTORS.map(x => x[0]);
     for (const [m, name] of MOTORS) {
+        if (supported.indexOf(m) < 0) continue;
         const c = (centers && centers[m] != null) ? centers[m] : 5;
         const row = document.createElement('div'); row.className = 'row';
         row.innerHTML = '<span class="name">' + name + '</span>'
@@ -257,9 +259,11 @@ function buildMotors(centers) {
     }
 }
 
-function buildActions() {
+function buildActions(supported) {
     const box = document.getElementById('actBox');
-    for (const a of ACTIONS) {
+    box.innerHTML = '';
+    supported = Array.isArray(supported) ? supported : ACTIONS;
+    for (const a of supported) {
         const b = document.createElement('button'); b.className = 'btn';
         b.textContent = a.replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase());
         b.addEventListener('click', () => postJSON('/head/action', {action: a}));
@@ -300,9 +304,21 @@ async function loadState() {
     if (LOCAL_DRIVERS[HEAD_ROBOT]) { status.className = 'status on'; status.textContent = 'Connected (this device, USB-C)'; }
     else if (s && s.available) { status.className = 'status on'; status.textContent = 'Connected'; }
     else { status.className = 'status off'; status.textContent = 'Not connected'; }
-    buildMotors(s && s.centers);
+    buildMotors(s && s.centers, s && s.supported_motors);
+    buildActions(s && s.supported_actions);
     buildCustomExpressions(s && s.custom_expressions);
     centerPads(s && s.centers);
+    const isPicoh = !!(s && s.driver === 'picoh');
+    ['lipDriveRow','lipDriveHint','invTopRow','lipTopRow'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = isPicoh ? 'none' : '';
+    });
+    if (isPicoh) {
+        document.getElementById('lipTitle').textContent = 'Jaw lip-sync';
+        document.getElementById('lipIntro').innerHTML = 'Picoh has one moving jaw. Flip its direction if speech closes the mouth, then use <b>Test lip-sync</b> to check it.';
+        document.getElementById('lipMechanicsHint').innerHTML = 'The sweep moves Casper\\'s single jaw through its safe range. Set the <b>BottomLip</b> neutral above inside the moving zone, and reduce jaw travel if it reaches a mechanical stop.';
+        document.getElementById('lipRelaxHint').innerHTML = '<b>Relax lip servo</b> powers off Casper\\'s jaw so it can be moved gently by hand. It wakes on the next lip command or reset.';
+    }
     document.getElementById('autoToggle').checked = !!(s && s.auto_movement);
     document.getElementById('invTop').checked = !!(s && s.lip_invert_top);
     document.getElementById('invBot').checked = !!(s && s.lip_invert_bottom);
@@ -409,7 +425,7 @@ document.getElementById('restoreBtn').addEventListener('click', async () => {
     loadState();
 });
 
-buildActions(); buildSwatches();
+buildSwatches();
 wireColour('R'); wireColour('G'); wireColour('B');
 
 // ---- 2D drag-pads for head + eyes ----
@@ -470,7 +486,7 @@ function buildCustomExpressions(map) {
     const cont = document.getElementById('customExpr'); cont.innerHTML = '';
     const names = Object.keys(map || {}).sort();
     if (!names.length) {
-        cont.innerHTML = '<span class="hint">No saved poses yet — move Blue, then click "Save current pose as…".</span>';
+        cont.innerHTML = '<span class="hint">No saved poses yet — move {{ head_robot_name }}, then click "Save current pose as…".</span>';
         return;
     }
     for (const name of names) {
@@ -803,7 +819,7 @@ function blueDeviceTag(){
 }
 var DRIVES_HEADS = (blueDeviceTag()==='windows');
 var WEBSERIAL_OK = ('serial' in navigator) && !!window.isSecureContext;
-var LOCAL_DRIVERS = {blue:null, hexia:null};
+var LOCAL_DRIVERS = {blue:null, hexia:null, pico:null};
 
 function _localHeadsNote(msg){ if(window.onLocalHeadsNote){ try{ window.onLocalHeadsNote(msg); return; }catch(e){} } try{ console.warn('[heads] '+msg); }catch(e){} }
 function _defaultCalib(){ return {centers:{}, lip_invert_top:false, lip_invert_bottom:false, lip_top_range:1.8, lip_bottom_range:3.0, lip_speed:10, lip_drive:'both', idle_frequency:7, idle_amplitude:5, auto_movement:true}; }
@@ -814,15 +830,20 @@ async function _fetchCalib(headName){
 async function _reparkFor(headName){
   var drv=LOCAL_DRIVERS[headName]; if(!drv) return;
   drv.calib=await _fetchCalib(headName);
-  for(var m=0;m<8;m++) drv.move(m, drv.center(m), 4);
+  var supported=Array.isArray(drv.calib.supported_motors)?drv.calib.supported_motors:[0,1,2,3,4,5,6,7];
+  for(var i=0;i<supported.length;i++){ var m=Number(supported[i]); drv.move(m, drv.center(m), 4); }
 }
 async function connectHead(headName){
   if(!WEBSERIAL_OK) return;
+  var calib=await _fetchCalib(headName);
+  if(calib.driver==='picoh'){
+    _localHeadsNote("Picoh USB control currently runs through the Windows server; open this page there to tune Casper.");
+    return;
+  }
   var port;
   try{ port=await navigator.serial.requestPort(); }catch(e){ return; }   // user dismissed the picker
   try{ await port.open({baudRate:19200}); }
   catch(e){ _localHeadsNote("couldn't open that USB port for "+headName+": "+(e&&e.message?e.message:e)); return; }
-  var calib=await _fetchCalib(headName);
   var drv;
   try{ drv=new OhbotSerialDriver(port, calib); await drv.start(); }
   catch(e){ _localHeadsNote("couldn't start "+headName+"'s head: "+(e&&e.message?e.message:e)); try{ await port.close(); }catch(_e){} return; }
@@ -879,6 +900,7 @@ HEADS_HTML = """
  .ok{color:#2e7d32;font-weight:600}.no{color:#9aa0a6}
  .pill{display:inline-block;padding:2px 9px;border-radius:11px;font-size:.8em}
  .pill.blue{background:#e3f0ff;color:#1b63b0}.pill.hexia{background:#f1e6fb;color:#7a3fb0}
+ .pill.pico{background:#fff0df;color:#a9550a}
  button{padding:6px 11px;border:1px solid var(--line);border-radius:7px;background:var(--paper);cursor:pointer;font:inherit;font-size:.88em;margin:2px 6px 2px 0;color:var(--ink)}
  button:hover{background:var(--mg-glass2,#f3f0e9)}button:disabled{opacity:.4;cursor:default}
  button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
@@ -891,16 +913,20 @@ HEADS_HTML = """
  :root:not([data-theme="light"]) .no{color:var(--slate)}
  :root:not([data-theme="light"]) .pill.blue{background:rgba(61,169,252,.14);color:#7fc4ff}
  :root:not([data-theme="light"]) .pill.hexia{background:rgba(176,108,240,.14);color:#c9a1f5}
+ :root:not([data-theme="light"]) .pill.pico{background:rgba(242,140,40,.14);color:#ffb86b}
  :root:not([data-theme="light"]) #msg.good{background:rgba(74,222,128,.12);color:#4ade80}
  :root:not([data-theme="light"]) #msg.bad{background:rgba(248,113,113,.12);color:#f87171}
 </style></head><body>
 <h1>Robot Heads</h1>
-<p class="sub">Blue and Hexia each drive their own Ohbot board over USB. Plug a board in, click <b>Refresh</b>, then assign it. Assignments are pinned by the board's USB serial number, so they survive reboots and COM-port renumbering. The Ohbot desktop app must be closed (it holds the port).</p>
+<p class="sub">Blue, Hexia, and Casper each drive their own USB robot board. Casper uses the distinct Picoh driver; Blue and Hexia use Ohbot. Plug a board in, click <b>Refresh</b>, then assign it. Assignments are pinned by USB serial number, so they survive reboots and COM-port renumbering. Close the Ohbot/Picoh desktop app first because it holds the port.</p>
 <div id="msg"></div>
 <button class="primary" id="refresh">Refresh</button>
-<table><thead><tr><th>Port</th><th>USB serial</th><th>Ohbot?</th><th>Assigned&nbsp;to</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table>
-<p class="sub">Tip: a board showing <b>Ohbot? &#10007;</b> that you know is a robot usually means the port is busy &mdash; close the Ohbot app (or whatever is holding it) and Refresh. A board with no USB serial can't be pinned.</p>
+<table><thead><tr><th>Port</th><th>USB serial</th><th>Robot?</th><th>Assigned&nbsp;to</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table>
+<p class="sub">Tip: a robot board showing <b>Robot? &#10007;</b> is usually busy &mdash; close any Ohbot/Picoh app (or whatever is holding it) and Refresh. A board with no USB serial can't be pinned.</p>
 <script>
+const ROBOT_ROLES = {{ robots_json|safe }};
+const ROBOT_ROLE_NAMES = Object.fromEntries(ROBOT_ROLES.map(info => [info.id, info.name]));
+function roleName(role){ return ROBOT_ROLE_NAMES[role] || role; }
 function show(t, good){ const m=document.getElementById('msg'); m.textContent=t; m.className='show '+(good?'good':'bad'); }
 async function load(){
   let d;
@@ -912,8 +938,8 @@ async function load(){
   boards.forEach(b=>{
     const tr=document.createElement('tr');
     const assigned = b.held_by
-       ? '<span class="pill '+b.held_by+'">'+b.held_by+' (live)</span>'
-       : (b.assigned_to ? '<span class="pill '+b.assigned_to+'">'+b.assigned_to+'</span>' : '<span class="no">&mdash;</span>');
+       ? '<span class="pill '+b.held_by+'">'+roleName(b.held_by)+' (live)</span>'
+       : (b.assigned_to ? '<span class="pill '+b.assigned_to+'">'+roleName(b.assigned_to)+'</span>' : '<span class="no">&mdash;</span>');
     const okmark = b.ohbot_compatible ? '<span class="ok">&#10003;</span>' : '<span class="no">&#10007;</span>';
     tr.innerHTML =
       '<td><code>'+b.device+'</code><br><span class="no">'+(b.description||'')+'</span></td>'+
@@ -922,9 +948,10 @@ async function load(){
       '<td>'+assigned+'</td>'+
       '<td class="acts"></td>';
     const acts = tr.querySelector('.acts');
-    ['blue','hexia'].forEach(role=>{
+    ROBOT_ROLES.forEach(info=>{
+      const role=info.id;
       const btn=document.createElement('button');
-      btn.textContent='\\u2192 '+role.charAt(0).toUpperCase()+role.slice(1);
+      btn.textContent='\\u2192 '+info.name+' ('+info.driver+')';
       btn.disabled = !b.serial_number;
       btn.addEventListener('click', ()=>assign(b.serial_number, role));
       acts.appendChild(btn);
@@ -934,11 +961,11 @@ async function load(){
 }
 async function assign(serial, role){
   if(!serial){ return show("That board has no USB serial number, so it can't be pinned.", false); }
-  show('Assigning to '+role+'\\u2026', true);
+  show('Assigning to '+roleName(role)+'\\u2026', true);
   try{
     const d = await (await fetch('/heads/assign',{method:'POST',headers:{'Content-Type':'application/json'},
                      body:JSON.stringify({role:role, serial_number:serial})})).json();
-    if(d.ok){ show(role.charAt(0).toUpperCase()+role.slice(1)+' assigned '+(d.available?'and connected \\u2713':'(board not responding \\u2014 is the Ohbot app closed?)')+'.', !!d.available); }
+    if(d.ok){ show(roleName(role)+' assigned '+(d.available?'and connected \\u2713':'(board not responding \\u2014 is the Ohbot app closed?)')+'.', !!d.available); }
     else { show('Failed: '+(d.error||'unknown'), false); }
   }catch(e){ show('Request failed: '+e, false); }
   load();

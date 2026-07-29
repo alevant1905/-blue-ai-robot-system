@@ -1,9 +1,9 @@
 """Direct hardware control of an Ohbot head — replaces the Ohbot app.
 
-This module drives one OR MORE Ohbot heads over USB serial via the official
-`ohbot` Python library. Each robot head is a `RobotHead` instance with its own
+This module drives one OR MORE Ohbot-family heads over USB serial via the
+official `ohbot` and `picoh` Python libraries. Each robot head has its own
 serial connection, calibration file, lip state and idle loop. Blue is the
-default head; Hexia (a second Ohbot, the "Xyloh") is a second instance.
+default head; Hexia is an Ohbot/Xyloh and Casper is a three-motor Picoh.
 
 Why a class (it used to be module globals):
   The `ohbot` library is a per-import singleton — importing `ohbot.ohbot`
@@ -14,9 +14,9 @@ Why a class (it used to be module globals):
   or it will hold the serial port and our connect will fail.
 
 Board identity is pinned by USB serial number (COM numbers drift across
-reboots) in `data/heads.json`, so Blue's physical board stays Blue and Hexia's
-stays Hexia. A board that isn't present/assigned degrades to logged no-ops, so
-the rest of Blue (and Hexia's persona/chat) keeps running with no hardware.
+reboots) in `data/heads.json`, so each physical board keeps its robot role.
+A board that isn't present/assigned degrades to logged no-ops, so the rest of
+each robot's persona/chat keeps running with no hardware.
 
 Back-compat: the original module-level API (`head.look(...)`, `head.init()`,
 `head._DEFAULT_CENTER`, …) is preserved as thin aliases onto the default Blue
@@ -95,6 +95,16 @@ try:
 except Exception:
     _OHBOT_LIB = False
 
+_PICOH_LIB = False
+_PICOH_PY = None  # filesystem path to picoh/picoh.py, also loaded privately
+try:
+    _sub = importlib.util.find_spec("picoh.picoh")
+    if _sub is not None and _sub.origin:
+        _PICOH_PY = _sub.origin
+        _PICOH_LIB = True
+except Exception:
+    _PICOH_LIB = False
+
 try:
     import serial as _serial
     import serial.tools.list_ports as _list_ports_mod
@@ -169,10 +179,28 @@ def _save_registry(reg):
         _log(f"registry save error: {e!r}")
 
 
-def assign_board(role, serial_number, port_hint=""):
-    """Pin a physical board (by USB serial number) to a robot role. Persists."""
+def assign_board(role, serial_number, port_hint="", driver=""):
+    """Pin a physical board (by USB serial number) to a robot role. Persists.
+
+    `driver` is kept with the assignment because an Ohbot/Xyloh and a Picoh both
+    answer the same ``v2`` serial handshake but require different motor maps.
+    """
+    role = str(role or "").strip().lower()
+    if role in ("casper", "caspar", "picoh"):
+        role = "pico"
+    driver = str(driver or ("picoh" if role == "pico" else "ohbot")).strip().lower()
+    if driver not in ("ohbot", "picoh"):
+        driver = "ohbot"
     reg = _load_registry()
-    reg[str(role)] = {"serial_number": serial_number, "port_hint": port_hint}
+    # A physical board cannot safely drive two roles. Reassignment transfers it.
+    for old_role, info in list(reg.items()):
+        if old_role != role and (info or {}).get("serial_number") == serial_number:
+            reg.pop(old_role, None)
+    reg[role] = {
+        "serial_number": serial_number,
+        "port_hint": port_hint,
+        "driver": driver,
+    }
     _save_registry(reg)
     return reg
 
@@ -203,6 +231,36 @@ def _load_private_ohbot(tag, target_port):
         return mod
     except Exception as e:
         _log(f"[{tag}] private ohbot load failed: {e!r}")
+        sys.modules.pop(modname, None)
+        return None
+
+
+def _load_private_picoh(tag, target_port):
+    """Load an isolated official Picoh module pinned to exactly one port.
+
+    The upstream library auto-connects during import, just like ``ohbot``. Its
+    handshake alone cannot distinguish Picoh from an eight-motor Ohbot, so the
+    port restriction and persisted driver type are safety-critical.
+    """
+    if not _PICOH_LIB or not _PICOH_PY or _list_ports_mod is None or not target_port:
+        return None
+    modname = f"picoh_private_{tag}"
+    try:
+        spec = importlib.util.spec_from_file_location(modname, _PICOH_PY)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[modname] = mod
+        real_comports = _list_ports_mod.comports
+        try:
+            _list_ports_mod.comports = (
+                lambda only=target_port, _r=real_comports:
+                [p for p in _r() if p.device == only]
+            )
+            spec.loader.exec_module(mod)  # upstream module calls init() on import
+        finally:
+            _list_ports_mod.comports = real_comports
+        return mod
+    except Exception as e:
+        _log(f"[{tag}] private picoh load failed: {e!r}")
         sys.modules.pop(modname, None)
         return None
 
@@ -266,6 +324,16 @@ _IDLE_RECIPES = [
 # ===========================================================================
 
 class RobotHead:
+    driver = "ohbot"
+    supported_motors = ALL_MOTORS
+    factory_centers = dict(_DEFAULT_CENTERS)
+    supported_actions = (
+        "nod_yes", "shake_no", "blink", "wink",
+        "look_left", "look_right", "look_up", "look_down", "look_center",
+        "happy", "sad", "surprised", "curious", "neutral",
+    )
+    color_target = "eyes"
+
     def __init__(self, name: str, calib_path: str):
         self.name = name
         self._calib_path = calib_path
@@ -280,7 +348,7 @@ class RobotHead:
         # invert flag. With invert=False opening the mouth increases the motor
         # value; invert=True opening decreases it. The GUI exposes both.
         self._calibration = {
-            "centers": dict(_DEFAULT_CENTERS),
+            "centers": dict(self.factory_centers),
             "auto_movement": True,
             "lip_invert_top": False,
             "lip_invert_bottom": False,
@@ -310,7 +378,10 @@ class RobotHead:
 
         self._busy_until = 0.0      # Unix time; idle loop skips if now < this.
         # Last commanded position per motor — read by current_pose().
-        self._last_pos = {m: _DEFAULT_CENTERS[m] for m in ALL_MOTORS}
+        self._last_pos = {
+            m: float(self.factory_centers.get(m, _DEFAULT_CENTER))
+            for m in ALL_MOTORS
+        }
 
         self._lip_active = False
         self._lip_thread = None
@@ -399,7 +470,8 @@ class RobotHead:
 
     def center(self, motor: int) -> float:
         """Calibrated rest position for a motor (0-10)."""
-        return float(self._calibration["centers"].get(int(motor), _DEFAULT_CENTER))
+        return float(self._calibration["centers"].get(
+            int(motor), self.factory_centers.get(int(motor), _DEFAULT_CENTER)))
 
     def get_calibration(self):
         """Snapshot of the current calibration (centers + flags)."""
@@ -421,6 +493,10 @@ class RobotHead:
             "current_pose": self.current_pose(),
             "builtin_expressions": sorted(_EXPRESSIONS.keys()),
             "custom_expressions": dict(self._calibration.get("custom_expressions") or {}),
+            "driver": self.driver,
+            "supported_motors": list(self.supported_motors),
+            "supported_actions": list(self.supported_actions),
+            "color_target": self.color_target,
         }
 
     def set_idle_params(self, frequency=None, amplitude=None) -> bool:
@@ -539,7 +615,7 @@ class RobotHead:
     def set_center(self, motor: int, pos: float) -> bool:
         """Save `pos` as motor's calibrated rest position. Persists to disk."""
         m = int(motor)
-        if m not in ALL_MOTORS:
+        if m not in self.supported_motors:
             return False
         self._calibration["centers"][m] = float(_clip(pos, _MIN_POS, _MAX_POS))
         self._save_calibration()
@@ -626,7 +702,7 @@ class RobotHead:
         if self._available:
             self._autopin(target)
             excl = set(self._excluded_lip_motors())
-            for m in ALL_MOTORS:
+            for m in self.supported_motors:
                 if m in excl:
                     self._detach_motor(m)   # leave a strain-prone lip de-energized
                 else:
@@ -642,7 +718,7 @@ class RobotHead:
             return
         sn = _serial_for_port(target)
         if sn:
-            assign_board(self.name, sn, target)
+            assign_board(self.name, sn, target, driver=self.driver)
             _log(f"[{self.name}] pinned to board serial {sn} ({target}).")
 
     def close(self) -> None:
@@ -673,7 +749,7 @@ class RobotHead:
             with self._lock:
                 self._ohbot.reset()
             excl = set(self._excluded_lip_motors())
-            for m in ALL_MOTORS:
+            for m in self.supported_motors:
                 if m in excl:
                     self._detach_motor(m)
                 else:
@@ -719,7 +795,7 @@ class RobotHead:
     def _move_internal(self, motor: int, pos: float, speed: float = 5.0) -> bool:
         """Write to a motor; assumes init() ran and we want the raw pos. Does not
         bump the busy timer (used by the idle loop too)."""
-        if not self._available:
+        if not self._available or int(motor) not in self.supported_motors:
             return False
         try:
             pos_c = _clip(pos, _MIN_POS, _MAX_POS)
@@ -816,7 +892,8 @@ class RobotHead:
             return False
         self._mark_busy(0.8)
         for motor, off in pose.items():
-            self._move_internal(motor, self.center(motor) + off, speed)
+            if motor in self.supported_motors:
+                self._move_internal(motor, self.center(motor) + off, speed)
         if m == "wink":
             time.sleep(0.25)
             self._move_internal(LIDBLINK, self.center(LIDBLINK), speed=10)
@@ -842,7 +919,7 @@ class RobotHead:
         for k, v in pose_src.items():
             try:
                 m = int(k)
-                if m not in ALL_MOTORS:
+                if m not in self.supported_motors:
                     continue
                 pose[m] = float(_clip(float(v), _MIN_POS, _MAX_POS))
             except Exception:
@@ -875,7 +952,8 @@ class RobotHead:
             return False
         self._mark_busy(0.8)
         for motor, pos in cust.items():
-            self._move_internal(int(motor), float(pos), speed)
+            if int(motor) in self.supported_motors:
+                self._move_internal(int(motor), float(pos), speed)
         return True
 
     def eye_color(self, r: int, g: int, b: int) -> bool:
@@ -892,6 +970,10 @@ class RobotHead:
         except Exception as e:
             _log(f"[{self.name}] eyeColour error: {e!r}")
             return False
+
+    def eye_expression(self, mood: str) -> bool:
+        """Set a display-only eye expression when the model supports one."""
+        return False
 
     def say(self, text: str, lip_sync: bool = True) -> bool:
         """Speak via the Ohbot board's SAPI + native lip-sync. Blocks until done."""
@@ -1159,22 +1241,294 @@ class RobotHead:
         self._auto_thread.start()
 
 
+class PicohHead(RobotHead):
+    """Three-servo Ohbot Picoh exposed through the common head interface.
+
+    Picoh uses servo channels 0/1/5 for head nod, head turn and jaw. Channels
+    2/3/6 control its LED-matrix pupils and blink animation. It has no physical
+    top lip or head-roll servo, and its RGB light is in the base rather than the
+    eyes. Keeping those capabilities explicit prevents the eight-motor Ohbot
+    tuning/demo paths from driving nonexistent Picoh mechanisms.
+    """
+
+    driver = "picoh"
+    supported_motors = (HEADNOD, HEADTURN, EYETURN, LIDBLINK, BOTTOMLIP, EYETILT)
+    factory_centers = {**_DEFAULT_CENTERS, LIDBLINK: 10.0}
+    supported_actions = (
+        "nod_yes", "shake_no", "blink", "wink",
+        "look_left", "look_right", "look_up", "look_down", "look_center",
+        "happy", "sad", "surprised", "curious", "neutral",
+    )
+    color_target = "base"
+    _EYE_SHAPES = {
+        "neutral": "Eyeball",
+        "happy": "Heart",
+        "sad": "Sad",
+        "surprised": "Large",
+        "curious": "Eyeball",
+    }
+    _MOOD_EYE_SHAPES = {
+        "neutral": "Eyeball",
+        "alert": "Angry",
+        "sad": "Sad",
+        "somber": "Sad",
+        "affection": "Heart",
+        "happy": "Heart",
+        "cheerful": "Heart",
+        "curious": "SmallBall",
+        "positive": "Large",
+        "surprised": "Large",
+    }
+    _IDLE_RECIPES = [
+        ("blink", None),
+        ("blink", None),
+        ("nudge", (HEADNOD, [-0.7, -0.4, 0.4, 0.7], 3, 0.5, 1.0)),
+        ("nudge", (HEADTURN, [-0.9, -0.5, 0.5, 0.9], 3, 0.7, 1.2)),
+        ("nudge", (EYETURN, [-1.2, 1.2], 6, 0.35, 0.7)),
+        ("nudge", (EYETILT, [-1.0, 1.0], 6, 0.35, 0.7)),
+    ]
+
+    def __init__(self, name: str, calib_path: str):
+        super().__init__(name, calib_path)
+        self._calibration["centers"][LIDBLINK] = 10.0
+        self._last_pos[LIDBLINK] = 10.0
+        self._calibration["lip_drive"] = "bottom"
+        self._calibration["eye_swap_rg"] = False
+
+    def init(self, port_name: str = "") -> bool:
+        if self._initialized:
+            return self._available
+        self._load_calibration()
+        # Picoh has one physical jaw; preserve that invariant even if an old
+        # calibration file was copied from an eight-motor Ohbot.
+        # Its matrix blink is likewise a 0..10 animation amount, not a servo
+        # centre that should inherit or retain an Ohbot calibration value.
+        self._calibration["centers"][LIDBLINK] = 10.0
+        self._last_pos[LIDBLINK] = 10.0
+        self._calibration["lip_drive"] = "bottom"
+        if not _PICOH_LIB:
+            if not self._warned_missing:
+                _log("picoh library not installed (pip install picoh). Casper head control disabled.")
+                self._warned_missing = True
+            self._initialized = True
+            return False
+        target = self._resolve_port(port_name)
+        if not target:
+            if not self._warned_missing:
+                _log(f"[{self.name}] no Picoh board assigned/found — head disabled (no-op).")
+                self._warned_missing = True
+            self._initialized = True
+            self._available = False
+            return False
+        try:
+            picoh = _load_private_picoh(self.name, target)
+            if picoh is None:
+                raise RuntimeError("could not load private picoh module")
+            self._ohbot = picoh
+            connected_ok = bool(getattr(picoh, "connected", False))
+            if not connected_ok:
+                raise RuntimeError(f"no Picoh responded on {target}")
+            self._available = True
+            self._port = target
+            self._autopin(target)
+            try:
+                with self._lock:
+                    picoh.setEyeShape("Eyeball")
+                    picoh.baseColour(0, 0, 0)
+            except Exception:
+                pass
+            for motor in self.supported_motors:
+                self._move_internal(motor, self.center(motor), speed=3.0)
+            _log(f"[{self.name}] Picoh connected on {target} and parked at neutral.")
+        except Exception as e:
+            _log(f"[{self.name}] could not connect Picoh ({e!r}). Is the Ohbot app closed?")
+            self._available = False
+        self._initialized = True
+        self._start_auto_thread()
+        return self._available
+
+    def close(self) -> None:
+        self._auto_stop = True
+        if self._available and self._ohbot is not None:
+            try:
+                self.lip_stop()
+                with self._lock:
+                    self._ohbot.baseColour(0, 0, 0)
+                    self._ohbot.close()
+                    ser = getattr(self._ohbot, "ser", None)
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                _log(f"[{self.name}] Picoh close() error: {e!r}")
+        self._initialized = False
+        self._available = False
+        self._ohbot = None
+        self._port = ""
+
+    def reset(self) -> bool:
+        if not self.init():
+            return False
+        try:
+            with self._lock:
+                self._ohbot.baseColour(0, 0, 0)
+                self._ohbot.setEyeShape("Eyeball")
+            for motor in self.supported_motors:
+                self._move_internal(motor, self.center(motor), speed=4.0)
+            return True
+        except Exception as e:
+            _log(f"[{self.name}] Picoh reset() error: {e!r}")
+            return False
+
+    def set_lip_drive(self, mode) -> bool:
+        mode = str(mode or "").strip().lower()
+        if mode not in ("bottom", "jaw"):
+            return False
+        self._calibration["lip_drive"] = "bottom"
+        self._save_calibration()
+        if self._available:
+            self._move_internal(BOTTOMLIP, self.center(BOTTOMLIP), speed=4.0)
+        return True
+
+    def _set_mouth(self, openness: float) -> None:
+        openness = _clip(openness, 0.0, 1.0)
+        sign = -1.0 if self._calibration.get("lip_invert_bottom") else +1.0
+        travel = float(self._calibration.get("lip_bottom_range", _LIP_BOTTOM_RANGE))
+        speed = float(_clip(
+            self._calibration.get("lip_speed", _LIP_FLAP_SPEED), 1.0, 10.0))
+        self._move_internal(
+            BOTTOMLIP,
+            _clip(self.center(BOTTOMLIP) + sign * travel * openness,
+                  _LIP_SOFT_MIN, _LIP_SOFT_MAX),
+            speed=speed,
+        )
+
+    def _lip_sweep_run(self, my_token):
+        try:
+            for pos in (5.0, 6.5, 8.0, 9.0, 5.0):
+                if self._lip_token != my_token or not self._available:
+                    return
+                self._move_internal(BOTTOMLIP, pos, speed=3.0)
+                time.sleep(0.55)
+            self._move_internal(BOTTOMLIP, self.center(BOTTOMLIP), speed=4.0)
+        finally:
+            if self._lip_token == my_token:
+                self._set_mouth(0.0)
+
+    def lip_relax(self) -> bool:
+        if not self.init():
+            return False
+        self._lip_active = False
+        self._lip_token += 1
+        self._detach_motor(BOTTOMLIP)
+        return True
+
+    def expression(self, mood: str, speed: float = 5.0) -> bool:
+        name = (mood or "").lower().strip()
+        if name not in self.supported_actions:
+            return False
+        if not self.init():
+            return False
+        self._mark_busy(0.8)
+        if name == "wink":
+            try:
+                with self._lock:
+                    self._ohbot.move(LIDBLINK, 0.0, 10, 1)
+                time.sleep(0.25)
+                with self._lock:
+                    self._ohbot.move(LIDBLINK, self.center(LIDBLINK), 10, 1)
+                return True
+            except Exception as e:
+                _log(f"[{self.name}] Picoh wink error: {e!r}")
+                return False
+        shape = self._EYE_SHAPES.get(name)
+        if shape:
+            try:
+                with self._lock:
+                    self._ohbot.setEyeShape(shape)
+            except Exception as e:
+                _log(f"[{self.name}] Picoh eye shape error: {e!r}")
+        offsets = {
+            "neutral": {HEADNOD: 0, HEADTURN: 0, EYETURN: 0, EYETILT: 0},
+            "happy": {HEADNOD: 0.8},
+            "sad": {HEADNOD: -1.3},
+            "surprised": {HEADNOD: 1.0},
+            "curious": {HEADNOD: 0.7, HEADTURN: 1.0, EYETURN: 0.8},
+        }.get(name, {})
+        for motor, offset in offsets.items():
+            self._move_internal(motor, self.center(motor) + offset, speed)
+        return True
+
+    def apply_expression(self, name, speed: float = 5.0) -> bool:
+        if (name or "").strip().lower() in _EXPRESSIONS:
+            return self.expression(name, speed)
+        return super().apply_expression(name, speed)
+
+    def eye_color(self, r: int, g: int, b: int) -> bool:
+        """Mood colour maps to Picoh's illuminated base (its eyes are a matrix)."""
+        if not self.init():
+            return False
+        try:
+            with self._lock:
+                self._ohbot.baseColour(
+                    int(_clip(r, 0, 10)),
+                    int(_clip(g, 0, 10)),
+                    int(_clip(b, 0, 10)),
+                )
+            return True
+        except Exception as e:
+            _log(f"[{self.name}] Picoh baseColour error: {e!r}")
+            return False
+
+    def eye_expression(self, mood: str) -> bool:
+        """Change only Picoh's matrix eyes, leaving head pose and jaw untouched."""
+        name = (mood or "neutral").lower().strip()
+        shape = self._MOOD_EYE_SHAPES.get(name)
+        if not shape or not self.init():
+            return False
+        try:
+            with self._lock:
+                self._ohbot.setEyeShape(shape)
+            return True
+        except Exception as e:
+            _log(f"[{self.name}] Picoh mood eye-shape error: {e!r}")
+            return False
+
+    def _do_idle_motion(self):
+        kind, spec = random.choice(self._IDLE_RECIPES)
+        if kind == "blink":
+            c = self.center(LIDBLINK)
+            self._move_internal(LIDBLINK, 0.0, speed=10)
+            time.sleep(0.10)
+            self._move_internal(LIDBLINK, c, speed=10)
+            return
+        motor, choices, speed, hold_min, hold_max = spec
+        self._nudge(motor, random.choice(choices), speed, hold_min, hold_max)
+
+
 # ===========================================================================
 # Instances + registry of robots
 # ===========================================================================
 
 _CALIB_PATH = os.path.join(os.getcwd(), "data", "head_calibration.json")
 _CALIB_PATH_HEXIA = os.path.join(os.getcwd(), "data", "head_calibration_hexia.json")
+_CALIB_PATH_PICO = os.path.join(os.getcwd(), "data", "head_calibration_pico.json")
 
 blue = RobotHead("blue", _CALIB_PATH)
 hexia = RobotHead("hexia", _CALIB_PATH_HEXIA)
+pico = PicohHead("pico", _CALIB_PATH_PICO)
 
-_ROBOTS = {"blue": blue, "hexia": hexia}
+_ROBOTS = {"blue": blue, "hexia": hexia, "pico": pico}
 
 
 def get_head(name) -> RobotHead:
     """Fetch a robot head by name (defaults to Blue for unknown names)."""
-    return _ROBOTS.get((name or _PRIMARY).strip().lower(), blue)
+    key = (name or _PRIMARY).strip().lower()
+    if key in ("casper", "caspar", "picoh"):
+        key = "pico"
+    return _ROBOTS.get(key, blue)
 
 
 def all_heads():
@@ -1191,15 +1545,20 @@ def close_all():
 
 def detect_boards():
     """Snapshot for the setup UI: every serial board, whether it answers the
-    Ohbot handshake, and which robot (if any) it's pinned to. Ports currently
+    Ohbot-family handshake, and which robot (if any) it's pinned to. Ports currently
     held open by a connected head are reported as compatible without re-probing
     (you can't reopen a held port)."""
     reg = _load_registry()
     role_by_serial = {}
+    driver_by_serial = {}
     for role, info in reg.items():
         sn = (info or {}).get("serial_number")
         if sn:
             role_by_serial[sn] = role
+            driver_by_serial[sn] = (
+                (info or {}).get("driver")
+                or ("picoh" if role == "pico" else "ohbot")
+            )
     held = {}
     for role, h in _ROBOTS.items():
         if getattr(h, "_available", False) and getattr(h, "_port", ""):
@@ -1209,14 +1568,33 @@ def detect_boards():
         dev = b["device"]
         sn = b.get("serial_number")
         held_role = held.get(dev)
+        version = "v2" if held_role else _probe_ohbot(dev)
+        assigned_role = role_by_serial.get(sn)
+        assigned_driver = driver_by_serial.get(sn)
+        # Older Picohs commonly enumerate as Arduino Micro; newer Ohbrain
+        # controllers use RP2040. This is a hint only—the explicit role/driver
+        # assignment remains authoritative because both answer "v2".
+        likely_picoh = b.get("vid") in (0x2341, 0x2A03)
         boards.append({
             "device": dev,
             "serial_number": sn,
             "vid": b.get("vid"),
             "pid": b.get("pid"),
             "description": b.get("description"),
-            "ohbot_compatible": True if held_role else bool(_probe_ohbot(dev)),
-            "assigned_to": role_by_serial.get(sn),
+            "ohbot_compatible": bool(version),
+            "protocol_version": version,
+            "assigned_to": assigned_role,
+            "driver": (
+                getattr(_ROBOTS.get(held_role), "driver", None)
+                if held_role else assigned_driver
+            ),
+            "suggested_driver": (
+                assigned_driver or ("picoh" if likely_picoh else "ohbot")
+            ),
+            "compatible_drivers": (
+                ["ohbot", "picoh"] if version == "v2"
+                else (["ohbot"] if version else [])
+            ),
             "held_by": held_role,
         })
     return {"boards": boards, "registry": reg}
