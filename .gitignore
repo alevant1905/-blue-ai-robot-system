@@ -124,9 +124,9 @@ dmypy.json
 
 # Blue AI Robot System specific
 # SQLite databases (contain personal data)
-data/*.db
-data/*.db-journal
-data/*.db-wal
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
 
 # Gmail OAuth tokens and credentials
 gmail_token.pickle
@@ -175,7 +175,7 @@ desktop.ini
 # === Personal data & runtime artifacts — keep OFF GitHub (added 2026-05-16) ===
 # Entire data dir: SQLite DBs, ChromaDB vector store, backups, runtime state,
 # and data/facebook_config.json (contains an app secret).
-data/
+/data/
 # Local Claude Code tooling, settings, and git worktrees — never commit these.
 .claude/
 # Debug dumps of LM Studio requests — contain raw conversation content.

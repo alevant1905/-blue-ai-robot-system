@@ -82,7 +82,7 @@ def _load_map(root: Path) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]],
     )
     forbidden = list(data.get("forbidden", []))
     forbidden += [key for key, _ in literals] + [key for key, _ in words]
-    return literals, words, forbidden
+    return literals, words, forbidden, list(data.get("exclude", []))
 
 
 def _cased(found: str, replacement: str) -> str:
@@ -192,8 +192,14 @@ def main() -> int:
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
 
-    literals, words, forbidden = _load_map(root)
+    literals, words, forbidden, exclude = _load_map(root)
     _export_head(root, destination)
+    for relative in exclude:
+        target = destination / relative
+        if target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
 
     changed = 0
     for path in sorted(destination.rglob("*")):
