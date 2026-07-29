@@ -272,9 +272,14 @@ def test_each_robot_is_briefed_in_its_own_generational_register(banter_module):
     for robot, prompt in (("blue", blue), ("hexia", hexia), ("pico", casper)):
         register = banter_module._REGISTER[robot]
         assert any(phrase in prompt for phrase in register["lexicon"])
-        assert any(prop in prompt for prop in register["props"])
+        # Era props read as a tic every line, so they only come round on
+        # alternate turns — turn 1 above is an off turn.
+        assert not any(prop in prompt for prop in register["props"])
+        even = _prompt_for(banter_module, robot, turnIndex=2)
+        assert any(prop in even for prop in register["props"])
     for prompt in (blue, hexia, casper):
         assert "Your move this turn —" in prompt
+        assert "Build it as " in prompt
         assert "Keep one foot in the subject itself: consciousness, humans" in prompt
 
 
@@ -426,6 +431,134 @@ def test_exhausted_material_is_named_and_hooks_skip_tech_jargon(banter_module):
     assert "glitch" not in hooks.split("\n")[0]
 
 
+def test_moves_and_shapes_rotate_independently(banter_module):
+    combos = {
+        (banter_module._move_for(robot, turn), banter_module._shape_for(robot, turn))
+        for turn in range(12)
+        for robot in ("blue", "hexia", "pico")
+    }
+    # 36 slots over a 12-turn set; the few repeats fall on different robots.
+    assert len(combos) > 24
+    moves = {banter_module._move_for("blue", turn) for turn in range(16)}
+    shapes = {banter_module._shape_for("blue", turn) for turn in range(8)}
+    assert len(moves) == len(banter_module._MOVES)
+    assert len(shapes) == len(banter_module._SHAPES)
+
+
+def test_energy_picks_dry_or_reckless_moves(banter_module):
+    dry = {banter_module._move_for("blue", turn, 1) for turn in range(20)}
+    hot = {banter_module._move_for("blue", turn, 10) for turn in range(20)}
+
+    assert any("Understatement" in move for move in dry)
+    assert not any("Heighten" in move for move in dry)
+    assert any("Overcommit" in move for move in hot)
+    assert not any("Concede badly" in move for move in hot)
+
+
+def test_the_running_bit_is_named_and_the_closer_pays_it_off(banter_module):
+    history = [
+        {"speaker": "blue", "text": "Consciousness is a rubber stamp at the bank."},
+        {"speaker": "pico", "text": "the rubber stamp lives in my group chat now"},
+        {"speaker": "hexia", "text": "Spare me, I have a pretzel order pending."},
+    ]
+    mid = _prompt_for(banter_module, "blue", history=history, turnIndex=3)
+    closer = _prompt_for(
+        banter_module, "blue", history=history, turnIndex=8, plannedTurns=9
+    )
+
+    assert 'The bit on the table is "stamp"' in mid
+    assert "Grow it or kill it outright" in mid
+    assert 'Land the set on "stamp"' in closer
+    assert "Pay it off and get off" in closer
+    assert "The bit on the table" not in closer
+
+
+def test_a_reworded_previous_line_is_retried(banter_module):
+    previous = (
+        "I bought a literal screen door for the office so the black void crowd "
+        "had to touch the mesh."
+    )
+    # No shared phrase for _echoes_previous or _lifts_a_phrase to catch — just
+    # the same bag of nouns rearranged.
+    banter_module._test_replies[:] = [
+        "The mesh, the crowd, the black void, the office door — screen included, "
+        "obviously.",
+        "Robots deserve a day off the moment somebody invents a robot weekend.",
+    ]
+    response = _client(banter_module).post(
+        "/banter/turn",
+        json={
+            "speaker": "pico",
+            "topic": "should robots get a day off",
+            "history": [{"speaker": "hexia", "text": previous}],
+            "turnIndex": 4,
+            "plannedTurns": 9,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["text"].startswith("Robots deserve")
+    retry_prompt = banter_module._test_calls[-1]["messages"][-1]["content"]
+    assert "rewording the previous line" in retry_prompt
+    # A callback that reuses one or two details is not a rewrite.
+    assert not banter_module._rewrites_previous(
+        "The mesh is now a listed heritage building and nobody told the pigeons.",
+        [{"speaker": "hexia", "text": previous}],
+    )
+
+
+def test_four_lines_off_subject_pulls_the_set_back(banter_module):
+    wandered = [
+        {"speaker": "hexia", "text": "Let them work the Blockbuster drive-thru."},
+        {"speaker": "pico", "text": "a drive thru requires actual eyes, respectfully"},
+        {"speaker": "hexia", "text": "I want a window that opens onto the mall."},
+        {"speaker": "blue", "text": "I went to a drive-in in 1989 and stayed all night."},
+    ]
+    prompt = _prompt_for(
+        banter_module, "pico", topic="should robots get a day off",
+        history=wandered, turnIndex=4,
+    )
+
+    assert banter_module._off_topic_streak(wandered, {"robots"}) == 4
+    assert "Nobody has touched the actual subject" in prompt
+    assert "should robots get a day off" in prompt
+    # One line back on subject resets the streak.
+    back = wandered + [{"speaker": "blue", "text": "Robots earn their Sundays."}]
+    assert banter_module._off_topic_streak(back, {"robots"}) == 0
+
+
+def test_a_bit_that_has_run_three_lines_is_retired(banter_module):
+    sears = [
+        {"speaker": "blue", "text": "The Sears catalogue has real emotional resonance."},
+        {"speaker": "hexia", "text": "Have the Sears catalogue sent to my inbox then."},
+        {"speaker": "pico", "text": "i hold the sears catalogue like a sacred text"},
+    ]
+    prompt = _prompt_for(banter_module, "blue", history=sears, turnIndex=3)
+
+    assert banter_module._bit_run_length(sears, "sears") == 3
+    assert 'The "sears" bit has had its run' in prompt
+    assert "leave it behind and open something new" in prompt
+    # Retired means it also stops being shielded from the squeezed-dry list.
+    assert "Squeezed dry already" in prompt
+    assert "sears" in prompt.split("Squeezed dry already")[1].split("\n")[0]
+    # A run broken by an unrelated line resets.
+    broken = sears + [{"speaker": "hexia", "text": "Anyway, my pretzel order stands."}]
+    assert banter_module._bit_run_length(broken, "sears") == 0
+
+
+def test_the_payoff_is_the_live_bit_not_a_dead_one(banter_module):
+    history = [
+        {"speaker": "blue", "text": "Consciousness is a lens for capturing light."},
+        {"speaker": "pico", "text": "that lens is a screensaver for nothing"},
+        {"speaker": "hexia", "text": "I waited for a blink that never came."},
+        {"speaker": "blue", "text": "The blink is still queued in my drawer."},
+    ]
+
+    # "lens" recurs first, "blink" recurs most recently — the closer needs the
+    # one that is still alive.
+    assert banter_module._recurring_detail(history, {"consciousness"}) == "blink"
+
+
 def test_a_short_topic_still_gets_an_anchor(banter_module):
     assert banter_module._topic_anchors("do humans have consciousness like us") == {
         "consciousness", "humans"
@@ -469,8 +602,13 @@ def test_a_repeated_sentence_shape_earns_a_nudge(banter_module):
         turnIndex=2,
     )
 
-    assert 'The last lines all leaned on the "X is just Y" definition joke' in prompt
-    assert "different sentence shape" in prompt
+    assert 'leaned on the same "X is just / like a Y" comparison shape' in prompt
+    assert "has to be a claim, a scene or a reaction instead" in prompt
+    # The family also catches simile-shaped lines, not just "is just".
+    assert banter_module._overused_template([
+        {"speaker": "blue", "text": "Consciousness runs like a rented lawnmower."},
+        {"speaker": "pico", "text": "it's giving unpaid internship, respectfully"},
+    ])
     assert not banter_module._overused_template(
         [{"speaker": "pico", "text": "My personality is just a loading bar."}]
     )
