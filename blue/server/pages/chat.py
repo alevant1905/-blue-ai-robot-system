@@ -151,6 +151,13 @@ CHAT_HTML = """
         .voice-row.sel .vn:after { content: ' \2713'; color: var(--forest); }
         .voice-row .vl { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); white-space: nowrap; }
         .voice-empty { padding: 18px; color: var(--slate); text-align: center; }
+        .voice-search { margin: 8px 18px 2px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+                        font: inherit; color: var(--ink); background: var(--paper); }
+        .voice-section { padding: 11px 5px 2px; font-family: 'IBM Plex Mono', monospace; font-size: 0.7em;
+                         letter-spacing: 0.08em; text-transform: uppercase; color: var(--slate); }
+        .voice-row .vmeta { display: flex; flex-direction: column; min-width: 0; }
+        .voice-row .vtraits { color: var(--slate); font-size: 0.72em; margin-top: 2px; overflow: hidden;
+                              text-overflow: ellipsis; white-space: nowrap; }
         .lang-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 18px 10px; border-bottom: 1px solid var(--line); }
         .lang-chip { border: 1px solid var(--line); background: var(--paper); border-radius: 16px; padding: 5px 12px; font-size: 0.82em; cursor: pointer; }
         .lang-chip.sel { border-color: var(--forest); background: #eef4ee; font-weight: 600; }
@@ -301,7 +308,7 @@ CHAT_HTML = """
                 <div>I'm so happy to see you! Tap the big microphone and let's chat.</div>
                 {% else %}
                 <div class="big">Say hello to {{ robot_name }}</div>
-                <div>Ask {{ robot_name }} anything, or attach a photo and ask what he sees. Attach a document and ask him about it.</div>
+                <div>Ask {{ robot_name }} anything, or attach a photo and ask what they see. Attach a document and ask about it.</div>
                 {% endif %}
             </div>
         </div>
@@ -333,14 +340,14 @@ CHAT_HTML = """
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
                 </button>
                 {% endif %}
-                <button class="iconbtn" id="hfBtn" title="Hands-free: say 'Blue' to start" aria-label="Hands-free listening" aria-pressed="false">
+                <button class="iconbtn" id="hfBtn" title="Hands-free: say '{{ robot_name }}' to start" aria-label="Hands-free listening" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
                 </button>
                 <textarea id="input" placeholder="Message {{ robot_name }}..." rows="1"></textarea>
                 <button class="iconbtn" id="voiceBtn" title="Choose {{ robot_name }}'s voice" aria-label="Choose {{ robot_name }}'s voice">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
                 </button>
-                <button class="iconbtn" id="speakBtn" title="Blue reads his answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
+                <button class="iconbtn" id="speakBtn" title="{{ robot_name }} reads answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg>
                 </button>
                 <button class="iconbtn" id="connHeadBtn" title="Drive {{ robot_name }}'s head from this device's USB-C port" aria-label="Connect a USB-C head" aria-pressed="false" style="display:none">
@@ -361,16 +368,17 @@ CHAT_HTML = """
             {% endif %}
             <div class="hint">Enter to send &middot; Shift+Enter for a new line</div>
             <div id="hfStatus" class="hf-status" style="display:none"></div>
-            <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "Blue" first</button>
+            <button id="hfModeBtn" class="hf-mode-btn" style="display:none" type="button">Mode: say "{{ robot_name }}" first</button>
         </div>
     </div>
 
     <div class="voice-panel" id="voicePanel" style="display:none">
         <div class="voice-card">
             <div class="voice-head"><span>{{ robot_name }} &mdash; language &amp; voice</span><button id="voiceClose" aria-label="Close">&times;</button></div>
-            <div class="voice-sub">Which language are we speaking? Auto means {{ robot_name }} guesses from each clip; picking one makes him hear and answer in it reliably.</div>
+            <div class="voice-sub">Which language are we speaking? Auto means {{ robot_name }} guesses from each clip; picking one helps the robot hear and answer in it reliably.</div>
             <div class="lang-row" id="langRow"></div>
-            <div class="voice-sub">Tap a voice to hear it. The one with a check mark is the one Blue uses.</div>
+            <div class="voice-sub">Neural voices work on every device and send only the spoken reply text to Microsoft's online speech service. Tap one to preview it; the check mark is what {{ robot_name }} uses.</div>
+            <input class="voice-search" id="voiceSearch" type="search" placeholder="Search voices, regions, or styles" autocomplete="off">
             <div class="voice-list" id="voiceList"></div>
         </div>
     </div>
@@ -622,22 +630,59 @@ CHAT_HTML = """
         // Voice-first for Vilda's iPad: replies are read out loud and the mic is
         // big. The mic uses the browser's speech recognition, which Safari only
         // allows over a secure (https) connection — hence the Tailscale setup.
-        // Which robot this page is — Blue (/chat) or Hexia (/hexia). Drives the
-        // chat target, the accent colour, the spoken voice and which head moves.
+        // Which robot this page belongs to. Drives the chat target, accent,
+        // spoken voice, wake name, and physical head.
         const ROBOT = {{ robot_json|safe }};
         try { if (ROBOT.accent) document.documentElement.style.setProperty('--blue', ROBOT.accent); } catch (e) {}
         const isVilda = blueDeviceTag() === 'ipad';
         let speakOn = isVilda;
         let audioPrimed = false;
+        let SERVER_VOICE_PREF = { provider: 'browser', voice: '' };
+        let SERVER_VOICES = [];
+        let SERVER_VOICE_STATUS = 'loading';
+        let _neuralAudio = (typeof Audio !== 'undefined') ? new Audio() : null;
+        let _neuralAbort = null, _neuralObjectUrl = '', _neuralGeneration = 0;
         const micBtn = document.getElementById('micBtn');
         const speakBtn = document.getElementById('speakBtn');
 
         function primeAudio() {
             // iOS only lets speech start after a real tap; speaking an empty line
             // during the tap unlocks it for the automatic replies that follow.
-            if (audioPrimed || !('speechSynthesis' in window)) return;
-            try { window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); audioPrimed = true; }
-            catch (e) { /* no speech available */ }
+            if (audioPrimed) return;
+            try {
+                if ('speechSynthesis' in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+            } catch (e) { /* browser speech unavailable */ }
+            // Prime the reusable HTMLAudio element too. This silent WAV is
+            // initiated inside the user's tap so iOS permits later neural audio
+            // after the asynchronous server request completes.
+            try {
+                if (_neuralAudio) {
+                    _neuralAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+                    const p = _neuralAudio.play();
+                    if (p && p.then) p.then(function () { _neuralAudio.pause(); }).catch(function () {});
+                }
+            } catch (e) { /* HTML audio unavailable */ }
+            audioPrimed = true;
+        }
+
+        function isRobotSpeaking() {
+            const browserTalking = !!(window.speechSynthesis &&
+                (window.speechSynthesis.speaking || window.speechSynthesis.pending));
+            const neuralTalking = !!(_neuralAudio && !_neuralAudio.paused && !_neuralAudio.ended);
+            return browserTalking || neuralTalking;
+        }
+
+        function cancelNeuralAudio() {
+            _neuralGeneration++;
+            if (_neuralAbort) { try { _neuralAbort.abort(); } catch (e) {} _neuralAbort = null; }
+            if (_neuralAudio) {
+                _neuralAudio.onplay = _neuralAudio.onended = _neuralAudio.onerror = null;
+                try { _neuralAudio.pause(); _neuralAudio.removeAttribute('src'); _neuralAudio.load(); } catch (e) {}
+            }
+            if (_neuralObjectUrl) {
+                try { URL.revokeObjectURL(_neuralObjectUrl); } catch (e) {}
+                _neuralObjectUrl = '';
+            }
         }
 
         // Pick a voice for the given language, preferring a male voice where one
@@ -769,18 +814,32 @@ CHAT_HTML = """
             return out.length ? out : [msg];
         }
 
-        // ===== Mood eyes: tint the LEDs to match the reply, revert when done =====
-        // The server computes a colour from the sentiment of each reply and
-        // returns it as data.eye_mood {r,g,b,name} (0-10 scale). We drive it the
+        // ===== Reply mood: tint the LEDs and animate Picoh's matrix eyes =====
+        // The server computes a colour + expression from each reply and
+        // returns data.eye_mood {r,g,b,name,expression} (0-10 colour scale). We drive it the
         // same way lip-sync is driven: a Web Serial head plugged into THIS device
         // wins (localHeadControl), else the PC-connected head over the server
         // route. Vilda's iPad never moves the physical robot.
-        const REST_EYES = { r: 0, g: 0, b: 0 };   // eyes dark when he's not talking (head reset baseline)
+        const REST_EYES = { r: 0, g: 0, b: 0, name: 'neutral', expression: 'neutral' };
         let _eyeRevertTimer = null;
         function _setEyes(c) {
             if (isVilda || !c) return;
             try {
-                const body = { r: c.r | 0, g: c.g | 0, b: c.b | 0 };
+                const body = {
+                    r: c.r | 0, g: c.g | 0, b: c.b | 0,
+                    name: c.name || 'neutral',
+                    expression: c.expression || c.name || 'neutral'
+                };
+                // Picoh's eyes are an LED matrix and its RGB light is in the
+                // base. One server call changes both without moving the head.
+                if (ROBOT.headDriver === 'picoh') {
+                    fetch('/head/' + ROBOT.head + '/mood', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    return;
+                }
                 if (!localHeadControl(ROBOT.head, '/head/eye-color', body)) {
                     fetch('/head/' + ROBOT.head + '/eye-color', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 }
@@ -818,8 +877,9 @@ CHAT_HTML = """
             } catch (e) {}
         }
 
-        function speak(text) {
+        function speakBrowser(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
+            cancelNeuralAudio();
             const msg = cleanForSpeech(text);
             if (!msg) return;
             const lang = langForSpeech(msg);
@@ -876,9 +936,92 @@ CHAT_HTML = """
             } catch (e) { /* ignore */ }
         }
 
+        async function speakNeural(msg, voiceId, previewOnly) {
+            if (!_neuralAudio || !voiceId) {
+                if (!previewOnly) speakBrowser(msg);
+                return;
+            }
+            try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch (e) {}
+            cancelNeuralAudio();
+            const generation = _neuralGeneration;
+            const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            _neuralAbort = controller;
+            const rate = (isVilda ? 0.95 : 1.0) * ((ROBOT && ROBOT.voiceRate) || 1.0);
+            const pitch = (ROBOT && ROBOT.voicePitch) || 1.0;
+            let started = false;
+
+            function finishNeural() {
+                if (generation !== _neuralGeneration) return;
+                _neuralAudio.onplay = _neuralAudio.onended = _neuralAudio.onerror = null;
+                if (_neuralObjectUrl) {
+                    try { URL.revokeObjectURL(_neuralObjectUrl); } catch (e) {}
+                    _neuralObjectUrl = '';
+                }
+                if (!previewOnly && started) {
+                    bargeInRecogStop();
+                    setFaceState('');
+                    revertEyes();
+                    if (!isVilda && !localHeadLipStop(ROBOT.head)) {
+                        try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+                    }
+                    if (handsFree) setHfStatus('waiting');
+                }
+            }
+
+            try {
+                const options = {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: msg, voice: voiceId, rate: rate, pitch: pitch })
+                };
+                if (controller) options.signal = controller.signal;
+                const response = await fetch('/tts/synthesize', options);
+                if (!response.ok) throw new Error('neural speech unavailable');
+                const blob = await response.blob();
+                if (generation !== _neuralGeneration || (!previewOnly && !speakOn)) return;
+                _neuralObjectUrl = URL.createObjectURL(blob);
+                _neuralAudio.src = _neuralObjectUrl;
+                _neuralAudio.onplay = function () {
+                    if (started || previewOnly) return;
+                    started = true;
+                    setFaceState('talking');
+                    bargeInRecogStart();
+                    if (!isVilda) {
+                        const frames = buildLipFrames(msg, rate);
+                        if (!localHeadLip(ROBOT.head, frames)) {
+                            try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: frames }) }); } catch (e) {}
+                        }
+                    }
+                };
+                _neuralAudio.onended = finishNeural;
+                _neuralAudio.onerror = finishNeural;
+                const playPromise = _neuralAudio.play();
+                if (playPromise && playPromise.catch) await playPromise;
+            } catch (e) {
+                if (generation !== _neuralGeneration || (e && e.name === 'AbortError')) return;
+                cancelNeuralAudio();
+                if (!previewOnly && speakOn) speakBrowser(msg);
+            } finally {
+                if (generation === _neuralGeneration) _neuralAbort = null;
+            }
+        }
+
+        function speak(text) {
+            if (!speakOn) return;
+            const msg = cleanForSpeech(text);
+            if (!msg) return;
+            if (SERVER_VOICE_PREF.provider === 'edge' && SERVER_VOICE_PREF.voice) {
+                speakNeural(msg, SERVER_VOICE_PREF.voice, false);
+            } else {
+                speakBrowser(msg);
+            }
+        }
+
         // If the user navigates away mid-speech, the lip thread on the server
         // would keep flapping until the next speech start. Make sure to stop.
         window.addEventListener('pagehide', function () {
+            cancelNeuralAudio();
+            revertEyes();
             if (isVilda) return;   // her iPad never drives the head; nothing to stop
             if (localHeadLipStop(ROBOT.head)) return;   // a head on THIS device — stop it locally
             try { navigator.sendBeacon && navigator.sendBeacon('/head/' + ROBOT.head + '/lip', new Blob(['{"on":false}'], { type: 'application/json' })); } catch (e) {}
@@ -892,7 +1035,15 @@ CHAT_HTML = """
             speakOn = on;
             speakBtn.classList.toggle('active', on);
             speakBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-            if (!on && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+            if (!on) {
+                if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                cancelNeuralAudio();
+                if (!isVilda && !localHeadLipStop(ROBOT.head)) {
+                    try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
+                }
+                setFaceState('');
+                revertEyes();
+            }
         }
         speakBtn.addEventListener('click', () => { primeAudio(); setSpeakOn(!speakOn); });
         setSpeakOn(speakOn);
@@ -904,7 +1055,8 @@ CHAT_HTML = """
         // WEBSERIAL_OK / DRIVES_HEADS / LOCAL_DRIVERS / connectHead / disconnectHead.
         (function () {
             const btn = document.getElementById('connHeadBtn');
-            if (!btn || !(WEBSERIAL_OK && !DRIVES_HEADS && !isVilda)) return;
+            if (!btn || ROBOT.headDriver === 'picoh' ||
+                    !(WEBSERIAL_OK && !DRIVES_HEADS && !isVilda)) return;
             btn.style.display = '';
             function paint() {
                 const on = !!LOCAL_DRIVERS[ROBOT.head];
@@ -1121,6 +1273,7 @@ CHAT_HTML = """
             LANG_MODE = code;
             try { localStorage.setItem('blueLang_' + ROBOT.id, code); } catch (e) {}
             buildLangRow();
+            if (voicePanel && voicePanel.style.display !== 'none') refreshNeuralVoices();
         }
 
         function buildLangRow() {
@@ -1153,7 +1306,14 @@ CHAT_HTML = """
         const voicePanel = document.getElementById('voicePanel');
         const voiceClose = document.getElementById('voiceClose');
         const voiceList = document.getElementById('voiceList');
-        const VOICE_SAMPLES = { en: "Hi, I'm Blue!", fr: 'Bonjour, je suis Blue\\u00a0!', ru: '\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442, \\u044f \\u0411\\u043b\\u044e!', el: '\\u0393\\u0435\\u03b9\\u03b1, \\u03b5\\u03af\\u03bc\\u03b1\\u03b9 \\u03bf \\u039c\\u03c0\\u03bb\\u03b5!', da: 'Hej, jeg er Blue!' };
+        const voiceSearch = document.getElementById('voiceSearch');
+        const VOICE_SAMPLES = {
+            en: "Hi, I'm " + ROBOT.name + "!",
+            fr: 'Bonjour, je suis ' + ROBOT.name + '\\u00a0!',
+            ru: '\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442, \\u044f ' + ROBOT.name + '!',
+            el: '\\u0393\\u0435\\u03b9\\u03b1, \\u03b5\\u03af\\u03bc\\u03b1\\u03b9 ' + ROBOT.name + '!',
+            da: 'Hej, jeg er ' + ROBOT.name + '!'
+        };
 
         function voiceLangCode(v) {
             const l = (v.lang || '').toLowerCase();
@@ -1165,23 +1325,97 @@ CHAT_HTML = """
             return null;
         }
 
+        function voiceSearchMatch(name, locale, traits) {
+            const q = ((voiceSearch && voiceSearch.value) || '').trim().toLowerCase();
+            if (!q) return true;
+            return ((name || '') + ' ' + (locale || '') + ' ' + (traits || '')).toLowerCase().indexOf(q) >= 0;
+        }
+
+        function addVoiceSection(label) {
+            const heading = document.createElement('div');
+            heading.className = 'voice-section';
+            heading.textContent = label;
+            voiceList.appendChild(heading);
+        }
+
+        function saveServerVoicePreference(provider, voice) {
+            SERVER_VOICE_PREF = { provider: provider, voice: voice || '' };
+            try {
+                fetch('/tts/preferences/' + ROBOT.id, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(SERVER_VOICE_PREF)
+                });
+            } catch (e) {}
+        }
+
         function buildVoiceList() {
-            const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
-            const supported = voices.filter(voiceLangCode);
+            const deviceVoices = ((window.speechSynthesis && window.speechSynthesis.getVoices()) || []).filter(voiceLangCode);
             let chosen = '';
             try { chosen = localStorage.getItem('blueVoiceName_' + ROBOT.id) || (ROBOT.id === 'blue' ? (localStorage.getItem('blueVoiceName') || '') : ''); } catch (e) {}
             voiceList.innerHTML = '';
-            if (!supported.length) {
-                voiceList.innerHTML = '<div class="voice-empty">No voices are installed on this device yet.</div>';
-                return;
+
+            const neural = SERVER_VOICES.filter(function (v) {
+                return voiceSearchMatch(v.name, v.locale, (v.personalities || []).join(' '));
+            });
+            addVoiceSection('Neural voices · available on every device');
+            if (!neural.length) {
+                const empty = document.createElement('div');
+                empty.className = 'voice-empty';
+                empty.textContent = SERVER_VOICES.length ? 'No neural voices match that search.' :
+                    (SERVER_VOICE_STATUS === 'offline' ? 'Neural voices are temporarily unavailable; device voices still work.' : 'Loading neural voices…');
+                voiceList.appendChild(empty);
             }
-            supported.forEach(function (v) {
+            neural.forEach(function (v) {
                 const row = document.createElement('button');
-                row.className = 'voice-row' + (v.name === chosen ? ' sel' : '');
+                const selected = SERVER_VOICE_PREF.provider === 'edge' && SERVER_VOICE_PREF.voice === v.id;
+                const traits = (v.personalities || []).slice(0, 3).join(' · ');
+                row.className = 'voice-row' + (selected ? ' sel' : '');
+                row.innerHTML = '<span class="vmeta"><span class="vn">' + esc(v.name) + '</span>' +
+                    (traits ? '<span class="vtraits">' + esc(traits) + '</span>' : '') +
+                    '</span><span class="vl">' + esc(v.locale) + '<br>' + esc(v.gender) + '</span>';
+                row.addEventListener('click', function () {
+                    primeAudio();
+                    saveServerVoicePreference('edge', v.id);
+                    const code = (v.locale || 'en').slice(0, 2).toLowerCase();
+                    speakNeural(VOICE_SAMPLES[code] || VOICE_SAMPLES.en, v.id, true);
+                    buildVoiceList();
+                });
+                voiceList.appendChild(row);
+            });
+
+            addVoiceSection('Device voices · offline fallback');
+            const automatic = document.createElement('button');
+            automatic.className = 'voice-row' + (SERVER_VOICE_PREF.provider === 'browser' && !chosen ? ' sel' : '');
+            automatic.innerHTML = '<span class="vn">Automatic device voice</span><span class="vl">offline</span>';
+            automatic.addEventListener('click', function () {
+                primeAudio();
+                try { localStorage.removeItem('blueVoiceName_' + ROBOT.id); } catch (e) {}
+                saveServerVoicePreference('browser', '');
+                buildVoiceList();
+                const autoVoice = pickVoice(LANG_MODE === 'auto' ? 'en' : LANG_MODE);
+                if (autoVoice) {
+                    try {
+                        window.speechSynthesis.cancel();
+                        const u = new SpeechSynthesisUtterance(VOICE_SAMPLES[voiceLangCode(autoVoice) || 'en'] || VOICE_SAMPLES.en);
+                        u.voice = autoVoice; u.lang = autoVoice.lang || 'en-US';
+                        window.speechSynthesis.speak(u);
+                    } catch (e) {}
+                }
+            });
+            voiceList.appendChild(automatic);
+
+            deviceVoices.filter(function (v) {
+                return voiceSearchMatch(v.name, v.lang, 'device offline');
+            }).forEach(function (v) {
+                const row = document.createElement('button');
+                row.className = 'voice-row' + (SERVER_VOICE_PREF.provider === 'browser' && v.name === chosen ? ' sel' : '');
                 row.innerHTML = '<span class="vn">' + esc(v.name) + '</span><span class="vl">' + esc(v.lang) + '</span>';
                 row.addEventListener('click', function () {
                     primeAudio();
+                    cancelNeuralAudio();
                     try { localStorage.setItem('blueVoiceName_' + ROBOT.id, v.name); } catch (e) {}
+                    saveServerVoicePreference('browser', v.name);
                     try {
                         window.speechSynthesis.cancel();
                         const code = voiceLangCode(v) || 'en';
@@ -1195,11 +1429,36 @@ CHAT_HTML = """
             });
         }
 
+        async function refreshNeuralVoices() {
+            const language = LANG_MODE === 'auto' ? 'en' : LANG_MODE;
+            try {
+                const results = await Promise.all([
+                    fetch('/tts/preferences/' + ROBOT.id).then(function (r) { return r.json(); }),
+                    fetch('/tts/voices?lang=' + encodeURIComponent(language)).then(function (r) { return r.json(); })
+                ]);
+                if (results[0] && results[0].ok) {
+                    SERVER_VOICE_PREF = { provider: results[0].provider || 'browser', voice: results[0].voice || '' };
+                }
+                if (results[1] && results[1].ok && Array.isArray(results[1].voices)) {
+                    SERVER_VOICES = results[1].voices;
+                    SERVER_VOICE_STATUS = 'ready';
+                } else {
+                    SERVER_VOICE_STATUS = 'offline';
+                }
+            } catch (e) {
+                SERVER_VOICES = [];
+                SERVER_VOICE_STATUS = 'offline';
+            }
+            buildVoiceList();
+        }
+
         if (voiceBtn) {
-            voiceBtn.addEventListener('click', function () { primeAudio(); buildLangRow(); buildVoiceList(); voicePanel.style.display = 'flex'; });
+            voiceBtn.addEventListener('click', function () { primeAudio(); buildLangRow(); buildVoiceList(); voicePanel.style.display = 'flex'; refreshNeuralVoices(); });
             voiceClose.addEventListener('click', function () { voicePanel.style.display = 'none'; });
             voicePanel.addEventListener('click', function (e) { if (e.target === voicePanel) voicePanel.style.display = 'none'; });
+            if (voiceSearch) voiceSearch.addEventListener('input', buildVoiceList);
         }
+        refreshNeuralVoices();
 
         // The iPad Mini (iOS 12) has no MediaRecorder, so we capture raw audio
         // with the Web Audio API (works back to iOS 12) and encode a WAV here,
@@ -1296,7 +1555,11 @@ CHAT_HTML = """
 
         async function startListening() {
             primeAudio();
-            if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+            if (isRobotSpeaking() || _neuralAbort) stopSpeaking('mic');
+            else {
+                if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                cancelNeuralAudio();
+            }
             if (recording) { stopListening(); return; }
             const ok = await ensureAudio();
             if (ok === 'denied') {
@@ -1446,7 +1709,7 @@ CHAT_HTML = """
         const HF_SILENCE_CHUNKS = 9;       // ~0.85s of silence ends the utterance (snappier)
         const HF_PREROLL_MAX = 4;          // ~0.37s of pre-roll keeps the first phoneme
         const HF_MAX_CHUNKS = 250;         // ~23s cap per utterance
-        const HF_ARMED_MS = 15000;         // bare-"Blue" wait window before the message
+        const HF_ARMED_MS = 15000;         // bare-name wait window before the message
         // Whisper hallucinates a small set of stock phrases when fed near-silence
         // or non-speech noise. Drop these before they trigger anything.
         const HF_HALLUC = /^\\s*(?:(?:thanks?(?:\\s+for\\s+watching)?|thank\\s+you|you|bye|\\.|subtitles?\\s+by[^.]*|amara\\.org|MBC\\b[^.]*|copyright[^.]*)[!\\.\\?\\s]*)+$/i;
@@ -1464,9 +1727,16 @@ CHAT_HTML = """
         // entries matter when the language setting fixes Russian/Greek: Whisper
         // then writes the name natively ("\\u0411\\u043b\\u044e," / "\\u039c\\u03c0\\u03bb\\u03b5") and the latin-only
         // strip below would otherwise erase it entirely.
-        const HF_WAKE_WORDS = ['blue','bleu','blu','blew','bloo','blues','bews',
-            '\\u0431\\u043b\\u044e','\\u0431\\u043b\\u0443','\\u0431\\u043b\\u044c\\u044e','\\u0431\\u043b\\u0435',
-            '\\u03bc\\u03c0\\u03bb\\u03b5','\\u03bc\\u03c0\\u03bb\\u03bf\\u03c5'];
+        const HF_WAKE_TARGET = String(ROBOT.name || 'Blue').toLowerCase();
+        const HF_WAKE_ALIASES = {
+            blue: ['blue','bleu','blu','blew','bloo','blues','bews',
+                '\\u0431\\u043b\\u044e','\\u0431\\u043b\\u0443','\\u0431\\u043b\\u044c\\u044e','\\u0431\\u043b\\u0435',
+                '\\u03bc\\u03c0\\u03bb\\u03b5','\\u03bc\\u03c0\\u03bb\\u03bf\\u03c5'],
+            hexia: ['hexia','heksia','hexya','hexa','lexia'],
+            casper: ['casper','caspar','caspur','casperr','pico','picoh','piko','peko','peekoh'],
+            pico: ['pico','picoh','piko','peko','peekoh']
+        };
+        const HF_WAKE_WORDS = HF_WAKE_ALIASES[HF_WAKE_TARGET] || [HF_WAKE_TARGET];
         function isWakeWord(w) {
             // Unicode-aware pass first: keep latin, Cyrillic and Greek letters,
             // drop punctuation — so "\\u0411\\u043b\\u044e," matches its list entry.
@@ -1476,8 +1746,8 @@ CHAT_HTML = """
             if (!w) return false;
             if (HF_WAKE_WORDS.indexOf(w) >= 0) return true;
             // edit-distance ≤1 from "blue" catches Boo/Blu/Blhe/etc. without a lib
-            if (Math.abs(w.length - 4) > 1) return false;
-            let i = 0, j = 0, edits = 0; const t = 'blue';
+            if (Math.abs(w.length - HF_WAKE_TARGET.length) > 1) return false;
+            let i = 0, j = 0, edits = 0; const t = HF_WAKE_TARGET;
             while (i < w.length && j < t.length) {
                 if (w[i] === t[j]) { i++; j++; }
                 else { edits++; if (edits > 1) return false;
@@ -1504,14 +1774,14 @@ CHAT_HTML = """
         if (hfStatusEl) {
             hfStatusEl.style.cursor = 'pointer';
             hfStatusEl.addEventListener('click', function () {
-                if (window.speechSynthesis && window.speechSynthesis.speaking) stopSpeaking('tap');
+                if (isRobotSpeaking()) stopSpeaking('tap');
             });
         }
 
         function setHfStatus(state) {
             if (!hfStatusEl) return;
             if (!handsFree) { hfStatusEl.style.display = 'none'; hfStatusEl.className = 'hf-status'; return; }
-            const waitLabel = hfMode === 'conversation' ? 'Conversation on \\u2014 just talk\\u2026' : 'Listening for "Blue"\\u2026';
+            const waitLabel = hfMode === 'conversation' ? 'Conversation on \\u2014 just talk\\u2026' : 'Listening for "' + ROBOT.name + '"\\u2026';
             const labels = {
                 waiting:  waitLabel,
                 voicing:  'Listening to you\\u2026',
@@ -1529,7 +1799,7 @@ CHAT_HTML = """
             hfMode = (mode === 'conversation') ? 'conversation' : 'wake';
             try { localStorage.setItem('blueHfMode', hfMode); } catch (e) {}
             const mb = document.getElementById('hfModeBtn');
-            if (mb) mb.textContent = hfMode === 'conversation' ? 'Mode: conversation (no wake word)' : 'Mode: say "Blue" first';
+            if (mb) mb.textContent = hfMode === 'conversation' ? 'Mode: conversation (no wake word)' : 'Mode: say "' + ROBOT.name + '" first';
             if (handsFree && !hfProcessing) setHfStatus('waiting');
         }
 
@@ -1548,7 +1818,7 @@ CHAT_HTML = """
             if (hfProcessing) return;
             // While Blue is talking, run the barge-in listener instead of the
             // normal capture — that's how "stop" interrupts him.
-            if (window.speechSynthesis && window.speechSynthesis.speaking) {
+            if (isRobotSpeaking()) {
                 bargeInOnSamples(samples);
                 return;
             }
@@ -1668,7 +1938,7 @@ CHAT_HTML = """
             try {
                 let clip = chunks;
                 while (clip) {
-                    if (!(window.speechSynthesis && window.speechSynthesis.speaking)) break;
+                    if (!isRobotSpeaking()) break;
                     const blob = encodeWav(clip, recSampleRate);
                     const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
                     fd.append('hint', 'stop');   // bias Whisper toward interrupt words
@@ -1698,10 +1968,13 @@ CHAT_HTML = """
         // ---- Stop speaking NOW — shared by every barge-in path ----
         function stopSpeaking(source) {
             try { window.speechSynthesis.cancel(); } catch (e) {}
+            cancelNeuralAudio();
+            bargeInRecogStop();
             if (!isVilda && !localHeadLipStop(ROBOT.head)) {
                 try { fetch('/head/' + ROBOT.head + '/lip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"on":false}' }); } catch (e) {}
             }
             setFaceState('');
+            revertEyes();
             biActive = false; biChunks = []; biVoice = 0; biSilence = 0; biPreroll = []; biPending = null;
             if (handsFree) setHfStatus('waiting');
         }
@@ -1722,7 +1995,7 @@ CHAT_HTML = """
                 r.continuous = true; r.interimResults = true; r.lang = 'en-US';
                 r.onstart = function () { biRecogOk = true; };
                 r.onresult = function (ev) {
-                    if (!(window.speechSynthesis && window.speechSynthesis.speaking)) return;
+                    if (!isRobotSpeaking()) return;
                     for (let i = ev.resultIndex; i < ev.results.length; i++) {
                         const t = (ev.results[i][0] && ev.results[i][0].transcript) || '';
                         // A short utterance containing "stop": the interrupt is a
@@ -1731,7 +2004,7 @@ CHAT_HTML = """
                         if (BI_STOP.test(t) && t.trim().split(/\\s+/).length <= 6) { stopSpeaking('speech-api'); break; }
                     }
                 };
-                r.onend = function () { biRecog = null; biRecogOk = false; if (biRecogWanted && window.speechSynthesis.speaking) setTimeout(bargeInRecogStart, 80); };
+                r.onend = function () { biRecog = null; biRecogOk = false; if (biRecogWanted && isRobotSpeaking()) setTimeout(bargeInRecogStart, 80); };
                 r.onerror = function () { biRecogOk = false; /* onend follows and decides on restart */ };
                 r.start(); biRecog = r;
             } catch (e) { biRecog = null; biRecogOk = false; }
@@ -1742,7 +2015,7 @@ CHAT_HTML = """
         }
         // Escape always shuts him up, mic or no mic.
         document.addEventListener('keydown', function (ev) {
-            if (ev.key === 'Escape' && window.speechSynthesis && window.speechSynthesis.speaking) stopSpeaking('esc');
+            if (ev.key === 'Escape' && isRobotSpeaking()) stopSpeaking('esc');
         });
 
         async function hfFinalize() {
@@ -1760,8 +2033,11 @@ CHAT_HTML = """
             try {
                 const blob = encodeWav(chunks, recSampleRate);
                 const fd = new FormData(); fd.append('audio', blob, 'speech.wav');
-                // In wake mode, ask the server to bias Whisper toward "Blue".
-                if (hfMode !== 'conversation') fd.append('wake', '1');
+                // In wake mode, ask the server to bias Whisper toward this robot's name.
+                if (hfMode !== 'conversation') {
+                    fd.append('wake', '1');
+                    fd.append('wake_name', ROBOT.name);
+                }
                 if (LANG_MODE !== 'auto') fd.append('language', LANG_MODE);
                 const res = await fetch('/stt', { method: 'POST', body: fd });
                 const data = await res.json().catch(() => null);

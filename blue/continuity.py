@@ -349,6 +349,36 @@ class ContinuityStore:
             rows = conn.execute(sql, params).fetchall()
             return [self._episode_from_row(row) for row in rows]
 
+    def list_episodes_between(
+        self,
+        start_at: str,
+        end_at: str,
+        limit: int = 400,
+        include_superseded: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return episodes in a precise time window, newest first.
+
+        This powers explicit temporal recall (notably "yesterday") without
+        relying on the small generic recent-episode window. ISO timestamps
+        are normalized by callers to UTC before reaching SQLite.
+        """
+        clauses = ["e.occurred_at >= ?", "e.occurred_at < ?"]
+        params: List[Any] = [_clip(start_at, 64), _clip(end_at, 64)]
+        if not include_superseded:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM episodes newer "
+                "WHERE newer.supersedes_id = e.id)"
+            )
+        params.append(max(1, min(int(limit), 800)))
+        sql = (
+            "SELECT e.* FROM episodes e WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY e.seq DESC LIMIT ?"
+        )
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._episode_from_row(row) for row in rows]
+
     def correct_episode(
         self,
         episode_id: str,

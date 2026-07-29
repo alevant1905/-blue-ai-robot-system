@@ -85,7 +85,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
  :root:not([data-theme="light"]) .turn.hexia{background:rgba(176,108,240,.12);border-color:rgba(176,108,240,.35)}
 </style></head><body>
 <h1>Blue &amp; Hexia</h1>
-<p class="sub">Give them a topic or a link to discuss, or assign each one a role or perspective to argue &mdash; then watch them go. Checked readings become that robot's source boundary for the duet. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
+<p class="sub">Give them one decision question or link, and optionally assign perspectives. Normal duets move through definitions, positions, challenge, test, adjudication, and synthesis. Conclusions become binding; an open-ended run continues only into a genuinely distinct question and stops after at most three inquiries. Checked readings become that robot's source boundary. Each speaks in their own voice and moves their own head, taking turns. (Both heads connected works best; if a head is off it just won't move.)</p>
 <p class="sub" id="devNote" style="margin-top:-8px;display:none"></p>
 <div class="controls">
  <input type="text" id="topic" placeholder="Topic (optional) — e.g. what makes a good story">
@@ -129,7 +129,7 @@ DUET_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
   <span id="spiceVal" class="muted" style="min-width:96px;text-align:right">balanced</span></label>
 </div>
 <div class="controls">
- <select id="turns"><option value="4">4 turns</option><option value="6" selected>6 turns</option><option value="8">8 turns</option><option value="10">10 turns</option><option value="20">20 turns</option><option value="0">until I stop</option></select>
+ <select id="turns"><option value="4">4 turns</option><option value="6">6 turns</option><option value="8">8 turns</option><option value="10" selected>10-turn inquiry</option><option value="12">12-turn inquiry</option><option value="20">20 turns max</option><option value="0">open-ended (up to 3 distinct inquiries)</option></select>
  <select id="starter"><option value="hexia">Hexia starts</option><option value="blue">Blue starts</option></select>
  <button class="primary" id="startBtn">Start</button>
  <button id="questionBtn" disabled title="Pause the duet so a student can ask a question">Question</button>
@@ -272,6 +272,13 @@ function restoreSettings(){
   restoreSettings();
 })();
 let running=false, history=[], DIRECTION='';   // DIRECTION = the conversation's evolving bearing (see maybeReflect); in 🔬 deep-dive mode it's the shared notebook
+let DUET_SESSION_ID='', DUET_SESSION_ENDED=true;
+let REFLECT_SEQ=0, REFLECT_APPLIED=0, REFLECT_IN_FLIGHT=false;
+const MAX_INQUIRY_CYCLES=3;
+let LAST_INQUIRY_PHASE='', INQUIRY_STALLS=0, INQUIRY_AUDITS=0, INQUIRY_CYCLES=0, INQUIRY_CYCLE_START_TURN=0;
+let INQUIRY_CLOSE_PENDING=false, INQUIRY_DECISION='', INQUIRY_CLOSE_REASON='';
+let INQUIRY_CONTROL_FAILURES=0;
+let GENERATION_FAILURES=0;
 let LAST_PHASE='', LAST_BUILDER='';            // 🔬 deep-dive protocol: for surfacing phase changes and job swaps as notes
 let STALL=0;                                   // consecutive reflects where the notebook barely changed (server-diffed)
 let MOVETYPES=[];                              // keeper-reported MOVED labels, most recent last (movement-monotony watch)
@@ -294,6 +301,91 @@ let WORKFLOW_STATE='IDLE';                     // IDLE/BLOCKED/EXECUTING/DEADLOC
 let DEADLOCKED=false;                          // workflow deadlock detected by notebook/browser
 let LAST_RECOVERY_TURN=0;                      // last turn where a blocked workflow recovered
 function PROTO(){ const c=document.getElementById('protoChk'); return !!(c && c.checked); }
+function inquiryControlFailed(reason){
+  if(PROTO() || !running) return;
+  INQUIRY_CONTROL_FAILURES++;
+  if(INQUIRY_CONTROL_FAILURES<=2 || INQUIRY_CONTROL_FAILURES%3===0){
+    addNote('(inquiry controller unavailable'+(reason?': '+reason:'')+' — preserving state and moving toward synthesis)');
+  }
+}
+function inquiryControlRecovered(reason){
+  if(PROTO() || !running) return;
+  INQUIRY_CONTROL_FAILURES++;
+  if(INQUIRY_CONTROL_FAILURES<=2 || INQUIRY_CONTROL_FAILURES%3===0){
+    addNote('(repaired inquiry state after '+(reason||'an invalid controller response')+')');
+  }
+}
+function inquiryField(label){
+  const prefix=label.toUpperCase()+':';
+  const lines=(DIRECTION||'').split(String.fromCharCode(10));
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i].trim();
+    if(line.toUpperCase().startsWith(prefix)) return line.slice(prefix.length).trim();
+  }
+  return '';
+}
+function setInquiryField(label,value){
+  const prefix=label.toUpperCase()+':';
+  const lines=(DIRECTION||'').split(String.fromCharCode(10));
+  let replaced=false;
+  for(let i=0;i<lines.length;i++){
+    if(lines[i].trim().toUpperCase().startsWith(prefix)){
+      lines[i]=label.toUpperCase()+': '+value; replaced=true; break;
+    }
+  }
+  if(!replaced) lines.push(label.toUpperCase()+': '+value);
+  DIRECTION=lines.join(String.fromCharCode(10));
+}
+function rolloverContinuousInquiry(){
+  const ledgerDecision=inquiryField('DECISION').toUpperCase();
+  const decision=(INQUIRY_DECISION||ledgerDecision).toUpperCase();
+  const next=inquiryField('NEXT');
+  const result=inquiryField('RESULT');
+  const banked=inquiryField('BANKED');
+  const last=history.slice().reverse().find(function(h){ return h.speaker==='blue'||h.speaker==='hexia'; });
+  let settled=(result && result!=='-' && !/^NOT RUN/i.test(result))?result:'';
+  if(!settled && ledgerDecision.startsWith('CLOSE') && next && next!=='-') settled=next;
+  if(!settled) settled=last?last.text:'the conclusion just reached';
+  settled=settled.replace(/[.!?]+$/,'').trim();
+  INQUIRY_CYCLES++;
+  if(!decision.startsWith('BRANCH') || !next || next==='-' || INQUIRY_CYCLES>=MAX_INQUIRY_CYCLES){
+    addNote('(conclusion reached — '+settled+')');
+    return false;
+  }
+  let nextQuestion=next;
+  if(!/[?]$/.test(nextQuestion)) nextQuestion=nextQuestion.replace(/[.!]+$/,'')+'?';
+  DIRECTION=[
+    'QUESTION: '+nextQuestion,
+    'DEFINITIONS: -',
+    'BANKED: '+((banked&&banked!=='-')?banked:'-'),
+    'POSITIONS: -',
+    'OPEN: '+nextQuestion,
+    'TEST: -',
+    'RESULT: NOT RUN',
+    'REOPEN: -',
+    'DECISION: CONTINUE — derive another supported conclusion',
+    'NEXT: Define the new question, then state rival answers that would lead to different conclusions.'
+  ].join('\\n');
+  INQUIRY_CYCLE_START_TURN=history.filter(function(h){
+    return h.speaker==='blue'||h.speaker==='hexia';
+  }).length;
+  REFLECT_APPLIED=REFLECT_SEQ; // discard a landing-turn reflection still in flight
+  LAST_INQUIRY_PHASE=''; INQUIRY_STALLS=0; INQUIRY_AUDITS=0; INQUIRY_CLOSE_PENDING=false;
+  INQUIRY_DECISION=''; INQUIRY_CLOSE_REASON=''; INQUIRY_CONTROL_FAILURES=0;
+  addNote('(conclusion reached — '+settled+'; continuing with: '+nextQuestion+')');
+  return true;
+}
+async function waitBeforeGenerationRetry(){
+  const delay=Math.min(8000,750*Math.pow(2,Math.min(Math.max(GENERATION_FAILURES-1,0),4)));
+  const deadline=Date.now()+delay;
+  while(running && Date.now()<deadline){
+    if(PAUSED) await waitWhilePaused();
+    if(!running) return;
+    await new Promise(function(resolve){
+      setTimeout(resolve,Math.min(250,Math.max(1,deadline-Date.now())));
+    });
+  }
+}
 // Movement monotony: the same MOVED type three reflects running (e.g. nothing but
 // additions) => oneTurn sends it and the server forces the complementary move.
 function MONO(){ const n=MOVETYPES.length; if(n<3) return '';
@@ -562,6 +654,17 @@ const qSubmitBtn=document.getElementById('qSubmitBtn'), qCancelBtn=document.getE
 const qStatus=document.getElementById('qStatus'), qRecordStatus=document.getElementById('qRecordStatus');
 let PAUSED=false, PAUSE_REASON=null, PAUSE_WAITERS=[], STUDENTQ=[];
 let ACTIVE_SPEECH_FINISH=null;
+let SERVER_VOICE_PREFS={blue:{provider:'browser',voice:''},hexia:{provider:'browser',voice:''}};
+let NEURAL_VOICES=[];
+let DUET_AUDIO=(typeof Audio!=='undefined')?new Audio():null;
+let DUET_AUDIO_ABORT=null, DUET_AUDIO_URL='';
+
+function cancelDuetAudio(){
+  try{ if('speechSynthesis' in window)window.speechSynthesis.cancel(); }catch(e){}
+  if(DUET_AUDIO_ABORT){try{DUET_AUDIO_ABORT.abort();}catch(e){} DUET_AUDIO_ABORT=null;}
+  if(DUET_AUDIO){DUET_AUDIO.onended=DUET_AUDIO.onerror=null;try{DUET_AUDIO.pause();DUET_AUDIO.removeAttribute('src');DUET_AUDIO.load();}catch(e){}}
+  if(DUET_AUDIO_URL){try{URL.revokeObjectURL(DUET_AUDIO_URL);}catch(e){} DUET_AUDIO_URL='';}
+}
 
 // iOS Safari refuses speechSynthesis unless audio was first unlocked by a real
 // tap. The duet speaks each line ASYNCHRONOUSLY (after fetching the turn), which
@@ -570,8 +673,15 @@ let ACTIVE_SPEECH_FINISH=null;
 // unlocks audio for every automatic line that follows. (Same trick chat uses.)
 let audioPrimed=false;
 function primeAudio(){
-  if(audioPrimed || !('speechSynthesis' in window)) return;
-  try{ window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); audioPrimed=true; }catch(e){}
+  if(audioPrimed) return;
+  try{ if('speechSynthesis' in window)window.speechSynthesis.speak(new SpeechSynthesisUtterance('')); }catch(e){}
+  try{
+    if(DUET_AUDIO){
+      DUET_AUDIO.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+      const p=DUET_AUDIO.play(); if(p&&p.then)p.then(function(){DUET_AUDIO.pause();}).catch(function(){});
+    }
+  }catch(e){}
+  audioPrimed=true;
 }
 
 // Square-bracket source tags ([Blue_Thoughts_2605.pdf]) stay visible in the
@@ -620,12 +730,34 @@ function voiceRateFor(id){
 }
 function previewVoice(id, v){
   try{
-    window.speechSynthesis.cancel();
+    cancelDuetAudio();
     const u=new SpeechSynthesisUtterance(id==='hexia'?"Hi, I'm Hexia!":"Hi, I'm Blue!");
     const cfg=ROBOTS[id]||{}; if(v){ u.voice=v; u.lang=v.lang||'en-US'; } else { u.lang='en-US'; }
     u.rate=voiceRateFor(id); u.pitch=cfg.voicePitch||1.0;
     window.speechSynthesis.speak(u);
   }catch(e){}
+}
+async function previewNeuralVoice(id, voice){
+  if(!DUET_AUDIO||!voice)return;
+  cancelDuetAudio();
+  const cfg=ROBOTS[id]||{}, controller=(typeof AbortController!=='undefined')?new AbortController():null;
+  DUET_AUDIO_ABORT=controller;
+  try{
+    const opts={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      text:id==='hexia'?"Hi, I'm Hexia!":"Hi, I'm Blue!", voice:voice,
+      rate:voiceRateFor(id), pitch:cfg.voicePitch||1.0
+    })};
+    if(controller)opts.signal=controller.signal;
+    const res=await fetch('/tts/synthesize',opts); if(!res.ok)throw new Error('unavailable');
+    const blob=await res.blob(); DUET_AUDIO_URL=URL.createObjectURL(blob); DUET_AUDIO.src=DUET_AUDIO_URL;
+    DUET_AUDIO.onended=function(){if(DUET_AUDIO_URL){try{URL.revokeObjectURL(DUET_AUDIO_URL);}catch(e){}DUET_AUDIO_URL='';}};
+    await DUET_AUDIO.play();
+  }catch(e){if(!(e&&e.name==='AbortError'))previewVoice(id,pickVoice(ROBOTS[id]));}
+  finally{DUET_AUDIO_ABORT=null;}
+}
+function saveDuetVoicePreference(id, provider, voice){
+  SERVER_VOICE_PREFS[id]={provider:provider,voice:voice||''};
+  try{fetch('/tts/preferences/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(SERVER_VOICE_PREFS[id])});}catch(e){}
 }
 function buildVoicePickers(){
   const voices=supportedVoices();
@@ -633,17 +765,45 @@ function buildVoicePickers(){
     const id=pair[0], sel=document.getElementById(pair[1]); if(!sel) return;
     let saved=''; try{ saved=localStorage.getItem('blueVoiceName_'+id)||''; }catch(e){}
     sel.innerHTML='';
-    const auto=document.createElement('option'); auto.value=''; auto.textContent='Automatic'; sel.appendChild(auto);
-    voices.forEach(function(v){
-      const o=document.createElement('option'); o.value=v.name; o.textContent=v.name+' ('+v.lang+')';
-      if(v.name===saved) o.selected=true; sel.appendChild(o);
+    const np=document.createElement('optgroup');np.label='Neural voices · every device';
+    NEURAL_VOICES.forEach(function(v){
+      const o=document.createElement('option');o.value='edge:'+v.id;o.textContent=v.name+' ('+v.locale+', '+v.gender+')';
+      if(SERVER_VOICE_PREFS[id].provider==='edge'&&SERVER_VOICE_PREFS[id].voice===v.id)o.selected=true;np.appendChild(o);
     });
+    if(NEURAL_VOICES.length)sel.appendChild(np);
+    const dp=document.createElement('optgroup');dp.label='Device voices · offline';
+    const auto=document.createElement('option'); auto.value='browser:'; auto.textContent='Automatic device voice';
+    if(SERVER_VOICE_PREFS[id].provider==='browser'&&!saved)auto.selected=true;dp.appendChild(auto);
+    voices.forEach(function(v){
+      const o=document.createElement('option'); o.value='browser:'+v.name; o.textContent=v.name+' ('+v.lang+')';
+      if(SERVER_VOICE_PREFS[id].provider==='browser'&&v.name===saved)o.selected=true;dp.appendChild(o);
+    });
+    sel.appendChild(dp);
     sel.onchange=function(){
       primeAudio();
-      try{ if(sel.value){ localStorage.setItem('blueVoiceName_'+id, sel.value); } else { localStorage.removeItem('blueVoiceName_'+id); } }catch(e){}
-      previewVoice(id, supportedVoices().find(function(x){ return x.name===sel.value; }) || pickVoice(ROBOTS[id]));
+      if(sel.value.indexOf('edge:')===0){
+        const voice=sel.value.slice(5);saveDuetVoicePreference(id,'edge',voice);previewNeuralVoice(id,voice);
+      }else{
+        const name=sel.value.slice(8);
+        try{if(name)localStorage.setItem('blueVoiceName_'+id,name);else localStorage.removeItem('blueVoiceName_'+id);}catch(e){}
+        saveDuetVoicePreference(id,'browser',name);
+        previewVoice(id,supportedVoices().find(function(x){return x.name===name;})||pickVoice(ROBOTS[id]));
+      }
     };
   });
+}
+async function loadNeuralVoiceChoices(){
+  try{
+    const results=await Promise.all([
+      fetch('/tts/preferences/blue').then(function(r){return r.json();}),
+      fetch('/tts/preferences/hexia').then(function(r){return r.json();}),
+      fetch('/tts/voices?lang=en').then(function(r){return r.json();})
+    ]);
+    if(results[0]&&results[0].ok)SERVER_VOICE_PREFS.blue={provider:results[0].provider,voice:results[0].voice||''};
+    if(results[1]&&results[1].ok)SERVER_VOICE_PREFS.hexia={provider:results[1].provider,voice:results[1].voice||''};
+    if(results[2]&&results[2].ok&&Array.isArray(results[2].voices))NEURAL_VOICES=results[2].voices;
+  }catch(e){}
+  buildVoicePickers();
 }
 // The voice currently in effect for a robot (saved pick, else the auto choice).
 function chosenVoiceFor(id){
@@ -662,7 +822,8 @@ function wireRatePickers(){
     sel.onchange=function(){
       primeAudio();
       try{ if(sel.value && sel.value!=='auto'){ localStorage.setItem('blueVoiceRate_'+id, sel.value); } else { localStorage.removeItem('blueVoiceRate_'+id); } }catch(e){}
-      previewVoice(id, chosenVoiceFor(id));
+      const pref=SERVER_VOICE_PREFS[id]||{};
+      if(pref.provider==='edge'&&pref.voice)previewNeuralVoice(id,pref.voice);else previewVoice(id, chosenVoiceFor(id));
     };
   });
 }
@@ -707,17 +868,31 @@ function addTurn(cfg,text){ const d=document.createElement('div'); d.className='
   logEl.appendChild(d); window.scrollTo(0,document.body.scrollHeight); return d; }
 
 function speakAs(cfg,text,el,mood,gesture){ return new Promise(resolve=>{
-  const useTTS=document.getElementById('speakChk').checked && ('speechSynthesis' in window);
+  const useTTS=document.getElementById('speakChk').checked;
   const rate=voiceRateFor(cfg.id);
   const frames=buildLipFrames(cleanForSpeech(text), rate);   // lips track what's actually SPOKEN
   const est=frames.reduce((s,f)=>s+f[1],0)*1000;   // ~speech duration (ms)
-  let done=false, keepAlive=null;
-  const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} headLipStop(cfg); headEyeRest(cfg); if(el)el.classList.remove('speaking'); resolve(); };
+  let done=false, keepAlive=null, embodied=false;
+  const startEmbodiment=()=>{if(embodied)return;embodied=true;if(el)el.classList.add('speaking');headLip(cfg,frames);headEye(cfg,mood);headGesture(cfg,gesture);};
+  const finish=()=>{ if(done)return; done=true; if(ACTIVE_SPEECH_FINISH===finish) ACTIVE_SPEECH_FINISH=null; if(keepAlive){clearInterval(keepAlive);keepAlive=null;} cancelDuetAudio(); if(embodied){headLipStop(cfg);headEyeRest(cfg);if(el)el.classList.remove('speaking');} resolve(); };
   ACTIVE_SPEECH_FINISH=finish;
-  if(el)el.classList.add('speaking'); headLip(cfg,frames); headEye(cfg,mood); headGesture(cfg,gesture);
-  if(!useTTS){ setTimeout(finish, Math.max(1500, est+400)); return; }   // no audio: wait out the lip-flap
+  if(!useTTS){ startEmbodiment();setTimeout(finish, Math.max(1500, est+400)); return; }   // no audio: wait out the lip-flap
+  const pref=SERVER_VOICE_PREFS[cfg.id]||{};
+  if(pref.provider==='edge'&&pref.voice&&DUET_AUDIO){
+    cancelDuetAudio();
+    const controller=(typeof AbortController!=='undefined')?new AbortController():null;DUET_AUDIO_ABORT=controller;
+    const opts={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      text:cleanForSpeech(text),voice:pref.voice,rate:rate,pitch:cfg.voicePitch||1.0
+    })};if(controller)opts.signal=controller.signal;
+    fetch('/tts/synthesize',opts).then(function(res){if(!res.ok)throw new Error('unavailable');return res.blob();})
+      .then(function(blob){if(done)return;DUET_AUDIO_URL=URL.createObjectURL(blob);DUET_AUDIO.src=DUET_AUDIO_URL;DUET_AUDIO.onended=finish;DUET_AUDIO.onerror=finish;startEmbodiment();return DUET_AUDIO.play();})
+      .catch(function(){finish();});
+    setTimeout(finish,Math.max(25000,est*2.5+10000));
+    return;
+  }
   try{
-    window.speechSynthesis.cancel();
+    startEmbodiment();
+    cancelDuetAudio();
     const u=new SpeechSynthesisUtterance(cleanForSpeech(text));
     const v=pickVoice(cfg); if(v)u.voice=v; u.rate=rate; u.pitch=cfg.voicePitch||1.0; u.lang='en-US';
     u.onend=finish; u.onerror=finish;
@@ -762,7 +937,7 @@ function openQuestionPanel(){
   if(!running) return;
   questionBtn.disabled=true;
   setPaused(true,'question');
-  try{ window.speechSynthesis.cancel(); }catch(e){}
+  cancelDuetAudio();
   if(ACTIVE_SPEECH_FINISH) ACTIVE_SPEECH_FINISH();
   headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia);
   questionPanel.style.display='block';
@@ -846,7 +1021,7 @@ function qEncodeWav(chunks,sampleRate){
 }
 async function startQuestionRecording(){
   primeAudio();
-  if('speechSynthesis' in window) try{ window.speechSynthesis.cancel(); }catch(e){}
+  cancelDuetAudio();
   const ok=await ensureQuestionAudio();
   if(ok==='denied'){ qRecordStatus.textContent='Microphone permission was denied.'; return; }
   if(ok!==true){ qRecordStatus.textContent=window.isSecureContext?'This browser cannot use the microphone.':'Open the secure HTTPS address to use the microphone.'; return; }
@@ -907,8 +1082,20 @@ async function oneTurn(speaker, closing){
   const quietArtifact=(PROTO() && ARTIFACT_SILENCE>0 && ARTIFACT_MODE);
   const nbNote=(PROTO() && !studentQuestion && !mail && NBQ.length && !quietArtifact)? NBQ.shift() : null;
   if(quietArtifact) ARTIFACT_SILENCE--;
-  let d; try{ d=await (await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, notebookNote:nbNote, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), arcStuck:(PROTO()?ARCSTUCK():''), operationMissed:(PROTO() && OPFAILS>0), validationRejected:(PROTO() && GATEFAILS>0), promotionRejected:(PROTO() && PROMOTIONFAILS>0), kernelDenied:(PROTO() && KERNELFAILS>0), kernelDeadlocked:(PROTO() && DEADLOCKED), kernelHealth:(PROTO()?KERNEL_HEALTH:''), activeTask:(PROTO()?ACTIVE_TASK:''), artifactPlan:(PROTO()?ARTIFACT_PLAN:''), artifactMode:(PROTO()?ARTIFACT_MODE:''), activeTaskAttempts:(PROTO()?ACTIVE_TASK_ATTEMPTS:0), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked})})).json(); }catch(e){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
-  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return false; }
+  const inquiryCycleTurns=Math.max(0,history.filter(function(h){ return h.speaker==='blue'||h.speaker==='hexia'; }).length-INQUIRY_CYCLE_START_TURN);
+  const turnPayload={sessionId:DUET_SESSION_ID, speaker:speaker, topic:topic, url:url, history:history, direction:DIRECTION, mail:mail, studentQuestion:studentQuestion, notebookNote:nbNote, closing:!!closing, classroom:document.getElementById('classChk').checked, noFamily:noFamily, sources:SOURCES(), roles:fieldMap('role'), tones:fieldMap('tone'), slang:fieldMap('slang'), spice:SPICE(), protocol:PROTO(), plannedTurns:parseInt(document.getElementById('turns').value,10)||0, inquiryCycleTurns:inquiryCycleTurns, stalled:(PROTO() && STALL>=2), monotony:(PROTO()?MONO():''), arcStuck:(PROTO()?ARCSTUCK():''), operationMissed:(PROTO() && OPFAILS>0), validationRejected:(PROTO() && GATEFAILS>0), promotionRejected:(PROTO() && PROMOTIONFAILS>0), kernelDenied:(PROTO() && KERNELFAILS>0), kernelDeadlocked:(PROTO() && DEADLOCKED), kernelHealth:(PROTO()?KERNEL_HEALTH:''), activeTask:(PROTO()?ACTIVE_TASK:''), artifactPlan:(PROTO()?ARTIFACT_PLAN:''), artifactMode:(PROTO()?ARTIFACT_MODE:''), activeTaskAttempts:(PROTO()?ACTIVE_TASK_ATTEMPTS:0), research:document.getElementById('researchChk').checked, wiki:document.getElementById('wikiChk').checked};
+  let d=null;
+  for(let requestAttempt=0;requestAttempt<2;requestAttempt++){
+    try{
+      const response=await fetch('/duet/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(turnPayload)});
+      d=await response.json();
+    }catch(e){ d=null; }
+    if(d&&d.text) break;
+    if(!(d&&d.retryable) || requestAttempt>0) break;
+    addNote('(generation returned no valid line — retrying the same speaker without advancing the dialogue)');
+    await new Promise(function(resolve){ setTimeout(resolve,450); });
+  }
+  if(!d||!d.text){ if(mail) MAILQ.unshift(mail); if(studentQuestion) STUDENTQ.unshift(studentQuestion); if(nbNote) NBQ.unshift(nbNote); return 'retry'; }
   if(!studentQuestion && !mail){
     if(PAUSED){
       await waitWhilePaused();
@@ -932,6 +1119,10 @@ async function oneTurn(speaker, closing){
   if(d.stallBreak){ addNote('(🔬 stall break — '+ROBOTS[speaker].name+' must bring new ground this turn)'); }
   if(d.monotonyBreak){ addNote('(🔬 '+ROBOTS[speaker].name+' must change the kind of move — no more '+d.monotonyBreak.toLowerCase()+'s)'); }
   if(d.arcBreak){ addNote('(🔬 inquiry intervention — '+ROBOTS[speaker].name+' must advance it past '+d.arcBreak.toLowerCase()+')'); }
+  if(d.inquiryPhase && d.inquiryPhase!==LAST_INQUIRY_PHASE){
+    LAST_INQUIRY_PHASE=d.inquiryPhase;
+    addNote('(inquiry round: '+d.inquiryPhase.toLowerCase()+' — '+(d.inquiryPhaseNote||'')+')');
+  }
   const el=addTurn(cfg,d.text); history.push({speaker:speaker, text:d.text});
   if(mail){ MAIL_REPLY={mail:mail, lines:[{name:d.name, text:d.text}]}; }
   else if(MAIL_REPLY && MAIL_REPLY.lines.length===1){ MAIL_REPLY.lines.push({name:d.name, text:d.text}); flushMailReply(); }
@@ -975,18 +1166,35 @@ function flushMailReply(){
 // two robots' views move, instead of just volleying replies to the last point.
 function maybeReflect(){
   const n=history.length, proto=PROTO();
-  // Not in the opening; take stock often enough to keep an arc. In 🔬 deep-dive
-  // mode the notebook is the point, so it refreshes every other turn (still
-  // backgrounded under the head's speech, so it costs no turn time).
-  if(n<3 || n%(proto?2:3)!==0) return;
+  const robotTurns=history.filter(function(h){ return h.speaker==='blue'||h.speaker==='hexia'; }).length;
+  const inquiryRobotTurns=Math.max(0,robotTurns-INQUIRY_CYCLE_START_TURN);
+  // Refresh after every completed exchange. Artifact-gated phases cannot advance
+  // promptly if a completed test waits four turns before the ledger sees it.
+  const reflectCadence=2;
+  if(robotTurns<reflectCadence || robotTurns%reflectCadence!==0) return;
+  if(REFLECT_IN_FLIGHT) return;
+  REFLECT_IN_FLIGHT=true;
+  const reflectSeq=++REFLECT_SEQ, sessionAtRequest=DUET_SESSION_ID;
   const topic=document.getElementById('topic').value.trim();
   const url=document.getElementById('url').value.trim();
   fetch('/duet/reflect',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({history:history, direction:DIRECTION, topic:topic, url:url, protocol:proto, roles:fieldMap('role'), sources:SOURCES(), noFamily:document.getElementById('noFamilyChk').checked})})
+        body:JSON.stringify({history:history, historyLength:n, reflectSeq:reflectSeq, direction:DIRECTION, topic:topic, url:url, protocol:proto, roles:fieldMap('role'), sources:SOURCES(), noFamily:document.getElementById('noFamilyChk').checked})})
     .then(function(r){ return r.json(); })
     .then(function(j){
-      if(!j || typeof j.direction!=='string' || !j.direction.trim()) return;
+      if(sessionAtRequest!==DUET_SESSION_ID || reflectSeq<=REFLECT_APPLIED) return;
+      if(!j || typeof j.direction!=='string' || !j.direction.trim()){
+        REFLECT_APPLIED=reflectSeq;
+        inquiryControlFailed((j&&j.controlError)||'no valid ledger returned');
+        return;
+      }
+      const hadBearing=!!DIRECTION.trim();
+      REFLECT_APPLIED=reflectSeq;
       DIRECTION=j.direction;
+      if(!proto){
+        if(j.controlRecovered) inquiryControlRecovered(j.controlError);
+        else if(j.controlError) inquiryControlFailed(j.controlError);
+        else INQUIRY_CONTROL_FAILURES=0;
+      }
       const compiledArtifact=!!(j.artifactCompiler && ['COMPILED','HARVESTED'].indexOf(j.artifactCompiler.status)>=0);
       // Mechanical stall counter (protocol): the server diffed the new notebook
       // against the previous one. Two barely-moved reflects in a row => the next
@@ -1245,18 +1453,65 @@ function maybeReflect(){
           }
         }
         if(NBQ.length>7) NBQ=NBQ.slice(-7);
+      } else if(j.inquiry){
+        const iq=j.inquiry;
+        const sourceAudit=iq.sourceAudit||{};
+        const auditRejected=!!(sourceAudit.checked &&
+          ((sourceAudit.rejectedIds&&sourceAudit.rejectedIds.length) ||
+           (sourceAudit.resultChecked&&sourceAudit.resultStatus!=='SUPPORTED')));
+        if(iq.bankedMoved){
+          INQUIRY_STALLS=0; INQUIRY_AUDITS=0;
+          if(running && iq.newBankedIds && iq.newBankedIds.length){
+            addNote('(banked '+iq.newBankedIds.join(', ')+' — settled ground is now binding)');
+          }
+        } else if(auditRejected && INQUIRY_AUDITS===0){
+          INQUIRY_AUDITS=1; INQUIRY_STALLS=0;
+          if(running){
+            const rejected=(sourceAudit.rejectedIds||[]).concat(
+              sourceAudit.resultChecked&&sourceAudit.resultStatus!=='SUPPORTED'?['RESULT']:[]);
+            addNote('(evidence audit - '+rejected.join(', ')+' was not supported by the assigned work; correcting fact versus inference)');
+          }
+        } else if(hadBearing){
+          INQUIRY_STALLS++;
+        }
+        const decision=(iq.decision||'CONTINUE').toUpperCase();
+        if(decision==='CLOSE' || decision==='BRANCH'){
+          INQUIRY_CLOSE_PENDING=true; INQUIRY_DECISION=decision;
+          INQUIRY_CLOSE_REASON=iq.reason||(decision==='BRANCH'?'a distinct next question emerged':'the live question is answered');
+        } else if(INQUIRY_CONTROL_FAILURES>=2 && inquiryRobotTurns>=6){
+          INQUIRY_CLOSE_PENDING=true; INQUIRY_DECISION='CLOSE';
+          INQUIRY_CLOSE_REASON='the controller required repeated repair; synthesizing the valid state';
+        } else if(INQUIRY_STALLS>=2 && inquiryRobotTurns>=8 && INQUIRY_AUDITS===0){
+          INQUIRY_AUDITS=1; INQUIRY_STALLS=0;
+          setInquiryField('OPEN','EVIDENCE AUDIT REQUIRED - agreement produced no new supported ground.');
+          setInquiryField('DECISION','CONTINUE - distinguish agreement from evidential support');
+          setInquiryField('NEXT','Re-read the assigned evidence; separate reported fact, author inference, and speaker inference; correct any contradiction before concluding.');
+          if(running) addNote('(evidence audit - no new supported conclusion was earned; checking reported fact against inference)');
+        } else if(INQUIRY_STALLS>=2 && inquiryRobotTurns>=8 && INQUIRY_AUDITS>=1){
+          INQUIRY_CLOSE_PENDING=true; INQUIRY_DECISION='CLOSE';
+          INQUIRY_CLOSE_REASON='the evidence audit produced no new supported conclusion; synthesizing only what the evidence warrants';
+        }
+        if(running && INQUIRY_CLOSE_PENDING){
+          addNote('(conclusion ready — '+INQUIRY_CLOSE_REASON+'; one landing turn)');
+        }
       }
       renderNotebook();
       // Surface the developing direction unobtrusively, so the self-reflection is visible.
       const m=/NEXT:\\s*(.+)/i.exec(DIRECTION);
-      if(m && running){
+      if(m && running && !(INQUIRY_CLOSE_PENDING && !proto)){
         const mv=(proto && j.movement && j.movement.type && j.movement.type!=='NONE')?('advanced by '+j.movement.type.toLowerCase()+'; '):'';
         addNote('(they take stock — '+mv+'where this is heading: '+m[1].trim()+')');
       }
-    }).catch(function(){});
+    }).catch(function(){ inquiryControlFailed('request failed'); }).finally(function(){
+      if(sessionAtRequest===DUET_SESSION_ID) REFLECT_IN_FLIGHT=false;
+    });
 }
 async function run(){
-  running=true; history=[]; DIRECTION=''; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; ARCS=[]; NBQ=[]; LAST_OBS=''; REFLECTS=0; OPFAILS=0; GATEFAILS=0; PROMOTIONFAILS=0; KERNELFAILS=0; PROTOCOL_AUDIT=''; KERNEL_HEALTH='NORMAL'; WORKFLOW_STATE='IDLE'; DEADLOCKED=false; LAST_RECOVERY_TURN=0; ACTIVE_TASK=''; ACTIVE_TASK_ATTEMPTS=0; ARTIFACT_PLAN=''; ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; ART_REQ=0; ART_CREATED=0; ART_POPULATED=0; ART_USED=0; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  INQUIRY_AUDITS=0;
+  running=true; history=[]; DIRECTION=''; LAST_INQUIRY_PHASE=''; INQUIRY_STALLS=0; INQUIRY_CYCLES=0; INQUIRY_CYCLE_START_TURN=0; INQUIRY_CLOSE_PENDING=false; INQUIRY_DECISION=''; INQUIRY_CLOSE_REASON=''; INQUIRY_CONTROL_FAILURES=0; GENERATION_FAILURES=0; LAST_PHASE=''; LAST_BUILDER=''; STALL=0; MOVETYPES=[]; ARCS=[]; NBQ=[]; LAST_OBS=''; REFLECTS=0; OPFAILS=0; GATEFAILS=0; PROMOTIONFAILS=0; KERNELFAILS=0; PROTOCOL_AUDIT=''; KERNEL_HEALTH='NORMAL'; WORKFLOW_STATE='IDLE'; DEADLOCKED=false; LAST_RECOVERY_TURN=0; ACTIVE_TASK=''; ACTIVE_TASK_ATTEMPTS=0; ARTIFACT_PLAN=''; ARTIFACT_MODE=''; ARTIFACT_SILENCE=0; ART_REQ=0; ART_CREATED=0; ART_POPULATED=0; ART_USED=0; logEl.innerHTML=''; renderNotebook(); startBtn.disabled=true; stopBtn.disabled=false; questionBtn.disabled=false; pauseBtn.disabled=false;
+  DUET_SESSION_ID=(window.crypto&&window.crypto.randomUUID)?window.crypto.randomUUID():('duet-'+Date.now()+'-'+Math.random().toString(16).slice(2));
+  DUET_SESSION_ENDED=false; REFLECT_SEQ=0; REFLECT_APPLIED=0; REFLECT_IN_FLIGHT=false;
+  try{ await fetch('/duet/session/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:DUET_SESSION_ID})}); }catch(e){}
   setPaused(false); STUDENTQ=[];
   TRANSCRIPT=[]; saveBtn.disabled=true;
   // A bare link pasted into the topic box IS the link — move it over visibly.
@@ -1321,20 +1576,52 @@ async function run(){
     addNote('(📧 watching the inbox — email with duet in the subject joins the conversation)');
     mailTimer=setInterval(pollMail, 8000);
   }
-  let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=6;   // 0 = until you press Stop
+  let turns=parseInt(document.getElementById('turns').value,10); if(isNaN(turns))turns=0;   // 0 runs until Stop
   let speaker=document.getElementById('starter').value;
   for(let i=0; running && (turns===0 || i<turns); i++){
     await waitWhilePaused();
     if(!running) break;
-    const ok=await oneTurn(speaker, turns>0 && i>=turns-2);
-    if(!ok){ addNote(ok===false?'(…lost the thread — is LM Studio running?)':''); break; }
+    const conclusionLanding=!PROTO() && INQUIRY_CLOSE_PENDING;
+    const ok=await oneTurn(speaker, conclusionLanding || (turns>0 && i>=turns-2));
+    if(ok==='retry'){
+      GENERATION_FAILURES++;
+      if(GENERATION_FAILURES===1 || GENERATION_FAILURES%3===0){
+        addNote('(generation unavailable — keeping '+ROBOTS[speaker].name+"'s turn and retrying; the discussion remains open)");
+      }
+      i--;
+      await waitBeforeGenerationRetry();
+      continue;
+    }
+    if(!ok) break;
     if(ok==='defer'){ i--; continue; }
+    GENERATION_FAILURES=0;
     speaker=(speaker==='blue')?'hexia':'blue';
+    if(conclusionLanding){
+      const continued=(turns===0 || i<turns-1) && rolloverContinuousInquiry();
+      if(!continued){
+        addNote('(discussion complete — no distinct unresolved branch remains)');
+        break;
+      }
+    }
   }
   stop();
 }
 function addNote(t){ if(!t)return; TRANSCRIPT.push({kind:'note', text:t}); const d=document.createElement('div'); d.className='muted'; d.textContent=t; logEl.appendChild(d); }
-function stop(){ running=false; setPaused(false); if(qRecording) stopQuestionRecording(false); if(questionPanel) questionPanel.style.display='none'; if(mailTimer){ clearInterval(mailTimer); mailTimer=null; } flushMailReply(); try{ window.speechSynthesis.cancel(); }catch(e){} if(ACTIVE_SPEECH_FINISH) ACTIVE_SPEECH_FINISH(); headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia); startBtn.disabled=false; stopBtn.disabled=true; questionBtn.disabled=true; pauseBtn.disabled=true; pauseBtn.textContent='Pause'; }
+function stop(){
+  running=false; setPaused(false);
+  if(qRecording) stopQuestionRecording(false);
+  if(questionPanel) questionPanel.style.display='none';
+  if(mailTimer){ clearInterval(mailTimer); mailTimer=null; }
+  flushMailReply();
+  if(DUET_SESSION_ID && !DUET_SESSION_ENDED){
+    DUET_SESSION_ENDED=true;
+    try{ fetch('/duet/session/end',{method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,body:JSON.stringify({sessionId:DUET_SESSION_ID,historyLength:history.length,direction:DIRECTION})}); }catch(e){}
+  }
+  cancelDuetAudio();
+  if(ACTIVE_SPEECH_FINISH) ACTIVE_SPEECH_FINISH();
+  headLipStop(ROBOTS.blue); headLipStop(ROBOTS.hexia);
+  startBtn.disabled=false; stopBtn.disabled=true; questionBtn.disabled=true; pauseBtn.disabled=true; pauseBtn.textContent='Pause';
+}
 startBtn.addEventListener('click', function(){ primeAudio(); run(); });
 stopBtn.addEventListener('click', stop);
 questionBtn.addEventListener('click', openQuestionPanel);
@@ -1403,6 +1690,7 @@ if('speechSynthesis' in window){
     refreshVoices();
   }, 600);
 } else { buildVoicePickers(); }
+loadNeuralVoiceChoices();
 wireRatePickers();
 
 /* The Web Serial Ohbot driver, the device gates (DRIVES_HEADS / WEBSERIAL_OK /

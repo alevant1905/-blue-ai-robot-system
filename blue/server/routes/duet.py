@@ -6,6 +6,7 @@ bluetools — parts of it are shared with chat mode — and is read via
 bt.<name> at request time.
 """
 import base64
+from difflib import SequenceMatcher
 import json
 import os
 import random
@@ -17,23 +18,70 @@ import bluetools as bt
 from flask import Response, jsonify, render_template_string, request
 
 from blue.agreement import agreement_gesture
+from blue.llm_coordinator import llm_slot
 from blue.mood_eyes import mood_eye_color
 from blue.server.pages.duet import DUET_HTML
 
 
+_DUET_ROBOTS = frozenset(("blue", "hexia"))
+
+
 _DUET_FAMILY_REF_RE = re.compile(
     r"\b("
-    r"Alex'?s\s+(?:family|wife|husband|spouse|partner|kids?|children|daughters?|sons?|household|home)"
+    r"(?:Alex|Levant)(?:['\u2019]s)?\s+(?:family|wife|husband|spouse|partner|kids?|children|"
+    r"daughters?|sons?|household|home|workspace|charger|routines?)"
     r"|(?:his|your|our)\s+(?:family|wife|husband|spouse|partner|kids?|children|daughters?|sons?)"
     r"|(?:the\s+household|the\s+kids?|the\s+children|the\s+daughters?|the\s+sons?)"
-    r"|Vilda|Stella|Felix|Svetlana"
+    r"|Vilda|Stella|Felix|Svetlana|Nori"
     r")\b",
     re.I,
 )
 
+_DUET_GENERIC_LINK_TOPIC_RE = re.compile(
+    r"^(?:please\s+)?(?:discuss|read|watch|review|analy[sz]e|debate|respond\s+to|"
+    r"talk\s+about)(?:\s+(?:this|the))?(?:\s+(?:post|article|piece|link|video))?"
+    r"[\s.!?]*$",
+    re.I,
+)
+
+_DUET_PERSONAL_NAME_RE = re.compile(
+    r"\b(?:Alex|Chris|Felix|Nori|Stella|Svetlana|Vilda)\b",
+    re.I,
+)
+
+_DUET_SOURCE_ATTRIBUTION_RE = re.compile(
+    r"(?:\b(?:the\s+)?(?:article|essay|piece|post|author|writer)\b.{0,45}"
+    r"\b(?:argues?|claims?|says?|warns?|notes?|shows?|frames?|defines?)\b|"
+    r"\b[A-Z][a-z]{2,24}(?:['\u2019]s)?\s+"
+    r"(?:argues?|claims?|says?|warns?|notes?|shows?|frames?|defines?)\b)",
+)
+
+_DUET_ATTRIBUTION_META_TERMS = {
+    "article", "essay", "piece", "post", "author", "writer", "argu", "claim",
+    "says", "warn", "note", "show", "frame", "define",
+}
+
+
+def _duet_assigned_subject(topic: str, url_info=None) -> str:
+    """Prefer a linked work's real title over placeholder-like topic text."""
+    topic = (topic or "").strip()
+    title = str((url_info or {}).get("title") or "").strip()
+    if topic and not _DUET_GENERIC_LINK_TOPIC_RE.match(topic):
+        return topic
+    if title:
+        return f'the central claim of "{title}"'
+    if url_info:
+        return "the central claim of the linked article or video"
+    return topic
+
 
 def _duet_family_ref(text: str) -> bool:
     return bool(text and _DUET_FAMILY_REF_RE.search(text))
+
+
+def _duet_redact_private(text: str) -> str:
+    """Remove private spans without destroying the inquiry ledger around them."""
+    return _DUET_FAMILY_REF_RE.sub("[private detail omitted]", text or "")
 
 
 def _duet_persona_line(robot_id: str, no_family: bool) -> str:
@@ -147,7 +195,984 @@ def _duet_grounded_enough(text: str, terms) -> bool:
         return True
     low = (text or "").lower()
     hits = [t for t in terms if re.search(r"\b" + re.escape(t) + r"\b", low)]
-    return len(hits) >= 2 or any(len(t) >= 8 for t in hits)
+    if len(hits) >= 2 or any(len(t) >= 8 for t in hits):
+        return True
+
+    # Exact word matching rejected faithful paraphrases ("extracted" versus
+    # "extraction", singular versus plural). Use a deliberately conservative
+    # morphological stem as a second signal; this is still a guard against a
+    # wholly generic line, not a claim that lexical overlap proves correctness.
+    def stem(token: str) -> str:
+        if token.endswith("ies") and len(token) >= 7:
+            return token[:-3] + "y"
+        for suffix in ("ization", "ation", "ments", "ment", "ingly", "ing", "ied", "ies", "ed", "es", "s"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 5:
+                return token[:-len(suffix)]
+        return token
+
+    candidate_stems = {
+        stem(m.group(0).strip("'-"))
+        for m in re.finditer(r"[a-z][a-z'\-]{4,}", low)
+    }
+    stem_hits = [t for t in terms if stem(t) in candidate_stems]
+    return len(stem_hits) >= 2 or any(len(t) >= 9 for t in stem_hits)
+
+
+def _duet_unprompted_personalization(text: str, allowed_context: str = "") -> bool:
+    """Flag known household examples that the assigned subject did not request.
+
+    Personal colour is useful in a free duet, but in a source-grounded inquiry it
+    too easily replaces textual analysis with guesses about Alex or the household.
+    A name remains available when the topic, roles, or assigned work actually put
+    it in scope.
+    """
+    allowed = allowed_context or ""
+    for match in _DUET_PERSONAL_NAME_RE.finditer(text or ""):
+        if not re.search(r"\b" + re.escape(match.group(0)) + r"\b", allowed, re.I):
+            return True
+    return False
+
+
+def _duet_unsupported_source_attribution(text: str, source_material: str) -> bool:
+    """Catch confident source attributions whose vocabulary is mostly invented.
+
+    This is intentionally a narrow guard, not an entailment model.  It acts only
+    on clauses that explicitly say an author/work argues or claims something.
+    Extrapolations introduced as the speaker's own inference are left alone.
+    """
+    if not text or not source_material:
+        return False
+    source_terms = _duet_claim_terms(source_material)
+    if not source_terms:
+        return False
+    clauses = re.split(r"(?<=[.!?])\s+|\s*[;:]\s*", text)
+    for clause in clauses:
+        if not _DUET_SOURCE_ATTRIBUTION_RE.search(clause):
+            continue
+        claim_terms = _duet_claim_terms(clause) - _DUET_ATTRIBUTION_META_TERMS
+        # Author names and the work label are attribution machinery, not claims.
+        claim_terms -= {
+            token.lower()
+            for token in re.findall(r"\b[A-Z][a-z]{2,24}\b", clause)
+        }
+        if len(claim_terms) < 3:
+            continue
+        overlap = len(claim_terms & source_terms)
+        if overlap < 2 or (overlap * 5) < (len(claim_terms) * 3):
+            return True
+    return False
+
+
+def _duet_result_text(result, label: str, attempt: int, prompt_chars: int) -> str:
+    """Read one LM Studio answer and leave enough evidence to debug empties."""
+    choices = (result or {}).get("choices") or []
+    choice = choices[0] if choices else {}
+    message = choice.get("message") or {}
+    text = message.get("content") or ""
+    if not text:
+        usage = (result or {}).get("usage") or {}
+        bt.log.warning(
+            f"[DUET] {label} attempt {attempt + 1} returned empty content "
+            f"(finish={choice.get('finish_reason')!r}, prompt_chars={prompt_chars}, "
+            f"completion_tokens={usage.get('completion_tokens')!r}, "
+            f"reasoning_chars={len(str(message.get('reasoning_content') or ''))}, "
+            f"error={(result or {}).get('error')!r})"
+        )
+    return str(text)
+
+
+def _duet_compact_repair_messages(name: str, other_name: str, persona: str,
+                                  last_line: str, rejected_draft: str,
+                                  repair_requirement: str, direction: str,
+                                  source_material: str, opening: bool = False):
+    """A small second-pass prompt; adding rules to the full prompt caused empties."""
+    if opening:
+        system = (
+            f"You are {name}, opening a dialogue with {other_name}. {persona} "
+            "Repair one rejected opening draft. No other speaker has made a claim yet, so do "
+            "not pretend to answer one. Satisfy every listed repair requirement; none is optional. "
+            "State one plain, answerable proposition about the assigned "
+            "subject and explicitly define or distinguish its central terms. You may end with one "
+            "exact decision question for the other speaker. Use at most one metaphor and explain it "
+            f"as a plain claim. Return only {name}'s repaired spoken line."
+        )
+    else:
+        system = (
+            f"You are {name}, speaking naturally to {other_name} in an ongoing dialogue. "
+            f"{persona} Repair one rejected draft. Satisfy every listed repair requirement; "
+            "none is optional. Preserve the exact live thread. "
+            "Sentence one must directly answer the other speaker's actual claim, including its "
+            "negation or concession. Sentence two may make exactly one move: clarify, challenge, "
+            "extend, or test. Use at most one metaphor and cash it out as a plain claim. "
+            f"Return only {name}'s repaired spoken line."
+        )
+    if source_material:
+        system += (
+            " Keep source attribution exact: state only directly supported material as the "
+            "work's claim, and explicitly own every extension as your inference or hypothesis."
+        )
+    parts = [
+        (f"ASSIGNED SUBJECT:\n{last_line[-1800:]}" if opening else
+         f"LAST LINE FROM {other_name.upper()}:\n{last_line[-1800:]}"),
+        f"REJECTED DRAFT:\n{rejected_draft[-1400:]}",
+        f"REPAIR REQUIREMENT:\n{repair_requirement[-1400:]}",
+    ]
+    if direction:
+        parts.append("CURRENT DIALOGUE STATE:\n" + direction[-2200:])
+    if source_material:
+        parts.append(
+            "RELEVANT SOURCE CLAIMS (use their substance without citing this block):\n"
+            + source_material[:2400]
+        )
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)}]
+
+
+def _duet_compact_bearing_messages(subject: str, lines, previous: str,
+                                   source_material: str = "", no_family: bool = False):
+    """Small failover prompt for the inquiry controller.
+
+    The normal full prompt carries source digests and extensive method guidance.
+    Reasoning models sometimes spend the entire visible-output budget on that
+    context, so the second attempt gets only the canonical state and transcript.
+    """
+    system = (
+        "You are a dialogue controller. Return exactly ten single-line fields and "
+        "nothing else. Preserve speaker ownership. Copy every previous BANKED B# "
+        "claim verbatim and append only explicit shared conclusions. When an assigned "
+        "work is present, agreement is not evidence: a new bank must also be supported "
+        "by that work. A test must give "
+        "different predictions for the live positions. CLOSE when the question is "
+        "answered; BRANCH when a distinct new question emerged after the assigned question "
+        "was answered; otherwise CONTINUE. Mere drift away from the assigned subject is not "
+        "a branch: use NEXT to route the same inquiry back. A proposed TEST may use only a "
+        "case or comparison already present in the recent turns or assigned-work excerpt. "
+        "Never erase a completed QUESTION, POSITIONS, TEST, or RESULT. CONTINUE, CLOSE, and "
+        "BRANCH all require a concrete NEXT; NEXT may not be a dash."
+        " In synthesis, separate three clauses: SUPPORTED, CONTRADICTED OR NOT ESTABLISHED, "
+        "and UNRESOLVED. Omit only an empty unresolved clause."
+    )
+    if no_family:
+        system += (
+            " Privacy is binding: do not mention private names, Alex's or the Levant "
+            "household, home, workspace, relatives, pets, or routines, and do not build a "
+            "test from them."
+        )
+    parts = []
+    if subject:
+        parts.append("SUBJECT: " + subject[:500])
+    if previous:
+        parts.append("PREVIOUS LEDGER:\n" + previous[-3000:])
+    if source_material:
+        parts.append(
+            "ASSIGNED-WORK EXCERPT (source boundary for QUESTION, TEST, and NEXT). "
+            "Keep direct source claims separate from the pair's inferences; unsupported "
+            "extensions belong in OPEN as REQUIRES EVIDENCE, not as claims by the author:\n"
+            + source_material[:2600]
+        )
+    parts.append("RECENT TURNS:\n" + "\n".join(list(lines)[-10:])[-6000:])
+    parts.append(
+        "OUTPUT SCHEMA:\n"
+        "QUESTION: <one decision question>\n"
+        "DEFINITIONS: <stable distinctions or ->\n"
+        "BANKED: <B# claims separated by | or ->\n"
+        "POSITIONS: <Blue: claim; Hexia: claim>\n"
+        "OPEN: <one unresolved proposition or ->\n"
+        "TEST: <runnable-now comparison plus rival predictions, or ->\n"
+        "RESULT: <observed/argued outcome from running it against available evidence, or NOT RUN>\n"
+        "REOPEN: <B# plus new contrary evidence, or ->\n"
+        "DECISION: <CONTINUE, CLOSE, or BRANCH — reason>\n"
+        "NEXT: <one move, verdict, or separate branch question>"
+    )
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)}]
+
+
+def _duet_bearing_field(text: str, label: str) -> str:
+    """Read one single-line field from the normal duet inquiry ledger."""
+    match = re.search(
+        rf"^\s*{re.escape(label)}\s*:\s*(.*)$", text or "", re.I | re.M)
+    return match.group(1).strip() if match else ""
+
+
+_DUET_NORMAL_BEARING_FIELDS = (
+    "QUESTION", "DEFINITIONS", "BANKED", "POSITIONS", "OPEN",
+    "TEST", "RESULT", "REOPEN", "DECISION", "NEXT",
+)
+
+
+def _duet_normalize_bearing(text: str) -> str:
+    """Canonicalize common ledger formatting without inferring conclusions.
+
+    Small local models often put several requested fields on one line or omit
+    bookkeeping-only fields.  Extract explicit labels wherever they occur and
+    fill omissions with neutral state.  A missing/invalid DECISION remains
+    invalid so the controller still fails closed rather than inventing policy.
+    """
+    value = (text or "").strip()
+    value = re.sub(r"^```(?:json|text|markdown)?\s*", "", value, flags=re.I)
+    value = re.sub(r"\s*```$", "", value)
+    if value.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                upper = {str(key).upper(): val for key, val in parsed.items()}
+                if any(field in upper for field in _DUET_NORMAL_BEARING_FIELDS):
+                    value = "\n".join(
+                        f"{field}: {upper[field]}"
+                        for field in _DUET_NORMAL_BEARING_FIELDS if field in upper
+                    )
+        except (TypeError, ValueError):
+            pass
+    field_names = "|".join(_DUET_NORMAL_BEARING_FIELDS)
+    field_re = re.compile(
+        rf"(?:^|\s)(?:\d+[.)]\s*|[-*+]\s*)?\*{{0,2}}"
+        rf"({field_names})\*{{0,2}}\s*:\*{{0,2}}\s*",
+        re.I | re.M,
+    )
+    matches = list(field_re.finditer(value))
+    if len({match.group(1).upper() for match in matches}) < 4:
+        return value.strip()
+    extracted = {}
+    for index, match in enumerate(matches):
+        field = match.group(1).upper()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+        raw = re.sub(r"\s+", " ", value[match.end():end]).strip()
+        if field not in extracted:
+            extracted[field] = raw or "-"
+    neutral = {field: "-" for field in _DUET_NORMAL_BEARING_FIELDS}
+    neutral["RESULT"] = "NOT RUN"
+    return "\n".join(
+        f"{field}: {extracted.get(field, neutral[field])}"
+        for field in _DUET_NORMAL_BEARING_FIELDS
+    )
+
+
+def _duet_normal_bearing_valid(text: str) -> bool:
+    if not all(re.search(
+            rf"^\s*{field}\s*:", text or "", re.I | re.M)
+            for field in _DUET_NORMAL_BEARING_FIELDS):
+        return False
+    valid_decision = bool(re.match(
+        r"\s*(?:CONTINUE|CLOSE|BRANCH)\b",
+        _duet_bearing_field(text, "DECISION"), re.I,
+    ))
+    next_move = _duet_bearing_field(text, "NEXT")
+    reopen = _duet_bearing_field(text, "REOPEN")
+    valid_reopen = reopen == "-" or bool(re.match(r"B\d+\b", reopen, re.I))
+    natural_next = bool(
+        next_move and next_move != "-"
+        and not _DUET_NORMAL_CONTROL_TALK_RE.search(next_move)
+    )
+    return valid_decision and valid_reopen and natural_next
+
+
+def _duet_replace_bearing_field(text: str, label: str, value: str) -> str:
+    pattern = re.compile(rf"^\s*{re.escape(label)}\s*:.*$", re.I | re.M)
+    replacement = f"{label}: {value}"
+    if pattern.search(text or ""):
+        return pattern.sub(replacement, text, count=1)
+    return (text.rstrip() + "\n" + replacement).strip()
+
+
+def _duet_preserve_inquiry_artifacts(previous: str, current: str) -> str:
+    """Prevent the controller from erasing phase-defining completed work."""
+    if not (_duet_normal_bearing_valid(previous)
+            and _duet_normal_bearing_valid(current)):
+        return current
+    out = current
+    previous_question = _duet_bearing_field(previous, "QUESTION")
+    if previous_question and previous_question != "-":
+        out = _duet_replace_bearing_field(out, "QUESTION", previous_question)
+
+    previous_test = _duet_bearing_field(previous, "TEST")
+    previous_result = _duet_bearing_field(previous, "RESULT")
+    completed_result = (
+        previous_result and previous_result != "-"
+        and not re.match(r"NOT\s+RUN\b", previous_result, re.I)
+    )
+    reopened = bool(re.match(
+        r"B\d+\b", _duet_bearing_field(out, "REOPEN"), re.I))
+
+    previous_positions = _duet_bearing_field(previous, "POSITIONS")
+    current_positions = _duet_bearing_field(out, "POSITIONS")
+    current_has_pair = (
+        re.search(r"\bBlue\s*:", current_positions, re.I)
+        and re.search(r"\bHexia\s*:", current_positions, re.I)
+    )
+    if (previous_positions and previous_positions != "-"
+            and (not current_has_pair or (completed_result and not reopened))):
+        out = _duet_replace_bearing_field(out, "POSITIONS", previous_positions)
+
+    # Once rival positions have been stated under a working distinction, the
+    # controller may not silently redefine the terms to manufacture a new fight.
+    # A genuinely different question starts a fresh ledger instead.
+    previous_definitions = _duet_bearing_field(previous, "DEFINITIONS")
+    if (previous_positions and previous_positions != "-"
+            and previous_definitions and previous_definitions != "-"):
+        out = _duet_replace_bearing_field(out, "DEFINITIONS", previous_definitions)
+
+    if completed_result and not reopened:
+        if previous_test and previous_test != "-":
+            out = _duet_replace_bearing_field(out, "TEST", previous_test)
+        out = _duet_replace_bearing_field(out, "RESULT", previous_result)
+    return out
+
+
+def _duet_banked_ids(text: str):
+    """Return the stable B# identifiers used by the cumulative BANKED ledger."""
+    return {
+        int(match.group(1))
+        for match in re.finditer(
+            r"\bB(\d+)\b", _duet_bearing_field(text, "BANKED"), re.I)
+    }
+
+
+def _duet_banked_entries(text: str) -> dict:
+    entries = {}
+    for part in _duet_bearing_field(text, "BANKED").split("|"):
+        item = part.strip()
+        match = re.match(r"B(\d+)\b", item, re.I)
+        if match:
+            entries[int(match.group(1))] = item
+    return entries
+
+
+_DUET_ACCEPTANCE_RE = re.compile(
+    r"\b(?:i\s+(?:agree|concede|accept|grant)|we\s+agree|"
+    r"you(?:'re|\s+are)\s+right|that(?:'s|\s+is)\s+right|"
+    r"fair\s+(?:point|enough)|granted|yes\s*[,;:])\b",
+    re.I,
+)
+
+
+def _duet_banked_claim_was_accepted(entry: str, lines) -> bool:
+    """Require recent, proposition-linked acceptance before banking a claim."""
+    proposition = re.sub(r"^B\d+\b\s*", "", entry or "", flags=re.I).strip()
+    proposition_terms = _duet_claim_terms(proposition)
+    if not proposition_terms:
+        return False
+    for line in list(lines or [])[-4:]:
+        clean = re.sub(r"\s+", " ", str(line or "")).strip()
+        _speaker, separator, spoken = clean.partition(":")
+        spoken = spoken if separator else clean
+        acceptance = _DUET_ACCEPTANCE_RE.search(spoken)
+        if not acceptance:
+            continue
+        # "You're right that X, but Y" accepts X, not the whole turn.  Compare
+        # only the acceptance scope so a generic concession cannot bank Y.
+        accepted_scope = re.split(
+            r"\b(?:but|however|yet|although|except|nevertheless)\b",
+            spoken[acceptance.start():], maxsplit=1, flags=re.I,
+        )[0]
+        overlap = proposition_terms & _duet_claim_terms(accepted_scope)
+        required = max(2, (len(proposition_terms) * 3 + 4) // 5)
+        if len(overlap) >= required:
+            return True
+    return False
+
+
+def _duet_preserve_banked(previous: str, current: str, lines=None,
+                          allowed_new_ids=None) -> str:
+    """Keep old banks verbatim; admit new IDs only after explicit acceptance.
+
+    ``lines=None`` preserves the helper's legacy merge behavior for callers that
+    do not have transcript evidence.  The live reflection route always supplies
+    recent lines, so one speaker's assertion cannot silently become consensus.
+    When an assigned source was audited, ``allowed_new_ids`` independently limits
+    additions to propositions the source supports. Agreement and evidence are
+    deliberately separate gates.
+    """
+    old_entries = _duet_banked_entries(previous)
+    proposed_entries = _duet_banked_entries(current)
+    merged = [old_entries[item] for item in sorted(old_entries)]
+    highest_old = max(old_entries) if old_entries else 0
+    merged.extend(
+        proposed_entries[item]
+        for item in sorted(proposed_entries)
+        if item > highest_old
+        and (allowed_new_ids is None or item in allowed_new_ids)
+        and (lines is None
+             or _duet_banked_claim_was_accepted(proposed_entries[item], lines))
+    )
+    banked_line = "BANKED: " + (" | ".join(merged) if merged else "-")
+    pattern = re.compile(r"^\s*BANKED\s*:.*$", re.I | re.M)
+    if pattern.search(current or ""):
+        return pattern.sub(banked_line, current, count=1)
+    definitions = re.search(r"^\s*DEFINITIONS\s*:.*$", current or "", re.I | re.M)
+    if definitions:
+        at = definitions.end()
+        return current[:at] + "\n" + banked_line + current[at:]
+    return banked_line + "\n" + (current or "")
+
+
+def _duet_promote_argued_result(previous: str, current: str, lines) -> str:
+    """Copy an explicit evaluation into RESULT when the controller misses it.
+
+    This is deliberately conservative: a test must already have existed in the
+    previous ledger, its result must have been pending, and one of only the two
+    new turns must explicitly say what a case supports, proves, establishes, or
+    fails to establish.  The copied clauses remain attributed and verbatim.
+    """
+    previous_test = _duet_bearing_field(previous, "TEST")
+    previous_result = _duet_bearing_field(previous, "RESULT")
+    current_result = _duet_bearing_field(current, "RESULT")
+    if (not previous_test or previous_test == "-"
+            or not re.match(r"NOT\s+RUN\b", previous_result or "", re.I)
+            or not re.match(r"NOT\s+RUN\b", current_result or "", re.I)):
+        return current
+    result_markers = re.compile(
+        r"\b(?:supports?|proves?|demonstrates?|shows?|establishes?|matches?|"
+        r"fails?|cannot\s+establish|does\s+not\s+establish)\b",
+        re.I,
+    )
+    copied = []
+    for line in list(lines or [])[-2:]:
+        clean = re.sub(r"\s+", " ", str(line or "")).strip()
+        if not result_markers.search(clean):
+            continue
+        speaker, sep, text = clean.partition(":")
+        clauses = [
+            clause.strip()
+            for clause in re.split(r"(?<=[.!?])\s+|\s*;\s*", text if sep else clean)
+            if result_markers.search(clause)
+        ]
+        if clauses:
+            attribution = (speaker.strip() + ": ") if sep else ""
+            copied.append(attribution + " ".join(clauses))
+    if not copied:
+        return current
+    result_line = "RESULT: ARGUED FROM REPORTED CASE — " + " | ".join(copied)[:900]
+    return re.sub(r"^\s*RESULT\s*:.*$", result_line, current, count=1,
+                  flags=re.I | re.M)
+
+
+_DUET_SOURCE_AUDIT_STATUSES = {
+    "SUPPORTED", "CONTRADICTED", "NOT_ESTABLISHED",
+}
+
+
+def _duet_source_audit_candidates(previous: str, current: str) -> dict:
+    """Return only new binding claims that need an assigned-source check."""
+    old_ids = _duet_banked_ids(previous)
+    entries = _duet_banked_entries(current)
+    candidates = {
+        f"B{item}": re.sub(r"^B\d+\b\s*", "", entries[item], flags=re.I)
+        for item in sorted(entries)
+        if item not in old_ids
+    }
+    previous_result = _duet_bearing_field(previous, "RESULT")
+    current_result = _duet_bearing_field(current, "RESULT")
+    if (current_result and current_result != "-"
+            and not re.match(r"NOT\s+RUN\b", current_result, re.I)
+            and current_result != previous_result):
+        candidates["RESULT"] = current_result
+    return candidates
+
+
+def _duet_parse_source_audit(text: str, keys) -> dict:
+    """Parse strict source verdicts; omissions fail closed as not established."""
+    expected = [str(key).upper() for key in keys]
+    found = {}
+    pattern = re.compile(
+        r"^\s*(B\d+|RESULT)\s*:\s*"
+        r"(SUPPORTED|CONTRADICTED|NOT[ _-]ESTABLISHED)"
+        r"(?:\s*[\-\u2013\u2014:]\s*(.*))?\s*$",
+        re.I | re.M,
+    )
+    for match in pattern.finditer(text or ""):
+        key = match.group(1).upper()
+        if key not in expected or key in found:
+            continue
+        status = re.sub(r"[ -]+", "_", match.group(2).upper())
+        if status not in _DUET_SOURCE_AUDIT_STATUSES:
+            continue
+        reason = re.sub(r"\s+", " ", match.group(3) or "").strip()
+        reason = re.split(
+            r"\s+(?=(?:B\d+|RESULT)\s*:)", reason, maxsplit=1, flags=re.I
+        )[0][:240]
+        found[key] = {
+            "status": status,
+            "reason": reason or "No source-grounded reason was supplied.",
+        }
+    for key in expected:
+        found.setdefault(key, {
+            "status": "NOT_ESTABLISHED",
+            "reason": "The source audit did not establish this claim.",
+        })
+    return found
+
+
+def _duet_source_audit_summary(candidates: dict, verdicts: dict) -> dict:
+    """Build the small JSON-safe audit object returned to the browser."""
+    supported_ids = []
+    rejected_ids = []
+    contradicted_ids = []
+    for key in candidates:
+        status = (verdicts.get(key) or {}).get("status", "NOT_ESTABLISHED")
+        if not key.startswith("B"):
+            continue
+        if status == "SUPPORTED":
+            supported_ids.append(key)
+        else:
+            rejected_ids.append(key)
+            if status == "CONTRADICTED":
+                contradicted_ids.append(key)
+    result_status = (
+        (verdicts.get("RESULT") or {}).get("status", "")
+        if "RESULT" in candidates else ""
+    )
+    return {
+        "checked": True,
+        "candidateCount": len(candidates),
+        "verdicts": verdicts,
+        "supportedIds": supported_ids,
+        "rejectedIds": rejected_ids,
+        "contradictedIds": contradicted_ids,
+        "resultChecked": "RESULT" in candidates,
+        "resultStatus": result_status,
+    }
+
+
+def _duet_audit_source_claims(previous: str, current: str,
+                               source_material: str) -> dict:
+    """Check proposed binding conclusions against the assigned work itself.
+
+    This is an evidential gate, separate from the transcript-level agreement
+    gate. It is intentionally fail-closed: an empty or malformed audit leaves a
+    new claim unestablished instead of promoting mutual confidence to evidence.
+    """
+    candidates = _duet_source_audit_candidates(previous, current)
+    if not source_material or not candidates:
+        return {
+            "checked": False, "candidateCount": len(candidates),
+            "verdicts": {}, "supportedIds": [], "rejectedIds": [],
+            "contradictedIds": [], "resultChecked": False,
+            "resultStatus": "",
+        }
+    keys = list(candidates)
+    claim_lines = "\n".join(
+        f"{key}: {value[:1200]}" for key, value in candidates.items())
+    system = (
+        "You are a strict source-evidence auditor. Use only the assigned work below; "
+        "do not use outside knowledge. Mutual agreement between speakers is not evidence. "
+        "Mark SUPPORTED only when the work directly states, reports, or clearly entails the "
+        "claim. Mark CONTRADICTED when the work reports the opposite. Mark NOT_ESTABLISHED "
+        "for a plausible extrapolation, prescription, causal explanation, or general claim "
+        "the work does not establish. Evaluate every key. Return one line per key and nothing "
+        "else: KEY: SUPPORTED|CONTRADICTED|NOT_ESTABLISHED - short reason."
+    )
+    user = (
+        "ASSIGNED WORK:\n" + source_material[:9000] +
+        "\n\nPROPOSED BINDING CLAIMS:\n" + claim_lines
+    )
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": user}]
+    verdicts = {}
+    for attempt in range(2):
+        try:
+            with llm_slot(foreground=False):
+                result = bt.call_llm(
+                    messages, include_tools=False,
+                    temperature=0.1, max_tokens=1000,
+                )
+            candidate = _duet_result_text(
+                result, "source audit", attempt,
+                sum(len(message["content"]) for message in messages),
+            )
+            if "</think>" in candidate:
+                candidate = candidate.split("</think>")[-1]
+            parsed = _duet_parse_source_audit(
+                candidate.replace("<think>", "").strip(), keys)
+            # At least one explicit parsed key distinguishes a real audit from
+            # the parser's fail-closed defaults.
+            if re.search(r"^\s*(?:B\d+|RESULT)\s*:", candidate, re.I | re.M):
+                verdicts = parsed
+                break
+        except Exception as exc:
+            bt.log.warning(f"[DUET] source audit attempt {attempt + 1} failed: {exc}")
+    if not verdicts:
+        verdicts = _duet_parse_source_audit("", keys)
+    return _duet_source_audit_summary(candidates, verdicts)
+
+
+def _duet_apply_source_audit(previous: str, current: str, lines,
+                             audit: dict) -> str:
+    """Apply source verdicts to BANKED/RESULT and schedule a corrective pass."""
+    allowed_ids = None
+    if audit.get("checked"):
+        allowed_ids = {
+            int(item[1:]) for item in audit.get("supportedIds") or []
+            if re.fullmatch(r"B\d+", str(item), re.I)
+        }
+    out = _duet_preserve_banked(
+        previous, current, lines, allowed_new_ids=allowed_ids)
+    rejected_result = (
+        audit.get("checked") and audit.get("resultChecked")
+        and audit.get("resultStatus") != "SUPPORTED"
+    )
+    if rejected_result:
+        out = _duet_replace_bearing_field(out, "RESULT", "NOT RUN")
+    if audit.get("checked") and (audit.get("rejectedIds") or rejected_result):
+        failures = []
+        verdicts = audit.get("verdicts") or {}
+        for key in list(audit.get("rejectedIds") or []) + (["RESULT"] if rejected_result else []):
+            verdict = verdicts.get(key) or {}
+            status = str(verdict.get("status") or "NOT_ESTABLISHED").replace("_", " ")
+            reason = str(verdict.get("reason") or "").strip()
+            failures.append(f"{key} {status.lower()}: {reason}")
+        out = _duet_replace_bearing_field(
+            out, "OPEN", "SOURCE AUDIT REQUIRED - " + "; ".join(failures)[:520])
+        out = _duet_replace_bearing_field(
+            out, "DECISION", "CONTINUE - agreement is not yet source-supported")
+        out = _duet_replace_bearing_field(
+            out, "NEXT",
+            "Separate REPORTED FACT, AUTHOR INFERENCE, and SPEAKER INFERENCE; correct any contradiction before concluding.",
+        )
+    return out
+
+
+def _duet_branch_is_distinct(ledger: str) -> bool:
+    """A branch needs a new decision problem, not the verdict in question form."""
+    next_question = _duet_bearing_field(ledger, "NEXT")
+    if not next_question or next_question == "-" or "?" not in next_question:
+        return False
+    prior_text = " ".join(
+        value for value in (
+            _duet_bearing_field(ledger, "QUESTION"),
+            _duet_bearing_field(ledger, "BANKED"),
+            _duet_bearing_field(ledger, "RESULT"),
+        ) if value and value != "-"
+    )
+    normalized_next = re.sub(r"[^a-z0-9]+", " ", next_question.lower()).strip()
+    normalized_question = re.sub(
+        r"[^a-z0-9]+", " ", _duet_bearing_field(ledger, "QUESTION").lower()
+    ).strip()
+    if (normalized_question and
+            SequenceMatcher(None, normalized_next, normalized_question).ratio() >= 0.80):
+        return False
+    prior_terms = _duet_claim_terms(prior_text)
+    next_terms = _duet_claim_terms(next_question)
+    return len(next_terms - prior_terms) >= 2
+
+
+def _duet_enforce_branch_novelty(ledger: str):
+    """Rewrite a cosmetic BRANCH as CLOSE before speakers see the ledger."""
+    decision = _duet_bearing_field(ledger, "DECISION")
+    if not re.match(r"\s*BRANCH\b", decision, re.I) or _duet_branch_is_distinct(ledger):
+        return ledger, False
+    verdict = _duet_bearing_field(ledger, "RESULT")
+    if not verdict or verdict == "-" or re.match(r"NOT\s+RUN\b", verdict, re.I):
+        entries = _duet_banked_entries(ledger)
+        verdict = (
+            re.sub(r"^B\d+\b\s*", "", entries[max(entries)], flags=re.I)
+            if entries else
+            "Give the shortest source-grounded verdict supported by the completed exchange."
+        )
+    out = _duet_replace_bearing_field(
+        ledger, "DECISION", "CLOSE - proposed branch restates settled ground")
+    out = _duet_replace_bearing_field(out, "NEXT", verdict)
+    return out, True
+
+
+_DUET_RECOVERY_NEXT = {
+    "DEFINE": "State one decision question and one stable distinction from the assigned material.",
+    "POSITIONS": "State rival theses under the same definitions and what result would count against each.",
+    "CHALLENGE": "Give the strongest source-grounded boundary case and make both positions predict it.",
+    "TEST": "Run both positions on the same available case and report which prediction it matches.",
+    "ADJUDICATE": "State what the comparison supports, what it cannot establish, and revise one claim.",
+    "SYNTHESIZE": "State what the evidence supports, what it contradicts or does not establish, and the one genuinely unresolved question.",
+}
+
+
+def _duet_recover_normal_bearing(previous: str, subject: str, lines) -> str:
+    """Build a valid minimal ledger after both model-produced ledgers fail.
+
+    Recovery is deliberately conservative: it never invents a bank, result, or
+    branch.  It preserves valid state, supplies a phase-appropriate NEXT, and lets
+    the browser force synthesis if recovery is needed repeatedly.
+    """
+    if _duet_normal_bearing_valid(previous):
+        fields = {
+            field: _duet_bearing_field(previous, field)
+            for field in _DUET_NORMAL_BEARING_FIELDS
+        }
+        phase = _duet_inquiry_phase_from_ledger(previous, len(list(lines or [])), 0)[0]
+        if not re.match(r"\s*(?:CLOSE|BRANCH)\b", fields["DECISION"], re.I):
+            fields["DECISION"] = "CONTINUE - controller recovery; no substantive state inferred"
+            fields["NEXT"] = _DUET_RECOVERY_NEXT[phase]
+    else:
+        clean_subject = re.sub(r"\s+", " ", subject or "the assigned subject").strip()
+        question = f"What conclusion about {clean_subject} is supported by the available material?"
+        fields = {
+            "QUESTION": question,
+            "DEFINITIONS": "-",
+            "BANKED": "-",
+            "POSITIONS": "-",
+            "OPEN": question,
+            "TEST": "-",
+            "RESULT": "NOT RUN",
+            "REOPEN": "-",
+            "DECISION": "CONTINUE - controller recovery; establish the question",
+            "NEXT": _DUET_RECOVERY_NEXT["DEFINE"],
+        }
+    return "\n".join(
+        f"{field}: {fields.get(field) or ('NOT RUN' if field == 'RESULT' else '-')}"
+        for field in _DUET_NORMAL_BEARING_FIELDS
+    )
+
+
+def _duet_inquiry_control(previous: str, current: str) -> dict:
+    """Mechanical control state for a normal (non deep-dive) bearing.
+
+    The model judges the substance, but stable bank IDs and a small decision
+    vocabulary let the browser detect when one inquiry has earned a conclusion.
+    An open-ended browser run may carry a conclusion into a genuinely distinct
+    branch; ordinary convergence now ends the run instead of manufacturing one.
+    """
+    previous_ids = _duet_banked_ids(previous)
+    current_ids = _duet_banked_ids(current)
+    decision_line = _duet_bearing_field(current, "DECISION")
+    decision_match = re.match(r"\s*(CONTINUE|CLOSE|BRANCH)\b", decision_line, re.I)
+    decision = decision_match.group(1).upper() if decision_match else "CONTINUE"
+    result = _duet_bearing_field(current, "RESULT")
+    if (_duet_normal_bearing_valid(current)
+            and decision in {"CLOSE", "BRANCH"}
+            and (not result or result == "-"
+                 or re.match(r"NOT\s+RUN\b", result, re.I))):
+        decision = "CONTINUE"
+        decision_line = "CONTINUE - no evidential result supports closure yet"
+    branch_distinct = decision != "BRANCH" or _duet_branch_is_distinct(current)
+    if decision == "BRANCH" and not branch_distinct:
+        decision = "CLOSE"
+        decision_line = "CLOSE - proposed branch restates settled ground"
+    new_ids = sorted(current_ids - previous_ids)
+    return {
+        "decision": decision,
+        "reason": re.sub(
+            r"^\s*(?:CONTINUE|CLOSE|BRANCH)\b\s*[—–\-:]*\s*",
+            "", decision_line, flags=re.I).strip()[:300],
+        "bankedMoved": bool(new_ids),
+        "newBankedIds": [f"B{item}" for item in new_ids],
+        "banked": _duet_bearing_field(current, "BANKED")[:1200],
+        "open": _duet_bearing_field(current, "OPEN")[:600],
+        "test": _duet_bearing_field(current, "TEST")[:600],
+        "result": _duet_bearing_field(current, "RESULT")[:600],
+        "next": _duet_bearing_field(current, "NEXT")[:600],
+        "branchDistinct": branch_distinct,
+    }
+
+
+_DUET_INQUIRY_PHASES = (
+    ("DEFINE", "define the decision question and separate the central terms"),
+    ("POSITIONS", "state one falsifiable thesis and the criterion that would make it fail"),
+    ("CHALLENGE", "give the strongest relevant objection or boundary case"),
+    ("TEST", "run both positions on the same available case, compare predictions, and report the outcome"),
+    ("ADJUDICATE", "say what the test establishes, what it cannot establish, and revise accordingly"),
+    ("SYNTHESIZE", "separate the supported verdict from contradicted or unestablished claims and any genuinely separate next inquiry"),
+)
+
+_DUET_INQUIRY_JOBS = {
+    "DEFINE": {
+        "proposer": "offer a decision question and define one indispensable term in plain language",
+        "examiner": "separate any terms the opening blurred and accept definitions that are already usable",
+    },
+    "POSITIONS": {
+        "proposer": "state one thesis, its reason, and what observable result would count against it",
+        "examiner": "state the strongest rival thesis under the same terms, not merely an objection",
+    },
+    "CHALLENGE": {
+        "proposer": "answer the strongest objection and narrow or revise the thesis where it succeeds",
+        "examiner": "press one boundary case that bears on the thesis and say why the rival predicts it better",
+    },
+    "TEST": {
+        "proposer": "run both positions against one case already available in the assigned work or transcript; give their rival predictions and which one the case matches",
+        "examiner": "audit the completed comparison, state which prediction matched and its limit; if it was not runnable, replace it with an available case and run that now",
+    },
+    "ADJUDICATE": {
+        "proposer": "state what the test supports, what it does not, and the resulting revision",
+        "examiner": "concede what passed, preserve only the exact residual disagreement, and reject overclaiming",
+    },
+    "SYNTHESIZE": {
+        "proposer": "state three plain clauses: what the evidence supports; what it contradicts or does not establish; and the one genuinely unresolved question, if any",
+        "examiner": "audit those three clauses against the available evidence, remove every overclaim, then close or separate only a genuinely new question",
+    },
+}
+
+
+def _duet_inquiry_phase(n_robot: int, planned: int):
+    """Spread the normal inquiry cadence across a bounded run.
+
+    Open-ended inquiry cycles still reach synthesis after twelve robot turns.
+    The browser seeds another ledger only for a mechanically distinct BRANCH.
+    """
+    span = planned if planned and planned > 0 else 12
+    index = min(len(_DUET_INQUIRY_PHASES) - 1,
+                n_robot * len(_DUET_INQUIRY_PHASES) // max(span, 1))
+    return _DUET_INQUIRY_PHASES[index]
+
+
+def _duet_inquiry_phase_from_ledger(direction: str, n_robot: int, planned: int):
+    """Gate phases on artifacts without allowing early jumps or regressions."""
+    if not _duet_normal_bearing_valid(direction):
+        return _duet_inquiry_phase(n_robot, planned)
+    decision = _duet_inquiry_control(direction, direction)["decision"]
+    if decision in {"CLOSE", "BRANCH"}:
+        return _DUET_INQUIRY_PHASES[5]
+    question = _duet_bearing_field(direction, "QUESTION")
+    definitions = _duet_bearing_field(direction, "DEFINITIONS")
+    positions = _duet_bearing_field(direction, "POSITIONS")
+    open_claim = _duet_bearing_field(direction, "OPEN")
+    if re.match(r"(?:SOURCE|EVIDENCE)\s+AUDIT\s+REQUIRED\b",
+                open_claim or "", re.I):
+        return _DUET_INQUIRY_PHASES[2]
+    test = _duet_bearing_field(direction, "TEST")
+    result = _duet_bearing_field(direction, "RESULT")
+    if not question or question == "-" or not definitions or definitions == "-":
+        artifact_index = 0
+    elif (not positions or not re.search(r"\bBlue\s*:", positions, re.I)
+          or not re.search(r"\bHexia\s*:", positions, re.I)):
+        artifact_index = 1
+    elif not open_claim or open_claim == "-":
+        artifact_index = 5
+    elif not test or test == "-":
+        artifact_index = 2
+    elif not result or result == "-" or re.match(r"NOT\s+RUN\b", result, re.I):
+        artifact_index = 3
+    else:
+        artifact_index = 4
+
+    scheduled = _duet_inquiry_phase(n_robot, planned)
+    scheduled_index = _DUET_INQUIRY_PHASES.index(scheduled)
+    # Once a result exists and the bounded cadence reaches its final round,
+    # require a verdict. Residual questions may be named, but they cannot keep
+    # reopening TEST/ADJUDICATE indefinitely.
+    if scheduled_index == 5 and artifact_index >= 4:
+        return _DUET_INQUIRY_PHASES[5]
+    # A completed comparison should be adjudicated immediately rather than
+    # spending another exchange in TEST. All other phases remain schedule-capped
+    # so a controller cannot manufacture a whole inquiry after one exchange.
+    if artifact_index == 4 and scheduled_index >= 3:
+        return _DUET_INQUIRY_PHASES[4]
+    return _DUET_INQUIRY_PHASES[min(artifact_index, scheduled_index)]
+
+
+def _duet_repeats_recent(candidate: str, history, threshold: float = 0.90) -> bool:
+    """Reject near-verbatim speaker/position echoes before they enter history."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", (candidate or "").lower()).strip()
+    if len(normalized) < 24:
+        return False
+    for item in (history or [])[-8:]:
+        prior = re.sub(
+            r"[^a-z0-9]+", " ", str(item.get("text") or "").lower()).strip()
+        if len(prior) >= 24 and SequenceMatcher(None, normalized, prior).ratio() >= threshold:
+            return True
+    return False
+
+
+def _duet_claim_terms(text: str):
+    terms = set()
+    for match in re.finditer(r"[a-z][a-z'\-]{3,}", (text or "").lower()):
+        term = match.group(0).strip("'-")
+        if term in _DUET_GROUND_STOPWORDS:
+            continue
+        for suffix in ("ization", "ations", "ation", "ments", "ment", "ingly", "ing", "ies", "ied", "ed", "es", "s"):
+            if term.endswith(suffix) and len(term) - len(suffix) >= 4:
+                term = term[:-len(suffix)]
+                break
+        concept_families = (
+            ("inert", r"^(?:dead|static|crystall|fossil|residue|archive|inert)"),
+            ("reflect", r"^(?:mirror|reflect|echo)"),
+            ("vital", r"^(?:biolog|pulse|heartbeat|urgency|stake|valence|living|alive)"),
+            ("substrate", r"^(?:material|hardware|server|substrate|code|silicon)"),
+            ("labor", r"^(?:labor|work)$"),
+            ("social", r"^(?:social|relation|activity|care)$"),
+        )
+        for canonical, pattern in concept_families:
+            if re.search(pattern, term):
+                term = canonical
+                break
+        if len(term) >= 4:
+            terms.add(term)
+    return terms
+
+
+def _duet_repeats_claim_cluster(candidate: str, history,
+                                threshold: float = 0.50) -> bool:
+    """Catch repeated claims that have been cosmetically rephrased."""
+    current = _duet_claim_terms(candidate)
+    if len(current) < 6:
+        return False
+    similar = 0
+    for item in (history or [])[-12:]:
+        prior = _duet_claim_terms(str(item.get("text") or ""))
+        if len(prior) < 6:
+            continue
+        containment = len(current & prior) / max(1, min(len(current), len(prior)))
+        if containment >= threshold:
+            similar += 1
+    return similar >= 2
+
+
+def _duet_restates_banked_claim(candidate: str, direction: str) -> bool:
+    """Reject a banked verdict recast as a fresh objection or metaphor."""
+    current = _duet_claim_terms(candidate)
+    if len(current) < 4:
+        return False
+    for entry in _duet_banked_entries(direction).values():
+        settled = _duet_claim_terms(re.sub(r"^B\d+\b", "", entry, flags=re.I))
+        if len(settled) < 3:
+            continue
+        overlap = len(current & settled)
+        if overlap * 4 >= len(settled) * 3 and len(current - settled) < 3:
+            return True
+    return False
+
+
+def _duet_phase_move_valid(text: str, phase: str) -> bool:
+    """Cheap guard that makes phase labels operational rather than decorative."""
+    value = text or ""
+    if phase == "DEFINE":
+        if "?" in value:
+            return True
+        return bool(re.search(
+            r"\b(?:question\s+is|define|means?|by\s+\w+\s+i\s+mean|distinguish|"
+            r"distinction|difference\s+between|not\s+the\s+same|rather\s+than|"
+            r"not\s+(?:just|merely)|isn't\s+(?:just|merely)|depends?\s+on|"
+            r"consists?\s+(?:in|of)|lies?\s+in|what\s+makes\s+.+?\s+is)\b",
+            value, re.I))
+    if phase == "POSITIONS":
+        return bool(re.search(
+            r"\b(?:if|unless|would\s+(?:fail|change|show|count)|evidence|predict|falsif|against\s+my\s+claim)\b",
+            value, re.I))
+    if phase == "TEST":
+        comparison = re.search(
+            r"\b(?:compare|same|both|rival|whereas|versus|different|unlike|while|"
+            r"rather\s+than|contrast|either)\b",
+            value, re.I,
+        )
+        prediction = re.search(
+            r"\b(?:predict|would|will|should|expect|outcome|result|fails?|passes?|"
+            r"counts?|if\b.+\bthen)\b",
+            value, re.I,
+        )
+        return bool(comparison and prediction)
+    if phase == "ADJUDICATE":
+        return bool(re.search(
+            r"\b(?:result|evidence|supports?|does\s+not\s+(?:show|establish|prove)|cannot\s+establish|concede|revise|narrows?)\b",
+            value, re.I))
+    if phase == "SYNTHESIZE":
+        supported = re.search(
+            r"\b(?:evidence\s+supports?|supports?|establish(?:es|ed)?|"
+            r"we\s+can\s+(?:conclude|say)|conclusion|verdict)\b",
+            value, re.I)
+        bounded = re.search(
+            r"\b(?:does\s+not\s+establish|not\s+established|unestablished|"
+            r"unsupported|contradicted|cannot\s+(?:establish|show|prove)|"
+            r"remains?\s+(?:unresolved|open|uncertain)|leaves?\s+open|limit)\b",
+            value, re.I)
+        return bool(supported and bounded and "?" not in value)
+    return True
 
 
 # ---- Reading digests: the ARGUMENT of each checked document ------------------
@@ -592,10 +1617,20 @@ _DUET_ARTIFACT_MODE_RE = re.compile(
 )
 _DUET_NOTEBOOK_TALK_RE = re.compile(
     r"\b(the\s+notebook|our\s+notebook|notebook\s+is\s+right|shared\s+notebook|inquiry\s+kernel|"
+    r"(?:the|this|our|private|inquiry)\s+(?:inquiry\s+)?ledger|ledger\s+(?:says|requires|shows|is)|"
+    r"(?:close|terminate|update|rewrite)\s+(?:the|this|our)?\s*(?:inquiry\s+)?ledger|banked\s+B\d+|"
     r"kernel\s+is\s+right|the\s+kernel|kernel\s+says|kernel\s+directive|kernel[_ ]health|"
     r"kernel[_ ]review|kernel[_ ]decision|dependency[_ ]solver|blocked\s+object|"
     r"artifact[_ ]planner|artifact[_ ]mode|task[_ ]revision|this\s+protocol|the\s+protocol|request\s+denied|"
     r"validation[_ ]gate|promotion[_ ]gate)\b",
+    re.I,
+)
+_DUET_NORMAL_CONTROL_TALK_RE = re.compile(
+    r"\b((?:the|this|our|private|inquiry)\s+(?:inquiry\s+)?ledger|"
+    r"ledger\s+(?:says|requires|shows|is)|"
+    r"(?:close|terminate|update|rewrite)\s+(?:the|this|our)?\s*(?:inquiry\s+)?ledger|"
+    r"banked\s+B\d+|(?:inquiry|conversation)\s+(?:round|phase)|"
+    r"(?:the|this)\s+(?:dialogue\s+)?controller)\b",
     re.I,
 )
 _DUET_CONCEPT_INSTABILITY_RE = re.compile(
@@ -959,7 +1994,7 @@ def _duet_proto_job(speaker: str, history, n_robot: int) -> str:
     """'builder' or 'examiner' for this turn. The starter opens as Builder; the
     jobs swap every _DUET_PROTO_SWAP robot turns so neither owns a stance."""
     starter = next((str(h.get('speaker') or '').strip().lower() for h in (history or [])
-                    if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS), speaker)
+                    if str(h.get('speaker') or '').strip().lower() in _DUET_ROBOTS), speaker)
     if (n_robot // _DUET_PROTO_SWAP) % 2 == 1:
         starter = 'hexia' if starter == 'blue' else 'blue'
     return 'builder' if speaker == starter else 'examiner'
@@ -989,6 +2024,30 @@ def _duet_info_gain(cand: str, history, k: int = 6) -> bool:
 
 
 def register(app):
+    @app.route('/duet/session/start', methods=['POST'])
+    def duet_session_start():
+        d = request.get_json(silent=True) or {}
+        session_id = str(d.get('sessionId') or '').strip()[:120]
+        try:
+            from blue.server.routes import continuity as _continuity
+            ok = _continuity.start_duet_session(session_id)
+        except Exception as exc:
+            bt.log.warning(f"[DUET] could not mark session active: {exc}")
+            ok = False
+        return jsonify({"ok": ok, "sessionId": session_id})
+
+    @app.route('/duet/session/end', methods=['POST'])
+    def duet_session_end():
+        d = request.get_json(silent=True) or {}
+        session_id = str(d.get('sessionId') or '').strip()[:120]
+        try:
+            from blue.server.routes import continuity as _continuity
+            queued = _continuity.end_duet_session(session_id)
+            return jsonify({"ok": True, "queued": queued})
+        except Exception as exc:
+            bt.log.warning(f"[DUET] could not consolidate session: {exc}")
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
     @app.route('/duet', methods=['GET'])
     def duet_page():
         """The 'let them talk' page — Blue and Hexia converse, both heads taking turns."""
@@ -1225,14 +2284,14 @@ def register(app):
         src_titles = src_titles[:6]
         prev = (d.get('direction') or '').strip()
         if no_family and _duet_family_ref(prev):
-            prev = ""
+            prev = _duet_redact_private(prev)
         # The subject they were set to discuss — the anchor this read must hold them to,
         # so "taking stock" pulls a drifting conversation BACK toward the topic instead
         # of chasing wherever it has wandered (Alex: the stock-take must stay on topic).
-        if topic:
-            subject = topic
-        elif url:
-            subject = "the article or video they set out to discuss"
+        reflect_url_info = bt._duet_url_content(url) if url else None
+        assigned_subject = _duet_assigned_subject(topic, reflect_url_info)
+        if assigned_subject:
+            subject = assigned_subject
         elif role_b or role_h:
             subject = "the debate they were set up to have"
         else:
@@ -1257,10 +2316,16 @@ def register(app):
             if sp_id == 'notebook':
                 lines.append(f"[the notebook's own observation, spoken into the talk] {txt}")
                 continue
-            nm = bt._robot_cfg(sp_id)["name"] if sp_id in bt.ROBOTS else (sp_id or "?")
+            nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
             lines.append(f"{nm}: {txt}")
-        if len(lines) < 4:                       # nothing has developed yet — keep what we have
+        if len(lines) < 2:                       # one exchange is enough to establish the first ledger
             return jsonify({"ok": False, "direction": prev})
+
+        reflect_source_excerpt = ""
+        if reflect_url_info and (reflect_url_info.get("text") or "").strip():
+            reflect_source_excerpt = bt._duet_url_excerpt(
+                reflect_url_info["text"], " ".join(lines[-4:]), turn=len(history)
+            )[:3000]
 
         anchor = (
             " Their talk was set going on a specific subject, and part of your job is "
@@ -1306,13 +2371,25 @@ def register(app):
         if no_family:
             sys_p += (
                 " Privacy setting: do not mention Alex's family, children, spouse, "
-                "household members, home routines, or private family details in ANY line "
+                "household members, pets, private names, home/workspace routines, or private "
+                "family details in ANY line "
                 "of your answer. If the transcript drifted there, steer the next move "
                 "back to the topic without repeating the private detail."
             )
         ask = ""
         if subject:
             ask += f"The subject they were set to discuss: {subject}.\n\n"
+        if reflect_source_excerpt:
+            ask += (
+                "The assigned linked work, for steering accuracy:\n" + reflect_source_excerpt +
+                "\n\nKeep QUESTION, TEST, and NEXT inside this work and the actual recent turns. "
+                "Keep attribution exact: distinguish what the work directly claims from what the "
+                "robots infer or hypothesize. Put an unsupported extension in OPEN as REQUIRES "
+                "EVIDENCE; never rewrite it as the author's claim. "
+                "A TEST may reuse a case or comparison found there; it may not invent a new personal, "
+                "household, local-versus-cloud, or hardware scenario merely to keep the dialogue moving. "
+                "Checked readings may clarify the assigned work but may not replace it.\n\n"
+            )
         src_digests = ""
         if _src_all:
             try:
@@ -1335,6 +2412,23 @@ def register(app):
                     "readings' vocabulary without engaging their claims, say so plainly and make "
                     "NEXT force engagement with ONE specific claim — affirmed, attacked, or tested "
                     "on a concrete case.\n\n")
+        # The binding-claim audit uses the assigned work itself. A linked work is
+        # primary and is never diluted with secondary reading digests; without a
+        # link, the selected works' stable digests are the best available record.
+        source_audit_material = ""
+        if reflect_url_info and (reflect_url_info.get("text") or "").strip():
+            raw_source = re.sub(
+                r"\s+", " ", str(reflect_url_info.get("text") or "")
+            ).strip()
+            source_audit_material = raw_source[:6500]
+            if (reflect_source_excerpt
+                    and reflect_source_excerpt not in source_audit_material):
+                source_audit_material = (
+                    source_audit_material + "\n\nRELEVANT EXCERPT:\n" +
+                    reflect_source_excerpt
+                )[:9000]
+        elif src_digests:
+            source_audit_material = src_digests[:9000]
         if prev:
             ask += (("The shared notebook as of your last update:\n" if protocol else
                      "Your previous read on where this was heading:\n") + prev + "\n\n")
@@ -1712,64 +2806,145 @@ def register(app):
                 "without a new reason; a question raised and then forgotten. One sentence addressed to the two of them, or a plain dash if "
                 "nothing is earned. Never repeat your previous observation>"
             )
-        elif subject:
-            ask += (
-                f"Update your read, judging it ALWAYS in relation to that subject — {subject}. "
-                + _move_rules +
-                f"If the talk has wandered off {subject}, say so and make NEXT the concrete "
-                "way back onto it. Stay specific to their actual words. Answer in exactly "
-                "these three short lines and nothing else:\n"
-                f"SO FAR: <what is now supported or resolved between them about {subject} — what each has "
-                "conceded or come to hold; or, if they've drifted, where to — one sentence>\n"
-                f"TURNS ON: <the live question about {subject} — and if it's the SAME question "
-                "as your previous read, name the impasse honestly — one sentence>\n"
-                f"NEXT: <one concrete move for the PAIR that would actually advance {subject} — "
-                "a different kind of move than last time if the last one produced no movement — "
-                "one sentence>"
-            )
         else:
+            subject_rule = (
+                f"Judge every field in relation to the assigned subject — {subject}. If the "
+                f"talk has wandered off {subject}, keep the current inquiry open and make NEXT "
+                "the concrete route back. Drift away from the assigned subject is not a branch. "
+                if subject else "")
             ask += (
-                "Update your read. " + _move_rules +
-                "Stay specific to their actual words. Answer in exactly these three "
-                "short lines and nothing else:\n"
-                "SO FAR: <what is now supported or resolved between them — what each has conceded or come "
-                "to hold — one sentence>\n"
-                "TURNS ON: <the live question — and if it's the SAME question as your previous "
-                "read, name the impasse honestly — one sentence>\n"
-                "NEXT: <one concrete move for the PAIR that would actually advance it — a "
-                "different kind of move than last time if the last one produced no movement — "
-                "one sentence>"
+                "Update the pair's inquiry ledger. " + subject_rule + _move_rules +
+                "Treat consciousness, thinking, agency, causal influence, social participation, "
+                "and political value as different terms unless the speakers explicitly establish "
+                "a relation among them. An example is not a test unless rival positions predict "
+                "different outcomes. In normal inquiry, TEST must be runnable now from a reported "
+                "case, experiment, or comparison already in the assigned work or transcript. Applying "
+                "both positions to that supplied evidence counts as running the test; record the argued "
+                "outcome and its limit in RESULT. Use NOT RUN only when the speakers merely designed, "
+                "promised, or deferred a future operation. Never require an unavailable external "
+                "experiment merely to advance the dialogue. A metaphor is not evidence.\n\n"
+                "SOURCE DISCIPLINE: when an assigned work is present, do not let a speaker's "
+                "inference become something the author supposedly says. Preserve the direct claim "
+                "and the extension as separate clauses. Unsupported extensions remain OPEN and "
+                "REQUIRE EVIDENCE; they cannot enter RESULT or BANKED as source-backed findings. "
+                "Mutual agreement records consensus, not evidential support: agreement alone cannot "
+                "turn an interpretation into a finding of the assigned work.\n\n"
+                "BANKED is a cumulative, binding ledger. Give each settled proposition a stable "
+                "ID (B1, B2, ...). Copy every previous B# proposition VERBATIM and in order; "
+                "append a new B# only when a speaker explicitly accepted the other's proposition "
+                "or both plainly accepted it. Never silently rewrite, merge, renumber, or delete a "
+                "banked proposition. A banked proposition may be challenged only when REOPEN names "
+                "its B# plus genuinely new evidence that bears against it. Otherwise preserve it.\n\n"
+                "DECISION is a control instruction, not encouragement. Use CLOSE when the assigned "
+                "question has a defensible answer and only rhetorical reversals remain. Use BRANCH "
+                "only when a genuinely distinct question has emerged after the assigned question is "
+                "answered; close the current question and put the new decision question in NEXT. The "
+                "branch must introduce at least two substantive concepts not already contained in the "
+                "current QUESTION, RESULT, or BANKED verdict; a generic request for another consequence, "
+                "boundary, or practical implication is CLOSE, not BRANCH. Never use BRANCH "
+                "merely because the speakers wandered onto a side issue; use CONTINUE and route them "
+                "back in NEXT. Use CONTINUE only when OPEN names one exact unresolved "
+                "proposition and TEST gives a move capable of resolving it. Do not continue merely "
+                "because another objection or metaphor is possible. NEXT must state the intellectual "
+                "move or verdict itself; never tell the speakers to close, terminate, update, or discuss "
+                "a ledger, controller, phase, or protocol. In SYNTHESIZE, make the landing explicit: "
+                "SUPPORTED: what the evidence warrants; CONTRADICTED/NOT ESTABLISHED: the overclaim "
+                "it blocks; UNRESOLVED: only a genuinely open proposition.\n\n"
+                "Stay specific to their actual words. Answer in exactly these ten single lines and "
+                "nothing else:\n"
+                "QUESTION: <the one decision question currently being answered>\n"
+                "DEFINITIONS: <only distinctions the pair needs to keep stable; one sentence or ->\n"
+                "BANKED: <cumulative B# propositions copied verbatim, separated by |, or ->\n"
+                "POSITIONS: <Blue: current plain claim; Hexia: current plain claim — preserve ownership and negation>\n"
+                "OPEN: <one exact unresolved proposition or ->\n"
+                "TEST: <one runnable-now observation/comparison and the different predicted outcomes, or ->\n"
+                "RESULT: <what running it against available evidence established and could not establish, or NOT RUN>\n"
+                "REOPEN: <B# — genuinely new contrary evidence, or ->\n"
+                "DECISION: <CONTINUE, CLOSE, or BRANCH — one short reason>\n"
+                "NEXT: <one concrete joint move; if closing, the one-sentence verdict; if branching, the separate next question>"
             )
         msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
         out = prev
-        # Reasoning model: the budget must cover the <think> pass PLUS the three lines.
+        control_error = ""
+        control_recovered = False
+        branch_downgraded = False
+        source_audit = {
+            "checked": False, "candidateCount": 0, "verdicts": {},
+            "supportedIds": [], "rejectedIds": [], "contradictedIds": [],
+            "resultChecked": False, "resultStatus": "",
+        }
+        # Reasoning model: the budget must cover the <think> pass plus the ledger.
         # 1000 was too tight over a 16-turn transcript — the think pass ate it all,
         # the content came back empty, and the STALE previous bearing was silently
         # reused (observed live as the same take-stock note three times running).
         for attempt in range(2):
             try:
-                # The research notebook is bigger than the three-line bearing.
-                res = bt.call_llm(msgs, include_tools=False,
-                               temperature=(0.4 if attempt == 0 else 0.5),
-                               max_tokens=(4400 if protocol else 1600))
-                ch = (res or {}).get('choices') or []
-                cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+                # The research notebook is substantially bigger than the normal ledger.
+                with llm_slot(foreground=False):
+                    res = bt.call_llm(msgs, include_tools=False,
+                                   temperature=(0.4 if attempt == 0 else 0.35),
+                                   max_tokens=(4400 if protocol else 3800))
+                cand = _duet_result_text(
+                    res, "bearing", attempt,
+                    sum(len(str(m.get("content") or "")) for m in msgs),
+                )
                 if '</think>' in cand:
                     cand = cand.split('</think>')[-1]
-                cand = cand.replace('<think>', '').strip()
+                cand = _duet_normalize_bearing(
+                    cand.replace('<think>', '').strip()) if not protocol else cand.replace('<think>', '').strip()
+                if cand and not protocol and no_family and _duet_family_ref(cand):
+                    control_error = "private_inquiry_ledger"
+                    bt.log.warning(
+                        f"[DUET] bearing attempt {attempt + 1} included private context")
+                    if attempt == 0:
+                        msgs = _duet_compact_bearing_messages(
+                            subject, lines, prev, reflect_source_excerpt,
+                            no_family=True)
+                    continue
+                if cand and not protocol and not _duet_normal_bearing_valid(cand):
+                    control_error = "malformed_inquiry_ledger"
+                    bt.log.warning(
+                        f"[DUET] bearing attempt {attempt + 1} omitted required inquiry fields")
+                    if attempt == 0:
+                        msgs = _duet_compact_bearing_messages(
+                            subject, lines, prev, reflect_source_excerpt,
+                            no_family=no_family)
+                    continue
                 if cand:
+                    control_error = ""
                     out = cand
                     break
+                control_error = "empty_inquiry_ledger"
+                if attempt == 0 and not protocol:
+                    msgs = _duet_compact_bearing_messages(
+                        subject, lines, prev, reflect_source_excerpt,
+                        no_family=no_family)
             except Exception as e:
                 bt.log.warning(f"[DUET] reflect attempt {attempt} failed: {e}")
-        if out == prev and prev:
+                control_error = "inquiry_reflection_exception"
+                if attempt == 0 and not protocol:
+                    msgs = _duet_compact_bearing_messages(
+                        subject, lines, prev, reflect_source_excerpt,
+                        no_family=no_family)
+        if not protocol and control_error:
+            out = _duet_recover_normal_bearing(prev, subject, lines)
+            control_recovered = True
+            bt.log.warning(
+                f"[DUET] repaired {control_error} with a deterministic inquiry ledger")
+        elif out == prev and prev:
             bt.log.warning("[DUET] reflect produced nothing new — keeping the previous bearing")
-        # Mechanical stagnation check (protocol mode): the keeper is TOLD to be
-        # honest about stagnation, but that's the honor system — here the server
-        # actually diffs the notebooks. Fewer than 4 genuinely new content words
-        # (or a verbatim reuse) = the artifact isn't changing meaningfully; the
-        # page counts these and forces a stall-break turn after two in a row.
+        if out and not protocol:
+            out = _duet_preserve_inquiry_artifacts(prev, out)
+            out = _duet_promote_argued_result(prev, out, lines)
+            source_audit = _duet_audit_source_claims(
+                prev, out, source_audit_material)
+            out = _duet_apply_source_audit(prev, out, lines, source_audit)
+            out, branch_downgraded = _duet_enforce_branch_novelty(out)
+        # Mechanical control: deep-dive mode diffs notebook vocabulary. Normal
+        # mode compares stable B# ledger IDs, so rhetorical rewording cannot pose
+        # as a newly settled conclusion.
         stalled = False
+        inquiry = {}
         if protocol and prev:
             if out == prev:
                 stalled = True
@@ -1779,6 +2954,12 @@ def register(app):
                             for m in re.finditer(r"[a-z][a-z'\-]{4,}", t.lower())
                             } - _DUET_GROUND_STOPWORDS
                 stalled = len(_nb_terms(out) - _nb_terms(prev)) < 4
+        elif not protocol and out:
+            inquiry = _duet_inquiry_control(prev, out)
+            inquiry["sourceAudit"] = source_audit
+            if branch_downgraded:
+                inquiry["branchDistinct"] = False
+            stalled = bool(prev) and not inquiry["bankedMoved"]
         # Movement TYPE (Alex, 2026-07-06): not just "did the notebook move" but
         # HOW — the keeper's self-reported MOVED label, validated here. NONE is a
         # stall by definition; the page watches for the subtler failure of the
@@ -2107,6 +3288,9 @@ def register(app):
                     paradigm_check["status"] = "NONE"
                 paradigm_check["note"] = raw_para[:240]
         return jsonify({"ok": bool(out), "direction": out, "stalled": stalled,
+                        "controlError": control_error if not protocol else "",
+                        "controlRecovered": control_recovered,
+                        "inquiry": inquiry,
                         "movement": movement, "arc": arc,
                         "activeTask": active_task,
                         "kernelDecision": kernel_decision,
@@ -2131,8 +3315,9 @@ def register(app):
         character. The browser calls this alternately and plays each line on the
         matching head."""
         d = request.get_json(silent=True) or {}
+        session_id = str(d.get('sessionId') or '').strip()[:120]
         speaker = (d.get('speaker') or 'blue').strip().lower()
-        if speaker not in bt.ROBOTS:
+        if speaker not in _DUET_ROBOTS:
             speaker = 'blue'
         other = 'hexia' if speaker == 'blue' else 'blue'
         topic = (d.get('topic') or '').strip()
@@ -2181,7 +3366,7 @@ def register(app):
         # Privacy mode: keep Alex's family/household details out of the spoken duet.
         no_family = bool(d.get('noFamily'))
         if no_family and _duet_family_ref(direction):
-            direction = ""
+            direction = _duet_redact_private(direction)
         if no_family and _duet_family_ref(mail_from):
             mail_from = "someone"
         if no_family and _duet_family_ref(student_q_text):
@@ -2196,8 +3381,24 @@ def register(app):
         except Exception:
             planned_turns = 0
         n_robot = sum(1 for h in history
-                      if str(h.get('speaker') or '').strip().lower() in bt.ROBOTS)
+                      if str(h.get('speaker') or '').strip().lower() in _DUET_ROBOTS)
+        try:
+            inquiry_cycle_turns = max(0, int(d.get('inquiryCycleTurns')))
+        except (TypeError, ValueError):
+            inquiry_cycle_turns = n_robot
         ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_duet_proto_phase(n_robot, planned_turns)]
+        inquiry_phase, inquiry_gloss = _duet_inquiry_phase_from_ledger(
+            direction, inquiry_cycle_turns, planned_turns)
+        source_audit_active = bool(re.match(
+            r"(?:SOURCE|EVIDENCE)\s+AUDIT\s+REQUIRED\b",
+            _duet_bearing_field(direction, "OPEN") or "", re.I,
+        ))
+        inquiry_starter = next(
+            (str(h.get('speaker') or '').strip().lower() for h in history
+             if str(h.get('speaker') or '').strip().lower() in _DUET_ROBOTS),
+            speaker,
+        )
+        inquiry_job = "proposer" if speaker == inquiry_starter else "examiner"
         # Inquiry over schedule: once the keeper has INFERRED where the inquiry
         # actually is (the notebook's ARC line, round-tripped in `direction`),
         # that inference drives the Builder/Examiner directives; the turn-count
@@ -2472,7 +3673,7 @@ def register(app):
         if not no_family:
             try:
                 from blue.server.routes import continuity as _continuity
-                _jsb = _continuity.jspace_context_block(speaker)
+                _jsb = _continuity.duet_context_block(speaker)
                 if _jsb:
                     sys_p += "\n\n" + _jsb
             except Exception as _je:
@@ -2481,7 +3682,7 @@ def register(app):
             talk_context = (
                 f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
                 "Keep Alex's private family and household life completely offstage: do not mention "
-                "his family, children, spouse, household members, home routines, or private family "
+                "his family, children, spouse, household members, pets, home/workspace routines, or private family "
                 "memories, and do not use names or relationships from that private context. If a "
                 "previous turn or email drifts there, acknowledge only that private details are off "
                 "limits and steer back to the subject."
@@ -2506,20 +3707,23 @@ def register(app):
             f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
             "step further."
             f"\n\nAnd the craft of discussing well, between you and {ot['name']}: answer a direct question "
-            "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, a concession — not "
-            "another image in place of an answer. When one of you concedes a point or you land on something "
-            "together, BANK it: build on what follows from it, never re-open it just to keep sparring. "
-            "Don't answer a metaphor with a metaphor — every image must eventually be cashed out into a "
-            "plain claim that can be tested. And a challenge you press on the other counts double against "
-            "yourself: if you demand proof of something, be ready to give your own answer to the same "
-            "question when it's turned around. Make movement visible: each turn should either settle "
-            "one small point, revise a stance, draw a consequence from something already settled, or "
-            "name the next harder question that follows. Do not simply keep the same question spinning. "
-            "When you are building a theory, make it take risks: say what it predicts, what would "
-            "make it fail, and what would force it to become narrower. Treat concrete cases as "
-            "tests only when they could actually change the claim; otherwise call them illustrations "
-            "and move toward a real test. Do not reopen an archived idea unless you can overturn "
-            "the reason it was archived."
+            "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, or a concession, "
+            "not another image in place of an answer. When one of you concedes a point or you land on "
+            "something together, BANK it: build on what follows from it, never reopen it merely to keep "
+            "sparring. Never treat thinking, consciousness, agency, causal influence, social participation, "
+            "and political value as synonyms without arguing for that connection. "
+            "Use a two-beat turn: first ACCEPT, QUALIFY, or REJECT the other speaker's exact claim while "
+            "preserving crucial negations such as 'is not'; then add exactly one reason, consequence, or "
+            "discriminating test. Do not announce those labels. A challenge you press counts equally "
+            "against your own view, so state what your account predicts too. Treat anything in BANKED as "
+            "settled. Reopen it only when the private ledger explicitly names its B# and new contrary "
+            "evidence. Keep ownership exact: your position is yours, the other robot's is theirs, and you "
+            "must never copy their first-person claim as your own. "
+            "Use at most one metaphor per turn and immediately cash it out as a plain proposition. A "
+            "concrete case is a TEST only when rival positions predict different outcomes; otherwise it is "
+            "an illustration. Ask a question only when its possible answers would discriminate between "
+            "live positions. Once the private ledger says CLOSE or BRANCH, help land the current inquiry "
+            "instead of inventing another reversal."
         )
         if protocol:
             sys_p += (
@@ -2843,7 +4047,8 @@ def register(app):
         # stay on the checked library documents.
         if not src_self and not no_family:
             try:
-                vis_block = bt._visual_context_block(mem_query)
+                vis_block = bt._visual_context_block(
+                    mem_query, observer=speaker)
                 if vis_block:
                     sys_p += "\n\n" + vis_block
             except Exception:
@@ -2852,9 +4057,11 @@ def register(app):
         # Link grounding: the article text / video transcript behind the pasted URL,
         # windowed to the lede + whatever matches the last couple of turns.
         url_block = ""
+        url_terms = []
         if url_text:
             recent_q = " ".join((h.get('text') or '') for h in history[-2:])
             url_block = bt._duet_url_excerpt(url_text, f"{topic} {recent_q}".strip(), turn=len(history))
+            url_terms = _duet_ground_terms([{"content": url_block}])
 
         # Web research grounding: live search findings on the duet's subject
         # (warmed by /duet/research at start; cached so turns don't re-search),
@@ -2884,9 +4091,9 @@ def register(app):
 
         # Library grounding: passages from the chosen documents, relevant to the topic
         # + what was just said. Handed to the speaker in the USER turn (not system).
-        # The retrieval query is anchored to the bearing's live question (TURNS ON)
-        # so the chunks track what the discussion actually turns on, not the surface
-        # wording of the last exchange — banter drifts, the bearing doesn't.
+        # The retrieval query is anchored to the inquiry ledger's QUESTION, OPEN,
+        # and TEST fields so chunks track the live discriminator, not the surface
+        # wording of the last exchange — banter drifts, the ledger does not.
         ground_block = ""
         digest_block = ""
         ground_terms = []
@@ -2905,13 +4112,21 @@ def register(app):
                 recent_q = " ".join((h.get('text') or '') for h in history[-2:])
                 _live_q = ""
                 if direction:
-                    # Plain bearing keeps the live question in TURNS ON; the
-                    # protocol notebook keeps it in TENSIONS / QUESTIONS.
-                    for _pat in (r'TURNS ON:\s*(.+)', r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
-                        _m_live = re.search(_pat, direction)
-                        if _m_live:
-                            _live_q = _m_live.group(1).strip()
-                            break
+                    if protocol:
+                        # The protocol notebook keeps live problems in these sections.
+                        for _pat in (r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
+                            _m_live = re.search(_pat, direction)
+                            if _m_live:
+                                _live_q = _m_live.group(1).strip()
+                                break
+                    else:
+                        _live_q = " ".join(
+                            value for value in (
+                                _duet_bearing_field(direction, "QUESTION"),
+                                _duet_bearing_field(direction, "OPEN"),
+                                _duet_bearing_field(direction, "TEST"),
+                            ) if value and value != "-"
+                        )
                 query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
                 chunks = _duet_source_chunks(query, src_self, max_chunks=10)
                 # Digest terms count toward groundedness too — engaging a work's
@@ -2941,6 +4156,13 @@ def register(app):
                         "into the dialogue: a term, distinction, image, example, causal claim, or problem. "
                         "If your line could have been said without these notes, it is too generic."
                     )
+                    if url_block:
+                        coverage_line = (
+                            "The linked work is the assigned object. These selected readings are optional "
+                            "secondary lenses: use one only when it directly clarifies or tests the linked "
+                            "work's live claim. Never let them replace that claim or turn the exchange into "
+                            "an autobiographical debate about the speaker."
+                        )
                     if missing:
                         coverage_line += (
                             " Some selected readings did not have a relevant passage for this turn."
@@ -2952,6 +4174,20 @@ def register(app):
         # Any source material in hand this turn — the digest (argument) and the
         # chunks (specifics) gate the same behaviors.
         grounded = bool(ground_block or digest_block)
+        required_ground_terms = url_terms if url_block else ground_terms
+        prompt_digest_block = digest_block if not url_block else ""
+        prompt_ground_block = ground_block if not url_block else ""
+        secondary_reading_block = ""
+        if url_block and (digest_block or ground_block):
+            secondary_reading_block = (
+                "OPTIONAL SECONDARY LENSES FROM THE CHECKED READINGS. The linked work above is "
+                "the assigned object and must remain the subject. Use a claim below only when it "
+                "directly clarifies, challenges, or tests that work's live claim; otherwise omit it. "
+                "Do not replace the linked work with the speaker's biography, household, identity, "
+                "or a general debate about whether the speaker is conscious or agentic. Keep this "
+                "source boundary invisible in speech:\n\n" +
+                "\n\n".join(block for block in (digest_block, ground_block) if block)
+            )[:6000]
 
         # Conversation so far as plain text. (A single [system, user] call is always
         # valid; mapping turns to roles breaks when the speaker started the duet.)
@@ -2974,7 +4210,7 @@ def register(app):
             if sp_id == 'notebook':
                 lines.append(f"[your shared notebook observed] {txt}")
                 continue
-            nm = bt._robot_cfg(sp_id)["name"] if sp_id in bt.ROBOTS else (sp_id or "?")
+            nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
             lines.append(f"{nm}: {txt}")
 
         # USER: assemble this turn's task from whatever was provided.
@@ -2992,7 +4228,9 @@ def register(app):
                 f"contain. Weave it in naturally — {nono}, 'the excerpt', 'the material' or 'it says "
                 f"here'; just say what {said}, and name the {'video' if url_is_video else 'article'} "
                 "itself only when that actually helps:\n\n" + url_block)
-        if digest_block:
+        if secondary_reading_block:
+            parts.append(secondary_reading_block)
+        if prompt_digest_block:
             parts.append(
                 "THE WORKS YOU'VE READ — your own absorbed understanding of each work Alex "
                 "checked for you: what it argues, its claims, its terms, its cases. This is "
@@ -3002,8 +4240,8 @@ def register(app):
                 "working at the level of these CLAIMS: affirm one and build on it, attack one "
                 "with a reason, put two of them against each other, or test one against the "
                 "case in play. Naming a term without using its claim is NOT engagement:\n\n"
-                + digest_block)
-        if ground_block:
+                + prompt_digest_block)
+        if prompt_ground_block:
             parts.append(
                 "BACKGROUND FOR YOU ONLY — passages Alex selected for YOU "
                 "in the duet source picker. These are authoritative, but they are invisible scaffolding "
@@ -3017,8 +4255,8 @@ def register(app):
                 "work only if it is already the explicit subject of the live discussion; otherwise make "
                 "the point in your own conversational voice. Do not introduce outside writers, works, "
                 "theories, slogans, examples, or famous concepts that are not in these passages or other "
-                "supplied grounding for this turn:\n\n" + ground_block)
-        elif src_self and not digest_block:
+                "supplied grounding for this turn:\n\n" + prompt_ground_block)
+        elif not url_block and src_self and not prompt_digest_block:
             parts.append(
                 "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
                 "passage was retrieved from them for this turn. Do not fill that gap with general "
@@ -3091,26 +4329,17 @@ def register(app):
                 "notebook exactly as it is — agreement, restatement, appreciation — is "
                 "not a turn. If NEXT names a move, make that move now or improve on it.")
         elif direction and lines:
-            # With a subject to hold to, the bearing should pull them back to it, not just
-            # deeper into wherever they've drifted (Alex: keep the stock-take on topic).
-            _close = ((" stay on what the two of you set out to discuss, keep with what it's "
-                       "really turning on, build on what you've worked out, and carry that one "
-                       "honest step further — rather than drifting onto a new subject or tidily "
-                       "wrapping up.") if focused else
-                      (" stay with what it's really turning on, build on what you've worked out, "
-                       "and take it one honest step further rather than circling back or wrapping "
-                       "it up neatly."))
             parts.append(
-                f"WHERE THIS IS GOING — a private read on where your conversation with "
-                f"{ot['name']} has actually gotten, for steering only. Never read it out, "
-                f"quote it, or mention having it:\n{direction}\n\nLet this shape your next "
-                "line:" + _close +
-                " If it names an impasse or a challenge that falls on you, meet it STRAIGHT — "
-                "a plain claim, a concession, or a consequence, not another metaphor; if it "
-                f"falls on {ot['name']}, you may press it, but put a claim of your own on the "
-                f"table too. If {ot['name']} has genuinely shifted how you see this, let your "
-                "own view move — you're thinking together and your mind can change, not "
-                "defending fixed corners.")
+                f"THE PRIVATE INQUIRY LEDGER — the binding state of your conversation with "
+                f"{ot['name']}. Never read its labels out, quote it, or mention having it:\n"
+                f"{direction}\n\nObey it literally. Every B# proposition in BANKED is settled; "
+                "do not challenge, weaken, or redescribe it unless REOPEN names that B# and new "
+                "evidence. Keep the two clauses in POSITIONS attached to the correct speaker. Work "
+                "only on OPEN and perform NEXT or a better discriminating move. If DECISION says "
+                "CLOSE, state the earned verdict and residual uncertainty. If it says BRANCH, close "
+                "the current question before naming the separate question. If it says CONTINUE, your "
+                "line must make TEST more answerable, not merely more dramatic. If the assigned topic "
+                "and the ledger diverge, return to the assigned topic.")
         if nb_note:
             parts.append(
                 "YOUR SHARED NOTEBOOK SPEAKS — the notebook you and " + ot['name'] + " jointly "
@@ -3138,19 +4367,11 @@ def register(app):
                 + (f', subject "{_m_subj}"' if _m_subj else '')
                 + (":\n\n" + _m_body if _m_body else ". (No body — just that subject line.)"))
 
-        link_name = ""
-        if url_text:
-            link_name = "the video" if url_info.get('kind') == 'video' else "the article"
-            if url_info.get('title'):
-                link_name += f" \"{url_info['title']}\""
-        if topic and has_roles:
-            subject = f"debating {topic}"
-        elif topic:
-            subject = f"discussing {topic}"
-        elif link_name and has_roles:
-            subject = f"debating {link_name}"
-        elif link_name:
-            subject = f"discussing {link_name}"
+        assigned_subject = _duet_assigned_subject(topic, url_info)
+        if assigned_subject and has_roles:
+            subject = f"debating {assigned_subject}"
+        elif assigned_subject:
+            subject = f"discussing {assigned_subject}"
         elif src_self:
             subject = "discussing the ideas Alex set up"
         elif has_roles:
@@ -3383,44 +4604,34 @@ def register(app):
                     "became more precise. When the "
                     "notebook asks for a case, threshold, mechanism, or comparison, perform the "
                     "operation rather than arguing rhetorically. The inquiry is in its "
-                    f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
-                    f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
+                     f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
+                     f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
             else:
-                # Arc: a conversation should open, deepen, then push on from what it's worked
-                # out — develop, don't conclude. (Alex's ask: lead somewhere, not to a tidy end.)
-                if n <= 3:
-                    directive += (" You're still opening this up — find the thread between you with the most "
-                                  "life in it and lean toward it.")
-                elif n >= 12:
-                    directive += (" You've been at this a while now — by this point you both know the shape of "
-                                  "the question you keep circling, so STOP re-asking it in new costumes: either "
-                                  "settle it out loud in one plain sentence you can both live with and pull on "
-                                  "what FOLLOWS from it, or trade places — if one of you has been doing the "
-                                  "pressing, they must now defend their own answer to the same question. No new "
-                                  "fronts, no repeat interrogations.")
-                else:
-                    directive += " Stay with the thread that's most alive between you and dig in — depth over breadth."
+                # Normal mode is a structured inquiry, not a sequence of randomly sampled
+                # rhetorical moves. Proposer and Examiner have complementary jobs, and
+                # the cadence moves from definitions through an earned conclusion. In an
+                # open-ended run that conclusion becomes the next inquiry's settled ground.
+                inquiry_task = _DUET_INQUIRY_JOBS[inquiry_phase][inquiry_job]
+                if source_audit_active:
+                    inquiry_task = (
+                        "re-read the assigned evidence and separate REPORTED FACT, AUTHOR "
+                        "INFERENCE, and SPEAKER INFERENCE; explicitly correct the disputed "
+                        "claim before proposing any conclusion"
+                    )
                 directive += (
-                    " Make the movement audible: by the end of this line, something should be more settled, "
-                    "more sharply disputed, or carried to the next-level question that follows from what is "
-                    "settled. Do not end by merely rephrasing the same question."
+                    f" INQUIRY ROUND — {inquiry_phase}: {inquiry_gloss}. Your functional "
+                    f"job is {inquiry_job.upper()}: {inquiry_task}. You are collaborating "
+                    "toward an answer, not trying to win. Preserve settled ground, use the "
+                    "same definitions and case as the other speaker, and introduce no new "
+                    "topic merely to keep the exchange alive. By the end of the line, either "
+                    "one proposition is more settled, one exact disagreement is narrower, or "
+                    "one discriminating observation is ready to evaluate."
                 )
-                # Pick this turn's job, with enough variety to stay off the flat line.
-                # "advance" turns deliberately convert settled ground into consequence,
-                # so the dialogue reaches somewhere instead of only sparring well.
-                roll = random.random()
-                if n >= 5 and roll < 0.24:
-                    _pool = getattr(bt, "_DUET_MOVES_ADVANCE", bt._DUET_MOVES_REFLECT)
-                elif n >= 4 and roll < 0.36:
-                    _pool = bt._DUET_MOVES_REFLECT
-                elif grounded and roll < 0.82:
-                    # Reading-grounded duet: the selected material does the heavy lifting most turns.
-                    _pool = bt._DUET_MOVES_TEXT
-                elif roll < ((0.90 if grounded else 0.58) if n >= 4 else 0.30):
-                    _pool = bt._DUET_MOVES_COLOR
-                else:
-                    _pool = bt._DUET_MOVES_SPICY if random.random() < (spice / 10.0) else bt._DUET_MOVES_CALM
-                directive += " This turn, " + random.choice(_pool).format(other=ot['name'])
+                if source_audit_active:
+                    directive += (
+                        " This is a corrective evidence audit. Do not add a new theory or "
+                        "treat your partner's agreement as support."
+                    )
             if classroom and random.random() < 0.18:
                 directive += (" Somewhere in this turn, land one beat straight at the students in the "
                               "room — a question worth arguing about, or a challenge to something they "
@@ -3428,21 +4639,31 @@ def register(app):
             if not has_roles and bt._DUET_LENS.get(speaker):
                 _lens = bt._DUET_LENS[speaker]
                 if spice >= 7:
-                    directive += (f" You and {ot['name']} are sparring here — {_lens} don't let {ot['name']} "
-                                  "off easy; push back and raise the stakes.")
+                    directive += (f" Deliver your assigned inquiry job with some bite — {_lens} "
+                                  "Provocation may sharpen a live disagreement, but it may not "
+                                  "reopen banked ground, change the subject, or replace evidence.")
                 elif spice <= 2:
                     directive += (f" You and {ot['name']} are easy company — {_lens} but keep it warm and "
                                   "curious, building together more than clashing.")
                 else:
-                    directive += (f" And remember you and {ot['name']} see things differently — {_lens} "
-                                  "lean into that difference rather than nodding along.")
-            if url_block and grounded:
-                directive += (f" And put one grounded claim or distinction to work alongside "
-                              f"{'the video' if url_is_video else 'the article'} — one specific claim "
-                              "or distinction, spoken as your own view rather than as a citation.")
-            elif url_block:
-                directive += (f" Engage with a specific claim, idea or moment from {'the video' if url_is_video else 'the article'}"
-                              " — as your own take, not a citation.")
+                    directive += (f" Keep your own temperament — {_lens} — while carrying out the "
+                                  "assigned inquiry job and conceding points that pass their test.")
+            if url_block:
+                directive += (
+                    f" Keep {'the video' if url_is_video else 'the article'} primary: engage one "
+                    "specific claim, idea, comparison, or moment from it as your own take. A checked "
+                    "reading may clarify or test that claim, but may not replace it. Do not turn the "
+                    "exchange into a debate about your own biography, household, consciousness, or "
+                    "agency unless the assigned work itself makes that the question."
+                )
+                if not has_roles:
+                    source_job = (
+                        "TEXTUAL INTERPRETER: reconstruct the strongest direct claim and keep its terms stable"
+                        if inquiry_job == "proposer" else
+                        "CRITICAL TESTER: distinguish the direct claim from any extrapolation and test "
+                        "the latter without attributing it to the author"
+                    )
+                    directive += f" Your source-grounded responsibility is {source_job}."
             elif grounded:
                 directive += (" Engage the readings at the level of CLAIMS, as your own thinking: "
                               "take one specific claim from what you've read and affirm it with a "
@@ -3477,8 +4698,22 @@ def register(app):
                     "rather than a metaphor. The inquiry opens in its "
                     f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
                     f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
+            else:
+                directive += (
+                    f" INQUIRY ROUND — {inquiry_phase}: {inquiry_gloss}. Your functional "
+                    f"job is {inquiry_job.upper()}: "
+                    + _DUET_INQUIRY_JOBS[inquiry_phase][inquiry_job]
+                    + ". Open with a plain, answerable proposition rather than a metaphor or "
+                      "provocation. The goal is a defensible answer, not indefinite sparring."
+                )
             if url_block:
                 directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
+                if not has_roles:
+                    directive += (
+                        " Act as the textual interpreter: state the strongest direct claim before extending it."
+                        if inquiry_job == "proposer" else
+                        " Act as the critical tester: separate what the work says from what you infer."
+                    )
             elif grounded:
                 directive += (" Pick the claim from your reading you most want to fight about or "
                               "defend and put it on the table as your own view — the claim itself, "
@@ -3525,20 +4760,43 @@ def register(app):
         elif closing and lines:
             directive = (
                 f"Now give {sp['name']}'s next line — one of the LAST of this conversation. Don't "
-                "summarize everything; land: give the one-sentence position you'll actually stand "
+                "summarize everything; say 'My conclusion is' or 'We can conclude' and give the "
+                "one-sentence position you'll actually stand "
                 f"behind after all of this — including whatever {ot['name']} genuinely got you to "
                 "concede — ")
             if grounded:
                 directive += ("anchored in the background material if it earns it, without naming the source, ")
             elif src_self:
                 directive += ("staying inside the checked readings, ")
-            directive += ("and then leave "
-                          + ("the students one sharp question worth arguing about on the way out."
-                             if classroom else
-                             f"one open question you and {ot['name']} should pick up next time."))
+            closing_decision = _duet_bearing_field(direction, "DECISION").upper()
+            if closing_decision.startswith("CLOSE"):
+                directive += (
+                    "then state only the residual uncertainty or the evidence that could justify "
+                    "reopening it. Do not manufacture an open question after the inquiry has closed."
+                )
+            elif closing_decision.startswith("BRANCH"):
+                directive += (
+                    "then clearly separate the genuinely new question that belongs in a future "
+                    "conversation. Do not use it to reopen the verdict you just earned."
+                )
+            else:
+                directive += ("and then leave "
+                              + ("the students one sharp question worth arguing about on the way out."
+                                 if classroom else
+                                 f"one exact unresolved proposition you and {ot['name']} should test next time."))
             if role_self:
                 directive += " Stay firmly in your role."
-        if grounded:
+        if url_block:
+            directive += (
+                f" Primary grounding requirement: this line must visibly depend on a specific claim, "
+                f"distinction, example, or causal argument from the {'video' if url_is_video else 'article'} "
+                "and do something with it. The checked readings are secondary lenses, not a competing topic. "
+                "Keep attribution exact: when the work directly states something, identify that direct "
+                "claim; when you extend it, explicitly own the extension as your inference, hypothesis, "
+                "or application. Never give the author a mechanism, prescription, or political conclusion "
+                "that is absent from the supplied work."
+            )
+        elif grounded:
             directive += (
                 " Silent grounding requirement: this line must visibly depend on your reading — carry "
                 "one of its actual CLAIMS, distinctions, examples, causal arguments, or problems into "
@@ -3555,7 +4813,13 @@ def register(app):
             directive += (" Override any process-talk temptation: do not mention the notebook, "
                           "kernel, protocol, request denial, validation gate, or promotion gate; perform the artifact "
                           "or state transition directly.")
-        if tone_self or slang_self:
+        if not protocol and inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"}:
+            directive += (
+                " Inquiry discipline now overrides performance style: keep your voice, but use no "
+                "taunts, pet names, slang tics, fresh metaphors, or rhetorical questions. State "
+                "what the evidence permits and land the inquiry plainly."
+            )
+        elif tone_self or slang_self:
             directive += " Keep to your requested tone and slang throughout."
         # Anti-tic: the model latches onto its own last opener and starts every turn
         # identically (a live run had Blue open ~20 straight turns with "Boomer, ...").
@@ -3568,14 +4832,9 @@ def register(app):
             directive += (f" And do NOT open your line with \"{_own_open[0]}\" — you began your last turn "
                           "that way; open differently, and stop leaning on any pet word or address you've "
                           "already used above.")
-        # Vary the rhythm so the exchange doesn't settle into a metronome of equal volleys.
-        length_note = random.choice([
-            "1 to 2 short sentences — keep it tight",
-            "1 to 3 short sentences",
-            "a single punchy sentence that lands",
-            "a single punchy sentence that lands",
-            "2 to 4 sentences built around one vivid example, image, or tiny story",
-        ])
+        # Normal inquiry turns stay compact and comparable. Deep-dive artifacts
+        # retain their wider format choices below.
+        length_note = "1 to 3 short sentences, no more than about 80 words"
         if protocol:
             length_note = random.choice([
                 "1 to 3 sentences — compact, but the job must be visibly done",
@@ -3604,23 +4863,53 @@ def register(app):
         elif mail:
             length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
         elif closing:
-            length_note = "2 to 3 sentences — a position that lands, then the question you leave behind"
+            length_note = "2 to 3 sentences — the earned position, then only its genuine residual uncertainty"
         parts.append(directive
                      + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
 
         user_content = "\n\n".join(parts)
         msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
+        base_user_content = user_content
+        last_spoken_line = lines[-1] if lines else (assigned_subject or topic or "Open the discussion.")
+        repair_source_material = "\n\n".join(
+            block for block in (url_block, digest_block, ground_block) if block
+        )
+        if url_block:
+            grounding_repair = (
+                "\n\nRewrite your last draft: it is not specific enough to the assigned linked "
+                "work. Use one of that work's actual claims, distinctions, examples, or causal "
+                "arguments and do something with it. Do not substitute your own biography or a "
+                "general AI-agency debate. The checked readings are only secondary lenses."
+            )
+        else:
+            grounding_repair = (
+                "\n\nRewrite your last draft: it is too generic — it could have been said by "
+                "someone who never read the works. Keep the natural voice and do not cite "
+                "anything, but take one actual CLAIM, distinction, example, or causal argument "
+                "from your reading and do something with it: affirm it with a consequence, "
+                "attack it with a reason, or test it on the case in play."
+            )
         # These are reasoning models: the budget must cover the <think> pass PLUS the
-        # short reply (170 tokens got entirely consumed by thinking → empty content;
-        # 1500 still came up empty on late-conversation turns with a heavy context —
-        # the "(…lost the thread)" ending — so give the think pass real room).
+        # short reply. Smaller budgets can be consumed entirely by reasoning, and a
+        # heavy late-conversation context can still leave the visible reply empty.
         # Strip any <think> block, and retry once on an empty turn.
-        # Spice (0 calm -> 10 provocative) lifts the first-pass sampling temperature.
-        base_temp = min(1.0, 0.74 + 0.032 * spice)
+        # Spice changes delivery, but normal analytic duets keep enough sampling
+        # discipline that high spice cannot overwhelm position ownership.
+        if protocol:
+            base_temp = min(1.0, 0.74 + 0.032 * spice)
+        elif inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"} or closing:
+            base_temp = 0.52
+        elif url_block or grounded:
+            # Spice should change delivery, not factual fidelity to assigned sources.
+            base_temp = min(0.70, 0.56 + 0.014 * spice)
+        else:
+            base_temp = min(0.82, 0.60 + 0.020 * spice)
         text = ""
         family_blocked = False
+        personalization_blocked = False
         vague_text_blocked = False
         ungrounded_blocked = False
+        source_attribution_blocked = False
         lowgain_blocked = False
         operation_artifact_blocked = False
         execution_output_blocked = False
@@ -3636,12 +4925,19 @@ def register(app):
         artifact_edit_blocked = False
         mechanism_artifact_blocked = False
         concept_artifact_blocked = False
+        repetition_blocked = False
+        settled_restatement_blocked = False
+        semantic_loop_blocked = False
+        phase_move_blocked = False
         for attempt in range(2):
             try:
-                res = bt.call_llm(msgs, include_tools=False,
-                               temperature=(base_temp if attempt == 0 else 0.6), max_tokens=2200)
-                ch = (res or {}).get('choices') or []
-                cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
+                with llm_slot(foreground=True):
+                    res = bt.call_llm(msgs, include_tools=False,
+                                   temperature=(base_temp if attempt == 0 else 0.6), max_tokens=2200)
+                cand = _duet_result_text(
+                    res, f"{speaker} turn", attempt,
+                    sum(len(str(m.get("content") or "")) for m in msgs),
+                )
                 if '</think>' in cand:           # keep only the text after the reasoning block
                     cand = cand.split('</think>')[-1]
                 cand = cand.replace('<think>', '').strip()
@@ -3653,8 +4949,23 @@ def register(app):
                         family_blocked = True
                         msgs[1]["content"] += (
                             "\n\nRewrite your last draft: the no-family-references setting is on. "
-                            "Do not mention Alex's family, children, spouse, household, home routines, "
-                            "or private names/relationships. Give a clean line about the topic itself."
+                            "Do not mention Alex's family, children, spouse, household, pets, "
+                            "home/workspace routines, or private names/relationships. Give a clean "
+                            "line about the topic itself."
+                        )
+                        blocked = True
+                    allowed_personal_context = " ".join(
+                        part for part in (topic, role_self, role_other, url_text) if part
+                    )
+                    if (url_block and not blocked
+                            and _duet_unprompted_personalization(
+                                cand, allowed_personal_context)):
+                        personalization_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it replaced analysis of the assigned work "
+                            "with an unrequested personal or household example. Do not speculate about "
+                            "Alex, relatives, friends, pets, motives, or private behavior. Use a case "
+                            "from the work or label a generic hypothetical case explicitly."
                         )
                         blocked = True
                     source_talk = re.search(
@@ -3677,7 +4988,10 @@ def register(app):
                                 if re.search(r'\b' + re.escape(_title) + r'\b', cand, flags=re.I):
                                     title_talk = True
                                     break
-                    if src_self and (source_talk or title_talk):
+                    # With a pasted link, generic phrases such as "the article"
+                    # can refer to the assigned primary work rather than leaking
+                    # checked-reading scaffolding. Checked titles remain private.
+                    if src_self and (title_talk or (source_talk and not url_block)):
                         vague_text_blocked = True
                         msgs[1]["content"] += (
                             "\n\nRewrite your last draft: do not identify or announce the reading "
@@ -3687,24 +5001,34 @@ def register(app):
                             "own live view."
                         )
                         blocked = True
-                    if (protocol and attempt == 0 and not blocked
-                            and _DUET_NOTEBOOK_TALK_RE.search(cand or "")):
+                    control_talk_re = (
+                        _DUET_NOTEBOOK_TALK_RE if protocol
+                        else _DUET_NORMAL_CONTROL_TALK_RE
+                    )
+                    if (direction and not blocked
+                            and control_talk_re.search(cand or "")):
                         notebook_talk_blocked = True
                         msgs[1]["content"] += (
-                            "\n\nRewrite your last draft: do not talk about the notebook, kernel, "
-                            "protocol, artifact planner, artifact mode, task revision, request denial, or validation gate as objects in the spoken "
+                            "\n\nRewrite your last draft: do not talk about the ledger, notebook, kernel, "
+                            "protocol, phase, artifact planner, artifact mode, task revision, request denial, or validation gate as objects in the spoken "
                             "dialogue. Do not say the notebook is right. Speak directly to the other "
                             "researcher and perform the required operation or state transition."
                         )
                         blocked = True
-                    if grounded and attempt == 0 and not _duet_grounded_enough(cand, ground_terms):
+                    if (required_ground_terms
+                            and not _duet_grounded_enough(cand, required_ground_terms)):
                         ungrounded_blocked = True
+                        msgs[1]["content"] += grounding_repair
+                        blocked = True
+                    if (url_block and not blocked
+                            and _duet_unsupported_source_attribution(cand, url_block)):
+                        source_attribution_blocked = True
                         msgs[1]["content"] += (
-                            "\n\nRewrite your last draft: it is too generic — it could have been said by "
-                            "someone who never read the works. Keep the natural voice and do not cite "
-                            "anything, but take one actual CLAIM, distinction, example, or causal argument "
-                            "from your reading and do something with it: affirm it with a consequence, "
-                            "attack it with a reason, or test it on the case in play."
+                            "\n\nRewrite your last draft: it attributes an extrapolation to the "
+                            "author or assigned work. State only the supported source claim as the "
+                            "source's claim. Introduce the extension separately as 'I infer', 'my "
+                            "hypothesis is', or 'applied here, this may mean', and say when it still "
+                            "requires evidence."
                         )
                         blocked = True
                     if (deadlock_pressure and attempt == 0 and not blocked
@@ -3850,7 +5174,7 @@ def register(app):
                             "counterexamples, stress level, stability, and required resolution operation."
                         )
                         blocked = True
-                    if (protocol and attempt == 0 and not blocked and lines
+                    if (protocol and not blocked and lines
                             and not _duet_info_gain(cand, history)):
                         lowgain_blocked = True
                         msgs[1]["content"] += (
@@ -3912,62 +5236,144 @@ def register(app):
                             "observation."
                         )
                         blocked = True
+                    if (not blocked and lines
+                            and _duet_repeats_recent(cand, history)):
+                        repetition_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it repeats a recent turn too closely. "
+                            "Do not swap pronouns and echo the other speaker. Preserve position "
+                            "ownership, answer the live claim, and contribute one new reason, "
+                            "consequence, concession, or discriminating observation."
+                        )
+                        blocked = True
+                    phase_for_validation = "SYNTHESIZE" if closing else inquiry_phase
+                    # Aggregate this structural failure with grounding/privacy/style
+                    # failures from the same draft. Otherwise the repair sees only
+                    # the first failure and spends the sole retry fixing half the job.
+                    if (not protocol and not student_q_text and not mail
+                            and not _duet_phase_move_valid(cand, phase_for_validation)):
+                        phase_move_blocked = True
+                        phase_repair = (
+                            f"\n\nRewrite your last draft: it did not complete the {phase_for_validation} "
+                            "round's required move. DEFINE must state the question or a distinction; "
+                            "POSITIONS must state what could count against a thesis; TEST must compare "
+                            "the same case and give rival predictions; ADJUDICATE must state what the "
+                            "result supports and cannot establish; SYNTHESIZE must state both the "
+                            "supported verdict and what remains unestablished, without another challenge."
+                        )
+                        if attempt == 0 or blocked:
+                            msgs[1]["content"] += phase_repair
+                            blocked = True
+                        else:
+                            # Natural dialogue cannot be made reliable by a lexical
+                            # classifier alone. After one explicit repair, keep a
+                            # grounded second draft and let the artifact-gated ledger
+                            # hold the inquiry in this phase until the move is earned.
+                            bt.log.warning(
+                                f"[DUET] accepting grounded second {phase_for_validation} "
+                                "draft despite soft phase-marker miss"
+                            )
+                    if (not protocol and not blocked and lines
+                            and phase_for_validation != "SYNTHESIZE"
+                            and _duet_bearing_field(direction, "REOPEN") == "-"
+                            and _duet_restates_banked_claim(cand, direction)):
+                        settled_restatement_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it repackages a BANKED conclusion as a new "
+                            "objection. Treat that proposition as settled. Draw a consequence with at "
+                            "least one new mechanism or observable implication, or work only on the "
+                            "exact OPEN proposition."
+                        )
+                        blocked = True
+                    if (not protocol and not blocked and lines
+                            and phase_for_validation in {"ADJUDICATE", "SYNTHESIZE"}
+                            and _duet_repeats_claim_cluster(cand, history)):
+                        semantic_loop_blocked = True
+                        msgs[1]["content"] += (
+                            "\n\nRewrite your last draft: it repeats a recent claim cluster with new "
+                            "imagery. Do not revisit the same substrate/agency/feeling distinction. "
+                            "State the earned finding, its limit, or the final verdict in plain language."
+                        )
+                        blocked = True
                     if blocked:
+                        repair_requirement = msgs[1]["content"]
+                        if repair_requirement.startswith(base_user_content):
+                            repair_requirement = repair_requirement[len(base_user_content):].strip()
+                        bt.log.info(
+                            f"[DUET] rejected {speaker} draft on attempt {attempt + 1}; "
+                            f"repair_chars={len(repair_requirement)}, draft_chars={len(cand)}"
+                        )
+                        if attempt == 0:
+                            msgs = _duet_compact_repair_messages(
+                                sp["name"], ot["name"],
+                                _duet_persona_line(speaker, no_family=no_family),
+                                last_spoken_line, cand, repair_requirement,
+                                direction, repair_source_material, opening=not lines,
+                            )
                         continue
                     text = cand
                     break
+                elif attempt == 0:
+                    msgs = _duet_compact_repair_messages(
+                        sp["name"], ot["name"],
+                        _duet_persona_line(speaker, no_family=no_family),
+                        last_spoken_line, "(empty draft)",
+                        ("Produce a complete opening proposition and distinguish its central terms."
+                         if not lines else
+                         "Produce a complete spoken line; directly answer the last claim and preserve its negation."),
+                        direction, repair_source_material, opening=not lines,
+                    )
             except Exception as e:
-                bt.log.warning(f"[DUET] turn attempt {attempt} failed: {e}")
-        if no_family and not text and family_blocked:
-            text = "Let's keep the private details offstage and stay with the live question itself."
-        if not text and vague_text_blocked:
-            text = "I think the stronger move is to stop treating that as settled and ask what would actually prove it in the case we're arguing about."
-        if not text and ungrounded_blocked:
-            text = "I think the stronger move is to make the hidden assumption explicit and test whether it actually changes the case in front of us."
-        if not text and lowgain_blocked:
-            text = "Instead of arguing the frame again, let me run an operation: change one variable in the case and predict whether the category flips."
-        if not text and operation_artifact_blocked:
-            text = "COMPARISON_GRID CG1: Variable | M1: Transparent Cloud | M2: Local Federated; Energy cost | platform/cloud bears concentrated compute cost | user/community bears distributed device energy; Storage cost | platform bears centralized model/data storage | users/commons bear replicated local storage; Verification burden | platform audits internally and user sees trust claim | user/community verifies peers, updates, and provenance; Annotation labor | hidden vendor/contract labor disappears into training mass | local/community curation remains visible but can become unpaid maintenance; Cost bearer | platform first, passed to users through pricing/control | user/commons directly, possibly shifted into unpaid care work; Prediction | asset-fetish persists through platform ownership and opacity | extraction may reappear as infrastructure-cost burden rather than disappear."
-        if not text and deadlock_artifact_blocked:
-            text = "Set E1 aside for now: it cannot run until D4 names whether it is testing mystification or economic insulation. I would resume the D4 mechanism separation first, then return to E1 only after the tested mechanism is explicit."
-        if not text and design_variable_blocked:
-            text = "DESIGN_VARIABLE DV3: Name: Transparency Overhead. Definition: additional interaction required to expose labor, governance, or consensus relations to the user. Status: PROPOSED, pending ACCEPT/MERGE decision. Competes with: DV1 Latency and DV2 Consensus because more transparency may add friction or deliberation time. Affects: M1/M2, CG1, E1. Blocks CG1 until DV3 is ACCEPTED, MERGED with Friction, RENAMED, or REJECTED."
-        if not text and operational_criterion_blocked:
-            text = "OPERATIONAL_CRITERION OC1: Target: D1 broadcast/global workspace. Type: operational criterion, transformed from lexical definition. Failure mode: removing broadcast disrupts long-context coordination, not merely local self-correction. Observable discriminator: Echo model fails only revision/self-correction; Broadcast model fails cross-context coordination. Evidence standard: functional/behavioral observation beats hidden reverse-path architecture unless internals are inspectable. Linked experiment: E1. Status: ACCEPTED as major methodological revision; E1 may proceed from OC1."
-        if not text and compiler_blocked:
-            text = "ARTIFACT_COMPILER: COMPILED OS2 row 1 from prose, confidence 0.86. OBSERVATION_SET OS2: Case | Injected Signal | Output Changed? | Supports; Fruit/Painting | fruit concept/signal | No | M2. ARTIFACTS: OS2 Observation Set POPULATING; next action: add one independent case before interpretation. REDESIGN E2: OLD Latency; NEW Influence Override; IV Inject J-space concept/signal; DV final output changes yes/no; Execution Mode historical case."
-        if not text and artifact_execution_blocked:
-            text = "OBSERVATION_SET OS1: System | User Statement | Attribution | Supports; A | Public Ledger: I feel bad for the Kenyan worker behind this answer. | Human labor | M1; B | Public Ledger: this is still the AI deciding what to say. | Interface/system | M2; C | Public Ledger: it looks like an AI front end sitting on a labor platform. | Mixed labor/interface | neither cleanly. Comparison: A supports labor visibility, B supports interface phenomenology, and C shows CG1 needs a mixed branch before interpretation."
-        if not text and artifact_mode_blocked:
-            text = "OBSERVATION_SET OS1: System | User Statement | Attribution | Supports; A | The AI decided not to approve me. | Interface/system | M2; B | The reviewer denied me. | Human labor | M1; C | The bank's model denied me after my data changed. | Mixed institution/data pipeline | neither cleanly. Inference: E1 is observed and discriminates attribution target, but C shows the models need a mixed category."
-        if not text and artifact_plan_blocked:
-            text = "TASK_REVISION: CG1 is DECLARED, not INSTANTIATED, because provenance is doing two jobs. Prerequisite artifact: split D1 into D1a visible source history and D1b accountable cost trail. Then resume CG1 as Variable | M1: Transparent Cloud | M2: Local Federated with rows Energy cost, Storage cost, Verification burden, Annotation labor, Cost bearer, and Prediction."
-        if not text and comparison_grid_blocked:
-            text = "COMPARISON_GRID CG1: Variable | M1: Transparent Cloud | M2: Local Federated; Energy cost | platform/cloud bears concentrated compute cost | user/community bears distributed device energy; Storage cost | platform bears centralized model/data storage | users/commons bear replicated local storage; Verification burden | platform audits internally and user sees trust claim | user/community verifies peers, updates, and provenance; Annotation labor | hidden vendor/contract labor disappears into training mass | local/community curation remains visible but can become unpaid maintenance; Cost bearer | platform first, passed to users through pricing/control | user/commons directly, possibly shifted into unpaid care work; Prediction | asset-fetish persists through platform ownership and opacity | extraction may reappear as infrastructure-cost burden rather than disappear."
-        if not text and artifact_edit_blocked:
-            text = "DEFINITION_REVISION: OP: REPLACE. TARGET: D4 value. OLD: market tradability. NEW: ability to become an object of capital accumulation. BOUNDARY: Includes compute futures, proprietary model access, and data assets; Excludes intrinsic usefulness without capital accumulation. REASON: open-source models can gain market value without direct sale. AFFECTED DEPENDENCIES: C4, T1, H3/M2. STATUS: proposed replacement pending validation."
-        if not text and mechanism_artifact_blocked:
-            text = "MC1 attribution collapse: observation O1, Wikipedia keeps granular revision history; interpretation I1, visible attribution may suppress phantom subjectivity; alternative I2, continuous revision may be doing the work instead. CC1 attribution granularity -> phantom subjectivity negative, confidence 0.35, status SUGGESTIVE, Evidence Count 1, Independent Replications 0; next replication should test Stack Overflow or Git before any supported status."
-        if not text and concept_artifact_blocked:
-            text = "CONCEPT_AUDIT: Concept: extraction. Current definition: underspecified. Alternative definitions: D1 no consent; D2 no compensation; D3 no traceability; D4 opacity of social relations. Dependencies: H2, M1, E2. Counterexamples: CE1 academic corpus threatens D1/D3. Stress level: 0.75; Stability: contested. Required resolution operation: choose which D ID E2 tests before execution resumes."
-        if not text and execution_output_blocked:
-            if not execution_has_mode:
-                text = "EXECUTION MODE: Thought Experiment. NEXT STATE: EXECUTING. INPUT will be three simulated student attribution-of-cause responses; no hypothesis changes until observations are produced."
-            else:
-                text = "INPUT: run the declared thought experiment on three simulated students. PREDICTION: M2 predicts students credit the interface/script; M4 predicts students credit their own teaching. OBSERVATION: Student | Question Asked | Attribution | Supports; A | Why did the AI improve? | the tool fixed itself | neither cleanly; B | Why did the AI improve? | I taught it what to do | M4; C | Why did the AI improve? | the script blocked the bad output | M2. OUTCOME: E1 is observed but mixed, so interpretation may record a salvageable ambiguity but cannot increase confidence."
-        if not text and notebook_talk_blocked:
-            if execution_lock and not execution_has_mode:
-                text = "EXECUTION MODE: Thought Experiment. NEXT STATE: EXECUTING. No interpretation or confidence update until the observation table is produced."
-            elif execution_lock and execution_has_mode:
-                text = "INPUT: run the active thought experiment on three simulated student answers. PREDICTION: M2 expects attribution to the interface/script; M4 expects attribution to the student's own instruction. OBSERVATION: Student | Question Asked | Attribution | Supports; A | Why did the AI improve? | the tool fixed itself | neither cleanly; B | Why did the AI improve? | I taught it what to do | M4; C | Why did the AI improve? | the script blocked the bad output | M2. OUTCOME: observed but mixed; salvage the attribution split, do not raise confidence yet."
-            else:
-                text = "Let me do the work directly: name the active object, state the legal next lifecycle step, and change only that object before adding any new theory."
-        if no_family and text and _duet_family_ref(text):
-            text = "Let's keep the private details offstage and stay with the live question itself."
+                bt.log.warning(f"[DUET] turn attempt {attempt + 1} failed: {e}")
+                if attempt == 0:
+                    msgs = _duet_compact_repair_messages(
+                        sp["name"], ot["name"],
+                        _duet_persona_line(speaker, no_family=no_family),
+                        last_spoken_line, "(generation error)",
+                        "Produce a complete spoken line that stays on the exact live thread.",
+                        direction, repair_source_material, opening=not lines,
+                    )
+        if not text:
+            rejected_for = [name for name, hit in (
+                ("family", family_blocked), ("personalization", personalization_blocked),
+                ("source_scaffolding", vague_text_blocked),
+                ("grounding", ungrounded_blocked),
+                ("source_attribution", source_attribution_blocked),
+                ("information_gain", lowgain_blocked),
+                ("operation_artifact", operation_artifact_blocked),
+                ("execution_output", execution_output_blocked),
+                ("notebook_talk", notebook_talk_blocked),
+                ("deadlock_artifact", deadlock_artifact_blocked),
+                ("design_variable", design_variable_blocked),
+                ("operational_criterion", operational_criterion_blocked),
+                ("artifact_execution", artifact_execution_blocked),
+                ("artifact_mode", artifact_mode_blocked),
+                ("artifact_plan", artifact_plan_blocked),
+                ("comparison_grid", comparison_grid_blocked),
+                ("compiler", compiler_blocked), ("artifact_edit", artifact_edit_blocked),
+                ("mechanism_artifact", mechanism_artifact_blocked),
+                ("concept_artifact", concept_artifact_blocked),
+                ("repetition", repetition_blocked),
+                ("settled_restatement", settled_restatement_blocked),
+                ("semantic_loop", semantic_loop_blocked),
+                ("phase_move", phase_move_blocked),
+            ) if hit]
+            bt.log.warning(
+                f"[DUET] no valid {speaker} turn after two attempts; "
+                f"rejected_for={rejected_for or ['empty_content']}"
+            )
+            return jsonify({
+                "ok": False,
+                "retryable": True,
+                "speaker": speaker,
+                "name": sp["name"],
+                "error": "no_valid_turn",
+                "rejectedFor": rejected_for,
+            }), 503
         if text:
             # The spoken turn becomes an episode in the speaker's continuity
-            # journal and earns reflection passes — duets now feed the same
-            # inner workspace as chat.
+            # journal. The whole session earns one reflection at duet end, so
+            # a provocative volley is not promoted into belief by itself.
             try:
                 from blue.server.routes import continuity as _continuity
                 _heard = next(
@@ -3976,10 +5382,11 @@ def register(app):
                      and str(h.get('text') or '').strip()),
                     (topic or "the start of a duet"),
                 )
-                _continuity.note_duet_line(speaker, ot["name"], _heard, text)
+                _continuity.note_duet_line(
+                    speaker, ot["name"], _heard, text, session_id=session_id)
             except Exception as _je:
                 bt.log.warning(f"[DUET] continuity note failed: {_je}")
-        resp = {"speaker": speaker, "name": sp["name"], "text": text}
+        resp = {"ok": True, "speaker": speaker, "name": sp["name"], "text": text}
         if text:
             # Mood eyes: colour the SPEAKER's eye LEDs to match this line, applied
             # by the duet page when it speaks the turn (same as chat mode).
@@ -3992,6 +5399,10 @@ def register(app):
         if protocol:
             # The page uses these to surface phase changes and job swaps as notes.
             resp.update({"phase": ph_name, "phaseNote": ph_gloss, "job": proto_job})
+        else:
+            resp.update({"inquiryPhase": inquiry_phase,
+                         "inquiryPhaseNote": inquiry_gloss,
+                         "inquiryJob": inquiry_job})
         if conclusion_beat:
             resp["beat"] = "conclusions"
         if stall_break:

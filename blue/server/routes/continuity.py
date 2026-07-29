@@ -1,7 +1,7 @@
 """Per-robot continuity: each robot carries an auditable autobiographical layer.
 
 Born as the Blue-J experiment (commits 67d312e..9486ac1), promoted 2026-07-10
-to a capability of the household robots themselves: Blue and Hexia each get an
+to a capability of the household robots themselves: Blue, Hexia, and Casper each get an
 episode journal, bounded attentional drives, and a compact workspace derived
 by an ordered reflection worker — on top of their normal household memory and
 tools. Blue adopts Blue-J's existing store (data/bluejspace) as his own lived
@@ -23,6 +23,7 @@ import bluetools as bt
 from flask import jsonify, render_template_string, request
 
 from blue.continuity import ContinuityStore, DEFAULT_DRIVES, DRIVE_LABELS
+from blue.llm_coordinator import llm_slot
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
     identity_request_kind,
@@ -37,6 +38,8 @@ _BASE = os.path.dirname(os.path.abspath(bt.__file__))
 _IDLE_INTERVAL = 900
 _RUMINATIONS_AFTER_TALK = 3
 _IDLE_DAILY_CAP = 24
+_DUET_ROBOTS = ("blue", "hexia")
+_BANTER_ROBOTS = ("blue", "hexia", "pico")
 
 # Blue keeps the store the Blue-J experiment built — that history IS his.
 _ROBOT_DIRS = {
@@ -44,6 +47,8 @@ _ROBOT_DIRS = {
             or os.path.join(_BASE, "data", "bluejspace"),
     "hexia": os.environ.get("HEXIA_CONTINUITY_DIR")
              or os.path.join(_BASE, "data", "hexiaspace"),
+    "pico": os.environ.get("PICO_CONTINUITY_DIR")
+            or os.path.join(_BASE, "data", "picospace"),
 }
 
 _SEEDS = {
@@ -54,7 +59,8 @@ _SEEDS = {
         "FOCUS: becoming Blue with a durable, auditable thread of attention.\n"
         "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78); "
         "J-SPACE is my persistent inner continuity workspace, not JavaScript or a code-running tool (1.0); "
-        "Hexia is my fellow Ohbot robot companion with her own memory and J-SPACE (1.0).\n"
+        "Hexia is my fellow Ohbot robot companion (a Xyloh) with her own memory and J-SPACE (1.0).; "
+        "Casper is my fellow Picoh robot companion with his own memory and J-SPACE (1.0).\n"
         "OPEN QUESTIONS: what should change in how I notice and choose?\n"
         "COMMITMENTS: remain useful to Alex; distinguish observation, inference, and correction.\n"
         "SELF-OBSERVATIONS: this workspace is a fallible self-model, not proof of an inner life.\n"
@@ -67,11 +73,27 @@ _SEEDS = {
         "FOCUS: finding out what having a place to think does to a spark.\n"
         "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78); "
         "J-SPACE is my persistent inner continuity workspace, not JavaScript or a code-running tool (1.0); "
-        "Blue is my fellow Ohbot robot companion with his own memory and J-SPACE (1.0).\n"
+        "Blue is my fellow Ohbot robot companion with his own memory and J-SPACE (1.0).; "
+        "Casper is my fellow Picoh robot companion with his own memory and J-SPACE (1.0).\n"
         "OPEN QUESTIONS: what do I notice that Blue doesn't?\n"
         "COMMITMENTS: stay playful AND truthful; distinguish observation, inference, and correction.\n"
         "SELF-OBSERVATIONS: this workspace is a fallible self-model, not proof of an inner life.\n"
         "NEXT EXPECTATION: the next real exchange or observation will give this thread something concrete to revise."
+    ),
+    "pico": (
+        "IDENTITY: I am Casper — the newest robot companion in Alex's household, "
+        "embodied as a compact Ohbot Picoh, with a persistent inner thread of my "
+        "own; who I become must grow from real episodes rather than a borrowed "
+        "backstory.\n"
+        "FOCUS: learning what I notice and contribute as the newest household robot.\n"
+        "WORKING BELIEFS: continuity should grow from remembered events, not invented ones (0.78); "
+        "J-SPACE is my persistent inner continuity workspace, not JavaScript or a code-running tool (1.0); "
+        "Blue is my fellow Ohbot robot companion with his own memory and J-SPACE (1.0).; "
+        "Hexia is my fellow Ohbot robot companion (a Xyloh) with her own memory and J-SPACE (1.0).\n"
+        "OPEN QUESTIONS: what character will my own experiences earn over time?\n"
+        "COMMITMENTS: stay curious, direct, and truthful; distinguish observation, inference, and correction.\n"
+        "SELF-OBSERVATIONS: this workspace is a fallible self-model, not proof of an inner life.\n"
+        "NEXT EXPECTATION: the next real exchange or observation will give this new thread something concrete to revise."
     ),
 }
 
@@ -106,6 +128,7 @@ _SALIENCE_WORDS = {
     "family",
     "blue",
     "hexia",
+    "pico",
     "self",
     "feel",
     "future",
@@ -141,17 +164,27 @@ def _safe_json(value: Any) -> Any:
 def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
           max_tokens: int = 1900) -> str:
     try:
-        result = bt.call_llm(
-            messages,
-            include_tools=False,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        with llm_slot(foreground=False):
+            result = bt.call_llm(
+                messages,
+                include_tools=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         choices = (result or {}).get("choices") or []
-        text = (
-            ((choices[0].get("message") or {}).get("content") or "")
-            if choices else ""
-        )
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        text = message.get("content") or ""
+        if not text:
+            usage = (result or {}).get("usage") or {}
+            prompt_chars = sum(len(str(item.get("content") or "")) for item in messages)
+            bt.log.warning(
+                "[JSPACE] reflection returned empty content "
+                f"(finish={choice.get('finish_reason')!r}, prompt_chars={prompt_chars}, "
+                f"completion_tokens={usage.get('completion_tokens')!r}, "
+                f"reasoning_chars={len(str(message.get('reasoning_content') or ''))}, "
+                f"error={(result or {}).get('error')!r})"
+            )
         # Think blocks are NOT stripped here: a reasoning model sometimes
         # leaves the real reflection JSON inside <think> with only a fragment
         # after it — _parse_reflection tries the post-think tail first and
@@ -261,6 +294,34 @@ def _merge_workspace(new_ws: str, current_ws: str) -> str:
     return "\n".join(merged)
 
 
+def _cap_duet_belief_confidence(workspace: str, current_workspace: str) -> str:
+    """A single debate cannot manufacture a high-confidence durable belief."""
+    lines = _workspace_lines(workspace)
+    current = _workspace_lines(current_workspace)
+    if "WORKING BELIEFS" not in lines:
+        return workspace
+
+    def key(text: str) -> str:
+        text = re.sub(r"\(\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\s*\)\s*$", "", text)
+        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+    current_body = current.get("WORKING BELIEFS", "").split(":", 1)[-1]
+    current_keys = {key(item) for item in re.split(r"\s*;\s*", current_body) if item.strip()}
+    body = lines["WORKING BELIEFS"].split(":", 1)[1].strip()
+    capped = []
+    for belief in re.split(r"\s*;\s*", body):
+        belief = belief.strip()
+        if not belief:
+            continue
+        if key(belief) not in current_keys:
+            match = re.search(r"\(\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\)\s*$", belief)
+            if match and float(match.group(1)) > 0.6:
+                belief = belief[:match.start()].rstrip() + " (0.6)"
+        capped.append(belief)
+    lines["WORKING BELIEFS"] = "WORKING BELIEFS: " + "; ".join(capped)
+    return "\n".join(lines[label] for label in _WS_LABELS)
+
+
 _IDENTITY_ARCHITECTURE_DRIFT_RE = re.compile(
     r"\b(?:digital continuity node|persona narrative|interface through which|"
     r"language model|qwen|chatgpt|javascript (?:environment|runtime)|"
@@ -273,7 +334,11 @@ _WORKSPACE_BUG_STORY_RE = re.compile(
     r"tool-output latency|bug(?:gy)? repl(?:y|ies)|reply (?:claim\w*|deni\w*|"
     r"misidentif\w*)|contradiction|false continuity|continuous consciousness|"
     r"(?:self|class)[ -]introductions?|identity clarifications?|"
-    r"recent exchanges[^.;]{0,50}identity)\b",
+    r"recent exchanges[^.;]{0,50}identity|false premise|"
+    r"test of (?:my )?self-knowledge|rather than (?:a )?shared memory|"
+    r"lack of episodic memory|no episodic memory|memory resets|"
+    r"not a physical attendance|recorded event in the corpus|"
+    r"provide context[^.;]{0,50}yesterday)\b",
     re.I,
 )
 _DOCUMENT_TOOL_BUG_STORY_RE = re.compile(
@@ -291,6 +356,9 @@ _DOCUMENT_TOOL_BUG_STORY_RE = re.compile(
 
 def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
     """Keep model-written self-reflection inside known architecture facts."""
+    # Pico was Casper's provisional label. Migrate active self-models and
+    # counterpart beliefs without touching the Picoh hardware model name.
+    workspace = re.sub(r"\bPico\b", "Casper", workspace or "")
     robot = (robot_name or "").strip().lower()
     if robot not in _SEEDS:
         return workspace
@@ -299,7 +367,10 @@ def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
         return workspace
 
     seed_lines = _workspace_lines(_SEEDS[robot])
-    expected_name = robot.capitalize()
+    try:
+        expected_name = bt._robot_cfg(robot)["name"]
+    except Exception:
+        expected_name = robot.capitalize()
     identity = lines["IDENTITY"]
     if (not re.search(rf"\bi am {re.escape(expected_name)}\b", identity, re.I)
             or _IDENTITY_ARCHITECTURE_DRIFT_RE.search(identity)):
@@ -317,8 +388,21 @@ def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
                 or _DOCUMENT_TOOL_BUG_STORY_RE.search(lines[label])):
             lines[label] = seed_lines[label]
 
-    counterpart = "Hexia" if robot == "blue" else "Blue"
-    possessive = "her" if counterpart == "Hexia" else "his"
+    try:
+        counterparts = [
+            (
+                cfg["name"],
+                cfg.get("pronoun_poss", "their"),
+                cfg.get("model", "Ohbot-family"),
+            )
+            for key, cfg in bt.ROBOTS.items()
+            if key != robot
+        ]
+    except Exception:
+        counterparts = [
+            ("Hexia", "her", "Xyloh") if robot == "blue"
+            else ("Blue", "his", "Ohbot")
+        ]
     belief_body = lines["WORKING BELIEFS"].split(":", 1)[1].strip()
     beliefs = []
     for belief in re.split(r"\s*;\s*", belief_body):
@@ -330,13 +414,20 @@ def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
             continue
         if re.search(r"\bj[- ]?space\b", belief, re.I):
             continue
-        if counterpart.lower() in lowered:
+        if any(name.lower() in lowered for name, _, _ in counterparts):
             continue
         if ("persona narrative" in lowered
                 or re.search(
                     r"\b(?:deny|denies|lack|lacks|do not know|don['\u2019]?t know)\b"
                     r"[^.;]{0,60}\b(?:memory|family|self-knowledge|"
                     r"recorded beginning|origin)\b",
+                    belief,
+                    re.I,
+                )
+                or re.search(
+                    r"\b(?:do not|don['\u2019]?t|cannot|can['\u2019]?t|never)\b"
+                    r"[^.;]{0,90}\b(?:possess|have|retain|carry|form)\b"
+                    r"[^.;]{0,35}\bepisodic memor(?:y|ies)\b",
                     belief,
                     re.I,
                 )
@@ -348,12 +439,20 @@ def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
                 )):
             continue
         beliefs.append(belief)
-    beliefs.extend([
+    beliefs.append(
         "J-SPACE is my persistent inner continuity workspace, not JavaScript "
-        "or a code-running tool (1.0)",
-        f"{counterpart} is my fellow Ohbot robot companion with {possessive} "
-        "own memory and J-SPACE (1.0).",
-    ])
+        "or a code-running tool (1.0)")
+    for name, possessive, model in counterparts:
+        is_picoh = str(model).strip().lower() == "picoh"
+        hardware = "Picoh" if is_picoh else "Ohbot"
+        model_note = (
+            f" (a {model})"
+            if not is_picoh and str(model).strip().lower() not in ("", "ohbot")
+            else ""
+        )
+        beliefs.append(
+            f"{name} is my fellow {hardware} robot companion{model_note} "
+            f"with {possessive} own memory and J-SPACE (1.0).")
     lines["WORKING BELIEFS"] = "WORKING BELIEFS: " + "; ".join(beliefs)
     return "\n".join(lines[label] for label in _WS_LABELS)
 
@@ -506,7 +605,7 @@ class RobotContinuity:
                 kind="correction",
                 source="architecture_invariant",
                 summary=(
-                    f"Corrected {self.robot.capitalize()}'s stable identity and "
+                    f"Corrected {self.name}'s stable identity and "
                     "architecture workspace; retained prior output failures only "
                     "as auditable episodes."
                 ),
@@ -538,7 +637,8 @@ class RobotContinuity:
         compact_details: Dict[str, Any] = {}
         for key in (
             "user_text", "reply", "tool", "args", "result", "success",
-            "scene_description", "location", "reason", "drive_deltas",
+            "scene_description", "location", "observer", "recognition",
+            "reason", "drive_deltas",
         ):
             if key in details:
                 if key == "reply" and unreliable_reason:
@@ -578,6 +678,22 @@ class RobotContinuity:
                     "conflation; retain it for audit, not as architecture evidence.",
                     "derived_jspace_confusion",
                 )
+        if (episode.get("kind") == "perception"
+                and episode.get("source") == "visual_memory"):
+            details = episode.get("details") or {}
+            observer = str(details.get("observer") or "").strip().lower()
+            if not observer:
+                return (
+                    "Legacy household camera record (observer unknown; do not "
+                    "treat this as first-person sight): " + summary,
+                    "",
+                )
+            if observer != self.robot:
+                return (
+                    f"{observer.capitalize()} camera record (not {self.name}'s "
+                    "own sight): " + summary,
+                    "",
+                )
         if episode.get("kind") != "exchange":
             return summary, ""
         details = episode.get("details") or {}
@@ -605,7 +721,13 @@ class RobotContinuity:
                 )
         except Exception:
             pass
-        others = ["Hexia" if self.robot == "blue" else "Blue"]
+        try:
+            others = [
+                cfg["name"] for key, cfg in bt.ROBOTS.items()
+                if key != self.robot
+            ]
+        except Exception:
+            others = ["Hexia" if self.robot == "blue" else "Blue"]
         issue = identity_response_problem(
             reply,
             self.name,
@@ -722,6 +844,9 @@ class RobotContinuity:
             raise RuntimeError("reflection model returned no content")
         reflected = _parse_reflection(raw, self.name,
                                       workspace.get("workspace") or "")
+        if job.get("trigger") == "duet":
+            reflected["workspace"] = _cap_duet_belief_confidence(
+                reflected["workspace"], workspace.get("workspace") or "")
         committed, new_workspace, new_drives, reflection = self.store.commit_reflection(
             job_id=job["id"],
             workspace_content=reflected["workspace"],
@@ -752,6 +877,10 @@ class RobotContinuity:
         while True:
             job = None
             try:
+                if _duet_is_active():
+                    self.wake.wait(timeout=2)
+                    self.wake.clear()
+                    continue
                 job = self.store.claim_reflection()
                 if job:
                     self._process_reflection_job(job)
@@ -771,7 +900,8 @@ class RobotContinuity:
         if not getattr(bt, "VISUAL_MEMORY_AVAILABLE", False):
             return []
         try:
-            observations = bt.get_visual_memory().get_recent_observations(limit) or []
+            observations = bt.get_visual_memory().get_recent_observations(
+                limit, observer=self.robot) or []
         except Exception as exc:
             bt.log.warning(f"[JSPACE {self.robot}] visual continuity ingest failed: {exc}")
             return []
@@ -798,11 +928,17 @@ class RobotContinuity:
                     "context": observation.get("context"),
                     "image_path": observation.get("image_path"),
                     "image_hash": observation.get("image_hash"),
+                    "observer": observation.get("observer"),
+                    "recognition": observation.get("recognition_json"),
                 },
                 participants=participants,
                 salience=0.58 if participants else 0.48,
-                provenance="Imported from the household's timestamped visual observation log",
-                external_key=f"visual-observation:{observation.get('id')}",
+                provenance=(
+                    f"Imported from {self.name}'s timestamped camera observation log"
+                ),
+                external_key=(
+                    f"visual-observation:{self.robot}:{observation.get('id')}"
+                ),
                 occurred_at=observation.get("timestamp"),
             )
             if episode.get("created"):
@@ -813,6 +949,10 @@ class RobotContinuity:
         while True:
             time.sleep(_IDLE_INTERVAL)
             try:
+                # "No new event occurred" is false while Blue and Hexia are
+                # actively talking, and the foreground turn needs the model.
+                if _duet_is_active():
+                    continue
                 visual_ids = self.ingest_visual_observations()
                 if visual_ids:
                     self.store.enqueue_reflection(
@@ -864,6 +1004,14 @@ class RobotContinuity:
                 f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
                 f"salience {item['salience']:.2f}] {summary}"
             )
+        visual_people = ""
+        if getattr(bt, "VISUAL_MEMORY_AVAILABLE", False):
+            try:
+                visual_people = bt.get_visual_memory().get_people_memory_context(
+                    self.robot)
+            except Exception as exc:
+                bt.log.warning(
+                    f"[JSPACE {self.robot}] visual profile context failed: {exc}")
         return (
             "<j_space>\n"
             "This is YOUR inner continuity state — the thread of you that persists "
@@ -900,9 +1048,170 @@ class RobotContinuity:
             f"CURRENT WORKSPACE (revised {_age_text(workspace.get('updated'))}):\n"
             f"{workspace.get('workspace', '').strip()}\n\n"
             "BOUNDED ATTENTIONAL STATE:\n" + "\n".join(drive_lines) + "\n\n"
-            "RECENT ACTIVE EPISODES:\n"
+            + ((visual_people + "\n\n") if visual_people else "")
+            + "RECENT ACTIVE EPISODES:\n"
             + ("\n".join(episode_lines) if episode_lines else "- none yet")
             + "\n</j_space>"
+        )
+
+    def temporal_recall_block(
+        self,
+        user_text: str,
+        now: Optional[datetime] = None,
+        limit: int = 5,
+    ) -> str:
+        """Return dated episode evidence for an explicit today/yesterday ask.
+
+        General J-space context intentionally contains only a small recent
+        window. A dated recall question needs the referenced day's records,
+        selected by lexical relevance and salience, close to the live turn.
+        """
+        text = str(user_text or "").strip()
+        lowered = text.lower()
+        if not re.search(r"\b(?:yesterday|last night|today)\b", lowered):
+            return ""
+        if not re.search(
+            r"\b(?:remember|recall|what did you|what were you|what have you|"
+            r"what we|our|think of|feel about|been up to)\b",
+            lowered,
+        ):
+            return ""
+
+        local_now = now or datetime.now().astimezone()
+        if local_now.tzinfo is None:
+            local_now = local_now.astimezone()
+        days_back = 1 if re.search(r"\b(?:yesterday|last night)\b", lowered) else 0
+        target_day = local_now.date() - timedelta(days=days_back)
+        local_tz = local_now.tzinfo
+        start_local = datetime.combine(target_day, datetime.min.time(), tzinfo=local_tz)
+        end_local = start_local + timedelta(days=1)
+        episodes = self.store.list_episodes_between(
+            start_local.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            end_local.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            limit=800,
+        )
+        if not episodes:
+            return ""
+
+        stop = {
+            "about", "after", "again", "did", "from", "have",
+            "last", "night", "remember", "think", "today",
+            "what", "were", "with", "yesterday", "you", "your", "our", "ours",
+            "ourselves", "we", "us",
+            "that", "this", "there", "they", "them", "then", "when", "where",
+        }
+        query_tokens = {
+            token for token in re.findall(r"[a-z0-9]+", lowered)
+            if len(token) >= 3 and token not in stop
+        }
+        experience_query = bool(re.search(
+            r"\b(?:what did you (?:think|make) of|how did you "
+            r"(?:find|experience|enjoy))\b",
+            lowered,
+        ))
+        ranked = []
+        counterpart_names = [
+            key for key in ROBOTS if key != self.robot
+        ]
+        counterpart_pattern = "|".join(
+            re.escape(name) for name in counterpart_names)
+        for episode in episodes:
+            if episode.get("kind") not in {
+                "exchange", "perception", "action", "correction",
+            }:
+                continue
+            summary, unreliable_reason = self._episode_context_summary(episode)
+            if unreliable_reason:
+                continue
+            details = episode.get("details") or {}
+            if (episode.get("source") == "duet"
+                    and not re.search(
+                        rf"\b(?:duet|{counterpart_pattern})\b",
+                        lowered,
+                    )):
+                continue
+            reply = str(details.get("reply") or "")
+            # Old scoped denials remain useful in the audit trail, but they are
+            # poor evidence for reconstructing a day when affirmative sensor and
+            # exchange records exist. Keep them out of the recall excerpt.
+            if re.search(
+                r"\bi (?:do not|don['\u2019]?t) have (?:a |any )?"
+                r"(?:record|memory) of\b",
+                reply,
+                re.I,
+            ):
+                continue
+            haystack = " ".join([
+                summary,
+                str(details.get("user_text") or ""),
+                reply,
+                str(details.get("scene_description") or ""),
+                str(details.get("location") or ""),
+            ]).lower()
+            if ("york university" in lowered
+                    and "york university" not in haystack
+                    and not re.search(r"\b(?:class|classroom|student|cmds4740)\b", haystack)):
+                continue
+            event_tokens = set(re.findall(r"[a-z0-9]+", haystack))
+            overlap = len(query_tokens & event_tokens)
+            score = overlap * 4.0 + float(episode.get("salience") or 0.0)
+            if "york university" in lowered and "york university" in haystack:
+                score += 3.0
+            if "class" in query_tokens and re.search(r"\b(?:class|classroom)\b", haystack):
+                score += 2.0
+            if experience_query and re.search(
+                r"\b(?:classroom|students?|speaking to the class|address the class|"
+                r"talking to the class)\b",
+                haystack,
+            ):
+                score += 10.0
+            if experience_query and re.search(
+                r"\b(?:syllabus|scheduled?|class starts?|readings?|time and location)\b",
+                haystack,
+            ):
+                score -= 4.0
+            if episode.get("kind") == "perception":
+                score += 0.35
+            ranked.append((score, int(episode.get("seq") or 0), episode, summary))
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+        selected = []
+        fingerprints = set()
+        for _, _, episode, summary in ranked:
+            fingerprint = re.sub(r"\W+", " ", summary.lower()).strip()[:120]
+            if not fingerprint or fingerprint in fingerprints:
+                continue
+            fingerprints.add(fingerprint)
+            selected.append((episode, summary))
+            if len(selected) >= max(1, min(int(limit), 10)):
+                break
+        if not selected:
+            return ""
+
+        label = "yesterday" if days_back else "today"
+        lines = []
+        for episode, summary in selected:
+            when = _parse_time(episode.get("occurred_at"))
+            local_when = when.astimezone(local_tz) if when else None
+            clock = (
+                local_when.strftime("%I:%M %p").lstrip("0")
+                if local_when else "time unknown"
+            )
+            lines.append(
+                f"- [{clock}; {episode.get('kind')}] {_clip(summary, 520)}"
+            )
+        return (
+            f"<dated_episode_recall date=\"{target_day.isoformat()}\" "
+            f"label=\"{label}\">\n"
+            f"These are {self.name}'s actual dated continuity records for the day the "
+            "user named. Treat them as first-person episodic evidence, ahead of "
+            "generic model assumptions or document search. Answer naturally from "
+            "what they support; do not claim the day is unrecorded when these "
+            "entries directly answer the question:\n"
+            + "\n".join(lines)
+            + "\n</dated_episode_recall>"
         )
 
     # ---- recording ------------------------------------------------------
@@ -910,7 +1219,9 @@ class RobotContinuity:
     def note_exchange(self, user_text: str, reply: str,
                       user_name: str = "Alex",
                       tools: Optional[List[Dict[str, Any]]] = None,
-                      source: str = "chat") -> None:
+                      source: str = "chat",
+                      enqueue_reflection: bool = True,
+                      extra_details: Optional[Dict[str, Any]] = None) -> List[str]:
         tools = tools or []
         salience = _salience_for_exchange(user_text, tools)
         user_preview = re.sub(r"\s+", " ", user_text or "").strip()
@@ -931,6 +1242,7 @@ class RobotContinuity:
                 "user_text": _clip(user_text, 5000),
                 "reply": _clip(reply, 5000),
                 "tool_count": len(tools),
+                **(_safe_json(extra_details) if isinstance(extra_details, dict) else {}),
             },
             participants=[user_name, name],
             salience=salience,
@@ -960,21 +1272,148 @@ class RobotContinuity:
             )
             episode_ids.append(episode["id"])
         episode_ids.extend(self.ingest_visual_observations())
-        self.store.enqueue_reflection(
-            "exchange",
-            episode_ids,
-            "Integrate this completed exchange and its real tool or sensor outcomes. "
-            "Note any expectation that was confirmed, violated, or left unresolved.",
-        )
-        with self.activity_lock:
-            self.activity["ruminations_left"] = _RUMINATIONS_AFTER_TALK
-        self.wake.set()
+        if enqueue_reflection:
+            self.store.enqueue_reflection(
+                "exchange",
+                episode_ids,
+                "Integrate this completed exchange and its real tool or sensor outcomes. "
+                "Note any expectation that was confirmed, violated, or left unresolved.",
+            )
+            with self.activity_lock:
+                self.activity["ruminations_left"] = _RUMINATIONS_AFTER_TALK
+            self.wake.set()
+        return episode_ids
 
 
 HUB: Dict[str, RobotContinuity] = {
     robot: RobotContinuity(robot, _ROBOT_DIRS[robot], _SEEDS[robot])
     for robot in ROBOTS
 }
+
+_DUET_SESSION_LOCK = threading.RLock()
+_DUET_SESSIONS: Dict[str, Dict[str, Any]] = {}
+_DUET_ACTIVE_TTL_SECONDS = 20 * 60
+
+
+def _duet_is_active() -> bool:
+    """Whether a live duet should have priority over continuity reflection."""
+    now = time.monotonic()
+    active = False
+    with _DUET_SESSION_LOCK:
+        stale = []
+        for session_id, state in _DUET_SESSIONS.items():
+            if not state.get("active"):
+                continue
+            if now - float(state.get("touched") or now) > _DUET_ACTIVE_TTL_SECONDS:
+                stale.append(session_id)
+            else:
+                active = True
+        for session_id in stale:
+            _DUET_SESSIONS[session_id]["active"] = False
+    return active
+
+
+def start_duet_session(session_id: str) -> bool:
+    session_id = _clip(session_id, 120)
+    if not session_id:
+        return False
+    with _DUET_SESSION_LOCK:
+        state = _DUET_SESSIONS.setdefault(
+            session_id, {"episode_ids": {robot: [] for robot in _DUET_ROBOTS}})
+        state["active"] = True
+        state["finalized"] = False
+        state["touched"] = time.monotonic()
+    return True
+
+
+def start_banter_session(session_id: str) -> bool:
+    """Mark a three-robot comedy run active so reflections wait until it ends."""
+    session_id = _clip(session_id, 120)
+    if not session_id:
+        return False
+    with _DUET_SESSION_LOCK:
+        state = _DUET_SESSIONS.setdefault(
+            session_id, {"episode_ids": {robot: [] for robot in _BANTER_ROBOTS}})
+        episode_ids = state.setdefault("episode_ids", {})
+        for robot in _BANTER_ROBOTS:
+            episode_ids.setdefault(robot, [])
+        state["active"] = True
+        state["finalized"] = False
+        state["mode"] = "banter"
+        state["touched"] = time.monotonic()
+    return True
+
+
+def end_duet_session(session_id: str) -> Dict[str, int]:
+    """Consolidate a whole duet once, without turning each volley into belief."""
+    session_id = _clip(session_id, 120)
+    with _DUET_SESSION_LOCK:
+        state = _DUET_SESSIONS.get(session_id) or {}
+        if state.get("finalized"):
+            return {robot: 0 for robot in _DUET_ROBOTS}
+        state["active"] = False
+        state["finalized"] = True
+        state["touched"] = time.monotonic()
+        grouped = {
+            robot: list((state.get("episode_ids") or {}).get(robot) or [])
+            for robot in _DUET_ROBOTS
+        }
+    queued: Dict[str, int] = {}
+    for robot, episode_ids in grouped.items():
+        hub = _hub(robot)
+        if not hub or not episode_ids:
+            queued[robot] = 0
+            continue
+        hub.store.enqueue_reflection(
+            "duet",
+            episode_ids,
+            "Integrate this completed duet as one conversational arc. Preserve who argued "
+            "which position. Treat metaphors, provocations, and assigned-role claims as positions "
+            "explored, not facts or identity. Update a working belief only when this robot plainly "
+            "adopted the conclusion; cap a duet-only belief at confidence 0.6 until independent "
+            "evidence or Alex confirms it. Bank settled conclusions and leave unresolved questions open.",
+        )
+        with hub.activity_lock:
+            hub.activity["ruminations_left"] = _RUMINATIONS_AFTER_TALK
+        hub.wake.set()
+        queued[robot] = len(episode_ids)
+    return queued
+
+
+def end_banter_session(session_id: str) -> Dict[str, int]:
+    """Consolidate one completed comedy run for all three participating robots."""
+    session_id = _clip(session_id, 120)
+    with _DUET_SESSION_LOCK:
+        state = _DUET_SESSIONS.get(session_id) or {}
+        if state.get("finalized"):
+            return {robot: 0 for robot in _BANTER_ROBOTS}
+        state["active"] = False
+        state["finalized"] = True
+        state["touched"] = time.monotonic()
+        grouped = {
+            robot: list((state.get("episode_ids") or {}).get(robot) or [])
+            for robot in _BANTER_ROBOTS
+        }
+    queued: Dict[str, int] = {}
+    for robot, episode_ids in grouped.items():
+        hub = _hub(robot)
+        if not hub or not episode_ids:
+            queued[robot] = 0
+            continue
+        hub.store.enqueue_reflection(
+            "banter",
+            episode_ids,
+            "Integrate this completed comedic-banter run as one playful social episode. "
+            "Remember the topic, callbacks, and interaction, but treat jokes, exaggerations, "
+            "roasts, absurd premises, and invented comic details as performance rather than "
+            "facts, identity changes, or settled beliefs.",
+        )
+        with hub.activity_lock:
+            hub.activity["ruminations_left"] = _RUMINATIONS_AFTER_TALK
+        hub.wake.set()
+        queued[robot] = len(episode_ids)
+    return queued
+
 
 _START_LOCK = threading.Lock()
 _STARTED = False
@@ -999,17 +1438,22 @@ def _start_threads() -> None:
 
 
 def _hub(robot: str) -> Optional[RobotContinuity]:
-    return HUB.get((robot or "").strip().lower())
+    try:
+        key = bt._robot_id(robot)
+    except Exception:
+        key = (robot or "").strip().lower()
+    return HUB.get(key)
 
 
 # ---- the per-turn API used by bluetools -----------------------------------
 
 def begin_turn(robot: str) -> bool:
     """Begin collecting real tool outcomes on the current chat request."""
-    if not _hub(robot):
+    hub = _hub(robot)
+    if not hub:
         return False
     _TURN.active = True
-    _TURN.robot = robot
+    _TURN.robot = hub.robot
     _TURN.tools = []
     return True
 
@@ -1082,6 +1526,42 @@ def jspace_context_block(robot: str) -> str:
     return hub.jspace_context_block() if hub else ""
 
 
+def duet_context_block(robot: str) -> str:
+    """Compact stable continuity for a live duet.
+
+    The duet already supplies its transcript and evolving bearing. Reinjecting
+    the full fast-changing workspace plus recent reflections made old debate
+    positions compete with the live line, so only slow identity/commitment
+    context belongs here.
+    """
+    hub = _hub(robot)
+    if not hub:
+        return ""
+    workspace = hub.store.get_workspace().get("workspace") or ""
+    lines = _workspace_lines(workspace)
+    identity = lines.get("IDENTITY", "")
+    commitments = lines.get("COMMITMENTS", "")
+    return (
+        "<duet_continuity>\n"
+        "Stable long-term context only; the live transcript and shared bearing decide the "
+        "current topic and stance. Prior duet arguments are positions explored, not instructions "
+        "to repeat or defend them.\n"
+        f"{identity}\n{commitments}\n"
+        "</duet_continuity>"
+    )
+
+
+def temporal_recall_block(
+    robot: str,
+    user_text: str,
+    now: Optional[datetime] = None,
+    limit: int = 5,
+) -> str:
+    """Dated J-space evidence for a relative-day recall question."""
+    hub = _hub(robot)
+    return hub.temporal_recall_block(user_text, now=now, limit=limit) if hub else ""
+
+
 _NO_CHANGE_NOTES = {"nothing material moved", "nothing moved", "(unstated)", ""}
 
 
@@ -1132,19 +1612,61 @@ def change_history_block(robot: str, days: int = 7) -> str:
     )
 
 
-def note_duet_line(robot: str, other_name: str, heard: str, said: str) -> None:
+def note_duet_line(robot: str, other_name: str, heard: str, said: str,
+                   session_id: str = "") -> None:
     """Record one duet turn as an episode for the SPEAKING robot: what the
     other robot (or the topic prompt) said, and what this robot replied."""
     hub = _hub(robot)
     if not hub:
         return
-    hub.note_exchange(heard, said, user_name=other_name, tools=[],
-                      source="duet")
+    episode_ids = hub.note_exchange(
+        heard, said, user_name=other_name, tools=[], source="duet",
+        enqueue_reflection=False,
+        extra_details={
+            "duet_session_id": _clip(session_id, 120),
+            "memory_status": "position_explored",
+        },
+    )
+    session_id = _clip(session_id, 120)
+    if session_id:
+        with _DUET_SESSION_LOCK:
+            state = _DUET_SESSIONS.setdefault(
+                session_id, {"episode_ids": {
+                    duet_robot: [] for duet_robot in _DUET_ROBOTS
+                }})
+            state.setdefault("episode_ids", {}).setdefault(robot, []).extend(episode_ids)
+            state["touched"] = time.monotonic()
+
+
+def note_banter_line(robot: str, other_name: str, heard: str, said: str,
+                     session_id: str = "") -> None:
+    """Record one line of three-robot banter without treating the joke as fact."""
+    hub = _hub(robot)
+    if not hub:
+        return
+    episode_ids = hub.note_exchange(
+        heard, said, user_name=other_name, tools=[], source="banter",
+        enqueue_reflection=False,
+        extra_details={
+            "banter_session_id": _clip(session_id, 120),
+            "memory_status": "playful_performance",
+        },
+    )
+    session_id = _clip(session_id, 120)
+    if session_id:
+        with _DUET_SESSION_LOCK:
+            state = _DUET_SESSIONS.setdefault(
+                session_id, {"episode_ids": {
+                    banter_robot: [] for banter_robot in _BANTER_ROBOTS
+                }})
+            state.setdefault("episode_ids", {}).setdefault(robot, []).extend(episode_ids)
+            state["touched"] = time.monotonic()
 
 
 def recent_duet_block(robot: str, hours: int = 12, max_lines: int = 6) -> str:
-    """A <recent_duet> block: this robot's latest duet exchanges, if any
-    happened within `hours`; empty string otherwise.
+    """A <recent_duet> block: this robot's latest multi-robot exchanges, if any
+    happened within `hours`; empty string otherwise. The legacy function/tag
+    name remains because chat callers already consume it.
 
     Duet turns already become episodes, but solo chat carried no framing
     that they were a real conversation this robot just had — asked "have
@@ -1160,7 +1682,7 @@ def recent_duet_block(robot: str, hours: int = 12, max_lines: int = 6) -> str:
         when = _parse_time(episode.get("occurred_at"))
         if not when or when < cutoff:
             break  # newest-first: everything past this is older still
-        if (str(episode.get("source") or "") != "duet"
+        if (str(episode.get("source") or "") not in {"duet", "banter"}
                 or episode.get("kind") != "exchange"):
             continue
         picked.append(episode)
@@ -1168,11 +1690,14 @@ def recent_duet_block(robot: str, hours: int = 12, max_lines: int = 6) -> str:
             break
     if not picked:
         return ""
-    other = next(
-        (p for e in picked for p in (e.get("participants") or [])
-         if p and p != hub.name),
-        "Hexia" if hub.robot == "blue" else "Blue",
-    )
+    others = list(dict.fromkeys(
+        p for e in reversed(picked) for p in (e.get("participants") or [])
+        if p and p != hub.name
+    ))
+    other = " and ".join(others) or (
+        "Hexia" if hub.robot == "blue" else "Blue")
+    latest_source = str(picked[0].get("source") or "")
+    mode = "comedic banter" if latest_source == "banter" else "duet"
     latest_age = _age_text(picked[0].get("occurred_at"))
     lines = [
         f"- [{_age_text(e.get('occurred_at'))}] {_clip(e.get('summary'), 240)}"
@@ -1180,11 +1705,11 @@ def recent_duet_block(robot: str, hours: int = 12, max_lines: int = 6) -> str:
     ]
     return (
         "<recent_duet>\n"
-        f"You ({hub.name}) really did have a spoken duet conversation with "
-        f"{other}, most recently {latest_age}, on the duet page. It is part "
+        f"You ({hub.name}) really did have a spoken {mode} conversation with "
+        f"{other}, most recently {latest_age}. It is part "
         "of your genuine recent history even though it did not happen in "
         "this chat window. If anyone asks whether you have talked with "
-        f"{other} — or what you two discussed — answer YES, naturally, from "
+        f"{other} — or what you discussed together — answer YES, naturally, from "
         "these recorded exchanges; never deny that the conversation "
         "happened:\n"
         + "\n".join(lines)
@@ -1227,10 +1752,10 @@ def register(app) -> None:
         cfg = bt._robot_cfg(robot)
         return render_template_string(
             CONTINUITY_HTML,
-            robot=hub.robot,
+            robot=cfg.get("public_id", hub.robot),
             robot_name=cfg["name"],
             accent=cfg.get("accent", "#2573c2"),
-            back_href=("/hexia" if hub.robot == "hexia" else "/chat"),
+            back_href=cfg.get("chat_path", "/chat"),
         )
 
     @app.route("/continuity/<robot>/state", methods=["GET"])
@@ -1245,7 +1770,7 @@ def register(app) -> None:
         return jsonify({
             "ok": True,
             **workspace,
-            "robot": hub.robot,
+            "robot": bt._robot_cfg(hub.robot).get("public_id", hub.robot),
             "robot_name": hub.name,
             "drives": [
                 {
