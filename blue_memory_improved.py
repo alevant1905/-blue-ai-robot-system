@@ -1640,6 +1640,16 @@ class EnhancedMemorySystem:
 
         # 2b) Session continuity — short recaps of the last few days so Blue
         #     has a thread of memory across conversations, not just within one.
+        #     The explicit "days since last conversation" fact comes first so
+        #     "when did we last speak?" has a single sentence to answer from.
+        last_conv_block = self._build_last_conversation_block(
+            user_name=user_name, robot=robot)
+        if last_conv_block:
+            context_parts.append({
+                "role": "system",
+                "content": last_conv_block,
+            })
+
         session_block = self._build_session_history_block()
         if session_block:
             context_parts.append({
@@ -2945,6 +2955,63 @@ class EnhancedMemorySystem:
             return f"{delta} days ago ({d.strftime('%A')})"
         return d.strftime("%A %b ") + str(d.day)
 
+    def _build_last_conversation_block(
+        self, user_name: str = "Alex", robot: str = "blue"
+    ) -> str:
+        """Explicit "when did we last speak" fact — first-class, not buried
+        inside session recap prose.
+
+        The <earlier_sessions> block carries this info spread across day
+        labels ("3 days ago (Monday): ..."), tagged "don't recite these",
+        which taught the model to hedge time-elapsed questions with "I don't
+        have a persistent log of past conversations." This block gives it a
+        single sentence to answer from and permission to answer directly.
+        """
+        try:
+            conn = self._conn()
+            today_iso = datetime.now().date().isoformat()
+            row = conn.execute(
+                "SELECT timestamp, substr(timestamp, 1, 10) AS d "
+                "FROM conversation_log "
+                "WHERE user_name = ? AND robot = ? "
+                "AND substr(timestamp, 1, 10) < ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (user_name, (robot or "blue"), today_iso),
+            ).fetchone()
+            conn.close()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+        last_day = row["d"]
+        try:
+            d = datetime.fromisoformat(last_day).date()
+        except (ValueError, TypeError):
+            return ""
+        delta = (datetime.now().date() - d).days
+        if delta <= 0:
+            return ""
+        if delta == 1:
+            elapsed = "yesterday (1 day ago)"
+        elif delta < 7:
+            elapsed = f"{delta} days ago ({d.strftime('%A')})"
+        elif delta < 14:
+            elapsed = f"{delta} days ago"
+        elif delta < 60:
+            elapsed = f"{delta} days ago (~{delta // 7} weeks)"
+        else:
+            elapsed = f"{delta} days ago (~{delta // 30} months)"
+        return (
+            "<last_conversation>\n"
+            f"Your last conversation with {user_name} was on {last_day} — "
+            f"{elapsed}. This is a factual record from the conversation log, "
+            "not a guess. When asked when you last spoke, how many days it has "
+            "been, or how long since we last talked, answer with this figure "
+            "directly. Never say you have no log of past conversations or no "
+            "way to tell — you do, and it is right here.\n"
+            "</last_conversation>"
+        )
+
     def _build_session_history_block(self) -> str:
         """Recaps of the last few days' conversations, for cross-day
         continuity. Empty string when there's nothing to show."""
@@ -2969,7 +3036,10 @@ class EnhancedMemorySystem:
         return (
             "<earlier_sessions>\n"
             "Recaps of recent conversations — rough context for continuity "
-            "(topics discussed, not verified facts; don't recite these):\n"
+            "(topics discussed, not verified facts; don't recite them "
+            "verbatim). The dates on each line ARE the ground truth for "
+            "when you talked with the user — use them freely when asked "
+            "about timing, continuity, or what came up recently:\n"
             + "\n".join(lines) +
             "\n</earlier_sessions>"
         )

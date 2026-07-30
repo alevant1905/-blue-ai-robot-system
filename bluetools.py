@@ -14552,6 +14552,54 @@ def _claims_false_idle(text: str) -> bool:
     return False
 
 
+# "I don't have a persistent log of our past conversations / no way to
+# timestamp when we last spoke" (live 2026-07-29) when session_summaries
+# and conversation_log carry exactly that. First-person capability denial
+# about temporal continuity — same family as the syllabus/family denials.
+_TEMPORAL_DENIAL_RE = re.compile(
+    r"\bi (?:do (?:not|n['’]?t)|don['’]?t|can(?:'|not|['’]t))\b"
+    r"[^.!?]{0,80}\b(?:persistent|history|log|record|timestamp|"
+    r"memory|way to (?:tell|know|calculate|gauge|reconstruct))\b"
+    r"[^.!?]{0,80}\b(?:past|previous|prior|last|earlier|our)\s+"
+    r"(?:conversation|conversations|chats?|interactions?|talks?|"
+    r"exchanges?|sessions?|calls?|meetings?)\b"
+    r"|\bi (?:don['’]?t|do not|can(?:'|not|['’]t))\s+"
+    r"(?:know|tell|say|calculate|pin down|reconstruct|remember|recall)\b"
+    r"[^.!?]{0,80}\b(?:how many days?|how long|when (?:we|you) last|"
+    r"the exact (?:number of )?days?|when the last time)\b"
+    r"|\bthis is a limitation of my design\b"
+    r"|\bi focus entirely on the present moment\b",
+    re.I)
+
+# The user just asked "when did we last speak? / how many days? / how long
+# since we talked?" — the class of question the temporal denial replaces
+# with a hedge. Only regenerate when the question is actually this shape.
+_TEMPORAL_ASK_RE = re.compile(
+    r"\b(?:how many days?|how long)\b[^.!?]{0,60}"
+    r"\b(?:since|ago|passed|been)\b"
+    r"|\bwhen (?:did|was)\s+(?:we|you|i)\b[^.!?]{0,60}"
+    r"\b(?:last|previously)\b[^.!?]{0,60}"
+    r"\b(?:speak|spoke|talk(?:ed)?|chat(?:ted)?|conversation)\b"
+    r"|\blast time we (?:spoke|talked|chatted)\b"
+    r"|\bhow long since (?:we|you|i)\b[^.!?]{0,60}"
+    r"\b(?:spoke|talked|chatted|last)\b"
+    r"|\bwhat day did we\b[^.!?]{0,40}\b(?:speak|talk|chat)\b",
+    re.I)
+
+
+def _last_conversation_note(user_name: str = "Alex", robot: str = "blue") -> str:
+    """Pull the same last-conversation figure the prompt block carries, for
+    injection into a regeneration hint when the model just denied it."""
+    global memory_system
+    if not memory_system or not ENHANCED_MEMORY_AVAILABLE:
+        return ""
+    try:
+        return memory_system._build_last_conversation_block(
+            user_name=user_name, robot=(robot or "blue")) or ""
+    except Exception:
+        return ""
+
+
 # "I don't have the actual course syllabus or your uploaded materials" while
 # CMDS4740_Syllabus_2026_S2.docx sits in the library (live 2026-07-15, drawn
 # by a bare "wrong"). Same family as the family-memory refusal: a false
@@ -15761,6 +15809,33 @@ def chat_completions():
                             "truthfully from this record — that conversation "
                             "really happened.]")
                         if _redo_text and not _ROBOT_CHAT_DENIAL_RE.search(_redo_text):
+                            final_content = _redo_text
+                            response["choices"][0]["message"]["content"] = final_content
+                elif (not _grounded_reply
+                      and _TEMPORAL_ASK_RE.search(last_user_msg or "")
+                      and _TEMPORAL_DENIAL_RE.search(final_content or "")):
+                    # "I don't have a persistent log of our past conversations"
+                    # in reply to "how many days since we last spoke?" (live
+                    # 2026-07-29). Session_summaries + conversation_log DO
+                    # carry that record — feed the actual figure back and
+                    # regenerate. Applies to any robot: <last_conversation>
+                    # is per-robot, per-user.
+                    _lc_note = _last_conversation_note(
+                        user_name=user_name, robot=robot)
+                    if _lc_note:
+                        print("   [ANTI-PARROT] temporal-continuity denial despite last-conversation record — regenerating once")
+                        _redo_text = _regen_once(
+                            "[You just told the user you have no log of past "
+                            "conversations and no way to tell how many days "
+                            "have passed. That is factually wrong — your "
+                            "conversation log carries the answer, and it is "
+                            "already in your prompt:\n" + _lc_note[:1200] +
+                            "\nAnswer the user's last question again using "
+                            "this figure directly. Do not deny having the "
+                            "record; do not ask the user to remind you when "
+                            "you last spoke.]")
+                        if (_redo_text
+                                and not _TEMPORAL_DENIAL_RE.search(_redo_text)):
                             final_content = _redo_text
                             response["choices"][0]["message"]["content"] = final_content
                 elif (not _grounded_reply and robot in _continuity_routes.ROBOTS
