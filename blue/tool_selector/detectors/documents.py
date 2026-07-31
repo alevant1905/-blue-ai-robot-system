@@ -24,6 +24,16 @@ tell read show find search looking look give get open review according say says 
 me you it please new old here there thing things stuff topic content help know need want
 """.split())
 
+# Unambiguous device control. These share vocabulary with book titles
+# ("volume") but are never a request to search the library.
+_DEVICE_COMMAND_RE = re.compile(
+    r'\b(?:turn|set|put)\b[^.!?]{0,20}\bvolume\b'
+    r'|\bvolume\s+(?:up|down|to)\b'
+    r'|\b(?:turn|switch)\s+(?:the\s+)?(?:lights?|music|lamp|tv)\b'
+    r'|\b(?:mute|unmute)\b'
+    r'|\bturn\s+(?:it|them)\s+(?:up|down|on|off)\b'
+)
+
 
 # Academic course/reading phrasings. This user is a professor; questions like
 # "what are the readings for tomorrow", "what's due this week", "what do I read
@@ -139,6 +149,12 @@ class DocumentsDetector(BaseDetector):
     @classmethod
     def _library_match(cls, msg_lower: str) -> Optional[str]:
         """Reason string if the query names something in the library, else None."""
+        # A device command is never a library query, however its words happen to
+        # collide with a title. "Turn the volume up" was answering with a
+        # document search at 0.9 confidence, because some work in the library has
+        # "volume" in its title and that made it a distinctive library token.
+        if _DEVICE_COMMAND_RE.search(msg_lower):
+            return None
         cls._refresh_library()
         if not cls._lib_tokens_by_doc:
             return None

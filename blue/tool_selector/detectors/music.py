@@ -52,10 +52,28 @@ _NEGATED_PLAY_RE = re.compile(
 _NON_MUSIC_FOLLOW_RE = re.compile(
     r'\bstop\s+(?:using|doing|saying|being|making|asking|telling|showing|giving|that)'
     r'|\bnext\s+(?:question|topic|time|step|one|page|slide|chapter|item|thing)'
-    r'|\bskip\s+(?:this|that|the\s+(?!song|track))'
+    # "skip this part" is not music, but "skip this song" is — the lookahead
+    # was only on "the", so "skip this song"/"skip that track" were excluded
+    # and reached no tool at all.
+    r'|\bskip\s+(?:this|that|the)\s+(?!song|track|tune|one\b)'
     r'|\bpause\s+(?:the\s+(?:game|video|movie|show)|for|that)'
     r'|\bback\s+(?:to|up|off|away|home)'
     r'|\bmute\s+(?:the\s+(?!music|song|audio)|your|his|her|my)'
+    # Head/body movement. "Move your head back into neutral position" is a
+    # robot-posture command that shares the word "back" with track-skipping.
+    r'|\b(?:head|neck|eyes?|face|body)\b[^.!?]{0,40}\bback\b'
+    r'|\bback\b[^.!?]{0,25}\b(?:neutral|centre|center|position|posture)\b'
+)
+
+# A music request without an explicit play verb has to be short. Beyond this,
+# an "artist" match is almost always a coincidence inside ordinary prose.
+_MAX_WORDS_FOR_IMPLICIT_PLAY = 8
+
+# Words that genuinely indicate music, matched as WHOLE words. A bare substring
+# test here silently disabled the ambiguity guard — see the note at its use.
+_MUSIC_CONTEXT_WORD_RE = re.compile(
+    r'\b(?:music|song|songs|track|tracks|playlist|album|playing|played'
+    r'|audio|spotify|radio|tune|tunes|volume)\b'
 )
 
 
@@ -242,8 +260,16 @@ class MusicDetector(BaseDetector):
             reasons.append("put on + music/artist/genre")
 
         # Artist mention with quantity words (whole words — 'something' is
-        # not 'some')
-        elif has_artist and re.search(r"\bsome\b|\blittle\b|\bbit of\b", msg_lower):
+        # not 'some'). Short requests only: "some Pink Floyd" is a request,
+        # but a whole paragraph that happens to contain a fuzzy artist match
+        # and the word "some" is just a sentence. At 0.85 this heuristic won
+        # outright and answered an ordinary question about a meeting with
+        # "Playing yes, that is the correct meeting and you had some ideas…"
+        # (2026-07-31); across every real message in the log it fired twice,
+        # and both were prose.
+        elif (has_artist
+              and re.search(r"\bsome\b|\blittle\b|\bbit of\b", msg_lower)
+              and len(msg_lower.split()) <= _MAX_WORDS_FOR_IMPLICIT_PLAY):
             confidence = 0.85
             reasons.append("artist + quantity word suggests play intent")
 
@@ -309,10 +335,15 @@ class MusicDetector(BaseDetector):
             # 1. Very short standalone command (e.g. "stop", "pause", "stop it"), OR
             # 2. Music-related words nearby (song, music, track, etc.)
             # "stop using emojis" and "next question" are NOT music commands
-            has_music_words = any(w in msg_lower for w in [
-                'music', 'song', 'track', 'playlist', 'album', 'playing',
-                'audio', 'spotify', 'radio', 'the music', 'it'
-            ])
+            # Whole words only. This list used to include the bare substring
+            # "it" (meant to catch "stop it"), which matched inside ordinary
+            # words — "pos-IT-ion", "k-IT-chen" — so almost every sentence
+            # counted as music-related and the ambiguity guard above was
+            # effectively switched off. "I want you to move your head back into
+            # your regular neutral position" reached control_music that way,
+            # and "turn back" really did answer "Going back to previous track."
+            # "stop it" is still covered by the standalone-command rule below.
+            has_music_words = bool(_MUSIC_CONTEXT_WORD_RE.search(msg_lower))
 
             # Check if the ambiguous word is followed by a non-music object
             # e.g., "stop using", "next question", "skip this part", "pause the game"

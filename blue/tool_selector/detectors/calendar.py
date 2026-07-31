@@ -41,6 +41,27 @@ _PAST_FRAMING_RE = re.compile(
 )
 
 
+# Saying "no need to set a reminder" must not set a reminder. Negation ahead of
+# an imperative is a recurring failure in this codebase — the keyword matches
+# and the "don't" in front of it is discarded.
+_REMINDER_DECLINED_RE = re.compile(
+    r"\b(?:no need|don'?t|do not|dont|no|not)\b[^.!?]{0,24}"
+    r"\b(?:set|make|create|add|need)\b[^.!?]{0,16}\breminder\b"
+    r"|\bno reminder\b"
+    r"|\bwithout (?:a |any )?reminder\b",
+    re.I,
+)
+
+
+def is_reminder_declined(msg_lower: str) -> bool:
+    """True when the user explicitly said NOT to set a reminder.
+
+    Shared by every detector that can produce create_reminder. Keeping a
+    private copy in each is how "can you remind me of those ideas?" survived a
+    fix to only one of them."""
+    return bool(_REMINDER_DECLINED_RE.search(msg_lower or ""))
+
+
 def is_reminder_recall_request(msg_lower: str) -> bool:
     """True when "remind me ..." asks to be TOLD something, not reminded later.
 
@@ -168,6 +189,12 @@ class CalendarDetector(BaseDetector):
             'how was', "how'd", 'how did',
         )
         if any(p in msg_lower for p in past_markers):
+            return None
+
+        # Explicit refusal. "No need to set a reminder, but are you excited to
+        # meet my students?" was creating one anyway — the word "reminder" was
+        # enough, and the negation in front of it was never read.
+        if _REMINDER_DECLINED_RE.search(msg_lower):
             return None
 
         # "Remind me of/what ..." asks to be told, not to be reminded. Firing

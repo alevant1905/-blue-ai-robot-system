@@ -139,6 +139,61 @@ def test_scheduling_still_reaches_create_reminder_through_the_selector(msg):
     assert _selected_tool(msg) == "create_reminder"
 
 
+# ---- negation ahead of an imperative ----------------------------------------
+
+DECLINED = [
+    "no need to set a reminder, but are you excited to meet my students?",
+    "don't set a reminder for that.",
+    "no reminder needed thanks",
+    "please do not create a reminder for this",
+]
+
+
+@pytest.mark.parametrize("msg", DECLINED)
+def test_declining_a_reminder_does_not_create_one(msg):
+    """The first of these is a real message from the log that made one anyway:
+    the word "reminder" matched and the "no need" in front of it was dropped."""
+    assert _selected_tool(msg) != "create_reminder"
+
+
+# ---- ambiguous words that are not media commands ----------------------------
+
+NOT_MEDIA = [
+    # "position" and "kitchen" contain the letters "it", which used to count as
+    # a music-context word and switched off the ambiguity guard entirely.
+    "i want you to move your head back into your regular neutral position.",
+    "we are back in kitchen right now, back at home.",
+    "it's okay, stop offering to do that.",
+    # Prose containing a fuzzy artist match and the word "some". This one really
+    # was answered with "Playing yes, that is the correct meeting…".
+    "yes, that is the correct meeting and you had some ideas for it when we "
+    "were preparing for it. do you remember them?",
+]
+
+REAL_MEDIA = [
+    ("i want you to stop the music.", "control_music"),
+    ("pause the music", "control_music"),
+    ("skip this song", "control_music"),
+    ("turn the volume up", "control_music"),
+    ("play some pink floyd", "play_music"),
+]
+
+
+@pytest.mark.parametrize("msg", NOT_MEDIA)
+def test_ordinary_sentences_do_not_touch_the_media_tools(msg):
+    assert _selected_tool(msg) not in {"play_music", "control_music"}
+
+
+@pytest.mark.parametrize("msg,expected", REAL_MEDIA)
+def test_real_media_commands_still_work(msg, expected):
+    assert _selected_tool(msg) == expected
+
+
+def test_a_library_volume_is_still_a_document_search():
+    """The fix for "turn the volume up" must not break searching for a book."""
+    assert _selected_tool("find the Lachapelle volume in my library") == "search_documents"
+
+
 @pytest.mark.parametrize("msg", SCHEDULE)
 def test_scheduling_requests_still_create_reminders(msg):
     assert not is_reminder_recall_request(msg)

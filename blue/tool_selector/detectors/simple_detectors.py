@@ -6,7 +6,7 @@ Includes: Automation, Contacts, Habits, Notes, Timers, System, Utilities, MediaL
 
 from typing import Dict, List, Optional
 from .base import BaseDetector
-from .calendar import is_reminder_recall_request
+from .calendar import is_reminder_declined, is_reminder_recall_request
 from ..models import ToolIntent
 from ..constants import ToolPriority
 
@@ -158,7 +158,7 @@ class TimersDetector(BaseDetector):
             # word ("yesterday", "earlier"). "Can you remind me of those ideas?"
             # has none, so it fell through here even after the calendar detector
             # was fixed, and still scheduled a reminder (2026-07-31).
-            if is_reminder_recall_request(msg_lower):
+            if is_reminder_recall_request(msg_lower) or is_reminder_declined(msg_lower):
                 return []
             return [ToolIntent(
                 tool_name='create_reminder',
