@@ -1,9 +1,59 @@
 """Calendar and events intent detector."""
 
+import re
 from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+
+# "Remind me" is two different requests wearing one phrase. "Remind me TO call
+# her" schedules something; "remind me OF what we decided" asks to be told
+# again. Treating both as scheduling turns a memory question into a calendar
+# write — and because the tool is then forced, the model invents arguments to
+# fill it. Asked "can you remind me of those ideas?", Blue created a reminder
+# whose description listed four ideas it had made up (2026-07-31).
+_RECALL_PHRASING_RE = re.compile(
+    r"\bremind me\s+(?:of|about)\b"
+    r"|\bremind me\s+(?:what|who|which|whose|where|why|how)\b"
+    r"|\bremind me,?\s+(?:did|do|does|was|were|is|are|had|have)\b",
+    re.I,
+)
+
+# A concrete future time turns recall-shaped phrasing back into a real
+# scheduling request: "remind me about the dentist tomorrow at 3".
+_FUTURE_TIME_RE = re.compile(
+    r"\bin \d+\s*(?:minute|min|hour|day|week)"
+    r"|\bat \d{1,2}(?::\d{2})?\s*(?:am|pm)?\b"
+    r"|\b\d{1,2}\s*(?:am|pm)\b"
+    r"|\btomorrow\b|\btonight\b|\blater\b"
+    r"|\bthis (?:morning|afternoon|evening)\b"
+    r"|\bnext (?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\bon (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.I,
+)
+
+# Past-tense framing means the thing already exists and is being asked about,
+# not planned: "remind me what those ideas WERE".
+_PAST_FRAMING_RE = re.compile(
+    r"\b(?:were|was|had|used to|we discussed|you said|you had|you came up with"
+    r"|talked about|last time|earlier|back then)\b",
+    re.I,
+)
+
+
+def is_reminder_recall_request(msg_lower: str) -> bool:
+    """True when "remind me ..." asks to be TOLD something, not reminded later.
+
+    Recall phrasing wins unless the message also names a concrete future time
+    and is not framed in the past tense — so "remind me about the dentist
+    tomorrow at 3" still schedules, while "remind me what we agreed" does not.
+    """
+    text = msg_lower or ""
+    if not _RECALL_PHRASING_RE.search(text):
+        return False
+    if _PAST_FRAMING_RE.search(text):
+        return True
+    return not _FUTURE_TIME_RE.search(text)
 
 
 class CalendarDetector(BaseDetector):
@@ -118,6 +168,11 @@ class CalendarDetector(BaseDetector):
             'how was', "how'd", 'how did',
         )
         if any(p in msg_lower for p in past_markers):
+            return None
+
+        # "Remind me of/what ..." asks to be told, not to be reminded. Firing
+        # create_reminder here forces a write tool onto a memory question.
+        if is_reminder_recall_request(msg_lower):
             return None
 
         # Strong signals — explicit reminder or event creation request.

@@ -16,7 +16,10 @@ if you change one, re-run that audit rather than trusting these cases alone.
 
 import pytest
 
-from blue_memory_improved import _extract_proper_names, _is_spelling_variant
+from blue_memory_improved import (
+    EnhancedMemorySystem, _extract_proper_names, _is_spelling_variant,
+    _topic_terms,
+)
 
 # Pairs that must be recognised as one name spelled two ways. All three are
 # real pairs that co-exist in the live store.
@@ -79,3 +82,87 @@ def test_lowercase_text_yields_no_names():
     assert _extract_proper_names("how are the girls doing today?") == []
     assert _extract_proper_names("") == []
     assert _extract_proper_names(None) == []
+
+
+# ---- topic terms, used to find Blue's own earlier answers -------------------
+
+def test_topic_terms_keep_the_distinctive_words():
+    terms = _topic_terms("the four ideas for the Laurier University meeting")
+    assert {"laurier", "university", "meeting", "ideas", "four"} <= terms
+
+
+def test_contractions_are_not_topic_terms():
+    """"i've" appeared in 45 of Blue's answers and was enough to rank an
+    unrelated two-month-old self-description alongside the real answer."""
+    terms = _topic_terms("I've still got that on my mind and it's fine")
+    assert "i've" not in terms
+    assert "it's" not in terms
+
+
+def test_possessives_reduce_to_the_name():
+    assert "laurier" in _topic_terms("Laurier's AI policy")
+
+
+# ---- grounding: did anyone actually say this? -------------------------------
+
+class _FakeStore:
+    """EnhancedMemorySystem.is_phrase_grounded with a corpus we control, so the
+    test doesn't drift with the live database."""
+
+    def __init__(self, docs):
+        self._docs = [d.lower() for d in docs]
+
+    _grounding_documents = lambda self: self._docs
+    is_phrase_grounded = EnhancedMemorySystem.is_phrase_grounded
+
+
+# One document mentioning students, a pilot program and reports — the kind of
+# scattered vocabulary that made a flattened haystack call everything grounded.
+CORPUS = [
+    "Establish a pilot program for CMDS4740 where students are required to "
+    "use and critique a local model, documenting differences in output.",
+    "Propose that Laurier adopt a campus-hosted local open-source model. Blue "
+    "as a pedagogical prototype for local AI infrastructure.",
+    "Introduce the AI autonomy spectrum framework so Laurier can audit where "
+    "it sits between commercial dependence and sovereign hosting.",
+]
+
+
+def test_a_phrase_that_was_actually_written_is_grounded():
+    store = _FakeStore(CORPUS)
+    assert store.is_phrase_grounded("Blue as a pedagogical prototype")
+    assert store.is_phrase_grounded("the AI autonomy spectrum")
+
+
+def test_an_invented_phrase_is_not_grounded():
+    """The four items Blue made up and wrote into a reminder."""
+    store = _FakeStore(CORPUS)
+    assert not store.is_phrase_grounded("Sustainability Initiative")
+    assert not store.is_phrase_grounded("Annual Research Symposium")
+    assert not store.is_phrase_grounded("Community Impact Report")
+
+
+def test_grounding_requires_words_to_co_occur_in_one_document():
+    """"students", "pilot" and "report" all appear in the corpus, but never
+    together — scattered words must not add up to a source."""
+    store = _FakeStore(CORPUS)
+    assert not store.is_phrase_grounded("Student Reporting Pilot Sovereign")
+
+
+def test_grounding_abstains_when_it_cannot_judge():
+    """Too few distinctive words to test. Must not report invention."""
+    store = _FakeStore(CORPUS)
+    assert store.is_phrase_grounded("the meeting")
+    assert store.is_phrase_grounded("")
+
+
+def test_grounding_abstains_when_there_is_no_corpus():
+    assert _FakeStore([]).is_phrase_grounded("Annual Research Symposium")
+
+
+def test_filler_questions_yield_too_few_terms_to_search():
+    """A search needs at least two distinctive terms; small talk has none, which
+    is what stops <earlier_answers> firing on every greeting."""
+    assert len(_topic_terms("Hey Blue, how are you doing today?")) < 2
+    assert _topic_terms("") == set()
+    assert _topic_terms(None) == set()

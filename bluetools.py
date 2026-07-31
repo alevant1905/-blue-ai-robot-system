@@ -1578,6 +1578,7 @@ from blue.tool_selector import (
     ImprovedToolSelector,
     integrate_with_existing_system,
 )
+from blue.utils import strip_pasted_block
 
 # Direct Ohbot-family head control (this branch only — replaces the Ohbot app
 # for the head). The module is defensive: if a library isn't installed or a
@@ -6116,11 +6117,12 @@ _LIVE_INFO_TEMPORAL = (
 def _intent_text(message) -> str:
     """The user's actual ask with model-facing evidence blocks stripped.
 
-    Intent/tool detection must NEVER run on attached text: a book excerpt
-    containing the word "playing" started REAL music in the house, and
-    another force-ran a garbage web_search (both 2026-07-10). Attachments
-    ride as '[Attached document: name]' followed by a triple-quoted block,
-    with the user's own words before or after it.
+    Intent/tool detection must NEVER run on attached or pasted text: a book
+    excerpt containing the word "playing" started REAL music in the house, and
+    another force-ran a garbage web_search (both 2026-07-10). Attachments ride
+    as '[Attached document: name]' followed by a triple-quoted block, with the
+    user's own words before or after it; a paste arrives with no marker at all
+    and is handled by strip_pasted_block.
     """
     if not isinstance(message, str):
         return ""
@@ -6133,13 +6135,13 @@ def _intent_text(message) -> str:
         ' ', message, flags=re.I | re.S,
     ).strip()
     if '[attached document:' not in cleaned.lower():
-        return cleaned
+        return strip_pasted_block(cleaned)
     cleaned = re.sub(r'\[attached document:[^\]]*\]\s*""".*?"""', ' ',
                      cleaned, flags=re.I | re.S)
     if '[attached document:' in cleaned.lower():
         # Unclosed quoting — keep only what precedes the attachment.
         cleaned = re.split(r'\[attached document:', cleaned, flags=re.I)[0]
-    return cleaned.strip()
+    return strip_pasted_block(cleaned.strip())
 
 
 def _temporal_recall_query(message: str, messages: List[Dict] = None) -> str:
@@ -9418,6 +9420,7 @@ def _execute_tool_internal(tool_name: str, tool_args: Dict[str, Any]) -> str:
 
     # ===== Enhanced Tools Handlers =====
     elif tool_name == "create_reminder" and ENHANCED_TOOLS_AVAILABLE:
+        tool_args = _drop_ungrounded_description(tool_args)
         result = CalendarManager.create_reminder(**tool_args)
         print(f"   [OK] Reminder created")
         return json.dumps(result)
@@ -10140,6 +10143,57 @@ _ACTION_REQUEST_WORDS = {
                         "calendar", "appointment", "event", "book"),
     "create_note": ("note", "write down", "jot", "save", "remember this"),
 }
+
+
+# An enumeration: "A, B, C and D", or a numbered/bulleted run. Listing
+# specifics is where invention shows up — a vague description is rarely wrong,
+# a confident list of four named items usually is.
+_ENUMERATION_SPLIT_RE = re.compile(r"\s*(?:;|,|\band\b|\d+[.)]\s|\n\s*[-*]\s)\s*")
+
+
+def _drop_ungrounded_description(tool_args: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip a reminder description that enumerates things nobody ever said.
+
+    Asked to recall four ideas it could no longer retrieve, Blue created a
+    reminder and filled its description with four inventions — "Community Impact
+    Report, Student Mentorship Pilot Program, Sustainability Initiative, Annual
+    Research Symposium". None had been mentioned by anyone. Stored, they would
+    read back later as a record of what Alex had planned (2026-07-31).
+
+    Deliberately narrow: only enumerations are checked, and only the description
+    is dropped — the reminder itself still gets created with its title and time.
+    Losing a good description costs little; keeping a fabricated one puts a
+    falsehood in the database permanently.
+    """
+    desc = (tool_args or {}).get("description")
+    if not desc or not isinstance(desc, str):
+        return tool_args
+    if not (ENHANCED_MEMORY_AVAILABLE and memory_system):
+        return tool_args
+    # "Review the four ideas: A, B, C and D" — enumerate what follows the
+    # colon, so the lead-in doesn't ride along as a bogus first item and
+    # ground itself on wording the user did supply.
+    body = desc.split(":", 1)[1] if ":" in desc else desc
+    items = [p.strip(" .:-") for p in _ENUMERATION_SPLIT_RE.split(body)]
+    items = [p for p in items if len(p.split()) >= 2]
+    if len(items) < 3:
+        return tool_args
+    try:
+        grounded = sum(1 for p in items if memory_system.is_phrase_grounded(p))
+    except Exception:
+        return tool_args
+    if grounded >= len(items) / 2:
+        return tool_args
+    log.warning(
+        "[GROUNDING] dropped a reminder description enumerating %d items, "
+        "only %d of which appear anywhere in conversation or memory",
+        len(items), grounded,
+    )
+    print(f"   [GROUNDING] ✗ description looked invented ({grounded}/{len(items)} "
+          f"items traceable) — keeping the reminder, dropping the description")
+    trimmed = dict(tool_args)
+    trimmed.pop("description", None)
+    return trimmed
 
 
 def _user_requested_action(tool_name: str, user_text: str) -> bool:

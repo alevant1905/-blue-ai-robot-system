@@ -35,6 +35,61 @@ log = setup_logger()
 # COMPOUND REQUEST PARSING (v8)
 # ================================================================================
 
+# ================================================================================
+# PASTED TEXT
+# ================================================================================
+
+# Text pasted straight into the chat box is evidence, not instruction — but it
+# arrives with no attachment marker, so the attachment stripping in
+# bluetools._intent_text never saw it. Alex pasted 5756 characters of Blue's own
+# notes back into the chat; intent detection ran on all of it, matched a request
+# for a self-introduction in the document's closing line ("allows you to present
+# yourself as a strategic partner") and lifted a venue out of "students gain
+# technical skills in prompt engineering". Blue answered "Hello everyone at
+# prompt engineering" (2026-07-31).
+PASTED_BLOCK_MIN_CHARS = 700
+PASTED_FRAMING_MAX_CHARS = 200
+
+# Markdown-ish line starts: headings, bullets, numbered items, bold labels.
+# Prose does not begin lines this way; pasted documents do.
+_PASTED_STRUCTURE_RE = re.compile(
+    r"^[ \t]{0,3}(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\*\*)", re.M)
+
+
+def strip_pasted_block(text: str) -> str:
+    """Reduce a pasted document to the user's own words around it.
+
+    Only fires on long, visibly structured text. A long unstructured message is
+    someone actually typing at length and passes through untouched. When a paste
+    carries no framing words at all the result is empty on purpose: no
+    detectable intent is the correct reading of "here, look at this".
+    """
+    if not text or len(text) < PASTED_BLOCK_MIN_CHARS:
+        return text
+    first = _PASTED_STRUCTURE_RE.search(text)
+    if not first and text.count("\n") < 6:
+        return text
+    head = text[:first.start()].strip() if first else ""
+    # Framing running past a couple of sentences is the document's own preamble,
+    # not the user talking. Cut at a word boundary.
+    if len(head) > PASTED_FRAMING_MAX_CHARS:
+        head = head[:PASTED_FRAMING_MAX_CHARS].rsplit(" ", 1)[0]
+    # A trailing paragraph is the user's real question only if it looks like
+    # one. Accepting any short last paragraph swallowed a document's closing
+    # line, which is what triggered the self-introduction above.
+    tail = ""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if paragraphs:
+        last = paragraphs[-1]
+        looks_like_a_question = (
+            (last.endswith("?") and len(last) < 200) or len(last) <= 60
+        )
+        if (looks_like_a_question and not _PASTED_STRUCTURE_RE.search(last)
+                and last not in head):
+            tail = last
+    return " ".join(p for p in (head, tail) if p).strip()
+
+
 def parse_compound_request(message: str) -> List[Dict[str, Any]]:
     """
     Parse compound requests into individual actions.

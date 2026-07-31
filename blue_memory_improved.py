@@ -19,6 +19,7 @@ Provides the interface expected by bluetools.py:
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -161,6 +162,73 @@ def _is_spelling_variant(a: str, b: str) -> bool:
     if x.startswith(y) or y.startswith(x):
         return False
     return difflib.SequenceMatcher(None, x, y).ratio() >= NAME_ALIAS_MIN_RATIO
+
+
+# Blue's own substantive answers were write-only. Every conversation_log query
+# in this module reads role='user', a recent-time window, or a date aggregate —
+# nothing ever searched what BLUE said by topic. So the four Laurier ideas he
+# wrote on 2026-07-29 (3048 characters, still sitting in the log) were
+# unreachable two days later: all that survived was a one-line day-recap saying
+# he had "provided detailed ideas". Asked what they were, he had nothing to
+# answer from, and invented four replacements that got written to the reminders
+# database as fact (2026-07-31).
+SUBSTANTIVE_ANSWER_MIN_CHARS = 600   # Shorter replies are chat, not work product
+PAST_ANSWER_EXCERPT_CHARS = 1200     # Per answer, to stay inside the token budget
+PAST_ANSWER_TOPIC_TURNS = 4          # Recent turns that define "what we're on about"
+PAST_ANSWER_MIN_TERM_HITS = 2        # Distinct query terms an answer must contain
+PAST_ANSWER_SETTLE_HOURS = 6         # Newer than this is still in <recent_history>
+PAST_ANSWER_RARE_DF_RATIO = 0.15     # A term in more answers than this proves nothing
+PAST_ANSWER_MIN_SCORE = 8.0          # Summed IDF a match must clear (tuned below)
+
+# Grounding: before model-authored content is written to a database, check that
+# it came from somewhere. Asked to recall four ideas it could no longer find,
+# Blue invented four replacements — "Community Impact Report, Student Mentorship
+# Pilot Program, Sustainability Initiative, Annual Research Symposium" — and
+# stored them in a reminder, where they would later read back as record.
+GROUNDING_WINDOW_DAYS = 21           # How far back "something we actually said" reaches
+# Share of a phrase's distinctive words that must co-occur in ONE document.
+# Swept against the real store: at 0.5 the fabricated list scored 2/4 and
+# survived; at 0.7 it scores 1/4 while three genuine reminder descriptions all
+# stay at 100%. Re-run that sweep before moving it.
+GROUNDING_MIN_TERM_RATIO = 0.7
+
+# Words too common to identify a topic. Deliberately short: the term list is
+# built from a few turns of conversation, so precision comes from requiring
+# several distinct hits, not from an exhaustive stoplist.
+_TOPIC_STOPWORDS = {
+    "about", "after", "again", "all", "also", "and", "any", "anything", "are",
+    "back", "because", "been", "before", "being", "both", "but", "can", "could",
+    "did", "does", "doing", "done", "down", "each", "even", "ever", "every",
+    "for", "from", "get", "give", "going", "good", "got", "great", "had", "has",
+    "have", "here", "how", "into", "its", "just", "know", "let", "like", "look",
+    "made", "make", "many", "may", "me", "might", "more", "most", "much", "my",
+    "need", "new", "not", "now", "off", "one", "only", "or", "other", "our",
+    "out", "over", "please", "really", "right", "said", "same", "say", "see",
+    "should", "some", "still", "such", "sure", "take", "tell", "than", "that",
+    "the", "their", "them", "then", "there", "these", "they", "thing", "things",
+    "think", "this", "those", "through", "time", "too", "under", "up", "us",
+    "use", "very", "want", "was", "way", "we", "well", "were", "what", "when",
+    "where", "which", "while", "who", "why", "will", "with", "would", "you",
+    "your", "yes", "no", "okay", "thanks", "thank", "hey", "hello", "blue",
+    "alex", "remember", "remind", "again", "were", "was",
+}
+
+
+def _topic_terms(text: Optional[str]) -> Set[str]:
+    """Distinctive lowercase words in `text` — the ones worth searching on.
+
+    Apostrophes are not word characters here, so contractions break at the
+    apostrophe and "i've" never becomes a term while "laurier's" yields
+    "laurier". That matters: "i've" appeared in 45 of Blue's answers and was
+    enough to rank a two-month-old self-description alongside the answer
+    actually being asked for.
+    """
+    if not text:
+        return set()
+    return {
+        w for w in re.findall(r"[a-z][a-z-]{3,}", str(text).lower())
+        if w not in _TOPIC_STOPWORDS
+    }
 
 
 # Rhythm learning: mine conversation_log for behavioural patterns (which kinds
@@ -1849,6 +1917,17 @@ class EnhancedMemorySystem:
                     "content": recalled_block,
                 })
 
+        # 2b-iii) Blue's OWN earlier answers on this topic, verbatim. The recap
+        #     blocks above record that a subject came up; this carries what he
+        #     actually wrote about it, which is what "what were your ideas?"
+        #     is asking for.
+        past_answers_block = self._build_past_answers_block(messages, user_msg)
+        if past_answers_block:
+            context_parts.append({
+                "role": "system",
+                "content": past_answers_block,
+            })
+
         # 2c) Daily rhythms — mined behavioural patterns for this part of day,
         #     so Blue can anticipate rather than only react.
         rhythms_block = self._build_rhythms_block()
@@ -3292,6 +3371,9 @@ class EnhancedMemorySystem:
             lines.append(f"- {self._friendly_day_label(day)}: {content[:280]}")
         if not lines:
             return ""
+        return self._remembered_days_wrapper(lines)
+
+    def _remembered_days_wrapper(self, lines: List[str]) -> str:
         return (
             "<remembered_days>\n"
             "A past day's recap that resurfaced because it relates to what the "
@@ -3306,6 +3388,192 @@ class EnhancedMemorySystem:
             + "\n".join(lines) +
             "\n</remembered_days>"
         )
+
+    # ------------------------------------------------------- Blue's own answers
+
+    def _topic_query_terms(self, messages: List[Dict[str, Any]],
+                           user_msg: str) -> Set[str]:
+        """Terms describing what the conversation is currently about.
+
+        Drawn from the last few turns on BOTH sides, not just the live message,
+        because the question that needs this is usually anaphoric: "can you tell
+        me what those ideas were?" carries almost no topic of its own. The
+        subject was named a turn earlier — often by Blue ("I've still got the
+        four ideas for the Laurier University meeting on my mind"), which is
+        exactly the thread back to the answer he is being asked about.
+        """
+        terms = _topic_terms(user_msg)
+        recent = [m for m in (messages or [])
+                  if isinstance(m, dict)
+                  and m.get("role") in {"user", "assistant"}
+                  and isinstance(m.get("content"), str)]
+        for m in recent[-PAST_ANSWER_TOPIC_TURNS:]:
+            terms |= _topic_terms(m["content"][:600])
+        return terms
+
+    def _substantive_answer_corpus(self) -> List[Tuple[str, str, str]]:
+        """(timestamp, content, lowered) for Blue's substantive past answers.
+
+        Held in memory and refreshed on a TTL so term rarity can be measured
+        across the whole corpus rather than guessed. Tool echoes and attachment
+        read-backs are dropped here: "Playing <the user's whole message>" is a
+        machine string and an attachment read-back is the user's own document
+        coming home — neither is something Blue wrote."""
+        now = time.time()
+        cached = getattr(self, "_answer_corpus_cache", None)
+        if (cached is not None
+                and now - getattr(self, "_answer_corpus_at", 0.0) < NAME_LEXICON_TTL_SEC):
+            return cached
+        settle = (datetime.now()
+                  - timedelta(hours=PAST_ANSWER_SETTLE_HOURS)).isoformat()
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT timestamp, content FROM conversation_log "
+                "WHERE role = 'assistant' AND length(content) >= ? "
+                "AND timestamp <= ? ORDER BY timestamp DESC LIMIT 2000",
+                (SUBSTANTIVE_ANSWER_MIN_CHARS, settle),
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return cached if cached is not None else []
+        corpus: List[Tuple[str, str, str]] = []
+        for r in rows:
+            content = r["content"] or ""
+            low = content.lower()
+            if low.startswith("playing ") or "[attached document:" in low:
+                continue
+            corpus.append((r["timestamp"], content, low))
+        self._answer_corpus_cache = corpus
+        self._answer_corpus_at = now
+        return corpus
+
+    def _search_past_answers(self, terms: Set[str],
+                             limit: int = 2) -> List[Dict[str, Any]]:
+        """Substantive things Blue said before that match these topic terms.
+
+        Scored by term RARITY, not term count. Counting hits alone matched "turn
+        off all the lights" against a two-week-old autobiography, because both
+        contain "turn" and "lights" — words that appear in most of what Blue
+        says. A match must therefore include at least one term rare across the
+        corpus, which is what makes "laurier" pull the Laurier answer while
+        "today" pulls nothing."""
+        if len(terms) < PAST_ANSWER_MIN_TERM_HITS:
+            return []
+        corpus = self._substantive_answer_corpus()
+        if not corpus:
+            return []
+        total = len(corpus)
+        ranked = sorted(terms)
+        doc_freq = {t: sum(1 for _, _, low in corpus if t in low) for t in ranked}
+        rare_ceiling = max(1, int(total * PAST_ANSWER_RARE_DF_RATIO))
+        scored: List[Tuple[float, str, str]] = []
+        for ts, content, low in corpus:
+            matched = [t for t in ranked if t in low]
+            if len(matched) < PAST_ANSWER_MIN_TERM_HITS:
+                continue
+            # At least one term that is not near-universal in Blue's writing.
+            if not any(doc_freq[t] <= rare_ceiling for t in matched):
+                continue
+            score = sum(math.log(total / (1 + doc_freq[t])) for t in matched)
+            if score >= PAST_ANSWER_MIN_SCORE:
+                scored.append((score, ts, content))
+        if not scored:
+            return []
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        return [{"timestamp": ts, "content": c, "score": round(sc, 2)}
+                for sc, ts, c in scored[:limit]]
+
+    def _build_past_answers_block(self, messages: List[Dict[str, Any]],
+                                  user_msg: str) -> str:
+        """Surface Blue's own earlier substantive answers on this topic.
+
+        The day-recap blocks say THAT something was discussed; this says WHAT
+        was actually written. Without it "what were your ideas?" has no source,
+        and the model fills the gap."""
+        if not user_msg or len(user_msg.strip()) < 5:
+            return ""
+        try:
+            terms = self._topic_query_terms(messages, user_msg)
+            hits = self._search_past_answers(terms)
+        except Exception:
+            return ""
+        if not hits:
+            return ""
+        lines: List[str] = []
+        for h in hits:
+            day = (h["timestamp"] or "")[:10]
+            label = self._friendly_day_label(day) if day else "earlier"
+            excerpt = h["content"].strip()
+            if len(excerpt) > PAST_ANSWER_EXCERPT_CHARS:
+                excerpt = excerpt[:PAST_ANSWER_EXCERPT_CHARS].rsplit(" ", 1)[0] + " […]"
+            lines.append(f"--- {label} ---\n{excerpt}")
+        return (
+            "<earlier_answers>\n"
+            "Things YOU wrote earlier that relate to what the user is asking "
+            "about now, quoted from the conversation log. This is your own "
+            "work, recorded verbatim — when the user asks what you said, what "
+            "your ideas were, or to go over something again, answer from this. "
+            "Summarise or quote it as needed. Long answers are cut off at the "
+            "end; if the user needs the rest, say so rather than filling the "
+            "gap from imagination. Never invent content to stand in for this — "
+            "if what they want isn't here, say you don't have it:\n"
+            + "\n".join(lines) +
+            "\n</earlier_answers>"
+        )
+
+    # ------------------------------------------------------------- Grounding
+
+    def _grounding_documents(self) -> List[str]:
+        """Everything actually said recently, as SEPARATE lowercased documents.
+
+        Kept apart on purpose. Flattened into one haystack, every phrase looks
+        grounded: across three weeks of conversation almost any single word
+        appears somewhere, so the invented "Student Mentorship Pilot Program"
+        passed on the strength of "student", "pilot" and "program" occurring in
+        unrelated places. A document is the proximity window that makes the
+        test mean something — the words have to turn up TOGETHER."""
+        now = time.time()
+        cached = getattr(self, "_grounding_cache", None)
+        if (cached is not None
+                and now - getattr(self, "_grounding_at", 0.0) < NAME_LEXICON_TTL_SEC):
+            return cached
+        floor = (datetime.now() - timedelta(days=GROUNDING_WINDOW_DAYS)).isoformat()
+        docs: List[str] = []
+        try:
+            conn = self._conn()
+            for r in conn.execute(
+                    "SELECT content FROM conversation_log WHERE timestamp >= ?",
+                    (floor,)):
+                docs.append((r["content"] or "").lower())
+            for r in conn.execute("SELECT subject, content FROM memories"):
+                docs.append(((r["subject"] or "") + " " + (r["content"] or "")).lower())
+            conn.close()
+        except Exception:
+            return cached if cached is not None else []
+        self._grounding_cache = docs
+        self._grounding_at = now
+        return docs
+
+    def is_phrase_grounded(self, phrase: str) -> bool:
+        """Did anyone actually say this, or is it being invented right now?
+
+        True when some single document contains most of the phrase's
+        distinctive words. Used before writing model-authored content to a
+        database. Returns True when it cannot tell — too few distinctive words
+        to judge — because the guard this feeds must fire on evidence of
+        invention, never on uncertainty."""
+        terms = _topic_terms(phrase)
+        if len(terms) < 2:
+            return True
+        docs = self._grounding_documents()
+        if not docs:
+            return True
+        needed = max(2, int(len(terms) * GROUNDING_MIN_TERM_RATIO + 0.999))
+        for doc in docs:
+            if sum(1 for t in terms if t in doc) >= needed:
+                return True
+        return False
 
     # ------------------------------------------------------------------ Rhythm learning
 
