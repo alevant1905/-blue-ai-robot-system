@@ -13,6 +13,11 @@ from ..models import ToolIntent
 from ..constants import ToolPriority
 from ..utils import has_word, has_any_word
 
+# A lighting request with no light noun in it ("set it to cozy") is a short
+# clause. Beyond this, a mood word, a set verb and a pronoun are just three
+# ordinary words that happened to land in the same message.
+_MAX_WORDS_FOR_ANCHORLESS_MOOD = 12
+
 
 class LightsDetector(BaseDetector):
     """Detects smart home lighting intents."""
@@ -48,6 +53,27 @@ class LightsDetector(BaseDetector):
     # Phrases that should go to visualizer, not lights
     VISUALIZER_PHRASES = ['light show', 'lights dance', 'sync lights', 'disco mode', 'party lights']
 
+    # Asking ABOUT a past change is not asking for another one. "Why did you
+    # change lights to red" scored 0.95 and changed them again.
+    _RETROSPECTIVE_RE = re.compile(
+        r"\b(?:why|when|how come|what made you|who)\b[^.!?]{0,40}"
+        r"\b(?:did|do|does|have|has|were|was|are)\b"
+        r"|\b(?:did|have) you (?:just )?(?:change|turn|set|switch|make)\b"
+        r"|\byou (?:changed|turned|set|switched|made)\b",
+        re.IGNORECASE,
+    )
+
+    # The user calling something off, or reporting it already handled.
+    # "It's okay, don't worry about that. The lights are fine" was turning
+    # them off; "I already asked Alexa to do it" was doing it a second time.
+    _NO_ACTION_RE = re.compile(
+        r"\b(?:it'?s (?:okay|ok|fine|alright)|don'?t worry|no need|never mind|"
+        r"nevermind|forget it|leave (?:it|them))\b"
+        r"|\bthe lights? (?:are|is|look) (?:fine|okay|ok|good|alright)\b"
+        r"|\b(?:already|just) (?:asked|told|did|done|handled)\b",
+        re.IGNORECASE,
+    )
+
     def detect(
         self,
         message: str,
@@ -61,6 +87,12 @@ class LightsDetector(BaseDetector):
         if self._is_light_adjective(msg_lower):
             return intents
         if self._is_visualizer_intent(msg_lower):
+            return intents
+        # A question about a past change, or the user waving the whole thing
+        # off, must never drive the bulbs.
+        if self._RETROSPECTIVE_RE.search(msg_lower):
+            return intents
+        if self._NO_ACTION_RE.search(msg_lower):
             return intents
 
         # Detect control intent
@@ -86,7 +118,11 @@ class LightsDetector(BaseDetector):
         """Detect light control intent."""
 
         has_light = has_any_word(self.NOUNS, msg_lower)
-        has_action = any(action in msg_lower for action in self.ACTIONS)
+        # Whole words. This was a bare substring test, and ACTIONS contains
+        # "on" and "set" — which match inside "d-ON-'t", "l-ON-g" and
+        # "SET-tling". "It's okay, don't worry about that. The lights are fine"
+        # scored 0.95 on the strength of the "on" in "don't".
+        has_action = has_any_word(self.ACTIONS, msg_lower)
         has_color = has_any_word(self.COLORS, msg_lower)
         has_mood = has_any_word(self.MOODS, msg_lower)
 
@@ -99,10 +135,25 @@ class LightsDetector(BaseDetector):
 
         elif has_mood and not has_light:
             # Mood words alone are weak - need context
-            set_context = any(w in msg_lower for w in ['set', 'change', 'make', 'switch to', 'turn to'])
-            explicit_light_ref = any(w in msg_lower for w in ['it', 'them', 'the lights', 'the light', 'lighting', 'brightness'])
+            # Whole words again: "it" matched inside "w-IT-h" and "t-IT-le",
+            # so "settling in for the night with Nori" and "change the title to
+            # I'm Blue" both read as mood-lighting requests.
+            set_context = has_any_word(['set', 'change', 'make', 'switch to', 'turn to'], msg_lower)
+            explicit_light_ref = has_any_word(
+                ['it', 'them', 'the lights', 'the light', 'lighting', 'brightness'],
+                msg_lower)
 
-            if set_context and explicit_light_ref and not context.get('has_music_in_history') and 'play' not in msg_lower:
+            # This branch has no light noun to anchor on — it fires on a mood
+            # word plus a set verb plus a pronoun. Across several sentences
+            # those three co-occur by accident: "Cool. Change the title to I'm
+            # Blue... Make it long and detailed" matched on "cool", "change"
+            # and the "it" of "make it long". A genuine anchorless request
+            # ("set it to cozy") is one short clause.
+            is_one_short_clause = len(msg_lower.split()) <= _MAX_WORDS_FOR_ANCHORLESS_MOOD
+
+            if (set_context and explicit_light_ref and is_one_short_clause
+                    and not context.get('has_music_in_history')
+                    and 'play' not in msg_lower):
                 confidence = 0.70
                 reasons.append("mood keyword with set context + light reference")
             else:

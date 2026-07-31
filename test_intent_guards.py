@@ -194,6 +194,47 @@ def test_a_library_volume_is_still_a_document_search():
     assert _selected_tool("find the Lachapelle volume in my library") == "search_documents"
 
 
+# ---- lights ------------------------------------------------------------------
+# Every one of these is a real message from the log that reached control_lights.
+
+NOT_LIGHTS = [
+    # ACTIONS held the bare substring "on", which matches inside "d-ON-'t".
+    "it's okay, it doesn't have to be light, i don't mind it so heavy.",
+    "it's okay, don't worry about that. the lights are fine and i don't know.",
+    # Asking about a past change is not asking for another one.
+    "why did you change lights to red",
+    # "set" matched inside "SET-tling", "it" inside "w-IT-h".
+    "i'm okay just settling in for the night with nori here.",
+    # Three ordinary words scattered across four sentences about writing:
+    # "cool", "change", and the "it" of "make it long".
+    "cool. change the title to i'm blue: lada dee lada da. draw on all the "
+    "theorists you have read. make it long and detailed",
+    # Already handled by someone else.
+    "and it's okay, i already asked alexa to do it",
+]
+
+REAL_LIGHTS = [
+    "turn off all the lights.",
+    "turn on all the lights.",
+    "make all the lights red.",
+    "set the lights to galaxy mode.",
+    "can you make the lights blue",
+    "dim the lamp",
+    # No light noun at all — the weak branch still has to work for these.
+    "set it to cozy",
+]
+
+
+@pytest.mark.parametrize("msg", NOT_LIGHTS)
+def test_ordinary_sentences_do_not_drive_the_bulbs(msg):
+    assert _selected_tool(msg) != "control_lights"
+
+
+@pytest.mark.parametrize("msg", REAL_LIGHTS)
+def test_real_light_commands_still_work(msg):
+    assert _selected_tool(msg) == "control_lights"
+
+
 @pytest.mark.parametrize("msg", SCHEDULE)
 def test_scheduling_requests_still_create_reminders(msg):
     assert not is_reminder_recall_request(msg)
