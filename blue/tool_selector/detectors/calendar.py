@@ -53,6 +53,30 @@ _REMINDER_DECLINED_RE = re.compile(
 )
 
 
+# "When is my meeting with X" is a schedule lookup, but the strong-signal list
+# below only carried the possessive forms ("when is my", "when's the"), so
+# "when is THE meeting with mark Humphries" and "when is OUR meeting" matched
+# nothing — and while the library matcher was still claiming his name, they
+# became document searches. "What time is my class" went to get_local_time,
+# which answers with the clock instead of the timetable.
+#
+# The event noun is required, so "when is the sun setting" is unaffected, and
+# the "is/are/was" must sit close behind the question word, which keeps
+# "when in class I will ask you to introduce yourself" out.
+_WHEN_IS_EVENT_RE = re.compile(
+    r"\b(?:when|what time)\b[^.?!]{0,12}\b(?:is|are|was|will)\b[^.?!]{0,24}"
+    r"\b(?:meeting|meetings|appointment|appointments|call|class|classes|lecture|"
+    r"seminar|lunch|dinner|coffee|event|events|reminder|reminders|party|"
+    r"practice|rehearsal|recital|game|flight|train|deadline)\b",
+    re.I,
+)
+
+
+def is_schedule_time_question(msg_lower: str) -> bool:
+    """True for "when is my meeting with X" / "what time is the class"."""
+    return bool(_WHEN_IS_EVENT_RE.search(msg_lower or ""))
+
+
 def is_reminder_declined(msg_lower: str) -> bool:
     """True when the user explicitly said NOT to set a reminder.
 
@@ -329,6 +353,18 @@ class CalendarDetector(BaseDetector):
                 confidence=0.90,
                 priority=ToolPriority.MEDIUM,
                 reason='explicit schedule/calendar query',
+                extracted_params={'user_name': 'Alex'},
+            )
+
+        # "When is the/our meeting with X", "what time is my class" — asking
+        # for the time OF a known event. Ranked above the clock and the
+        # library, both of which used to take these.
+        if is_schedule_time_question(msg_lower):
+            return ToolIntent(
+                tool_name='get_upcoming_reminders',
+                confidence=0.92,
+                priority=ToolPriority.HIGH,
+                reason='asks the time of a scheduled event',
                 extracted_params={'user_name': 'Alex'},
             )
 

@@ -6,7 +6,9 @@ Includes: Automation, Contacts, Habits, Notes, Timers, System, Utilities, MediaL
 
 from typing import Dict, List, Optional
 from .base import BaseDetector
-from .calendar import is_reminder_declined, is_reminder_recall_request
+from .calendar import (
+    is_reminder_declined, is_reminder_recall_request, is_schedule_time_question,
+)
 from ..models import ToolIntent
 from ..constants import ToolPriority
 
@@ -220,6 +222,12 @@ class UtilitiesDetector(BaseDetector):
                 extracted_params={}
             )]
         elif any(s in msg_lower for s in date_signals):
+            # "What time is my class" asks the timetable, not the clock. Shared
+            # with CalendarDetector so the two cannot disagree — answering with
+            # the current time is a confidently wrong answer to a schedule
+            # question.
+            if is_schedule_time_question(msg_lower):
+                return []
             # Determine if user wants date, time, or both
             date_only = ['what day', 'what date', "today's date", 'current date', 'date today']
             time_only = ['what time', 'current time', "what's the time", 'time is it', 'time right now']

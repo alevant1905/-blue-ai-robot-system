@@ -351,6 +351,52 @@ def test_asking_about_their_writing_still_searches_the_library(msg):
     assert _selected_tool(msg) == "search_documents"
 
 
+# ---- "when is my meeting with X" --------------------------------------------
+
+SCHEDULE_TIME_QUESTIONS = [
+    "When is my meeting with navun.",
+    "When is the meeting with mark Humphries.",
+    "When is our meeting with mark Humphries.",
+    "what time is my class tomorrow",
+    "when is the dentist appointment",
+    "what time is the recital",
+    "what time is my flight",
+]
+
+CLOCK_QUESTIONS = [
+    "what time is it",
+    "what time is it in tokyo",
+    "what's the time",
+    "what day is it today",
+]
+
+NEITHER = [
+    # "when" followed by a clause, not by "is <event>".
+    "lets practice. when in class i will ask you to introduce yourself.",
+    "When we're in class tomorrow blue, I'm gonna ask you to introduce yourself.",
+    # No event noun.
+    "when is the sun going to set",
+    "when is your birthday",
+]
+
+
+@pytest.mark.parametrize("msg", SCHEDULE_TIME_QUESTIONS)
+def test_asking_the_time_of_an_event_checks_the_calendar(msg):
+    assert _selected_tool(msg) == "get_upcoming_reminders"
+
+
+@pytest.mark.parametrize("msg", CLOCK_QUESTIONS)
+def test_asking_the_actual_time_still_reads_the_clock(msg):
+    """The calendar path must not swallow the clock: answering "what time is
+    it" from the timetable would be as wrong as the reverse."""
+    assert _selected_tool(msg) == "get_local_time"
+
+
+@pytest.mark.parametrize("msg", NEITHER)
+def test_when_without_an_event_claims_nothing(msg):
+    assert _selected_tool(msg) not in {"get_upcoming_reminders", "get_local_time"}
+
+
 def test_scheduling_a_meeting_with_an_author_reaches_the_calendar():
     """The collision wasn't only noise — it was stealing real calendar work."""
     assert _selected_tool(
