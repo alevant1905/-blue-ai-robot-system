@@ -15,7 +15,9 @@ Module Structure:
     ├── utils.py             # Utility functions
     ├── memory.py            # Memory/facts system
     ├── llm.py               # LLM client
-    ├── tool_selector.py     # Intent detection & tool selection
+    ├── tool_selector/       # Intent detection & tool selection (package)
+    │   ├── selector.py      # ImprovedToolSelector
+    │   └── detectors/       # Per-domain intent detectors
     └── tools/
         ├── music.py         # YouTube Music
         ├── vision.py        # Camera & visualizer

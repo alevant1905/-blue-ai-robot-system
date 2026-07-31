@@ -1,7 +1,7 @@
 """
 Integration layer for backward compatibility.
 
-Provides the same interface as the original tool_selector.py for
+Provides the same interface as the pre-refactor flat module for
 seamless integration with existing code.
 """
 

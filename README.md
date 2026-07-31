@@ -215,7 +215,9 @@ blue-ai-robot-system/
 │   ├── utils.py              # Utility functions
 │   ├── memory.py             # Memory & facts system
 │   ├── llm.py                # LLM client
-│   ├── tool_selector.py      # Intent detection
+│   ├── tool_selector/        # Intent detection (package)
+│   │   ├── selector.py       # ImprovedToolSelector
+│   │   └── detectors/        # Per-domain intent detectors
 │   └── tools/                # Tool implementations
 │       ├── calendar.py       # Calendar & events
 │       ├── contacts.py       # Contact management
