@@ -66,6 +66,7 @@ def _init_db() -> None:
                 when_iso TEXT NOT NULL,
                 description TEXT,
                 completed INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
                 alerted_email INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 end_iso TEXT,
@@ -139,6 +140,12 @@ def _migrate_reminders_columns() -> None:
     column'), which we swallow. `end_iso` gives reminders a duration so
     conflict detection can do true overlap; `recurrence` ('weekly' or NULL)
     lets a single row stand for a repeating event.
+
+    `archived` separates "this moment has passed" from `completed`'s "this was
+    finished or cancelled". They used to be the same flag, which made every
+    event invisible two hours after it ended — including to Blue, who then
+    told Alex he had no record of a meeting he had scheduled himself
+    (the Sara Matthews meeting, 2026-07-31). See archive_past_oneoffs.
     """
     for stmt in (
         "ALTER TABLE reminders ADD COLUMN alerted_email INTEGER NOT NULL DEFAULT 0",
@@ -148,12 +155,31 @@ def _migrate_reminders_columns() -> None:
         "ALTER TABLE reminders ADD COLUMN remind_before_min INTEGER NOT NULL DEFAULT 0",
         # Optional end date for a recurrence ('every Monday until 2026-12-31').
         "ALTER TABLE reminders ADD COLUMN until_iso TEXT",
+        "ALTER TABLE reminders ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             with _DB_LOCK, _conn() as c:
                 c.execute(stmt)
         except sqlite3.OperationalError:
             pass
+
+    # Backfill: before `archived` existed, archive_past_oneoffs expressed
+    # "past" by setting completed = 1. Reconstruct the flag for those rows so
+    # history reads correctly. Recurring rows are exempt (their when_iso is a
+    # repeating anchor, not a moment that passed). Idempotent — the WHERE
+    # clause matches nothing once the rows are marked.
+    try:
+        with _DB_LOCK, _conn() as c:
+            c.execute(
+                "UPDATE reminders SET archived = 1 "
+                "WHERE archived = 0 AND completed = 1 "
+                "AND (recurrence IS NULL OR recurrence = '') "
+                "AND COALESCE(NULLIF(end_iso, ''), when_iso) < ?",
+                (datetime.now().isoformat(timespec="minutes"),),
+            )
+            c.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 _migrate_reminders_columns()
@@ -417,6 +443,10 @@ def _occurrence(row, start_dt: datetime, end_dt: Optional[datetime],
         "recurrence": (row["recurrence"] if "recurrence" in keys else None) or "",
         "remind_before_min": (row["remind_before_min"]
                               if "remind_before_min" in keys else 0) or 0,
+        # Only populated when the caller selected them (backward-looking
+        # queries); forward callers never read these.
+        "completed": bool(row["completed"]) if "completed" in keys else False,
+        "archived": bool(row["archived"]) if "archived" in keys else False,
     }
 
 
@@ -490,26 +520,40 @@ def _expand_row(row, window_start: datetime,
 
 
 def occurrences_in_window(window_start: datetime, window_end: datetime,
-                          user_name: Optional[str] = None) -> List[Dict[str, Any]]:
+                          user_name: Optional[str] = None,
+                          include_completed: bool = False,
+                          include_archived: bool = False) -> List[Dict[str, Any]]:
     """Concrete reminder occurrences overlapping [window_start, window_end],
     earliest first.
 
     One-shot reminders appear once; recurring reminders are expanded to every
     occurrence in the window. Each occurrence is a dict with datetime `start`,
     datetime-or-None `end`, plus id/title/description/user_name/recurring/
-    recurrence/remind_before_min. This is the single source of truth for
-    "what's on the schedule" — the daily briefing, the system-prompt schedule
-    block, the calendar GUI, and get_upcoming_reminders all build on it.
+    recurrence/remind_before_min/completed/archived. This is the single source
+    of truth for "what's on the schedule" — the daily briefing, the
+    system-prompt schedule blocks, the calendar GUI, and get_upcoming_reminders
+    all build on it.
+
+    By default only live rows come back (not finished, not past), which is what
+    every forward-looking caller wants. Pass include_completed/include_archived
+    to look BACKWARD: a window in the past is meaningless if the rows that fell
+    in it have already been filtered out, which is exactly how Blue lost the
+    ability to answer "did I have a meeting yesterday?".
     """
-    clause = "WHERE completed = 0"
+    clause = "WHERE 1 = 1"
     params: List[Any] = []
+    if not include_completed:
+        clause += " AND completed = 0"
+    if not include_archived:
+        clause += " AND archived = 0"
     if user_name:
         clause += " AND user_name = ?"
         params.append(user_name)
     with _DB_LOCK, _conn() as c:
         rows = c.execute(
             "SELECT id, user_name, title, description, when_iso, end_iso, "
-            "recurrence, remind_before_min, until_iso FROM reminders " + clause,
+            "recurrence, remind_before_min, until_iso, completed, archived "
+            "FROM reminders " + clause,
             params,
         ).fetchall()
     out: List[Dict[str, Any]] = []
@@ -645,21 +689,27 @@ def _humanize_lead(minutes: int) -> str:
 
 def archive_past_oneoffs(now: Optional[datetime] = None,
                          grace_min: int = 120) -> int:
-    """Mark one-off reminders whose time has fully passed as completed.
+    """Mark one-off reminders whose time has fully passed as archived.
 
-    Past one-offs that linger as completed=0 clutter the table and risk
-    resurfacing; archiving them keeps the schedule clean and is the backstop
-    that stops a stale reminder from ever being re-announced. Recurring rows
-    are exempt (their when_iso is a repeating anchor). The grace window is
-    wider than the email scanner's, so a just-due reminder still gets its
-    email before this archives it. Returns the number archived.
+    Past one-offs that linger as live rows clutter the schedule and risk
+    resurfacing; archiving them keeps it clean and is the backstop that stops
+    a stale reminder from ever being re-announced. Recurring rows are exempt
+    (their when_iso is a repeating anchor). The grace window is wider than the
+    email scanner's, so a just-due reminder still gets its email before this
+    archives it. Returns the number archived.
+
+    This sets `archived`, NOT `completed`. It used to set `completed`, which
+    conflated "time passed" with "Alex finished it" — and since
+    occurrences_in_window filtered on `completed`, every event vanished from
+    Blue's world two hours after it ended. Keeping the flags separate is what
+    lets a past window still see the event while a future window doesn't.
     """
     now = now or datetime.now()
     cutoff = (now - timedelta(minutes=grace_min)).isoformat(timespec="minutes")
     with _DB_LOCK, _conn() as c:
         cur = c.execute(
-            "UPDATE reminders SET completed = 1 "
-            "WHERE completed = 0 "
+            "UPDATE reminders SET archived = 1 "
+            "WHERE archived = 0 "
             "AND (recurrence IS NULL OR recurrence = '') "
             "AND COALESCE(NULLIF(end_iso, ''), when_iso) < ?",
             (cutoff,),
@@ -812,7 +862,7 @@ class CalendarManager:
                 sep=" ", timespec="seconds")
             dup = c.execute(
                 "SELECT id, when_iso FROM reminders "
-                "WHERE completed = 0 AND user_name = ? "
+                "WHERE completed = 0 AND archived = 0 AND user_name = ? "
                 "AND LOWER(title) = LOWER(?) AND when_iso = ? "
                 "AND created_at >= ? "
                 "ORDER BY id DESC LIMIT 1",
@@ -959,7 +1009,8 @@ class CalendarManager:
     def complete_reminder(reminder_id: int) -> Dict[str, Any]:
         with _DB_LOCK, _conn() as c:
             cur = c.execute(
-                "UPDATE reminders SET completed = 1 WHERE id = ? AND completed = 0",
+                "UPDATE reminders SET completed = 1 "
+                "WHERE id = ? AND completed = 0 AND archived = 0",
                 (reminder_id,),
             )
             changed = cur.rowcount
@@ -990,7 +1041,7 @@ class CalendarManager:
             with _DB_LOCK, _conn() as c:
                 cur = c.execute(
                     "UPDATE reminders SET completed = 1 "
-                    "WHERE id = ? AND completed = 0",
+                    "WHERE id = ? AND completed = 0 AND archived = 0",
                     (reminder_id,),
                 )
                 changed = cur.rowcount
@@ -1005,7 +1056,7 @@ class CalendarManager:
             if user_name:
                 rows = c.execute(
                     "SELECT id, user_name, title, when_iso FROM reminders "
-                    "WHERE completed = 0 AND user_name = ? "
+                    "WHERE completed = 0 AND archived = 0 AND user_name = ? "
                     "AND LOWER(title) LIKE ? "
                     "ORDER BY when_iso ASC",
                     (user_name, like),
@@ -1013,7 +1064,7 @@ class CalendarManager:
             else:
                 rows = c.execute(
                     "SELECT id, user_name, title, when_iso FROM reminders "
-                    "WHERE completed = 0 AND LOWER(title) LIKE ? "
+                    "WHERE completed = 0 AND archived = 0 AND LOWER(title) LIKE ? "
                     "ORDER BY when_iso ASC",
                     (like,),
                 ).fetchall()
@@ -1076,7 +1127,7 @@ class CalendarManager:
                 if user_name:
                     rows = c.execute(
                         "SELECT id, user_name, title, when_iso FROM reminders "
-                        "WHERE completed = 0 AND user_name = ? "
+                        "WHERE completed = 0 AND archived = 0 AND user_name = ? "
                         "AND LOWER(title) LIKE ? "
                         "ORDER BY when_iso ASC",
                         (user_name, like),
@@ -1084,7 +1135,7 @@ class CalendarManager:
                 else:
                     rows = c.execute(
                         "SELECT id, user_name, title, when_iso FROM reminders "
-                        "WHERE completed = 0 AND LOWER(title) LIKE ? "
+                        "WHERE completed = 0 AND archived = 0 AND LOWER(title) LIKE ? "
                         "ORDER BY when_iso ASC",
                         (like,),
                     ).fetchall()

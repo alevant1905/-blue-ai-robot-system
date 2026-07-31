@@ -7,7 +7,7 @@ fall through to dateutil's fuzzy parser, which ignored "last" and fabricated a
 future date with the current minute leaked in — so a past meeting fired today.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from blue_tools_enhanced import (
     parse_when, parse_recurrence_phrase, parse_lead_minutes,
@@ -88,6 +88,74 @@ EXPAND = [
 ]
 
 
+def check_archive_visibility_split():
+    """A past event must leave the FUTURE window without leaving the record.
+
+    Regression for the bug that made Blue tell Alex he had no record of a
+    meeting he had scheduled himself (2026-07-31): archive_past_oneoffs set
+    `completed = 1`, and occurrences_in_window filtered on `completed`, so two
+    hours after any event ended it was gone from every query. Archiving must
+    set `archived` and leave `completed` alone, and a backward window asking
+    for archived rows must still see it.
+
+    Runs against a throwaway DB so the real calendar is never touched.
+    """
+    import os
+    import tempfile
+
+    import blue_tools_enhanced as bte
+
+    original_path = bte._DB_PATH
+    bte._DB_PATH = os.path.join(tempfile.mkdtemp(), "test_reminders.db")
+    problems = []
+    try:
+        bte._init_db()
+        bte._migrate_reminders_columns()
+        now = datetime.now()
+        past = (now - timedelta(hours=26)).isoformat(timespec="minutes")
+        with bte._DB_LOCK, bte._conn() as c:
+            c.execute("INSERT INTO reminders (user_name, title, when_iso) "
+                      "VALUES ('Alex', 'Past meeting', ?)", (past,))
+            c.commit()
+
+        def titles(**kw):
+            start = kw.pop("start")
+            end = kw.pop("end")
+            return [o["title"] for o in bte.occurrences_in_window(start, end, **kw)]
+
+        week_ago, week_ahead = now - timedelta(days=7), now + timedelta(days=7)
+        bte.archive_past_oneoffs()
+
+        with bte._DB_LOCK, bte._conn() as c:
+            row = c.execute("SELECT completed, archived FROM reminders").fetchone()
+        if row["completed"] != 0:
+            problems.append("archiving wrongly set completed=1")
+        if row["archived"] != 1:
+            problems.append("archiving failed to set archived=1")
+
+        if titles(start=now, end=week_ahead):
+            problems.append("archived event still shows in the future window")
+        if titles(start=week_ago, end=now):
+            problems.append("archived event leaks into a default past window")
+        if not titles(start=week_ago, end=now,
+                      include_completed=True, include_archived=True):
+            problems.append("archived event unreachable in an explicit past window")
+
+        # Cancel-by-title is an "active reminder" operation: it must not match
+        # something that has already happened.
+        if bte.CalendarManager.cancel_reminder(
+                title_query="Past meeting", user_name="Alex")["success"]:
+            problems.append("cancel-by-title matched an archived event")
+    finally:
+        bte._DB_PATH = original_path
+
+    for p in problems:
+        print(f"FAIL archive-split: {p}")
+    if not problems:
+        print("OK   archive/visibility split -> past stays visible, future clean")
+    return problems
+
+
 def run():
     failures = []
     for phrase, expected in EXPECTED.items():
@@ -121,6 +189,8 @@ def run():
         if got != expected:
             failures.append((row["recurrence"] or "one-off", expected, got))
         print(f"{status} expand {(row['recurrence'] or 'one-off'):12} -> {len(got)} occ")
+    for problem in check_archive_visibility_split():
+        failures.append(("archive/visibility split", "past stays visible", problem))
     if failures:
         print(f"\n{len(failures)} FAILED")
         for ph, exp, got in failures:

@@ -11016,6 +11016,85 @@ def _build_upcoming_schedule_block(hours_ahead: int = 168) -> str:
     )
 
 
+def _build_recent_schedule_block(hours_back: int = 168) -> str:
+    """List calendar events that have already happened in the last
+    `hours_back` hours.
+
+    The counterpart to _build_upcoming_schedule_block. Without it Blue's
+    schedule had no past tense at all: archive_past_oneoffs retires an event
+    two hours after it ends, and every query looked forward from `now`, so
+    "did I have a meeting yesterday?" was unanswerable from the prompt. Blue
+    told Alex he had no record of the Sara Matthews meeting (2026-07-31) that
+    he had scheduled himself two days earlier — the row was right there, just
+    filtered out of every window he could see.
+
+    Archived and completed occurrences are deliberately included: in the past
+    they are the whole point. Defaults to a week back, which covers "yesterday",
+    "the other day", and "earlier this week". Silent degradation on failure,
+    same as the forward block — never break the system prompt.
+    """
+    if not globals().get("ENHANCED_TOOLS_AVAILABLE", False):
+        return ""
+    try:
+        from datetime import datetime, timedelta
+        from blue_tools_enhanced import occurrences_in_window
+        now = datetime.now()
+        occs = occurrences_in_window(now - timedelta(hours=hours_back), now,
+                                     include_completed=True,
+                                     include_archived=True)
+    except Exception as e:
+        log.warning(f"[SCHEDULE] recent block build failed: {e}")
+        return ""
+
+    horizon = (f"{hours_back // 24} days" if hours_back % 24 == 0
+               else f"{hours_back} hours")
+
+    # Anything still running belongs to <current_activity>, not to history.
+    past = [o for o in occs if (o["end"] or o["start"]) <= now]
+    if not past:
+        return (
+            "<recent_schedule>\n"
+            f"Nothing was on the calendar in the past {horizon}.\n"
+            "</recent_schedule>"
+        )
+
+    today_d = now.date()
+    lines = []
+    for o in reversed(past[-20:]):          # most recent first
+        when = o["start"]
+        days_ago = (today_d - when.date()).days
+        if days_ago == 0:
+            day_label = "earlier today"
+        elif days_ago == 1:
+            day_label = "yesterday"
+        elif days_ago < 7:
+            day_label = f"{days_ago} days ago ({when.strftime('%A')})"
+        else:
+            day_label = when.strftime("%a %b ") + str(when.day)
+        clock = when.strftime("%I:%M %p").lstrip("0")
+        if o["end"]:
+            clock += "-" + o["end"].strftime("%I:%M %p").lstrip("0")
+        tag = " (weekly)" if o["recurring"] else ""
+        desc = (o.get("description") or "").strip().replace("\n", " ")
+        detail = f" — {desc[:120]}" if desc else ""
+        lines.append(
+            f"- {day_label} at {clock} — {o['user_name']}: "
+            f"{o['title']}{tag}{detail}"
+        )
+
+    return (
+        "<recent_schedule>\n"
+        f"Calendar events that ALREADY HAPPENED, most recent first, covering "
+        f"the past {horizon}. This is a factual record from the reminders "
+        f"database, not a guess. Use it when the user asks what they had on, "
+        f"what happened yesterday, or refers back to a past meeting or class — "
+        f"do not call a tool, and never say you have no record of the user's "
+        f"past schedule:\n"
+        + "\n".join(lines) +
+        "\n</recent_schedule>"
+    )
+
+
 # ============================================================================
 # "Where we are" + "what we're doing" — two more situational-awareness blocks.
 # Blue is a home robot, so home is the safe default for location; Alex can set a
@@ -11596,6 +11675,12 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     activity_block = _build_current_activity_block()
     schedule_block = _build_upcoming_schedule_block()
     schedule_section = f"{schedule_block}\n\n" if schedule_block else ""
+    # Past events sit right beside the future ones: "what do I have tomorrow?"
+    # and "what did I have yesterday?" are the same question pointed the other
+    # way, and only one of them used to be answerable.
+    recent_schedule_block = _build_recent_schedule_block()
+    if recent_schedule_block:
+        schedule_section += f"{recent_schedule_block}\n\n"
 
     # Tell Blue, accurately, that it CAN recognize faces — but only of people
     # enrolled with a reference photo. Without this, the model improvises and
