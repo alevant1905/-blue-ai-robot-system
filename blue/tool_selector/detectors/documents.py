@@ -27,6 +27,81 @@ me you it please new old here there thing things stuff topic content help know n
 
 # Unambiguous device control. These share vocabulary with book titles
 # ("volume") but are never a request to search the library.
+# A single distinctive token is enough to trigger a library search — that is the
+# whole point ("what does Toscano argue" names no document noun). But the
+# "distinctive" test was "starts with a capital in the filename", and filenames
+# are Title_Case, so EVERY word qualified: Making_Our_World-…_In_Context yielded
+# "making" and "context", AI_Industry_vs… yielded "industry". Ordinary sentences
+# then scored a document search at 0.90 — "My first name is Alex" on "first",
+# "explain to my grandmother who has never…" on "three".
+#
+# Only genuine title/author words should survive. Keep this list to words that
+# are ordinary English AND plausible in an academic title; author surnames must
+# never appear here.
+_COMMON_TITLE_WORDS = set("""
+first second third fourth fifth last next previous three four five six seven
+eight nine ten making make made makes doing done being having getting taking
+giving thinking image images picture pictures photo photos video videos audio
+industry industrial society social societies culture cultural nature natural
+capital capitalism capitalist labour labor market markets economy economic
+studies study theory theories theoretical practice practical problem problems
+question questions answer answers issue issues logic logical reason reasons
+rational analysis ideal ideals real reality material materials perspective
+perspectives approach approaches method methods model models context contexts
+content contents form forms structure structures critical critique criticism
+politics political power powers haven world worlds life lives human humans
+people person volume volumes edition editions series part parts section
+sections autobiography biography memoir notes note draft drafts technology
+technologies machine machines computer computers digital knowledge information
+data science sciences research language languages word words text texts writing
+written history historical modern contemporary future past present system
+systems process processes development developing education feedback thoughts
+thought toward towards press master costs fight creative acting archive
+movements resistance reproduction realism recorded producing untitled thesis
+""".split())
+
+# Contractions break at the apostrophe when the query is tokenised, and the
+# stem can collide with a library token: "we haven't celebrated yet" produced
+# "haven", which is a real word in one of the titles. Expand them first so the
+# stem never appears.
+_CONTRACTION_RE = re.compile(r"n't\b")
+_APOSTROPHE_SUFFIX_RE = re.compile(r"'(?:s|ve|re|ll|d|m)\b")
+
+
+def _normalise_query_text(msg_lower: str) -> str:
+    """Expand contractions so their stems can't masquerade as library terms."""
+    return _APOSTROPHE_SUFFIX_RE.sub(" ", _CONTRACTION_RE.sub(" not", msg_lower))
+
+
+# Two title words scattered across a sentence are a coincidence; a title is a
+# phrase. Alex's own name is a library FOLDER, so "my first name is Alex my
+# last name is Levant" matched a document on "alex" + "levant" 40 characters
+# apart. The folder matcher above already handles the contiguous case.
+_NEAR_TOKENS_MAX_GAP = 30
+
+# Telling Blue what someone is called. Never a request to search the library,
+# however much the name collides with it.
+_NAMING_STATEMENT_RE = re.compile(
+    r"\bmy (?:first |last |full |middle )?name is\b"
+    r"|\byour (?:first |last |full )?name is\b"
+    r"|\b(?:call|address) me\b"
+    r"|\bi'?m called\b|\bhis name is\b|\bher name is\b|\btheir name is\b",
+    re.I,
+)
+
+
+def _tokens_are_near(tokens, msg_lower: str) -> bool:
+    """True when at least two of `tokens` occur close together in the message."""
+    spots = []
+    for t in tokens:
+        m = re.search(r"\b" + re.escape(t), msg_lower)
+        if m:
+            spots.append(m.start())
+    spots.sort()
+    return any(b - a <= _NEAR_TOKENS_MAX_GAP
+               for a, b in zip(spots, spots[1:]))
+
+
 _DEVICE_COMMAND_RE = re.compile(
     r'\b(?:turn|set|put)\b[^.!?]{0,20}\bvolume\b'
     r'|\bvolume\s+(?:up|down|to)\b'
@@ -118,13 +193,21 @@ class DocumentsDetector(BaseDetector):
                 # would otherwise trigger on any sentence using that common word.
                 name_toks = {w.lower() for w in raw_words
                              if w[:1].isupper() and len(w) >= 5
-                             and w.lower() not in _GENERIC_TERMS and not w.isdigit()}
+                             and w.lower() not in _GENERIC_TERMS
+                             and w.lower() not in _COMMON_TITLE_WORDS
+                             and not w.isdigit()}
                 if folder:
                     raw_f = [w for w in re.split(r"[\s_\-./\\]+", folder) if w]
                     for w in raw_f:
                         if len(w) >= 4 and w.lower() not in _GENERIC_TERMS and not w.isdigit():
                             toks.add(w.lower())
-                            if w[:1].isupper() or any(ch.isdigit() for ch in w):
+                            # Folder words need the same common-word filter as
+                            # filename words. Without it the folder "Surveillance
+                            # Studies" made "studies" a single-token trigger, so
+                            # "CS101 is communication studies" searched the
+                            # library. The folder PHRASE still matches in full.
+                            if ((w[:1].isupper() or any(ch.isdigit() for ch in w))
+                                    and w.lower() not in _COMMON_TITLE_WORDS):
                                 name_toks.add(w.lower())
                     fphrase = " ".join(w.lower() for w in raw_f)
                     if len(fphrase) >= 4:
@@ -156,6 +239,11 @@ class DocumentsDetector(BaseDetector):
         # "volume" in its title and that made it a distinctive library token.
         if _DEVICE_COMMAND_RE.search(msg_lower):
             return None
+        # Alex's surname is in six of his own filenames and his name is also a
+        # folder, so "my first name is Alex my last name is Levant" matched a
+        # library document at 0.90. Stating a name is never a search.
+        if _NAMING_STATEMENT_RE.search(msg_lower):
+            return None
         cls._refresh_library()
         if not cls._lib_tokens_by_doc:
             return None
@@ -163,7 +251,7 @@ class DocumentsDetector(BaseDetector):
         for ph in cls._lib_phrases:
             if ph and ph in msg_lower:
                 return f"names library folder '{ph}'"
-        qwords = {w for w in re.split(r"[^a-z0-9]+", msg_lower)
+        qwords = {w for w in re.split(r"[^a-z0-9]+", _normalise_query_text(msg_lower))
                   if len(w) >= 4 and w not in _GENERIC_TERMS}
         # Voice transcription commonly drops possessive apostrophes ("Noble's"
         # becomes "nobles"). Add the singular form only when it names a token
@@ -182,7 +270,7 @@ class DocumentsDetector(BaseDetector):
         # Two-plus distinctive tokens shared with a single document's title.
         for toks in cls._lib_tokens_by_doc:
             overlap = qwords & toks
-            if len(overlap) >= 2:
+            if len(overlap) >= 2 and _tokens_are_near(overlap, msg_lower):
                 return "names a library document (" + ", ".join(sorted(overlap)[:3]) + ")"
         return None
 

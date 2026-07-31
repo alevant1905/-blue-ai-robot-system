@@ -275,6 +275,45 @@ def test_anything_is_not_the_new_york_times():
     assert "news source" not in reasons
 
 
+# ---- library matching --------------------------------------------------------
+# A single distinctive token triggers a library search on purpose ("what does
+# Toscano argue" names no document noun). The bug was in what counted as
+# distinctive: filenames are Title_Case, so the "starts with a capital"
+# heuristic promoted every word in every title.
+
+NOT_LIBRARY = [
+    # "first" and "three" came from Title_Cased filenames.
+    "my first name is Alex my last name is Levant",
+    "how would you explain that to my grandmother who has never used one",
+    # "haven" is a title word; "haven't" used to tokenise to it.
+    "we haven't celebrated yet, she's coming back today at three",
+    # A folder called "Surveillance Studies" made "studies" a trigger.
+    "CS101 is not computer science it's communication studies",
+    "I want you to write your autobiography",
+    "I want you to answer the following from my perspective",
+]
+
+REAL_LIBRARY = [
+    "what does Toscano argue",
+    "what did Humphries write about",
+    "what does Ilyenkov say about the ideal",
+    "show me the Alex Levant folder",
+    "the document is called AI fetish",
+    "search my documents for surveillance",
+    "what are the readings for tomorrow",
+]
+
+
+@pytest.mark.parametrize("msg", NOT_LIBRARY)
+def test_ordinary_words_do_not_trigger_a_library_search(msg):
+    assert _selected_tool(msg) != "search_documents"
+
+
+@pytest.mark.parametrize("msg", REAL_LIBRARY)
+def test_real_library_queries_still_work(msg):
+    assert _selected_tool(msg) == "search_documents"
+
+
 def test_named_sources_and_real_requests_still_work():
     from blue.tool_selector.detectors.web import WebDetector
     msg = "headlines from the guardian"
