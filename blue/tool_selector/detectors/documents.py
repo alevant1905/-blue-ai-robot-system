@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_any_word
 
 
 # Words too generic to identify a specific library document. Used to filter
@@ -279,13 +280,18 @@ class DocumentsDetector(BaseDetector):
             reasons.append("re-read verb + doc noun (proximity)")
         elif any(v in msg_lower for v in ['search', 'find', 'look for', 'look up']):
             if any(n in msg_lower for n in doc_nouns):
-                if 'my' in msg_lower or 'our' in msg_lower:
+                # Whole words: "our" is inside "y-OUR", "f-OUR" and
+                # "c-OUR-se", so "search your documents folder" scored as
+                # though the user had said "our" (601 such matches in the log).
+                if has_any_word(['my', 'our'], msg_lower):
                     confidence = 0.85
                     reasons.append("search + possessive + document")
                 else:
                     confidence = 0.70
                     reasons.append("search + document")
-            elif 'my' in msg_lower:
+            # Whole word: "my" sits inside "em-MY" and "a-MY", so simply
+            # naming Emmy scored an implicit document search at 0.75.
+            elif has_any_word(['my', 'our'], msg_lower):
                 confidence = 0.75
                 reasons.append("search + possessive (implicit docs)")
 

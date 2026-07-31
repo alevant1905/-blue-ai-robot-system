@@ -161,7 +161,10 @@ class LightsDetector(BaseDetector):
                 reasons.append("mood keyword but no clear light context")
 
         elif has_color and ('set' in msg_lower or 'change' in msg_lower or 'make' in msg_lower):
-            if has_light or context.get('has_lights_in_history') or 'light' in msg_lower:
+            # has_light already covers the light nouns as whole words; the
+            # bare substring here additionally matched "s-LIGHT-ly" and
+            # "high-LIGHT".
+            if has_light or context.get('has_lights_in_history'):
                 confidence = 0.88
                 reasons.append("color + set/change + light context")
             else:

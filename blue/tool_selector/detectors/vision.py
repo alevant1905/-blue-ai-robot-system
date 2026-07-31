@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_any_word
 
 
 # ---- Camera view-control extraction (shared with bluetools' fast path) ----
@@ -170,7 +171,9 @@ class VisionDetector(BaseDetector):
             'do you see me', 'look at me', 'what does it look like there',
         ]
         camera_keywords = ['camera', 'picture', 'photo', 'image', 'snapshot', 'capture']
-        action_verbs = ['take', 'capture', 'snap', 'get', 'grab']
+        # Whole words: "get" is inside "for-GET" and "to-GET-her", so
+        # "don't forget the photo" read as a request to take one.
+        action_verbs = ['take', 'taking', 'capture', 'snap', 'get', 'grab']
         # Aim/zoom requests — the camera with view control ("what's to your
         # left", "zoom in on the table", "look up and tell me what you see").
         view_control_signals = [
@@ -216,7 +219,7 @@ class VisionDetector(BaseDetector):
         elif any(s in msg_lower for s in view_control_signals):
             confidence = 0.88
             reasons.append("view-control capture (aim/zoom)")
-        elif any(v in msg_lower for v in action_verbs) and any(k in msg_lower for k in camera_keywords):
+        elif has_any_word(action_verbs, msg_lower) and any(k in msg_lower for k in camera_keywords):
             confidence = 0.85
             reasons.append("action verb + camera keyword")
 
@@ -236,6 +239,10 @@ class VisionDetector(BaseDetector):
             'show me the image', 'display the picture', 'view the photo',
             'let me see', 'show the picture', 'display image'
         ]
+        # Whole words. As substrings, "see" matches inside "SEE-ms" and
+        # "SEE-ing", so with camera history in the conversation an innocuous
+        # "it seems fine" opened an image at 0.70. "Show me what you're seeing"
+        # still works — it carries "show".
         view_verbs = ['show', 'display', 'view', 'see', 'look at']
         image_nouns = ['image', 'picture', 'photo', 'screenshot']
 
@@ -245,11 +252,11 @@ class VisionDetector(BaseDetector):
         if any(s in msg_lower for s in strong_signals):
             confidence = 0.90
             reasons.append("explicit view image keywords")
-        elif any(v in msg_lower for v in view_verbs) and any(n in msg_lower for n in image_nouns):
+        elif has_any_word(view_verbs, msg_lower) and any(n in msg_lower for n in image_nouns):
             confidence = 0.80
             reasons.append("view verb + image noun")
         elif context.get('has_camera_in_history'):
-            if any(v in msg_lower for v in view_verbs):
+            if has_any_word(view_verbs, msg_lower):
                 confidence = 0.70
                 reasons.append("view verb + camera context")
 

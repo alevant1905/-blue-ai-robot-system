@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_any_word
 
 
 class WebDetector(BaseDetector):
@@ -44,7 +45,10 @@ class WebDetector(BaseDetector):
                           'still in', 'knocked out', 'eliminated', 'what happened',
                           'who plays', 'who is playing', "who's playing",
                           'what teams are left', 'which teams are left']
-        # Named news sources strongly imply web search
+        # Named news sources strongly imply web search. Matched as whole words:
+        # as a substring "nyt" is inside "a-NYT-hing" and "times" inside
+        # "some-TIMES", so any news-flavoured question containing "anything"
+        # claimed a named source and jumped to 0.90.
         news_sources = ['guardian', 'bbc', 'cnn', 'reuters', 'nyt',
                         'new york times', 'washington post', 'times',
                         'al jazeera', 'associated press', 'sky news']
@@ -72,7 +76,7 @@ class WebDetector(BaseDetector):
             reasons.append("live event question")
         # "headlines from the guardian" — news topic + named source
         if any(topic in msg_lower for topic in news_topics) and \
-           any(src in msg_lower for src in news_sources):
+           has_any_word(news_sources, msg_lower):
             confidence = max(confidence, 0.90)
             if "news source + topic" not in reasons:
                 reasons.append("news source + topic")

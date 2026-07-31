@@ -14,6 +14,7 @@ from .base import BaseDetector
 from .vision import is_email_snapshot_request
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_any_word
 
 
 class GmailDetector(BaseDetector):
@@ -167,7 +168,9 @@ class GmailDetector(BaseDetector):
                 reasons.append("follow-up imperative + recent email context")
 
         # Exclude if reading
-        if any(word in msg_lower for word in ['check', 'read', 'show my']):
+        # Whole words: "read" is inside "al-READ-y", which was quietly
+        # subtracting 0.3 from send confidence on unrelated sentences.
+        if has_any_word(['check', 'read', 'reading', 'show my'], msg_lower):
             confidence = max(0, confidence - 0.3)
             reasons.append("reduced: read indicators")
 

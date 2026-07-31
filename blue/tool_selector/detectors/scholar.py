@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import has_any_word
 
 
 class ScholarDetector(BaseDetector):
@@ -58,7 +59,8 @@ class ScholarDetector(BaseDetector):
         return intents
 
     # Verbs that mean "get me the CONTENT", not just the metadata.
-    READ_VERBS = ['read', 'summarize', 'summarise', 'analyze', 'analyse',
+    READ_VERBS = ['read', 'reads', 'reading', 'readings', 'reread',
+                  'summarize', 'summarise', 'analyze', 'analyse',
                   'full text', 'fulltext', 'download', 'what does it say',
                   'what does it argue', 'go through']
 
@@ -68,7 +70,8 @@ class ScholarDetector(BaseDetector):
             return None
         doi = m.group(0).rstrip('.,;)')
         # "read/summarize <DOI>" wants the article's content, not its record.
-        if any(v in msg_lower for v in self.READ_VERBS):
+        # Whole words: "read" is inside "al-READ-y" and "READ-y".
+        if has_any_word(self.READ_VERBS, msg_lower):
             return ToolIntent(
                 tool_name='read_paper',
                 confidence=0.95,

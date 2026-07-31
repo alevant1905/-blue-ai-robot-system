@@ -235,6 +235,55 @@ def test_real_light_commands_still_work(msg):
     assert _selected_tool(msg) == "control_lights"
 
 
+# ---- the substring sweep across the remaining detectors ----------------------
+# Same bug in five more places, found by scanning every keyword that is tested
+# with a raw `in` against every real user message and counting the ones that
+# only ever match INSIDE another word.
+
+SUBSTRING_TRAPS = [
+    # "my" is inside "e-MY" — Emmy is Alex's daughter, and naming her scored an
+    # implicit document search at 0.75 (30 messages in the log).
+    ("find emmy a soccer club", "search_documents"),
+    ("can you find amy for me", "search_documents"),
+    # "get" is inside "for-GET" and "to-GET-her".
+    ("don't forget the photo", "capture_camera"),
+    # "read" is inside "al-READ-y".
+    ("we already had the final class", "read_paper"),
+]
+
+
+@pytest.mark.parametrize("msg,must_not_be", SUBSTRING_TRAPS)
+def test_a_word_containing_a_keyword_is_not_that_keyword(msg, must_not_be):
+    assert _selected_tool(msg) != must_not_be
+
+
+def test_seeming_is_not_seeing():
+    """"see" is inside "SEE-ms". With camera context in the conversation, an
+    innocuous "it seems fine" was opening an image at 0.70."""
+    from blue.tool_selector.detectors.vision import VisionDetector
+    intents = VisionDetector().detect(
+        "it seems fine", "it seems fine", {"has_camera_in_history": True})
+    assert not any(i.tool_name == "view_image" for i in intents)
+
+
+def test_anything_is_not_the_new_york_times():
+    """"nyt" is inside "a-NYT-hing", so any news-flavoured question containing
+    "anything" claimed a named source and jumped to 0.90."""
+    from blue.tool_selector.detectors.web import WebDetector
+    msg = "is there anything in the news"
+    reasons = " ".join(i.reason for i in WebDetector().detect(msg, msg, {}))
+    assert "news source" not in reasons
+
+
+def test_named_sources_and_real_requests_still_work():
+    from blue.tool_selector.detectors.web import WebDetector
+    msg = "headlines from the guardian"
+    reasons = " ".join(i.reason for i in WebDetector().detect(msg, msg, {}))
+    assert "news source" in reasons
+    assert _selected_tool("search my documents for surveillance") == "search_documents"
+    assert _selected_tool("take a picture") == "capture_camera"
+
+
 @pytest.mark.parametrize("msg", SCHEDULE)
 def test_scheduling_requests_still_create_reminders(msg):
     assert not is_reminder_recall_request(msg)
