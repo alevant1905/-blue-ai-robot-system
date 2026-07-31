@@ -6,6 +6,7 @@ Includes: Automation, Contacts, Habits, Notes, Timers, System, Utilities, MediaL
 
 from typing import Dict, List, Optional
 from .base import BaseDetector
+from .calendar import is_reminder_recall_request
 from ..models import ToolIntent
 from ..constants import ToolPriority
 
@@ -150,18 +151,14 @@ class TimersDetector(BaseDetector):
                 extracted_params=params
             )]
         elif any(s in msg_lower for s in reminder_signals):
-            # "Remind me of what you did yesterday" asks for memory recall;
-            # it does not authorize creating a future reminder. Scheduling
-            # requests still route normally ("remind me tomorrow to call").
-            if (re.search(r'\bremind me (?:of|about|what|who|where|when)\b', msg_lower)
-                    and re.search(
-                        r'\b(?:yesterday|last (?:night|week|time)|earlier|previously)\b',
-                        msg_lower,
-                    )
-                    and not re.search(
-                        r'\b(?:tomorrow|tonight|next (?:week|month)|in \d+|at \d{1,2})\b',
-                        msg_lower,
-                    )):
+            # "Remind me of those ideas" asks for memory recall; it does not
+            # authorize creating a future reminder. Shared with CalendarDetector
+            # so the two paths cannot disagree — this one used to carry its own
+            # narrower copy that additionally demanded an explicit past-time
+            # word ("yesterday", "earlier"). "Can you remind me of those ideas?"
+            # has none, so it fell through here even after the calendar detector
+            # was fixed, and still scheduled a reminder (2026-07-31).
+            if is_reminder_recall_request(msg_lower):
                 return []
             return [ToolIntent(
                 tool_name='create_reminder',

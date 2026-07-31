@@ -116,6 +116,29 @@ def test_recall_phrasing_is_not_a_scheduling_request(msg):
     assert CalendarDetector()._detect_create_event(msg) is None
 
 
+def _selected_tool(msg):
+    from blue.tool_selector import ImprovedToolSelector
+    primary = ImprovedToolSelector().select_tool(msg, []).primary_tool
+    return getattr(primary, "tool_name", None) if primary else None
+
+
+@pytest.mark.parametrize("msg", RECALL)
+def test_recall_creates_no_reminder_through_the_whole_selector(msg):
+    """End-to-end, not just the calendar detector.
+
+    Fixing CalendarDetector alone was not enough: SimpleDetectors carried its
+    own narrower copy of the guard that additionally demanded an explicit
+    past-time word, so "can you remind me of those ideas?" still came out of
+    the selector as create_reminder at 0.9. Assert against the selector, which
+    is what actually runs."""
+    assert _selected_tool(msg) != "create_reminder"
+
+
+@pytest.mark.parametrize("msg", SCHEDULE)
+def test_scheduling_still_reaches_create_reminder_through_the_selector(msg):
+    assert _selected_tool(msg) == "create_reminder"
+
+
 @pytest.mark.parametrize("msg", SCHEDULE)
 def test_scheduling_requests_still_create_reminders(msg):
     assert not is_reminder_recall_request(msg)

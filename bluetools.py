@@ -9805,6 +9805,66 @@ def _estimate_payload_tokens(messages, tools) -> int:
     return total + 64  # final chat-template wrap pad
 
 
+# The input budget was hard-coded at 6500, "sized for an 8192-ctx model". The
+# machine now loads a 32768-ctx model, but the budget never moved — so Blue was
+# throwing away four fifths of the context he actually had. The tool schema
+# alone estimates ~8700 tokens, which exceeds 6500 on its own, so the trimmer
+# fired on EVERY tool-enabled turn and stripped the conversation down to the
+# protected tail: measured on a 22-message thread, 16 messages dropped and the
+# payload still over budget. That is Blue losing the thread mid-conversation and
+# greeting you like he just woke up (audited 2026-07-31).
+_LM_BUDGET_FALLBACK = 6500
+_LM_BUDGET_CTX_SHARE = 0.7      # Leave room for the reply
+_LM_BUDGET_TTL_SEC = 300
+_lm_budget_cache = {"value": None, "at": 0.0}
+
+
+def _detect_lm_context_size() -> Optional[int]:
+    """The loaded model's real context length, via LM Studio's REST API.
+
+    Returns None when the endpoint is missing or nothing is loaded — older
+    LM Studio builds have no /api/v0, so this must never be required.
+    """
+    try:
+        base = LM_STUDIO_URL.split('/v1/')[0]
+        r = requests.get(f"{base}/api/v0/models", timeout=3)
+        r.raise_for_status()
+        for m in r.json().get("data", []):
+            if m.get("state") == "loaded":
+                ctx = m.get("loaded_context_length") or m.get("max_context_length")
+                if isinstance(ctx, int) and ctx > 0:
+                    return ctx
+    except Exception:
+        return None
+    return None
+
+
+def _lm_input_budget() -> int:
+    """Input-token budget for one request.
+
+    Explicit env override wins. Otherwise take a share of the loaded model's
+    real context, cached briefly so swapping models is picked up without a
+    restart. Falls back to the old constant when the context can't be read.
+    """
+    env = os.environ.get('BLUE_LM_INPUT_BUDGET_TOKENS')
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    now = time.time()
+    if (_lm_budget_cache["value"] is not None
+            and now - _lm_budget_cache["at"] < _LM_BUDGET_TTL_SEC):
+        return _lm_budget_cache["value"]
+    ctx = _detect_lm_context_size()
+    budget = int(ctx * _LM_BUDGET_CTX_SHARE) if ctx else _LM_BUDGET_FALLBACK
+    if _lm_budget_cache["value"] != budget:
+        print(f"   [BUDGET] input budget {budget}t"
+              f"{f' (model ctx {ctx})' if ctx else ' (context unknown — fallback)'}")
+    _lm_budget_cache.update({"value": budget, "at": now})
+    return budget
+
+
 def _trim_messages_for_budget(messages, tools, budget_tokens: int, min_keep_tail: int = 0):
     """Drop oldest non-system messages until estimated tokens fit the budget.
 
@@ -10639,12 +10699,9 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             payload["tool_choice"] = "auto"
 
     # Token-budget guard: trim oldest non-system history if the request would
-    # overflow LM Studio's context. Default sized for an 8192-ctx model with
-    # headroom for the response; override via BLUE_LM_INPUT_BUDGET_TOKENS.
-    try:
-        _budget = int(os.environ.get('BLUE_LM_INPUT_BUDGET_TOKENS', '6500'))
-    except ValueError:
-        _budget = 6500
+    # overflow LM Studio's context. Sized from the LOADED model's real context
+    # (see _lm_input_budget); override via BLUE_LM_INPUT_BUDGET_TOKENS.
+    _budget = _lm_input_budget()
     _trimmed, _dropped = _trim_messages_for_budget(
         payload['messages'], payload.get('tools'), _budget,
         min_keep_tail=4,   # never trim away the last ~2 exchanges
@@ -10667,14 +10724,32 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        # Self-heal on n_ctx overflow: LM Studio's error body looks like
-        # `n_keep: 5188 >= n_ctx: 4096`. Parse the actual context size, retrim
-        # the payload to fit, and retry once. Avoids depending on the user's
-        # LM Studio context-length setting matching our default budget.
+        # Self-heal on context overflow: parse the model's real context size out
+        # of the error, retrim to fit, retry once. Avoids depending on the
+        # user's LM Studio context-length setting matching our budget.
+        #
+        # LM Studio has used several wordings. The original `n_keep: 5188 >=
+        # n_ctx: 4096` was the only one matched, so when the message changed to
+        # "request (8971 tokens) exceeds the available context size (8192
+        # tokens)" the self-heal silently stopped firing and overflows just
+        # failed the turn — that is the form in all three most recent dumps.
         body = getattr(getattr(e, 'response', None), 'text', '') or ''
-        _ctx_match = re.search(r'n_ctx:\s*(\d+)', body)
-        if _ctx_match:
-            _n_ctx = int(_ctx_match.group(1))
+        _ctx_match = (
+            re.search(r'n_ctx:\s*(\d+)', body)
+            or re.search(r'available context size (?:is )?\(?(\d+)', body)
+            or re.search(r'context (?:size|length) (?:of )?(\d+)', body)
+        )
+        # Some overflow errors name no number at all ("Context size has been
+        # exceeded.") — the newest form, and the one in the most recent dump.
+        # Nothing can be parsed, so fall back to halving the current budget and
+        # retrying rather than failing the turn outright.
+        _ctx_unnumbered = bool(
+            not _ctx_match
+            and re.search(r'context (?:size|length).{0,30}exceed', body, re.I)
+        )
+        if _ctx_match or _ctx_unnumbered:
+            _n_ctx = (int(_ctx_match.group(1)) if _ctx_match
+                      else max(2048, _lm_input_budget() // 2))
             _retry_budget = max(256, int(_n_ctx * 0.7))
             _retrimmed, _dropped_now = _trim_messages_for_budget(
                 payload['messages'], payload.get('tools'), _retry_budget,
