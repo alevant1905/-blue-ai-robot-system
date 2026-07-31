@@ -50,6 +50,19 @@ from blue_identity import (
         ("Do you have a j-space?", "jspace"),
         ("No, j-space.", "jspace"),
         ("What is the weather?", None),
+        # Commands that happen to be phrased at Blue's own attributes. Both were
+        # swallowed by the identity path (audited 2026-07-31), which mattered
+        # more than it looks: a classified message whose reply fails the drift
+        # check is REPLACED by the canonical blurb, while an unclassified one
+        # keeps the on-topic answer minus the drifted sentences.
+        ("Can you change the color of your eyes?", None),
+        ("Can you change your eye colour to green?", None),
+        ("What are you doing?", None),
+        ("What are you up to right now?", None),
+        ("What are you working on?", None),
+        # ...without losing the abstract senses of the same verbs.
+        ("Do you change over time?", "evolution"),
+        ("What have you been up to?", "evolution"),
         # The 2026-07-15 dialogue: shared-plan recall probes must be classified
         # so they get memory grounding instead of identity boilerplate.
         ("Do you remember what we're doing tomorrow, you and I?", "shared_recall"),

@@ -45,7 +45,13 @@ _IDENTITY_MORE_RE = re.compile(
 _IDENTITY_REQUEST_RE = re.compile(
     r"\b(?:describe yourself|tell (?:me|us|them) about yourself)\b"
     r"|\bwho are (?:you|yuou|yuo|youu)(?: really| actually)?\b"
+    # "What are you doing?" asks about the current moment, not about what kind
+    # of thing Blue is. Classified as identity, the answer got judged against
+    # identity expectations and could be replaced by the canonical blurb —
+    # <current_activity> already carries the real answer.
     r"|\bwhat are (?:you|yuou|yuo|youu)(?: really| actually)?\b"
+    r"(?!\s+(?:doing|up to|working on|busy with|thinking about|looking at|"
+    r"reading|watching|planning))"
     r"|\bwhat(?:'s| is) your (?:real )?identity\b",
     re.IGNORECASE,
 )
@@ -70,7 +76,13 @@ _SELFHOOD_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _EVOLUTION_REQUEST_RE = re.compile(
+    # A direct object turns this from "do you develop over time?" into an
+    # instruction: "can you change the colour of your eyes?" is a request to
+    # drive the eye LEDs, not a question about self-development. Without the
+    # lookahead it classified as an evolution question and the eye-colour
+    # request was answered with a reflection on growth (audited 2026-07-31).
     r"\b(?:do|can|have) you (?:grow|change|evolve|learn)\b"
+    r"(?!\s+(?:the|your|my|its|it|that|this)\b)"
     r"|\bhow (?:do|did|have) you (?:grow|change|changed|evolve|evolved|learn)\b"
     r"|\b(?:grow|change|evolve) over time\b"
     r"|\b(?:your )?(?:identity|self-understanding|sense of self)\b"
