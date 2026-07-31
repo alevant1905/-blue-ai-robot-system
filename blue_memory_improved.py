@@ -16,6 +16,7 @@ Provides the interface expected by bluetools.py:
     - memory_system.get_memory_summary()
 """
 
+import difflib
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from blue_identity import (
     identity_request_kind,
@@ -63,6 +64,104 @@ RECENT_HISTORY_HOURS = 48            # Only inject conversation history from the
 # by date, and any older day can still resurface by semantic relevance.
 SESSION_HISTORY_DAYS = 90            # How far back the backfill keeps writing recaps
 SESSION_HISTORY_INJECT = 3           # How many recent day-recaps to put in the prompt by date
+
+# Proper-name recall. Embedding similarity is weakest exactly where recall
+# matters most. Measured on the live store: "Sara Matthews" returned the
+# meeting recap at 0.5; "Sarah Matthews" — one letter out, and the spelling
+# Alex actually says — returned NOTHING, because a name is a small part of a
+# sentence embedding and the miss pushed it past SIMILARITY_THRESHOLD. The
+# keyword tier couldn't save it either: it LIKEs the whole query, so a name
+# inside a sentence never matches. Blue had corrected Sarah->Sara from her
+# email himself, which is what made the record unfindable under the name Alex
+# uses out loud (2026-07-31).
+NAME_ALIAS_MIN_RATIO = 0.88          # difflib ratio for "same name, spelled differently"
+NAME_LEXICON_TTL_SEC = 300           # Re-read the store's names at most this often
+NAME_MAX_SEARCH_TERMS = 4            # Cap the extra lookups one query can trigger
+
+# A run of one to three capitalised words: "Svetlana", "Sara Matthews",
+# "Wilfrid Laurier University". Three-letter minimum keeps initials and "I" out.
+_NAME_TOKEN_RE = re.compile(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}\b")
+
+# Capitalised because they start a sentence or label something — not people.
+_NAME_STOPWORDS = {
+    "The", "They", "Their", "There", "This", "That", "These", "Those",
+    "User", "And", "But", "For", "From", "With", "Was", "Were", "Are",
+    "Not", "All", "Any", "Its", "His", "Her", "She", "You", "Your",
+    "When", "What", "Where", "Which", "While", "Who", "Why", "How",
+    "Today", "Tomorrow", "Yesterday", "Tonight", "Morning", "Afternoon",
+    "Evening", "Night", "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday", "January", "February", "March",
+    "April", "June", "July", "August", "September", "October",
+    "November", "December", "Assistant", "Alex",
+    # Sentence-initial words that get capitalised in front of a real name.
+    "Did", "Does", "Can", "Could", "Will", "Would", "Should", "Have",
+    "Has", "Had", "Are", "Let", "Tell", "Please", "Hey", "Hello",
+    "Also", "Then", "Now", "Well", "Yes", "Maybe", "Just", "About",
+    "Remember", "Meeting", "Meet", "Talk", "Talked", "Spoke", "Said",
+}
+
+
+def _extract_proper_names(text: Optional[str]) -> List[str]:
+    """Capitalised name-shaped spans in `text`.
+
+    Leading and trailing stopwords are stripped, so "Did Alex ..." doesn't
+    become the name "Did Alex". Each span also yields its contiguous word
+    pairs: capitalisation alone can't tell a name from a sentence-initial verb,
+    so "Met Sarah Matthews" emits "Sarah Matthews" alongside the junk "Met
+    Sarah" rather than losing the real name to an unlisted stopword. A junk
+    pair costs one LIKE that matches nothing; a missed name costs recall.
+    """
+    if not text:
+        return []
+    out: List[str] = []
+    for m in _NAME_TOKEN_RE.finditer(str(text)):
+        parts = m.group(0).split()
+        while parts and parts[0] in _NAME_STOPWORDS:
+            parts.pop(0)
+        while parts and parts[-1] in _NAME_STOPWORDS:
+            parts.pop()
+        if not parts:
+            continue
+        out.append(" ".join(parts))
+        for i in range(len(parts) - 1):
+            pair = " ".join(parts[i:i + 2])
+            if pair not in out:
+                out.append(pair)
+    return out
+
+
+def _is_spelling_variant(a: str, b: str) -> bool:
+    """True when `a` and `b` look like the same name spelled two ways.
+
+    Guards, each one earned by a false positive measured against the real
+    store. Tuned by enumerating every pair the rules fire on across all ~190
+    names in the store and reading the list; re-run that audit after changing
+    a threshold.
+
+    - Same first letter. Drops unrelated neighbours cheaply. Costs us
+      Catherine/Katherine, which is the accepted price.
+    - Length within 2 of each other.
+    - **Neither is a prefix of the other.** English inflection is suffixation,
+      so a pure prefix extension is a different word, not a variant: this
+      rejects Friday/Fridays, Kitchen/Kitchener, Friend/Friendly and
+      Alex/Alexa. The cost is that bare "Sara"/"Sarah" won't alias on their
+      own — full names do, which is the case that actually comes up.
+    - difflib ratio >= NAME_ALIAS_MIN_RATIO. The prefix rule alone was not
+      enough: Canada/Canadian diverges at the sixth character, so it is not a
+      prefix pair, and it needs the ratio floor (0.857) to exclude it. The
+      three real variants in the store sit at 0.909 (Sofie/Sophie
+      Lachapelle), 0.957 (Wiikemkoong/Wiikwemkoong) and 0.963 (Sara/Sarah
+      Matthews), so 0.88 separates them with room on both sides.
+    """
+    x, y = a.lower(), b.lower()
+    if x == y or not x or not y:
+        return False
+    if x[0] != y[0] or abs(len(x) - len(y)) > 2:
+        return False
+    if x.startswith(y) or y.startswith(x):
+        return False
+    return difflib.SequenceMatcher(None, x, y).ratio() >= NAME_ALIAS_MIN_RATIO
+
 
 # Rhythm learning: mine conversation_log for behavioural patterns (which kinds
 # of request cluster at which time of day). Pure counting — never LLM-guessed.
@@ -1352,6 +1451,62 @@ class EnhancedMemorySystem:
 
     # ------------------------------------------------------------------ Semantic search
 
+    def _person_name_lexicon(self) -> Set[str]:
+        """Every proper name that actually appears in the memory store.
+
+        Built from what is written down rather than from a curated contact
+        list, because the variants we need to bridge are created by the store
+        itself: one row says "Sarah Matthews", another says "Sara Matthews",
+        and nothing declares them the same person. Cached for
+        NAME_LEXICON_TTL_SEC — it is read on most turns and changes slowly."""
+        now = time.time()
+        cached = getattr(self, "_name_lexicon_cache", None)
+        if (cached is not None
+                and now - getattr(self, "_name_lexicon_at", 0.0) < NAME_LEXICON_TTL_SEC):
+            return cached
+        names: Set[str] = set()
+        try:
+            conn = self._conn()
+            for row in conn.execute("SELECT subject, content FROM memories"):
+                names.update(_extract_proper_names(row["subject"]))
+                names.update(_extract_proper_names(row["content"]))
+            for row in conn.execute("SELECT fact_value FROM facts"):
+                names.update(_extract_proper_names(row["fact_value"]))
+            conn.close()
+        except Exception:
+            return cached if cached is not None else set()
+        self._name_lexicon_cache = names
+        self._name_lexicon_at = now
+        return names
+
+    def _name_search_terms(self, query: str) -> List[Tuple[str, float]]:
+        """(term, similarity) pairs to look up literally for this query.
+
+        Full names in the query are searched directly — the keyword tier only
+        LIKEs the whole query, so a name sitting inside a sentence matches
+        nothing. Spelling variants of ANY name in the query are searched too,
+        which is what bridges Sarah -> Sara.
+
+        Bare single names are deliberately NOT searched on their own: "Alex"
+        or "Stella" appear in dozens of memories and would crowd out genuinely
+        relevant hits every turn. They still contribute their aliases."""
+        terms: List[Tuple[str, float]] = []
+        seen: Set[str] = set()
+        lexicon = None
+        for name in _extract_proper_names(query):
+            if " " in name and name.lower() not in seen:
+                seen.add(name.lower())
+                terms.append((name, 0.60))
+            if lexicon is None:
+                lexicon = self._person_name_lexicon()
+            for candidate in lexicon:
+                if candidate.lower() in seen:
+                    continue
+                if _is_spelling_variant(name, candidate):
+                    seen.add(candidate.lower())
+                    terms.append((candidate, 0.58))
+        return terms[:NAME_MAX_SEARCH_TERMS]
+
     def search_memories(self, query: str, top_k: int = TOP_K_CONTEXT,
                         mem_type: str = None) -> List[Dict[str, Any]]:
         """Semantic search across all memories using ChromaDB."""
@@ -1413,6 +1568,33 @@ class EnhancedMemorySystem:
                     "distance": 0.5,  # No real distance for keyword
                     "similarity": 0.5,
                     "source": "keyword",
+                })
+
+        # Name tier: look up full names in the query, and any spelling variant
+        # of them the store happens to use, as literal terms. See
+        # _name_search_terms — this is the path that finds a "Sara Matthews"
+        # record when Alex typed "Sarah Matthews".
+        for term, term_sim in self._name_search_terms(query):
+            name_sql = ("SELECT * FROM memories "
+                        "WHERE (subject LIKE ? OR content LIKE ?)")
+            name_params: List[Any] = [f"%{term}%", f"%{term}%"]
+            if mem_type:
+                name_sql += " AND type = ?"
+                name_params.append(mem_type)
+            name_sql += " ORDER BY importance DESC LIMIT ?"
+            name_params.append(top_k)
+            for row in conn.execute(name_sql, name_params).fetchall():
+                row_id = row["id"]
+                if any(r["id"] == row_id for r in results):
+                    continue
+                results.append({
+                    "id": row_id,
+                    "content": f"{row['subject']}: {row['content']}",
+                    "type": row["type"],
+                    "subject": row["subject"],
+                    "distance": 1.0 - term_sim,
+                    "similarity": term_sim,
+                    "source": "name",
                 })
 
         conn.close()
