@@ -3012,9 +3012,13 @@ class EnhancedMemorySystem:
             "</last_conversation>"
         )
 
-    def _build_session_history_block(self) -> str:
-        """Recaps of the last few days' conversations, for cross-day
-        continuity. Empty string when there's nothing to show."""
+    def _recent_session_rows(self) -> List[Any]:
+        """The most recent day-recaps, newest first — the rows
+        <earlier_sessions> is built from.
+
+        Shared with _build_recalled_days_block so the two blocks can dedupe
+        against the days actually shown rather than against a guessed age
+        cutoff. Returns [] on any failure."""
         try:
             conn = self._conn()
             today = datetime.now().date().isoformat()
@@ -3025,8 +3029,14 @@ class EnhancedMemorySystem:
                 (today, SESSION_HISTORY_INJECT),
             ).fetchall()
             conn.close()
+            return list(rows)
         except Exception:
-            return ""
+            return []
+
+    def _build_session_history_block(self) -> str:
+        """Recaps of the last few days' conversations, for cross-day
+        continuity. Empty string when there's nothing to show."""
+        rows = self._recent_session_rows()
         if not rows:
             return ""
         lines = []
@@ -3035,11 +3045,20 @@ class EnhancedMemorySystem:
             lines.append(f"- {label}: {r['summary'][:300]}")
         return (
             "<earlier_sessions>\n"
-            "Recaps of recent conversations — rough context for continuity "
-            "(topics discussed, not verified facts; don't recite them "
-            "verbatim). The dates on each line ARE the ground truth for "
-            "when you talked with the user — use them freely when asked "
-            "about timing, continuity, or what came up recently:\n"
+            "Recaps of your recent conversations, drawn from the conversation "
+            "log. These are a real record of what was discussed and you may "
+            "answer from them directly — if the user asks what came up "
+            "yesterday or earlier this week, use these rather than saying you "
+            "have no record. They are summaries, so they are reliable about "
+            "TOPICS and dates but thin on exact wording and detail: give what "
+            "you have and offer to dig further, rather than either hedging it "
+            "all away or inventing specifics. Don't recite them verbatim or "
+            "list them back unprompted.\n"
+            "The date on each line is when you TALKED about it, which is not "
+            "necessarily when the thing itself happened. A recap saying an "
+            "event is \"tomorrow\" or \"upcoming\" means tomorrow relative to "
+            "THAT date — work out from the labels whether it has since "
+            "passed:\n"
             + "\n".join(lines) +
             "\n</earlier_sessions>"
         )
@@ -3048,11 +3067,22 @@ class EnhancedMemorySystem:
         """Surface an older day-recap that is topically relevant to what the
         user just said.
 
-        <earlier_sessions> only shows the last few days by date; this reaches
-        further back by semantic relevance, so a conversation from weeks or
-        months ago can resurface when its topic comes up again. This is the
-        durable, long-term recall Blue asked for. Empty string when nothing
-        old enough matches."""
+        <earlier_sessions> shows a fixed handful of days by date; this reaches
+        anywhere by semantic relevance, so a conversation from weeks or months
+        ago can resurface when its topic comes up again. This is the durable,
+        long-term recall Blue asked for. Empty string when nothing matches.
+
+        Dedup is against the days <earlier_sessions> ACTUALLY shows, not the
+        age cutoff this used to apply (discard anything newer than
+        SESSION_HISTORY_INJECT days). The cutoff was a proxy for "already shown
+        by date", and a leaky one: it let through an echo of any shown day
+        older than the cutoff, which happens whenever the user skips a few
+        days — the fixed list reaches back further than the cutoff does.
+        (It did not, as once suspected, block recent days from surfacing here:
+        at most SESSION_HISTORY_INJECT summarized days can fall inside the
+        cutoff, so those days are always in the shown list anyway. The reason
+        a recent day reads as unavailable is the framing on the block that
+        carries it, not this filter.)"""
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
         try:
@@ -3061,10 +3091,7 @@ class EnhancedMemorySystem:
             return ""
         if not hits:
             return ""
-        # Skip days already shown by date in <earlier_sessions> so the two
-        # blocks don't echo each other — this block is for older context only.
-        recent_floor = (datetime.now().date()
-                        - timedelta(days=SESSION_HISTORY_INJECT)).isoformat()
+        already_shown = {r["session_id"] for r in self._recent_session_rows()}
         lines: List[str] = []
         seen: set = set()
         for h in hits:
@@ -3073,7 +3100,7 @@ class EnhancedMemorySystem:
             if not m:
                 continue
             day = m.group(1)
-            if day >= recent_floor or day in seen:
+            if day in already_shown or day in seen:
                 continue
             seen.add(day)
             content = (h.get("content") or "").strip()
@@ -3085,9 +3112,14 @@ class EnhancedMemorySystem:
             return ""
         return (
             "<remembered_days>\n"
-            "From further back — a past day's recap that resurfaced because it "
-            "relates to what the user just said. Rough context for continuity, "
-            "not a verified fact; weave it in naturally only if it genuinely "
+            "A past day's recap that resurfaced because it relates to what the "
+            "user just said — from the conversation log, so you may answer "
+            "from it directly rather than saying you have no record. Same "
+            "caveat as <earlier_sessions>: reliable about topics and dates, "
+            "thin on detail, and the date is when you TALKED about it, not "
+            "necessarily when the thing happened — an event described as "
+            "\"tomorrow\" or \"upcoming\" was tomorrow relative to that date "
+            "and has almost certainly passed. Weave it in only if it genuinely "
             "helps, and don't recite it:\n"
             + "\n".join(lines) +
             "\n</remembered_days>"
