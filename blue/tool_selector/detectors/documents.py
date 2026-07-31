@@ -81,6 +81,49 @@ _NEAR_TOKENS_MAX_GAP = 30
 
 # Telling Blue what someone is called. Never a request to search the library,
 # however much the name collides with it.
+# People in the library are also people in Alex's life. Mark Humphries is a
+# folder AND a colleague, so "we're meeting with Mark Humphries tomorrow"
+# searched the library at 0.90 — and "I have a meeting with Eva Plach, add it to
+# my calendar" was taken away from create_reminder entirely. Vocabulary can't
+# separate these; the frame around the name can.
+_PERSON_INTERACTION_RE = re.compile(
+    r"\b(?:meeting|meet|meets|met)\s+(?:with|up with)\b"
+    r"|\b(?:our|the|my|a|another)\s+meeting\b"
+    r"|\bintroduce\s+(?:yourself|myself|me|us)\b"
+    r"|\bsay\s+(?:hi|hey|hello|thanks|thank you)\b"
+    r"|\bpitch\s+(?:myself|yourself|it|us)\s+to\b"
+    r"|\btalk(?:ing)?\s+to\b|\bspeak(?:ing)?\s+(?:to|with)\b"
+    r"|\bhave\s+(?:a|our|my|an)\s+(?:meeting|call|chat|lunch|coffee|appointment)\b"
+    r"|\b(?:email|e-mail|call|phone|text|message)\s+(?:doctor|dr\.?|professor|prof\.?)?\s*\w+\b"
+    r"|\badd\s+(?:it|this|that)\s+to\s+my\s+calendar\b"
+    r"|\bwhen\s+is\s+(?:the|our|my)\b",
+    re.I,
+)
+
+# ...but an explicit document frame outranks the person frame, so "summarise
+# the Toscano document" and "what does Ilyenkov argue" keep working even when
+# an interaction word happens to be nearby.
+_DOCUMENT_FRAME_RE = re.compile(
+    r"\b(?:text|texts|book|books|paper|papers|article|articles|chapter|chapters"
+    r"|document|documents|essay|essays|writing|writings|piece|publication"
+    r"|publications|pdf|substack|library|folder|syllabus|reading|readings)\b"
+    r"|\bwhat\s+does\b[^.!?]{0,40}\b(?:argue|argues|say|says|mean|means|write|"
+    r"writes|claim|claims|think|thinks)\b"
+    r"|\b(?:read|re-read|reread|summari[sz]e|summari[sz]es|quote|cite|cites)\b",
+    re.I,
+)
+
+# Pointing at an organisation or a web page is a question about the world, not
+# about the library: "check the balsillie institute", "is there something with
+# Mark Humphries on that site". Checked against the live library rather than
+# hard-coded, because "Frankfurt School" or "Institute for Social Research"
+# would be perfectly good titles — if the word IS a library token, the guard
+# stands down and the search proceeds.
+_EXTERNAL_PLACE_RE = re.compile(
+    r"\b(site|website|web page|webpage|institute|school|department|faculty)\b",
+    re.I,
+)
+
 _NAMING_STATEMENT_RE = re.compile(
     r"\bmy (?:first |last |full |middle )?name is\b"
     r"|\byour (?:first |last |full )?name is\b"
@@ -244,6 +287,21 @@ class DocumentsDetector(BaseDetector):
         # library document at 0.90. Stating a name is never a search.
         if _NAMING_STATEMENT_RE.search(msg_lower):
             return None
+        # Interacting with a person who happens to be an author is not a
+        # library query — unless the message also frames a document.
+        if (_PERSON_INTERACTION_RE.search(msg_lower)
+                and not _DOCUMENT_FRAME_RE.search(msg_lower)):
+            return None
+        cls._refresh_library()
+        # An organisation or web page the user is pointing at — unless that
+        # very word names something in the library.
+        places = {p.lower() for p in _EXTERNAL_PLACE_RE.findall(msg_lower)}
+        if places and not _DOCUMENT_FRAME_RE.search(msg_lower):
+            library_words = set(cls._lib_rare_tokens or ())
+            for toks in (cls._lib_tokens_by_doc or ()):
+                library_words |= toks
+            if not (places & library_words):
+                return None
         cls._refresh_library()
         if not cls._lib_tokens_by_doc:
             return None

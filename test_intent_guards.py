@@ -314,6 +314,50 @@ def test_real_library_queries_still_work(msg):
     assert _selected_tool(msg) == "search_documents"
 
 
+# ---- a person who is also an author -----------------------------------------
+# Mark Humphries is a colleague AND a library folder. Every message here is real.
+
+PERSON_CONTEXT = [
+    "We're meeting with mark Humphries tomorrow.",
+    "We have a meeting on Thursday with mark Humphries.",
+    "When is the meeting with mark Humphries.",
+    "I want you to introduce yourself to doctor mark Humphries.",
+    "You wanna say hi to mark Humphries.",
+    "Help me pitch myself to mark Humphries in terms of what I can offer.",
+    # This one was taken away from create_reminder entirely.
+    "i have a meeting with eva Plach on thursday may 29 at 2pm. add it to my calendar.",
+    # Pointing at an organisation or a web page, not at the library.
+    "Is there something there with mark Humphries on that site.",
+    "Can you see what other kinds of work mark Humphries is doing, check the balsillie institute",
+]
+
+AUTHOR_CONTEXT = [
+    "what did Humphries write about",
+    "Can you read the Humphries substack piece",
+    "Summarize the toscano document.",
+    "And how is this related to the text by toscano in your library.",
+    # A document frame outranks a place word.
+    "read the Humphries substack piece about the institute",
+]
+
+
+@pytest.mark.parametrize("msg", PERSON_CONTEXT)
+def test_interacting_with_a_person_is_not_a_library_search(msg):
+    assert _selected_tool(msg) != "search_documents"
+
+
+@pytest.mark.parametrize("msg", AUTHOR_CONTEXT)
+def test_asking_about_their_writing_still_searches_the_library(msg):
+    assert _selected_tool(msg) == "search_documents"
+
+
+def test_scheduling_a_meeting_with_an_author_reaches_the_calendar():
+    """The collision wasn't only noise — it was stealing real calendar work."""
+    assert _selected_tool(
+        "i have a meeting with eva Plach on thursday at 2pm, add it to my calendar"
+    ) == "create_reminder"
+
+
 def test_named_sources_and_real_requests_still_work():
     from blue.tool_selector.detectors.web import WebDetector
     msg = "headlines from the guardian"
