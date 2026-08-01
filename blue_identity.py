@@ -1467,7 +1467,19 @@ _CORRECTION_ACK_RE = re.compile(
     r"|\bthank you for (?:the|that|your) correction\b"
     r"|\bthanks for (?:the|that) correction\b"
     r"|\bnoted[,.]? (?:i(?:['’]ve| have) )?(?:corrected|updated) "
-    r"(?:my|the) (?:records?|notes?|memory)\b",
+    r"(?:my|the) (?:records?|notes?|memory)\b"
+    # The informal register the local models actually use. Only the stiff
+    # phrasings above were listed, so Casper opening "Oops! Thanks for catching
+    # that. I must have mixed up the digits again" and "You're right! Let me
+    # update my memory" — to questions that corrected nothing — went straight
+    # through (2026-08-01).
+    r"|\bthanks for catching (?:that|this|it)\b"
+    r"|\b(?:oops|whoops|my bad|my mistake|you(?:['’]re| are) right)\b"
+    r"|\bi (?:must have|may have|might have) (?:mixed|gotten|got|had) "
+    r"(?:that|those|them|it|the \w+)?\s*(?:up|wrong|mixed up)?\b"
+    r"|\blet me (?:get (?:that|this|it) (?:straight|right)|update my memory)\b"
+    r"|\bi really need to lock (?:this|that|it) in\b"
+    r"|\bthanks for the correction\b",
     re.IGNORECASE,
 )
 # ...and the user-side cues that make an acknowledgment legitimate. Generous

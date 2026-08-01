@@ -14643,6 +14643,15 @@ _ASSISTANT_REFUSAL_MARKERS = (
 _FAMILY_QUERY_RE = re.compile(
     r"\b(?:family|famly|kids|children|daughters?|girls|wife|partner|"
     r"stella|emmy|athena|vilda|nori)\b"
+    # Roster questions that name nobody. "Do you remember everyone's names"
+    # matched none of the above, so the canonical family block was NOT injected
+    # on the one turn that asked for it — and Casper invented a household,
+    # then a different one, then dropped two children (2026-08-01).
+    r"|\beveryone['’]?s?\b|\beverybody['’]?s?\b|\bhousehold\b"
+    r"|\bwho (?:all )?(?:else )?(?:lives|live|is|are)\b[^.!?]{0,20}"
+    r"\b(?:here|home|house|family|with (?:me|us))\b"
+    r"|\b(?:remember|recall|know|list|name|tell me)\b[^.!?]{0,24}"
+    r"\bnames?\b"
     r"|\b(?:ages?|birthday)s?\b[^.!?]{0,30}\b(?:wrong|right|correct|off)\b"
     r"|\b(?:wrong|getting (?:them|it|these) wrong|still wrong|not (?:right|correct))\b"
     r"[^.!?]{0,20}\b(?:age|ages|old)\b",
@@ -14682,6 +14691,82 @@ def _canonical_person_ages() -> dict:
     return out
 
 
+# An age can be written with a unit ("8 years old"), in brackets ("(8)"), or —
+# most often, and previously not matched at all — bare: "Athena is 8." Casper
+# listed three children's ages in that bare form, two of them invented, and the
+# guard saw nothing because it required a unit (2026-08-01). Markdown counts as
+# a terminator so "**Athena** is **8**." is caught too.
+_AGE_TAIL = r"\)|years?[- ]?old|yrs?\b|(?=[\s]*[.,;:!?*\n)]|\s*$)"
+
+# A bare number often counts something that is not an age.
+_NOT_AN_AGE_RE = re.compile(
+    r"\b(?:grade|chapter|level|room|page|number|no|floor|apt|unit|bus|track|"
+    r"channel|size|version|part|week|day|hour|minute|month)\s*$")
+
+
+# The roster check must only run when the answer is meant to be the WHOLE
+# household. "How old are the girls?" answered with the three daughters is
+# complete and correct — flagging it for omitting the dog would be worse than
+# the bug. Either the user asked for the whole roster, or the reply presents
+# itself as the full list.
+_ROSTER_QUERY_RE = re.compile(
+    r"\beveryone['’]?s?\b|\beverybody['’]?s?\b|\bhousehold\b"
+    r"|\bwhole family\b|\ball of (?:us|them)\b"
+    r"|\bwho (?:all )?(?:else )?(?:lives|live|is|are)\b[^.!?]{0,20}"
+    r"\b(?:here|home|house|family|with (?:me|us))\b",
+    re.I,
+)
+_COMPLETENESS_CLAIM_RE = re.compile(
+    r"\b(?:here (?:is|are)|this is) the (?:correct |full |complete |updated )?"
+    r"list\b"
+    r"|\b(?:correct|full|complete|updated) list\b"
+    r"|\beveryone in (?:the|your|our) (?:household|family|home)\b"
+    r"|\bi(?:['’]ve| have) got them (?:straight|right)\b"
+    r"|\bthat(?:['’]s| is) everyone\b",
+    re.I,
+)
+
+
+def _canonical_household_names() -> List[str]:
+    """Everyone the household roster should contain: daughters, partner, pet."""
+    try:
+        if not (ENHANCED_MEMORY_AVAILABLE and memory_system):
+            return []
+        facts = memory_system.load_facts() or {}
+    except Exception:
+        return []
+    names: List[str] = []
+    for key in ("daughter_name", "daughter_names"):
+        for piece in re.split(r"[,|;]|\sand\s", str(facts.get(key) or "")):
+            piece = piece.strip()
+            if piece and piece.lower() not in (n.lower() for n in names):
+                names.append(piece)
+    for key in ("partner_name", "pet_name"):
+        piece = str(facts.get(key) or "").strip()
+        if piece and piece.lower() not in (n.lower() for n in names):
+            names.append(piece)
+    return names
+
+
+def _dropped_household_members(text: str, roster: List[str]) -> List[str]:
+    """Roster members missing from a reply that is enumerating the household.
+
+    Asked who was in the family, Casper answered three times and each answer
+    named a different set — the last one, offered as "here is the correct
+    list", contained Emmy, Stella and Nori and had quietly lost both Athena
+    and Vilda (2026-08-01). Naming several members and omitting others is the
+    signature; mentioning one person in passing is not.
+    """
+    if len(roster) < 3:
+        return []
+    low = (text or "").lower()
+    present = [n for n in roster if re.search(rf"\b{re.escape(n.lower())}\b", low)]
+    missing = [n for n in roster if n not in present]
+    if len(present) >= 2 and missing:
+        return missing
+    return []
+
+
 def _misstated_ages(text: str, canonical: dict) -> dict:
     """person -> (stated, true) for ages asserted in `text` that contradict
     the name-bound age facts. Matches "Emmy (10 years old)", "Athena is 8
@@ -14695,7 +14780,11 @@ def _misstated_ages(text: str, canonical: dict) -> dict:
     for person, age in (canonical or {}).items():
         for m in re.finditer(
                 rf"\b{re.escape(person)}\b((?:(?!{others}|[.!?\n]).){{0,48}}?)"
-                rf"(\d{{1,2}})\s*(?:\)|years?[- ]?old|yrs?\b)", low):
+                rf"(\d{{1,2}})\s*(?:{_AGE_TAIL})", low):
+            # "grade 5", "page 5", "10 minutes" — a number that counts
+            # something else entirely.
+            if _NOT_AN_AGE_RE.search(m.group(1)):
+                continue
             if m.group(2) != age:
                 wrong[person] = (m.group(2), age)
     return wrong
@@ -15433,9 +15522,17 @@ def chat_completions():
             # experience simple and avoids surfacing Alex's private notes (or his
             # calendar) to a child. Within-session continuity still comes from
             # the turns the page carries on each request.
+            # The length gate exists to skip context for filler ("ok", "sure").
+            # But a short message about the household is exactly when the facts
+            # are needed: "everyone is home" is three words, got no context at
+            # all, and set up three turns of invented family (2026-08-01).
+            _short_but_substantive = bool(
+                last_user_msg and isinstance(last_user_msg, str)
+                and _FAMILY_QUERY_RE.search(last_user_msg))
             _needs_history = (not _grounded_reply
                               and user_name not in _CHAT_ONLY_USERS) and (
-                len(last_user_msg.split()) > 3 if last_user_msg else False)
+                (len(last_user_msg.split()) > 3 or _short_but_substantive)
+                if last_user_msg else False)
             if _needs_history:
                 # Enhanced memory has its own SQLite store and ChromaDB — it
                 # does NOT depend on the legacy `blue_database` module. Don't
@@ -15822,6 +15919,19 @@ def chat_completions():
                     r"|(?:might|may|could) have been a hallucination"
                     r"|was (?:just )?a hallucination",
                     re.I)
+                # A roster answer that quietly loses people. Only checked when
+                # the user actually asked about the household, so an ordinary
+                # mention of one or two names is never treated as a list.
+                _household_roster = _canonical_household_names()
+                _roster_answer = bool(
+                    _household_roster
+                    and ((last_user_msg and isinstance(last_user_msg, str)
+                          and _ROSTER_QUERY_RE.search(last_user_msg))
+                         or _COMPLETENESS_CLAIM_RE.search(final_content or "")))
+                _dropped_roster = (
+                    _dropped_household_members(final_content, _household_roster)
+                    if _roster_answer else [])
+
                 _has_family_facts = bool(_person_ages)
                 if not _has_family_facts:
                     try:
@@ -15950,6 +16060,21 @@ def chat_completions():
                         f"household facts: {_truth}. Answer again using ONLY "
                         "these ages — do not guess or shuffle.]")
                     if _redo_text and not _misstated_ages(_redo_text, _person_ages):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
+                elif _dropped_roster:
+                    # Answering "who is in the family" with a partial roster
+                    # offered as complete. Each retelling lost someone until
+                    # two of the three daughters were gone (2026-08-01).
+                    print(f"   [ANTI-PARROT] household roster dropped {_dropped_roster} — regenerating once")
+                    _redo_text = _regen_once(
+                        "[Your list left people out. Everyone in the household: "
+                        f"{', '.join(_household_roster)}. List them ALL, with "
+                        "the relationships you have on record, and do not "
+                        "apologise for a correction nobody made.]")
+                    if (_redo_text
+                            and not _dropped_household_members(
+                                _redo_text, _household_roster)):
                         final_content = _redo_text
                         response["choices"][0]["message"]["content"] = final_content
                 elif (robot in _continuity_routes.ROBOTS and _has_family_facts
