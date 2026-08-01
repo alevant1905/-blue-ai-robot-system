@@ -14727,6 +14727,39 @@ _COMPLETENESS_CLAIM_RE = re.compile(
 )
 
 
+# Asked for names, answered with ages. Alex asked "do you remember everyone's
+# names" and got a list of ages — three times, never having mentioned age once
+# (2026-08-01). The <family> block renders each daughter as "... age 10 and in
+# French immersion", so a model told to "answer from these facts" recites the
+# whole line instead of answering the question. Wrong ages were only half the
+# problem; ages were never the question.
+_ASKED_FOR_NAMES_RE = re.compile(
+    r"\bnames?\b|\bwho (?:is|are|all)\b|\bremember everyone"
+    r"|\beveryone['’]?s?\b|\beverybody['’]?s?\b",
+    re.I,
+)
+_ASKED_ABOUT_AGE_RE = re.compile(
+    r"\bages?\b|\bhow old\b|\byears? old\b|\bbirthday\b|\bborn\b", re.I)
+
+
+def _unrequested_ages(text: str, user_msg: str, canonical: dict) -> List[str]:
+    """People given an age in reply to a question that asked for names."""
+    if not canonical or not user_msg:
+        return []
+    if not _ASKED_FOR_NAMES_RE.search(user_msg):
+        return []
+    if _ASKED_ABOUT_AGE_RE.search(user_msg):
+        return []
+    low = (text or "").lower()
+    stated = []
+    for person in canonical:
+        if re.search(
+                rf"\b{re.escape(person)}\b((?:(?![.!?\n]).){{0,24}}?)"
+                rf"(\d{{1,2}})\s*(?:{_AGE_TAIL})", low):
+            stated.append(person)
+    return stated if len(stated) >= 2 else []
+
+
 def _canonical_household_names() -> List[str]:
     """Everyone the household roster should contain: daughters, partner, pet."""
     try:
@@ -14937,9 +14970,13 @@ def _family_ground_truth_block() -> str:
         "earlier in this conversation. If an earlier reply gave different "
         "ages or names, THOSE were wrong; use these:\n- "
         + "\n- ".join(parts)
-        + "\nAnswer questions about the family warmly and directly from these "
-        "facts. Never claim you have no memory of the family or that these "
-        "are guesses. If a requested detail is absent, say it is not recorded; "
+        + "\nThis is reference material, NOT a template for your reply. Answer "
+        "only what was actually asked, in a sentence or two of ordinary "
+        "speech: if the question is about names, give names; mention an age "
+        "ONLY if age was asked about. Do not list every field you can see, do "
+        "not answer with bullet points, and do not recite this block back. "
+        "Never claim you have no memory of the family or that these are "
+        "guesses. If a requested detail is absent, say it is not recorded; "
         "never infer interests, personality, routines, or abilities from a "
         "person's age or from generic assumptions.\n</family>"
     )
@@ -15932,6 +15969,16 @@ def chat_completions():
                     _dropped_household_members(final_content, _household_roster)
                     if _roster_answer else [])
 
+                # The frame carries across turns: "not just the kids" is a
+                # follow-up to "do you remember everyone's names" and inherits
+                # its question. Any mention of age in the window switches the
+                # check off, so it can only ever under-fire.
+                _ask_window = " ".join(
+                    str(m.get("content") or "")
+                    for m in user_messages[-3:]) if user_messages else ""
+                _unasked_ages = _unrequested_ages(
+                    final_content, _ask_window, _person_ages)
+
                 _has_family_facts = bool(_person_ages)
                 if not _has_family_facts:
                     try:
@@ -16046,6 +16093,21 @@ def chat_completions():
                         )
                         print("   [IDENTITY] retry still invalid — using canonical fallback")
                     response["choices"][0]["message"]["content"] = final_content
+                elif _unasked_ages:
+                    # Ranked ahead of the wrong-age fix on purpose: correcting
+                    # 8 to 10 still answers a question nobody asked. Alex asked
+                    # for names three times and got ages every time.
+                    print(f"   [ANTI-PARROT] ages given for {_unasked_ages} but not asked — regenerating once")
+                    _redo_text = _regen_once(
+                        "[You were asked about names, not ages — nobody "
+                        "mentioned age. Answer the question actually asked: "
+                        "give the names and who each person is, in a sentence "
+                        "or two. Do not list ages, do not use bullet points, "
+                        "and do not apologise.]")
+                    if _redo_text and not _unrequested_ages(
+                            _redo_text, _ask_window, _person_ages):
+                        final_content = _redo_text
+                        response["choices"][0]["message"]["content"] = final_content
                 elif _wrong_ages:
                     # Wrong ages replay from history and reshuffle randomly
                     # under bare "wrong" corrections — hand the model the

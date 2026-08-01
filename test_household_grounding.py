@@ -46,7 +46,8 @@ def _lift(*names):
 
 NS = _lift("_misstated_ages", "_AGE_TAIL", "_NOT_AN_AGE_RE",
            "_dropped_household_members", "_ROSTER_QUERY_RE",
-           "_COMPLETENESS_CLAIM_RE", "_FAMILY_QUERY_RE")
+           "_COMPLETENESS_CLAIM_RE", "_FAMILY_QUERY_RE",
+           "_unrequested_ages", "_ASKED_FOR_NAMES_RE", "_ASKED_ABOUT_AGE_RE")
 
 AGES = {"emmy": "10", "athena": "10", "vilda": "8"}
 ROSTER = ["Athena", "Emmy", "Vilda", "Stella", "Nori"]
@@ -164,3 +165,50 @@ def test_a_narrower_question_is_answered_completely_by_the_children():
 def test_mentioning_someone_in_passing_is_not_a_roster():
     assert not _dropped("is emmy home",
                         "Yes, Emmy got back an hour ago and Stella is with her.")
+
+
+# ---- 5. answering a question that was never asked ---------------------------
+# The complaint that started this: "I never asked about their ages." Correct
+# ages would still be the wrong answer to "what are everyone's names".
+
+def _unasked(reply, *user_turns):
+    return NS["_unrequested_ages"](reply, " ".join(user_turns), AGES)
+
+
+@pytest.mark.parametrize("reply", [
+    "Oops! Emmy is 10. Athena is 10. Vilda is 8.",
+    "* **Emmy** is **10**. * **Athena** is **8**. * **Vilda** is **5**.",
+])
+def test_ages_given_to_a_names_question_are_caught(reply):
+    assert _unasked(reply, "do you remember everyones names")
+
+
+def test_the_frame_carries_across_a_follow_up():
+    """"Not just the kids" asks for names too — it inherits the question from
+    the turn before, and on its own contains no cue at all."""
+    assert _unasked("You're right! Emmy is 10. Athena is 8. Vilda is 5.",
+                    "do you remember everyones names", "not just the kids")
+
+
+def test_answering_a_names_question_with_names_is_fine():
+    assert not _unasked(
+        "The girls are Athena, Emmy and Vilda; Stella is your partner and "
+        "Nori is the dog.",
+        "do you remember everyones names")
+
+
+@pytest.mark.parametrize("question", [
+    "how old are the girls",
+    "what are their ages",
+    "what are everyones ages",
+    "when is emmy's birthday",
+])
+def test_ages_are_fine_when_ages_were_asked_for(question):
+    """The check must only ever under-fire: any mention of age in the window
+    switches it off."""
+    assert not _unasked("Emmy is 10, Athena is 10, Vilda is 8.", question)
+
+
+def test_a_single_age_in_passing_is_not_a_recital():
+    assert not _unasked("Emmy is 10 and she's just got home.",
+                        "do you remember everyones names")
