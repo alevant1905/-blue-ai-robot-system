@@ -1578,7 +1578,7 @@ from blue.tool_selector import (
     ImprovedToolSelector,
     integrate_with_existing_system,
 )
-from blue.utils import strip_pasted_block
+from blue.utils import strip_conversational_filler, strip_pasted_block
 
 # Direct Ohbot-family head control (this branch only — replaces the Ohbot app
 # for the head). The module is defensive: if a library isn't installed or a
@@ -11995,6 +11995,24 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # Spoken turns: force brevity. This both shortens what Blue says aloud and,
     # because the local model generates fewer tokens, makes him start talking
     # noticeably sooner — the main remaining source of voice latency.
+    # Typed turns get a lighter version of the spoken rule. Openers that restate
+    # the question ("Great! That makes things much easier. How can I help you
+    # with everyone being home?") and bullet lists for conversational answers
+    # can't be cleaned up after the fact the way a closing offer can, so they
+    # have to be asked for here.
+    if not voice and isinstance(system_msg, dict):
+        chat_note = (
+            "\nSTYLE: Reply the way a person would in a message — usually two "
+            "to five sentences. Answer the question that was actually asked, "
+            "and answer it first; don't restate the question back, don't open "
+            "with filler ('Great!', 'That makes things easier'), and don't "
+            "close by offering further help. Use a bulleted list only when the "
+            "content is genuinely a list the user asked for — never for a "
+            "conversational answer about people or plans. No emoji.\n"
+        )
+        system_msg = {"role": "system",
+                      "content": (system_msg.get("content", "") + chat_note)}
+
     if voice and isinstance(system_msg, dict):
         voice_note = (
             "\nSPOKEN REPLY: This message was spoken aloud and your answer will be "
@@ -16341,6 +16359,24 @@ def chat_completions():
                         response["choices"][0]["message"]["content"] = final_content
             except Exception as e:
                 log.warning(f"[ANTI-PARROT] check failed: {e}")
+
+            # Strip the closing offer and the emoji. Done here rather than by
+            # instruction because the persona has asked for concise replies all
+            # along and still gets "Is there anything specific you'd like me to
+            # help with? 😊" on one turn in five. The kids' chat keeps its
+            # emoji — Vilda's page is meant to be friendly.
+            try:
+                if final_content:
+                    _styled = strip_conversational_filler(
+                        final_content,
+                        allow_emoji=user_name in _CHAT_ONLY_USERS)
+                    if _styled and _styled != final_content:
+                        _dropped_chars = len(final_content) - len(_styled)
+                        print(f"   [STYLE] trimmed {_dropped_chars} chars of filler/emoji")
+                        final_content = _styled
+                        response["choices"][0]["message"]["content"] = final_content
+            except Exception as e:
+                log.warning(f"[STYLE] filler strip failed: {e}")
 
             # Prepend proactive content: the once-a-day schedule briefing,
             # then any reminder alerts queued by the heartbeat thread. Done

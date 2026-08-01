@@ -90,6 +90,89 @@ def strip_pasted_block(text: str) -> str:
     return " ".join(p for p in (head, tail) if p).strip()
 
 
+# ================================================================================
+# CONVERSATIONAL FILLER
+# ================================================================================
+
+# Measured across assistant replies since 2026-06-01: a closing offer on 14% of
+# Blue's, 17% of Hexia's and 20% of Casper's; emoji on 15% / 42% / 51%. A strong
+# "no lists, no emoji, get to the point" rule already existed but applied only to
+# SPOKEN turns, so typed chat had nothing. Casper's four-turn chat on 2026-08-01
+# ended every single turn with "Is there anything specific you'd like me to help
+# with? 😊".
+#
+# Only content-free closers are removed. "Would you like me to add that to your
+# calendar?" is a real offer and is deliberately NOT matched — losing it would
+# break an interaction the user relies on.
+_FILLER_CLOSER_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:but\s+)?(?:is|are)\s+there\s+anything\s+(?:else|specific|particular|"
+    r"more)\b.*"
+    r"|anything\s+else\b.*"
+    r"|let\s+me\s+know\s+if\s+(?:you|there|i)\b.*"
+    r"|(?:just\s+)?let\s+me\s+know\b[!.]*"
+    r"|how\s+(?:can|may)\s+i\s+(?:help|assist)\b.*"
+    r"|what\s+(?:can|else can)\s+i\s+(?:help|do)\b.*"
+    r"|i(?:'|’)?m\s+here\s+(?:to\s+help|if\s+you)\b.*"
+    r"|feel\s+free\s+to\s+ask\b.*"
+    r"|hope\s+(?:that|this)\s+helps\b.*"
+    r")\s*$",
+    re.I,
+)
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"   # pictographs, emoticons, symbols
+    "\U0001F000-\U0001F0FF"
+    "☀-➿"           # misc symbols and dingbats
+    "️‍"            # variation selectors, ZWJ
+    "]+"
+)
+
+# Where the final sentence begins: after a sentence ender, OR after a blank
+# line. The second case matters because a closer often follows a bulleted body
+# whose last line has no full stop ("...The Education Industrial Complex\n\nLet
+# me know if you need any help!").
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+|\n[ \t]*\n")
+
+
+def strip_conversational_filler(text: str, allow_emoji: bool = False) -> str:
+    """Remove content-free closing offers, and optionally emoji.
+
+    Only the TAIL is touched: trailing filler sentences are chopped off one at
+    a time, so "Thanks! Is there anything else? Let me know!" loses both. The
+    body is left byte-for-byte alone — an earlier version split the whole reply
+    into sentences and rejoined them with spaces, which silently flattened
+    every paragraph break in long answers.
+
+    Never returns empty: if the whole reply looks like a closer, it is kept,
+    because a reply that is all closer beats no reply.
+    """
+    if not text or not text.strip():
+        return text
+    cleaned = text if allow_emoji else _EMOJI_RE.sub("", text)
+
+    while True:
+        stripped = cleaned.rstrip()
+        last = None
+        for match in _SENTENCE_BOUNDARY_RE.finditer(stripped):
+            last = match
+        if last is None:
+            break
+        head, tail = stripped[:last.start()], stripped[last.end():]
+        if not head.strip() or not _FILLER_CLOSER_RE.match(tail):
+            break
+        cleaned = head
+
+    # Emoji removal can leave doubled spaces or a space before punctuation.
+    # Horizontal whitespace only — newlines are structure, not slack.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]+([,.!?;:])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or text.strip()
+
+
 def parse_compound_request(message: str) -> List[Dict[str, Any]]:
     """
     Parse compound requests into individual actions.
