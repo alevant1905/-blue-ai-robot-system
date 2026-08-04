@@ -14212,6 +14212,9 @@ _duet_routes.register(app)
 from blue.server.routes import banter as _banter_routes
 _banter_routes.register(app)
 
+from blue.server.routes import panel as _panel_routes
+_panel_routes.register(app)
+
 
 # ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
 # (routes live in blue/server/routes/jspace.py)
