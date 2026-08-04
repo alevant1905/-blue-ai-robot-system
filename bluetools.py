@@ -1586,6 +1586,9 @@ from blue.utils import strip_conversational_filler, strip_pasted_block
 from blue import head as blue_head
 from blue.mood_eyes import mood_eye_color
 from blue.agreement import agreement_gesture
+# Every call to the single local model goes through this gate, so a background
+# reflection and the user's live question cannot run against it at once.
+from blue.llm_coordinator import llm_slot
 
 # Connect the head at module load (covers both entry points: `python
 # bluetools.py` directly AND `python run.py` which imports this module). Make
@@ -1957,7 +1960,10 @@ class LMStudioClient:
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                resp = requests.post(self.base_url, json=payload, timeout=self.timeout)
+                # Serialized like the other HTTP path (see _post_to_model).
+                # Held for the call only, never across the backoff sleeps below.
+                with llm_slot(foreground=True):
+                    resp = requests.post(self.base_url, json=payload, timeout=self.timeout)
                 resp.raise_for_status()
                 result = resp.json()
                 
@@ -10323,6 +10329,26 @@ def extract_email_subject_and_body(message: str) -> tuple:
     return subject, body
 
 
+def _post_to_model(payload: Dict, timeout: int = 120) -> Dict:
+    """One HTTP call to the local model, serialized through the priority gate.
+
+    Chat never took the gate. Duet, banter, panel and continuity all did, so
+    the continuity reflection that fires after EVERY exchange was free to run
+    against the same loaded model as the user's next question — two requests
+    competing for one model. Measured cost to that question: +0.40s.
+
+    The gate is taken here, at the HTTP call, rather than around a whole turn:
+    tool execution, retrieval and retry backoff are not model work and must
+    not hold it, or a slow web_search in chat would stall a running duet.
+    Nested acquisitions are no-ops (see llm_slot), so the routes that already
+    wrap whole turns keep their declared priority.
+    """
+    with llm_slot(foreground=True):
+        response = requests.post(LM_STUDIO_URL, json=payload, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1) -> Dict:
     global _vision_queue, _last_vision_recognition
 
@@ -10720,9 +10746,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         )
 
     try:
-        response = requests.post(LM_STUDIO_URL, json=payload, timeout=120)
-        response.raise_for_status()
-        return response.json()
+        return _post_to_model(payload)
     except Exception as e:
         # Self-heal on context overflow: parse the model's real context size out
         # of the error, retrim to fit, retry once. Avoids depending on the
@@ -10787,9 +10811,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 )
                 payload['messages'] = _normalize_message_alternation(_retrimmed)
                 try:
-                    response = requests.post(LM_STUDIO_URL, json=payload, timeout=120)
-                    response.raise_for_status()
-                    return response.json()
+                    return _post_to_model(payload)
                 except Exception as e2:
                     print(f"[ERROR] Retry after n_ctx trim also failed: {e2}")
                     e = e2

@@ -336,6 +336,9 @@ class EnhancedMemorySystem:
         self._last_consolidation = 0
         self._last_rhythm_update = 0.0
         self._session_mem_backfilled = False
+        # Raw ChromaDB hits from the most recent whole-store search, so the
+        # proactive nudge does not re-embed and re-query the same message.
+        self._last_semantic: Optional[Dict[str, Any]] = None
         self._ensure_db()
         self._migrate_legacy_data()
         self._self_heal_index()
@@ -1595,22 +1598,34 @@ class EnhancedMemorySystem:
                 )
 
                 if chroma_results and chroma_results["ids"] and chroma_results["ids"][0]:
+                    # Kept in ChromaDB's own distance order, before the
+                    # recency re-rank and the top_k cut below, so
+                    # get_proactive_memories can reuse this instead of
+                    # embedding and querying the same text a second time.
+                    semantic_hits: List[Dict[str, Any]] = []
                     for doc_id, doc, meta, dist in zip(
                         chroma_results["ids"][0],
                         chroma_results["documents"][0],
                         chroma_results["metadatas"][0],
                         chroma_results["distances"][0],
                     ):
+                        hit = {
+                            "id": doc_id,
+                            "content": doc,
+                            "type": meta.get("type", "unknown"),
+                            "subject": meta.get("subject", ""),
+                            "distance": dist,
+                            "similarity": 1.0 - dist,
+                            "source": "semantic",
+                        }
+                        semantic_hits.append(hit)
                         if dist <= SIMILARITY_THRESHOLD:
-                            results.append({
-                                "id": doc_id,
-                                "content": doc,
-                                "type": meta.get("type", "unknown"),
-                                "subject": meta.get("subject", ""),
-                                "distance": dist,
-                                "similarity": 1.0 - dist,
-                                "source": "semantic",
-                            })
+                            results.append(hit)
+                    self._last_semantic = {
+                        "query": query,
+                        "mem_type": mem_type,
+                        "hits": semantic_hits,
+                    }
             except Exception as e:
                 print(f"   [MEM-SEARCH] ChromaDB error: {e}")
 
@@ -2752,40 +2767,52 @@ class EnhancedMemorySystem:
         Distinct from the broad <relevant_memories> injection: it uses a
         tighter similarity threshold (PROACTIVE_SIMILARITY_THRESHOLD) so it
         fires rarely, and it drops junk memories so a nudge is trustworthy.
+
+        build_context calls search_memories on this same text a moment before
+        calling this, and both embedded the message and queried ChromaDB
+        independently — 0.12s of duplicate work on every turn, measured warm.
+        The proactive set is a strict subset of what that search already
+        fetched: a tighter distance cut over the same ranking. So reuse those
+        hits when they are for this exact query, and only query when there is
+        nothing to reuse.
         """
         if not user_message or len(user_message.strip()) < 4:
             return None
-        collection = _get_memory_collection()
-        if collection is None or collection.count() == 0:
-            return None
 
-        try:
-            results = collection.query(
-                query_texts=[user_message],
-                n_results=4,
-                include=["documents", "metadatas", "distances"],
-            )
-        except Exception as e:
-            print(f"   [MEM-PROACTIVE] Error: {e}")
-            return None
-
-        if not results or not results.get("distances") or not results["distances"][0]:
-            return None
+        hits = self._reusable_semantic_hits(user_message)
+        if hits is None:
+            collection = _get_memory_collection()
+            if collection is None or collection.count() == 0:
+                return None
+            try:
+                results = collection.query(
+                    query_texts=[user_message],
+                    n_results=4,
+                    include=["documents", "metadatas", "distances"],
+                )
+            except Exception as e:
+                print(f"   [MEM-PROACTIVE] Error: {e}")
+                return None
+            if not results or not results.get("distances") or not results["distances"][0]:
+                return None
+            hits = [
+                {"content": doc, "subject": meta.get("subject") or "",
+                 "type": meta.get("type", ""), "distance": dist}
+                for doc, meta, dist in zip(
+                    results["documents"][0],
+                    results["metadatas"][0],
+                    results["distances"][0],
+                )
+            ]
 
         hints: List[str] = []
-        for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        ):
-            if dist > PROACTIVE_SIMILARITY_THRESHOLD:
+        for hit in hits:
+            if hit["distance"] > PROACTIVE_SIMILARITY_THRESHOLD:
                 continue
-            content = (doc or "").strip()
-            subject = (meta.get("subject") or "")
-            mtype = meta.get("type", "")
+            content = (hit["content"] or "").strip()
             # Same junk filter as <relevant_memories> — never nudge with garbage.
             if not content or self._is_junk_memory(
-                subject.lower(), content.lower(), mtype
+                (hit["subject"] or "").lower(), content.lower(), hit["type"] or ""
             ):
                 continue
             hints.append(f"- {content[:160]}")
@@ -2793,6 +2820,24 @@ class EnhancedMemorySystem:
                 break
 
         return "\n".join(hints) if hints else None
+
+    def _reusable_semantic_hits(
+        self, user_message: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """The last search's raw ChromaDB hits, if they were for this text.
+
+        Only an unfiltered whole-store search qualifies: a type-filtered one
+        ranked a different population, and reusing it would let the proactive
+        nudge fire off the wrong candidate set. Distance order is ChromaDB's
+        own, so the first four entries are exactly what a fresh n_results=4
+        query would have returned.
+        """
+        memo = getattr(self, "_last_semantic", None)
+        if not memo or memo.get("mem_type") is not None:
+            return None
+        if memo.get("query") != user_message:
+            return None
+        return memo.get("hits") or []
 
     # ------------------------------------------------------------------ Consolidation & decay
 

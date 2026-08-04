@@ -23,7 +23,7 @@ import bluetools as bt
 from flask import jsonify, render_template_string, request
 
 from blue.continuity import ContinuityStore, DEFAULT_DRIVES, DRIVE_LABELS
-from blue.llm_coordinator import llm_slot
+from blue.llm_coordinator import llm_slot, seconds_since_foreground
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
     identity_request_kind,
@@ -877,7 +877,7 @@ class RobotContinuity:
         while True:
             job = None
             try:
-                if _duet_is_active():
+                if _duet_is_active() or _conversation_is_live():
                     self.wake.wait(timeout=2)
                     self.wake.clear()
                     continue
@@ -951,7 +951,7 @@ class RobotContinuity:
             try:
                 # "No new event occurred" is false while Blue and Hexia are
                 # actively talking, and the foreground turn needs the model.
-                if _duet_is_active():
+                if _duet_is_active() or _conversation_is_live():
                     continue
                 visual_ids = self.ingest_visual_observations()
                 if visual_ids:
@@ -1293,6 +1293,25 @@ HUB: Dict[str, RobotContinuity] = {
 _DUET_SESSION_LOCK = threading.RLock()
 _DUET_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _DUET_ACTIVE_TTL_SECONDS = 20 * 60
+
+
+# A reflection fires after EVERY exchange — precisely when Alex is most likely
+# to send his next message — and then competes with it for the one loaded
+# model. Serializing the two is not enough: measured, it only turns a steady
+# +0.4s on the live turn into a coin flip between no delay at all and waiting
+# out the whole reflection. Nothing about "note what changed" is urgent, so
+# hold it until the conversation goes quiet. Duet already had this idea; this
+# extends it to chat, panel and banter via the coordinator's foreground mark.
+_CONVERSATION_QUIET_SECONDS = float(
+    os.environ.get("BLUE_CONTINUITY_QUIET_SECONDS", "20") or 20
+)
+
+
+def _conversation_is_live() -> bool:
+    """Whether someone is mid-conversation and should keep the model."""
+    if _CONVERSATION_QUIET_SECONDS <= 0:
+        return False
+    return seconds_since_foreground() < _CONVERSATION_QUIET_SECONDS
 
 
 def _duet_is_active() -> bool:
