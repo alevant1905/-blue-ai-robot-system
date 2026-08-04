@@ -72,7 +72,7 @@ button:disabled{opacity:.46;cursor:default}.muted{color:var(--slate);font-size:.
 </head>
 <body>
 <h1>Panel Mode</h1>
-<p class="sub">Speak naturally with Blue, Hexia, and Casper in one room. Call a robot’s name to give them the floor; they keep it until you clearly call someone else. Mentioning another robot inside the question does not switch speakers. Every robot still hears the full conversation.</p>
+<p class="sub">Speak naturally with Blue, Hexia, and Casper in one room. Call a robot’s name to give them the floor; they answer once, then the floor returns to the room — say a name again for the next question. Say a name on its own and that robot waits for what you say next. Mentioning another robot inside the question does not switch speakers. Every robot still hears the full conversation.</p>
 
 <section class="panel">
   <div class="section-title">Discussion</div>
@@ -296,12 +296,18 @@ function interruptReply(message){
   if(turnAbort){try{turnAbort.abort();}catch(e){}turnAbort=null;}
   if(activeFinish)activeFinish();else stopAudio();
   busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;
-  if(message!==false)setStatus(message||'Stopped. Panel is listening.');
+  // Cut off mid-answer is still an answer that ended: the floor goes back to
+  // the room rather than staying with whoever was talking.
+  setActive('');
+  if(message!==false)setStatus(message||'Stopped. Panel is listening. Call a robot by name.');
   if(resumeListening&&running&&!listening)setTimeout(startRecognition,50);
 }
 async function submitUtterance(raw){
   const text=String(raw||'').replace(/\s+/g,' ').trim();if(!text)return;if(isStopCommand(text)){interruptReply();return;}if(busy)return;if(!running)startPanel();
   const thisTurn=++turnVersion;inputEl.value='';busy=true;sendBtn.disabled=true;interruptBtn.disabled=false;
+  // Set only when a bare name was called and nobody answered yet — that is the
+  // one case where the floor survives into the next utterance.
+  let heldForFollowUp=false;
   try{
     const routing=await resolveRouting(text),targets=routing.targets||[];addTurn('user',text);
     if(thisTurn!==turnVersion)return;
@@ -313,8 +319,17 @@ async function submitUtterance(raw){
       const data=await response.json();if(!response.ok||!data.ok){addNote(ROBOTS[id].name+' could not answer: '+(data.error||'unknown error'));continue;}
       const el=addTurn(id,data.text);await speakAs(ROBOTS[id],data.text,el,data.eye_mood,thisTurn);
     }
-    if(thisTurn===turnVersion)setStatus(routing.nameOnly?targets.map(id=>ROBOTS[id].name).join(', ')+' listening.':'Panel is listening.');
-  }catch(error){if(error&&error.name!=='AbortError'&&thisTurn===turnVersion)setStatus(error.message||'Panel turn failed.',true);}finally{if(thisTurn===turnVersion){turnAbort=null;busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;if(resumeListening&&running&&!listening)startRecognition();}}
+    // The floor lasts one answer. A robot that has finished replying goes back
+    // to hearing-all, so the next thing said reaches nobody until Alex names
+    // someone again — otherwise the last speaker quietly keeps answering
+    // everything, including remarks meant for the room.
+    // The exception is a bare name: "Hexia" with no question IS the act of
+    // addressing her, so she holds the floor for the sentence that follows.
+    if(thisTurn===turnVersion){
+      if(routing.nameOnly){heldForFollowUp=true;setStatus(targets.map(id=>ROBOTS[id].name).join(', ')+' listening.');}
+      else setStatus('Panel is listening. Call a robot by name.');
+    }
+  }catch(error){if(error&&error.name!=='AbortError'&&thisTurn===turnVersion)setStatus(error.message||'Panel turn failed.',true);}finally{if(thisTurn===turnVersion){if(!heldForFollowUp)setActive('');turnAbort=null;busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;if(resumeListening&&running&&!listening)startRecognition();}}
 }
 function startPanel(){running=true;startBtn.disabled=true;stopBtn.disabled=false;saveSettings();setStatus('Panel is listening. Call a robot by name.');}
 function stopPanel(){running=false;interruptReply(false);startBtn.disabled=false;stopBtn.disabled=true;setActive('');stopRecognition(false);setStatus('Panel ended. The transcript is still available.');}

@@ -5,6 +5,13 @@ the floor.  The browser recognises the robot names, acknowledges the named
 listeners immediately, and sends each selected robot the same transcript.
 Every turn therefore knows exactly what Alex and the other robots heard and
 said, while role, slang, and library grounding remain per-robot.
+
+The floor lasts exactly one answer. ``_resolve_panel_routing`` still falls back
+to whoever currently holds it, but the page clears that as soon as a robot has
+finished replying, so an unaddressed remark reaches nobody instead of being
+picked up by whoever spoke last. The single exception is a bare name — "Hexia"
+with no question is the act of addressing her, and she keeps the floor for the
+sentence that follows.
 """
 
 from __future__ import annotations

@@ -570,3 +570,48 @@ def test_panel_route_endpoint_uses_current_listener(panel_module):
     assert response.status_code == 200
     assert response.get_json()["targets"] == ["blue"]
     assert response.get_json()["explicit"] is False
+
+
+def test_the_floor_lasts_exactly_one_answer(panel_module):
+    """A robot that has finished replying stops listening.
+
+    Before this, whoever spoke last kept the floor, so an unaddressed remark to
+    the room was quietly answered by the previous speaker.
+    """
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+
+    # Released in the finally, so a failed or errored turn releases it too.
+    assert "if(!heldForFollowUp)setActive('')" in html
+    # ...and the flag is only raised by a bare name.
+    assert "if(routing.nameOnly){heldForFollowUp=true;" in html
+
+
+def test_a_bare_name_still_holds_the_floor(panel_module):
+    """"Hexia" on its own IS the act of addressing her — she waits for the
+    sentence that follows rather than being dropped immediately."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+
+    held = html.index("heldForFollowUp=true")
+    name_only = html.index("routing.nameOnly")
+    assert name_only < held, "the floor is held for something other than a bare name"
+
+
+def test_interrupting_releases_the_floor(panel_module):
+    """Cut off mid-answer is still an answer that ended."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    body = html[html.index("function interruptReply("):]
+    body = body[:body.index("async function submitUtterance(")]
+    assert "setActive('')" in body
+
+
+def test_the_page_describes_the_one_answer_floor(panel_module):
+    """The old copy promised the opposite behaviour."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "they keep it until you clearly call someone else" not in html
+    assert "the floor returns to the room" in html
+
+
+def test_an_unaddressed_remark_is_told_to_use_a_name(panel_module):
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "Everyone heard that. Call Blue, Hexia, or Casper by name" in html
+    assert "'Panel is listening. Call a robot by name.'" in html
