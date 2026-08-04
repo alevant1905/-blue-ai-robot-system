@@ -127,6 +127,12 @@ dmypy.json
 /data/*.db
 /data/*.db-journal
 /data/*.db-wal
+# A process started from the wrong working directory writes the store to the
+# repo root instead of data/ — where the /data rules above do not reach it.
+# Never let a memory database become committable by accident.
+/*.db
+/*.db-journal
+/*.db-wal
 
 # Gmail OAuth tokens and credentials
 gmail_token.pickle
