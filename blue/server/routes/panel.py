@@ -80,6 +80,23 @@ def _robot_key(value: Any) -> str:
     return _ROBOT_ALIASES.get(str(value or "").strip().lower(), "")
 
 
+def _held_floor(value: Any) -> List[str]:
+    """Who currently holds the floor, as a list.
+
+    "Everyone" hands the floor to all three at once, so this accepts a list as
+    well as the single name the page used to send. Saying "everyone" on its own
+    used to leave only Casper listening — the page acknowledged each robot in
+    turn and the last one won.
+    """
+    values = value if isinstance(value, (list, tuple)) else [value]
+    out: List[str] = []
+    for item in values:
+        robot = _robot_key(item)
+        if robot in PANEL_ROBOTS and robot not in out:
+            out.append(robot)
+    return out
+
+
 def _panel_name_keys(value: str) -> List[str]:
     """Robot ids in first-mention order, without treating repeats as turns."""
     out: List[str] = []
@@ -111,7 +128,7 @@ def _resolve_panel_routing(text: str, active_robot: Any = "") -> Dict[str, Any]:
     robot by name ("Hexia, respond to Casper" must stay addressed to Hexia).
     """
     utterance = re.sub(r"\s+", " ", str(text or "")).strip()
-    active = _robot_key(active_robot)
+    active = _held_floor(active_robot)
     explicit: List[str] = []
 
     if _PANEL_LEADING_EVERYONE_RE.search(utterance):
@@ -133,12 +150,13 @@ def _resolve_panel_routing(text: str, active_robot: Any = "") -> Dict[str, Any]:
         if trailing:
             explicit = [_robot_key(trailing.group("name"))]
 
-    targets = explicit or ([active] if active in PANEL_ROBOTS else [])
+    targets = explicit or list(active)
     return {
         "targets": targets,
         "explicit": bool(explicit),
         "nameOnly": bool(explicit and _panel_name_only(utterance)),
-        "activeRobot": active,
+        "activeRobot": active[0] if active else "",
+        "activeRobots": active,
     }
 
 

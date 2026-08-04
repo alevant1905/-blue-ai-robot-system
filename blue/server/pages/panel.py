@@ -153,7 +153,8 @@ const startBtn=document.getElementById('startBtn'),stopBtn=document.getElementBy
 const interruptBtn=document.getElementById('interruptBtn'),saveBtn=document.getElementById('saveBtn'),sendBtn=document.getElementById('sendBtn');
 const micBtn=document.getElementById('micBtn'),inputEl=document.getElementById('messageInput');
 const audioEl=document.getElementById('panelAudio');
-let running=false,busy=false,activeRobot='',history=[],materials=[];
+// The floor is a LIST, not one name: "everyone" hands it to all three at once.
+let running=false,busy=false,activeRobots=[],history=[],materials=[];
 let recognition=null,listening=false,resumeListening=false,activeFinish=null,audioUrl='',audioAbort=null,turnAbort=null,turnVersion=0;
 let lastRobotSpeech='',echoGuardUntil=0,recognitionRestartAfter=0;
 const voicePrefs={{ voice_preferences_json|safe }};
@@ -169,10 +170,13 @@ function addTurn(speaker,text){
   history.push({speaker:speaker,text:text});saveBtn.disabled=false;scrollDown();return el;
 }
 function scrollDown(){requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}));}
+// Accepts a name, a list of names, or nothing at all.
 function setActive(robot){
-  activeRobot=robot||'';
-  IDS.forEach(id=>{const card=document.getElementById('robot-'+id),state=card.querySelector('.robot-state');
-    card.classList.toggle('listening',id===activeRobot);state.textContent=id===activeRobot?'listening':'hearing all';});
+  const list=Array.isArray(robot)?robot.slice():(robot?[robot]:[]);
+  activeRobots=list.filter(id=>IDS.indexOf(id)>=0);
+  IDS.forEach(id=>{const card=document.getElementById('robot-'+id),state=card.querySelector('.robot-state'),
+    holding=activeRobots.indexOf(id)>=0;
+    card.classList.toggle('listening',holding);state.textContent=holding?'listening':'hearing all';});
 }
 function selectedSettings(){
   const out={};IDS.forEach(id=>{out[id]={role:document.getElementById('role-'+id).value.trim(),slang:document.getElementById('slang-'+id).value.trim(),documents:Array.from(document.querySelectorAll('#docs-'+id+' input[type=checkbox]:checked')).map(x=>x.value)};});return out;
@@ -281,10 +285,10 @@ function localRoutingFallback(text){
   if(!explicit.length){const lead=value.match(/^(?:(?:hey|hi|hello|okay|ok|yo|please)\b[\s,!:;\-—]*)*(blue|hexia|casper|caspar|pico|picoh)(?=\s*[,!:;—-]|\s*$|\s+(?:what|who|how|why|when|where|do|does|did|can|could|would|will|tell|give|explain|respond|your|i)\b)/i);if(lead)explicit=[/^(casper|caspar|pico|picoh)$/i.test(lead[1])?'pico':lead[1].toLowerCase()];}
   if(!explicit.length){const trail=value.match(/(?:[,;:—-]\s*|\b(?:what\s+do\s+you\s+think|your\s+take|over\s+to\s+you)\s+)(blue|hexia|casper|caspar|pico|picoh)\s*[?!.]*$/i);if(trail)explicit=[/^(casper|caspar|pico|picoh)$/i.test(trail[1])?'pico':trail[1].toLowerCase()];}
   let residual=lower.replace(/\ball\s+of\s+you\b|\ball\s+three\b/g,' ').replace(/\b(?:hey|hi|hello|okay|ok|yo|please|and|everyone|everybody|blue|hexia|casper|caspar|pico|picoh)\b/g,' ').replace(/[^a-z0-9]+/g,' ').trim();
-  return {targets:explicit.length?explicit:(activeRobot?[activeRobot]:[]),explicit:!!explicit.length,nameOnly:!!explicit.length&&!residual};
+  return {targets:explicit.length?explicit:activeRobots.slice(),explicit:!!explicit.length,nameOnly:!!explicit.length&&!residual};
 }
 async function resolveRouting(text){
-  try{const response=await fetch('/panel/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,activeRobot:activeRobot})}),data=await response.json();if(response.ok&&data.ok&&Array.isArray(data.targets))return data;}catch(e){}
+  try{const response=await fetch('/panel/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,activeRobot:activeRobots})}),data=await response.json();if(response.ok&&data.ok&&Array.isArray(data.targets))return data;}catch(e){}
   return localRoutingFallback(text);
 }
 function isStopCommand(raw){
@@ -326,7 +330,10 @@ async function submitUtterance(raw){
     // The exception is a bare name: "Hexia" with no question IS the act of
     // addressing her, so she holds the floor for the sentence that follows.
     if(thisTurn===turnVersion){
-      if(routing.nameOnly){heldForFollowUp=true;setStatus(targets.map(id=>ROBOTS[id].name).join(', ')+' listening.');}
+      // setActive(targets), not whatever the acknowledgement loop left behind:
+      // it lights each robot in turn, so "everyone" used to end with only
+      // Casper holding the floor and answering the next question alone.
+      if(routing.nameOnly){heldForFollowUp=true;setActive(targets);setStatus(targets.map(id=>ROBOTS[id].name).join(', ')+' listening.');}
       else setStatus('Panel is listening. Call a robot by name.');
     }
   }catch(error){if(error&&error.name!=='AbortError'&&thisTurn===turnVersion)setStatus(error.message||'Panel turn failed.',true);}finally{if(thisTurn===turnVersion){if(!heldForFollowUp)setActive('');turnAbort=null;busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;if(resumeListening&&running&&!listening)startRecognition();}}

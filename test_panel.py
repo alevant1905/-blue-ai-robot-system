@@ -615,3 +615,50 @@ def test_an_unaddressed_remark_is_told_to_use_a_name(panel_module):
     html = _client(panel_module).get("/panel").get_data(as_text=True)
     assert "Everyone heard that. Call Blue, Hexia, or Casper by name" in html
     assert "'Panel is listening. Call a robot by name.'" in html
+
+
+@pytest.mark.parametrize(
+    "held,text,targets",
+    [
+        # "Everyone" hands the floor to all three; the follow-up reaches all three.
+        (["blue", "hexia", "pico"], "what do you make of that?",
+         ["blue", "hexia", "pico"]),
+        # A single held robot still works, list form or bare string.
+        (["hexia"], "and why is that?", ["hexia"]),
+        ("hexia", "and why is that?", ["hexia"]),
+        # An explicit name overrides whoever is holding it.
+        (["blue", "hexia", "pico"], "Casper, what about you?", ["pico"]),
+        # Nobody holding means nobody answers.
+        ([], "and why is that?", []),
+        ("", "and why is that?", []),
+        # Junk in the held list is ignored rather than routed to.
+        (["blue", "nobody", "blue"], "go on", ["blue"]),
+    ],
+)
+def test_the_floor_can_be_held_by_several_robots(panel_module, held, text, targets):
+    """Saying "everyone" used to leave only Casper listening: the page
+    acknowledged each robot in turn and the last one won."""
+    result = panel_module._resolve_panel_routing(text, held)
+    assert result["targets"] == targets
+
+
+def test_the_route_endpoint_accepts_a_list_floor(panel_module):
+    response = _client(panel_module).post(
+        "/panel/route",
+        json={"text": "go on then", "activeRobot": ["blue", "hexia", "pico"]},
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["targets"] == ["blue", "hexia", "pico"]
+    assert data["activeRobots"] == ["blue", "hexia", "pico"]
+
+
+def test_everyone_holds_the_floor_for_all_three_in_the_page(panel_module):
+    """The page must set the floor from the target list, not from whatever the
+    acknowledgement loop happened to light last."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "heldForFollowUp=true;setActive(targets);" in html
+    # The floor is a list throughout.
+    assert "activeRobots=[]" in html
+    assert "activeRobot:activeRobots" in html
