@@ -10349,7 +10349,76 @@ def _post_to_model(payload: Dict, timeout: int = 120) -> Dict:
     return response.json()
 
 
-def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1) -> Dict:
+def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
+    """A streamed call, assembled into exactly what a blocking call returns.
+
+    Streaming here changes only WHEN text becomes visible, never what the rest
+    of the pipeline sees. The tool loop, the output guards, the anti-parrot
+    nets and the logging all receive the same completed
+    {"choices":[{"message": ...}]} dict they always did — which matters,
+    because those guards rewrite roughly one reply in seven and could not do
+    so if the pipeline were handed fragments.
+
+    ``on_token`` is called with each content delta. It is deliberately NOT
+    called for tool-call deltas: a turn that ends in a tool call has no
+    answer to show yet.
+    """
+    payload = {**payload, "stream": True}
+    parts: List[str] = []
+    tool_calls: Dict[int, Dict[str, Any]] = {}
+    finish_reason = None
+    with llm_slot(foreground=True):
+        with requests.post(LM_STUDIO_URL, json=payload,
+                           timeout=timeout, stream=True) as response:
+            response.raise_for_status()
+            for raw in response.iter_lines():
+                if not raw or not raw.startswith(b"data: "):
+                    continue
+                body = raw[6:].strip()
+                if body == b"[DONE]":
+                    break
+                try:
+                    chunk = json.loads(body)
+                except ValueError:
+                    continue
+                choice = (chunk.get("choices") or [{}])[0]
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    parts.append(piece)
+                    if on_token:
+                        try:
+                            on_token(piece)
+                        except Exception as exc:
+                            # A broken client pipe must not fail the turn: the
+                            # reply still has to be logged, guarded and stored.
+                            log.warning(f"[STREAM] token sink failed: {exc}")
+                            on_token = None
+                for call in delta.get("tool_calls") or []:
+                    index = call.get("index", 0)
+                    slot = tool_calls.setdefault(
+                        index,
+                        {"id": "", "type": "function",
+                         "function": {"name": "", "arguments": ""}},
+                    )
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    fn = call.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+
+    message: Dict[str, Any] = {"role": "assistant", "content": "".join(parts)}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return {"choices": [{"message": message,
+                         "finish_reason": finish_reason or "stop"}]}
+
+
+def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
+                   on_token=None) -> Dict:
     global _vision_queue, _last_vision_recognition
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
@@ -10746,6 +10815,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         )
 
     try:
+        if on_token is not None:
+            return _stream_from_model(payload, on_token)
         return _post_to_model(payload)
     except Exception as e:
         # Self-heal on context overflow: parse the model's real context size out
@@ -11986,7 +12057,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "") -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None) -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page). `focus` carries the
     chat Context panel's library picks ({"docs": [...], "folders": [...]}),
@@ -12966,7 +13037,8 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 "role": "user",
                 "content": "[Respond now using the tool results above. No more tool calls.]"
             })
-            response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration)
+            response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
+                                      on_token=on_token)
             if not response:
                 return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
             return response
@@ -12979,6 +13051,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             include_tools=_include_tools,
             force_tool=force_tool,
             iteration=iteration,
+            on_token=on_token,
         )
 
         if not response:
@@ -14288,6 +14361,9 @@ _banter_routes.register(app)
 from blue.server.routes import panel as _panel_routes
 _panel_routes.register(app)
 
+from blue.server.routes import stream as _stream_routes
+_stream_routes.register(app)
+
 
 # ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
 # (routes live in blue/server/routes/jspace.py)
@@ -15514,6 +15590,9 @@ def should_include_history(messages) -> bool:
 def chat_completions():
     """Main endpoint with conversation persistence"""
     _continuity_turn_started = False
+    # Bound before the try: the finally releases the preview subscriber, and a
+    # request that fails while parsing must not turn that into a NameError.
+    _stream_id = ""
     try:
         data = request.json
         messages = data.get("messages", [])
@@ -15551,6 +15630,12 @@ def chat_completions():
         focus = data.get("focus")
         if not isinstance(focus, dict):
             focus = {}
+        # Live token preview. The page invents an id, subscribes to
+        # /chat/stream/<id>, and sends it here; the model's content deltas go
+        # to that subscriber as they arrive. THIS response stays the only
+        # authoritative one — see blue/server/routes/stream.py for why the
+        # guards make that distinction necessary.
+        _stream_id = str(data.get("stream_id") or "").strip()[:80]
 
         print(f"")
         print(f"{'='*60}")
@@ -15562,20 +15647,35 @@ def chat_completions():
         user_name = _identify_user_from_request()
         print(f"   [WHO] Speaker identified as: {user_name}")
 
-        # Recent duet awareness: a duet with the other robot is real recent
-        # history, but it happens outside this chat window — without this
-        # block Blue flatly denied a duet he'd finished minutes earlier
-        # (2026-07-15). Merged into the system message (never a second
-        # system message — the chat template 400s on those).
+        # Autobiographical conversation awareness: retrieve from THIS robot's
+        # durable episode journal, including human chat plus duet/banter with
+        # both fellow robots. The J-space head contains only the latest events
+        # and can be crowded out by reflections; this query-aware slice keeps a
+        # short follow-up connected to an exchange that happened in another
+        # browser window or mode. It is merged into the one system message.
         if robot in _continuity_routes.ROBOTS and user_name not in _CHAT_ONLY_USERS:
             try:
-                _duet_block = _continuity_routes.recent_duet_block(robot)
-                if _duet_block:
-                    print("   [DUET] ✓ Injecting recent duet context")
+                _history_query = next((
+                    m.get("content", "")
+                    for m in reversed(messages)
+                    if m.get("role") == "user"
+                    and isinstance(m.get("content"), str)
+                ), "")
+                _conversation_block = _continuity_routes.conversation_memory_block(
+                    robot,
+                    query=_history_query,
+                    max_lines=9,
+                    include_humans=True,
+                    include_robots=True,
+                )
+                if _conversation_block:
+                    print("   [CONTINUITY] ✓ Injecting human + robot conversation memory")
                     messages = _splice_context_after_system(
-                        messages, [{"role": "system", "content": _duet_block}])
+                        messages,
+                        [{"role": "system", "content": _conversation_block}],
+                    )
             except Exception as e:
-                log.warning(f"[DUET] recent-duet injection failed: {e}")
+                log.warning(f"[CONTINUITY] conversation-memory injection failed: {e}")
 
         # Find the last actual USER message
         last_user_msg = ""
@@ -15828,6 +15928,7 @@ def chat_completions():
                 robot=robot,
                 language=language,
                 focus=focus,
+                on_token=_stream_routes.token_sink(_stream_id),
             )
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
@@ -16576,6 +16677,14 @@ def chat_completions():
         import traceback
         traceback.print_exc()
         return jsonify({"choices": [{"message": {"role": "assistant", "content": f"Error: {str(e)}"}}]}), 500
+    finally:
+        # Always release the preview subscriber, including on the error paths
+        # above — otherwise the page sits on an open connection waiting for a
+        # turn that already failed.
+        try:
+            _stream_routes.close_stream(_stream_id)
+        except Exception:
+            pass
 
 
 # ===== Memory/health/stats/home/RAG endpoints ===== (routes live in blue/server/routes/system.py)

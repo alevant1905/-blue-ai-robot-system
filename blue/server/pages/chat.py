@@ -587,6 +587,7 @@ CHAT_HTML = """
             renderChips();
 
             busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
+            let streamId = '', preview = null;
             const thinking = addBubble('blue', '');
             thinking.querySelector('.bubble').innerHTML = '<span class="typing">' + ROBOT.name + (researchOn ? ' is researching…' : (wikiOn ? ' is checking Wikipedia…' : ' is thinking…')) + '</span>';
             setFaceState('thinking');
@@ -596,17 +597,28 @@ CHAT_HTML = """
                 // so he can see during THIS turn — not only when the eye is tapped.
                 // No-op when the camera is closed or on Alex's page.
                 if (window.__blueEyeGrab) { try { await window.__blueEyeGrab(); } catch (e) {} }
+                // Live preview: watch the words arrive instead of a spinner.
+                // This is for the eyes only — the POST below stays the single
+                // source of truth, because the server's output guards rewrite
+                // roughly one reply in seven AFTER the model has finished.
+                // Nothing is spoken, stored or remembered from the preview.
+                streamId = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+                preview = startReplyPreview(streamId, thinking.querySelector('.bubble'));
                 const res = await fetch('/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-Blue-Device': blueDeviceTag() },
                     body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
                                            language: (LANG_MODE !== 'auto' ? LANG_MODE : ''),
-                                           research: researchOn, wiki: wikiOn, focus: FOCUS })
+                                           research: researchOn, wiki: wikiOn, focus: FOCUS,
+                                           stream_id: streamId })
                 });
                 const data = await res.json();
+                if (preview) { preview.stop(); preview = null; }
                 let reply = '';
                 try { reply = data.choices[0].message.content || ''; } catch (e) { reply = ''; }
                 if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
+                // Always overwrite: whatever the preview showed, the guarded
+                // reply is what the user reads, hears and what goes in history.
                 thinking.querySelector('.bubble').textContent = reply;
                 setFaceState('');
                 // Tint Blue's eyes to the mood of this reply (server-computed),
@@ -621,9 +633,48 @@ CHAT_HTML = """
                 thinking.querySelector('.bubble').textContent = 'I had trouble reaching my brain just now. Is the server running?';
                 faceCuriousBriefly();
             } finally {
+                if (preview) { preview.stop(); preview = null; }
                 busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
                 inputEl.focus();
             }
+        }
+
+        // Subscribe to the live token preview for one turn. Returns a handle
+        // whose stop() closes the connection; safe to call more than once.
+        //
+        // Deliberately text-only and deliberately never spoken. The server
+        // finishes generating, THEN runs the output guards that catch identity
+        // drift, dropped family members, wrong ages and verbatim replays —
+        // guards that regenerate the reply outright. The preview is what the
+        // model said; the POST is what Blue actually says.
+        function startReplyPreview(streamId, bubbleEl) {
+            if (typeof EventSource === 'undefined' || !bubbleEl) return null;
+            let source = null, shown = '', live = true;
+            try {
+                source = new EventSource('/chat/stream/' + encodeURIComponent(streamId));
+            } catch (e) { return null; }
+            const handle = {
+                stop: function () {
+                    live = false;
+                    if (source) { try { source.close(); } catch (e) {} source = null; }
+                }
+            };
+            source.onmessage = function (event) {
+                if (!live) return;
+                let piece = '';
+                try { piece = (JSON.parse(event.data) || {}).delta || ''; } catch (e) { return; }
+                if (!piece) return;
+                shown += piece;
+                // textContent, never innerHTML: this is unvalidated model
+                // output going straight onto the page.
+                bubbleEl.textContent = shown;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            };
+            source.addEventListener('end', handle.stop);
+            // A dropped preview is cosmetic — the POST is still in flight and
+            // will deliver the real reply, so fail quietly.
+            source.onerror = handle.stop;
+            return handle;
         }
 
         // ===== Voice: Blue speaks aloud, and (over HTTPS) you can talk to him =====
