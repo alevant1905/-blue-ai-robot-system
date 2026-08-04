@@ -865,6 +865,23 @@ CHAT_HTML = """
             return out.length ? out : [msg];
         }
 
+        // Chunking for NEURAL speech, where each chunk costs a synthesis round
+        // trip before it can be heard. speechChunks groups up to 220 characters,
+        // which is right for the browser voice (it renders locally, instantly)
+        // but wrong here: 220 characters is around three seconds of synthesis,
+        // all of it silence. So the FIRST chunk is a single sentence — that one
+        // sets time-to-first-word — and the rest keep the larger grouping, since
+        // they are rendered while earlier audio is already playing and fewer
+        // requests is better once nobody is waiting on them.
+        function neuralChunks(msg) {
+            const sentences = msg.match(/[^.!?…]+[.!?…]*\\s*/g) || [msg];
+            if (sentences.length < 2) return [msg];
+            const first = sentences[0];
+            const rest = sentences.slice(1).join('');
+            if (!rest.trim()) return [msg];
+            return [first].concat(speechChunks(rest));
+        }
+
         // ===== Reply mood: tint the LEDs and animate Picoh's matrix eyes =====
         // The server computes a colour + expression from each reply and
         // returns data.eye_mood {r,g,b,name,expression} (0-10 colour scale). We drive it the
@@ -1000,6 +1017,10 @@ CHAT_HTML = """
             const rate = (isVilda ? 0.95 : 1.0) * ((ROBOT && ROBOT.voiceRate) || 1.0);
             const pitch = (ROBOT && ROBOT.voicePitch) || 1.0;
             let started = false;
+            // A voice preview is one short sample — synthesise it whole. A real
+            // reply is split so the first sentence can start while the rest is
+            // still being rendered.
+            const chunks = previewOnly ? [msg] : neuralChunks(msg);
 
             function finishNeural() {
                 if (generation !== _neuralGeneration) return;
@@ -1019,39 +1040,81 @@ CHAT_HTML = """
                 }
             }
 
-            try {
+            const alive = function () { return generation === _neuralGeneration; };
+
+            function synth(text) {
                 const options = {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: msg, voice: voiceId, rate: rate, pitch: pitch })
+                    body: JSON.stringify({ text: text, voice: voiceId, rate: rate, pitch: pitch })
                 };
                 if (controller) options.signal = controller.signal;
-                const response = await fetch('/tts/synthesize', options);
-                if (!response.ok) throw new Error('neural speech unavailable');
-                const blob = await response.blob();
-                if (generation !== _neuralGeneration || (!previewOnly && !speakOn)) return;
-                _neuralObjectUrl = URL.createObjectURL(blob);
-                _neuralAudio.src = _neuralObjectUrl;
-                _neuralAudio.onplay = function () {
-                    if (started || previewOnly) return;
-                    started = true;
-                    setFaceState('talking');
-                    bargeInRecogStart();
-                    if (!isVilda) {
-                        const frames = buildLipFrames(msg, rate);
-                        if (!localHeadLip(ROBOT.head, frames)) {
-                            try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: frames }) }); } catch (e) {}
-                        }
+                return fetch('/tts/synthesize', options).then(function (response) {
+                    if (!response.ok) throw new Error('neural speech unavailable');
+                    return response.blob();
+                });
+            }
+
+            // Play one chunk, resolving when it finishes. The head's lips are
+            // driven per chunk rather than once for the whole reply: the frames
+            // are a timed schedule, and a single schedule for the whole text
+            // would drift out of step with audio that arrives in pieces.
+            function playChunk(blob, text) {
+                return new Promise(function (resolve, reject) {
+                    if (!alive()) { resolve(); return; }
+                    if (_neuralObjectUrl) {
+                        try { URL.revokeObjectURL(_neuralObjectUrl); } catch (e) {}
                     }
-                };
-                _neuralAudio.onended = finishNeural;
-                _neuralAudio.onerror = finishNeural;
-                const playPromise = _neuralAudio.play();
-                if (playPromise && playPromise.catch) await playPromise;
+                    _neuralObjectUrl = URL.createObjectURL(blob);
+                    _neuralAudio.src = _neuralObjectUrl;
+                    _neuralAudio.onplay = function () {
+                        if (previewOnly) return;
+                        if (!started) {
+                            started = true;
+                            setFaceState('talking');
+                            bargeInRecogStart();
+                        }
+                        if (!isVilda) {
+                            const frames = buildLipFrames(text, rate);
+                            if (!localHeadLip(ROBOT.head, frames)) {
+                                try { fetch('/head/' + ROBOT.head + '/lip-seq', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frames: frames }) }); } catch (e) {}
+                            }
+                        }
+                    };
+                    _neuralAudio.onended = function () { resolve(); };
+                    _neuralAudio.onerror = function () { reject(new Error('playback failed')); };
+                    const playPromise = _neuralAudio.play();
+                    if (playPromise && playPromise.catch) playPromise.catch(reject);
+                });
+            }
+
+            // Synthesis is the slow part: a five-sentence reply took 5.12s to
+            // render as one request, against 0.88s for a single sentence — all
+            // of it before a word was heard. Synthesising the NEXT chunk while
+            // the current one plays hides everything after the first.
+            let spokenUpTo = 0;
+            try {
+                let pending = synth(chunks[0]);
+                for (let i = 0; i < chunks.length; i++) {
+                    const current = pending;
+                    pending = (i + 1 < chunks.length) ? synth(chunks[i + 1]) : null;
+                    // Keep an in-flight prefetch from raising an unhandled
+                    // rejection while we are awaiting playback of this chunk.
+                    if (pending) pending.catch(function () {});
+                    const blob = await current;
+                    if (!alive() || (!previewOnly && !speakOn)) return;
+                    await playChunk(blob, chunks[i]);
+                    if (!alive() || (!previewOnly && !speakOn)) return;
+                    spokenUpTo = i + 1;
+                }
+                finishNeural();
             } catch (e) {
                 if (generation !== _neuralGeneration || (e && e.name === 'AbortError')) return;
                 cancelNeuralAudio();
-                if (!previewOnly && speakOn) speakBrowser(msg);
+                // Fall back for what is still UNSAID. Re-speaking from the top
+                // would repeat sentences the user already heard.
+                const remaining = chunks.slice(spokenUpTo).join(' ').trim();
+                if (!previewOnly && speakOn && remaining) speakBrowser(remaining);
             } finally {
                 if (generation === _neuralGeneration) _neuralAbort = null;
             }
