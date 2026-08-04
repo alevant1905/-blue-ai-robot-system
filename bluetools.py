@@ -11849,14 +11849,50 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         "your physical form is an Ohbot-family robot head with moving head and lips",
     )
 
+    # PROMPT ORDER IS A PERFORMANCE DECISION, not a stylistic one.
+    #
+    # llama.cpp caches the prompt prefix and re-prefills only from the first
+    # byte that changed. The volatile blocks used to sit at the very top —
+    # <now> carries the current TIME, so the cache died every minute, and with
+    # it the whole persona, the rules, and the ~9,300-token tool schema that
+    # the chat template renders alongside them. Measured on the loaded 35B:
+    # 1.99s per turn with the volatile blocks first, 0.75s with them last.
+    # Same text, same tools, same answers.
+    #
+    # So: everything constant for this robot goes first and stays byte-identical
+    # across turns; everything that changes per turn goes in the tail below.
+    # Memory blocks are appended after this by _splice_context_after_system,
+    # which keeps them in the volatile region where they belong.
+    #
+    # Putting the clock last also matches how this codebase already pins
+    # time-sensitive cues (see the [CUE] pin in process_with_tools): a small
+    # local model weighs nearby text more, and <now> now sits nearer the live
+    # question than it did before.
+    # The library listing is NOT per-turn state: it changes when Alex adds a
+    # document or pins a focus, not between one question and the next. Keeping
+    # it in the stable prefix matters — at ~4,300 chars it is a third of the
+    # whole prompt, and putting it in the tail cut the cacheable share to 51%.
+    # Ordered least-volatile first, so the smallest possible suffix dies with
+    # each change — with one deliberate exception: <now> must come BEFORE the
+    # schedule blocks. Those label their entries relatively ("5 days ago
+    # (Thursday)"), which is only interpretable once the model knows today's
+    # date. Putting the clock after them made it read the oldest entry and
+    # assert it as "yesterday, Tuesday July 28". Pure cache logic would park
+    # <now> last, but that costs ~440 tokens of re-prefill to buy back — about
+    # 0.05s, against a date answer being wrong.
+    volatile_state = (
+        f"{location_block}\n\n"
+        f"{activity_block}\n\n"
+        f"{now_block}\n\n"
+        f"{schedule_section}"
+        f"{anti_repetition_context}"
+        f"{continuation_note}"
+    )
+
     system_msg = {
         "role": "system",
         "content": (
             f"{facts_preamble}\n\n"
-            f"{now_block}\n\n"
-            f"{location_block}\n\n"
-            f"{activity_block}\n\n"
-            f"{schedule_section}"
             f"{_robot_cfg(robot)['persona_line']}\n"
             f"IDENTITY BOUNDARY: Your name is {_robot_cfg(robot)['name']}, always. "
             "The language model and runtime that help generate your words are "
@@ -11920,13 +11956,15 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "date, even if it feels redundant. The user needs the date "
             "back so they can catch a wrong assumption.\n"
             "Moods: moonlight, sunset, ocean, forest, romance, party, focus, relax, energize, movie, fireplace"
+            # --- end of the cacheable prefix; per-turn state follows ---
+            f"\n\n{volatile_state}"
         )
     }
 
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None) -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "") -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page). `focus` carries the
     chat Context panel's library picks ({"docs": [...], "folders": [...]}),
@@ -11964,6 +12002,19 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # gates the adult "perspective" colouring and shapes the speaker note below.
     _is_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
     system_msg = build_dynamic_system_message(conversation_messages, facts_preamble, kid_mode=_is_kid, robot=robot)
+    # Alternate chat surfaces such as Panel Mode need the complete chat tool
+    # pipeline while retaining their own live-session contract.  Append that
+    # trusted, server-built contract to the normal robot system prompt instead
+    # of replacing the identity, memory, safety, and tool instructions.
+    if system_addendum and isinstance(system_msg, dict):
+        system_msg = {
+            "role": "system",
+            "content": (
+                system_msg.get("content", "").rstrip()
+                + "\n\n"
+                + str(system_addendum).strip()
+            ),
+        }
     # Color Blue's default voice with his own evolving perspective profile.
     # (The 'write as Alex' short-circuit below returns before this matters, so
     # this only shapes Blue speaking as himself.) Skip it on the kids' iPad —
