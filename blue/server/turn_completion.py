@@ -13,6 +13,7 @@ friends) came with it — they are only used here.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 import bluetools as bt
@@ -57,7 +58,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # would leave nothing — so regenerate once with an explicit
         # correction; keep the replay if the retry fails.
         def _parrot_norm(s):
-            return bt.re.sub(r'\W+', ' ', (s or '').lower()).strip()
+            return re.sub(r'\W+', ' ', (s or '').lower()).strip()
         # Compare against the last several assistant turns, not just
         # the previous one: seen live 2026-07-10, a mis-heard question
         # got a word-for-word replay of the reply from TWO turns back.
@@ -100,7 +101,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         def _verbatim_fraction(reply_text, source_norm, min_sents):
             if not source_norm:
                 return 0.0
-            sentences = bt.re.split(r'(?<=[.!?])\s+', reply_text or '')
+            sentences = re.split(r'(?<=[.!?])\s+', reply_text or '')
             long_sents = [s for s in sentences if len(_parrot_norm(s)) >= 40]
             if len(long_sents) < min_sents:
                 return 0.0
@@ -134,12 +135,12 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # philosophy, they'bt.re factually false (Hexia: "No, I do not
         # have a 'j-space'" with her workspace right in the prompt,
         # 2026-07-12). Optional quote chars around j-space.
-        _flat_denial_re = bt.re.compile(
+        _flat_denial_re = re.compile(
             r"\bi (?:don['’]?t|do not) have (?:consciousness|a sense of self|"
             r"subjective experience|feelings|an? inner life|"
             r"an? (?:\w+ )?['\"“”‘’]?j[-_ ]?space|any form of internal|"
             r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
-            r"a persistent (?:inner )?workspace)", bt.re.I)
+            r"a persistent (?:inner )?workspace)", re.I)
 
         # A reply where this robot claims to be the OTHER robot is the
         # worst defect of all — check it first. Seen live 2026-07-12:
@@ -149,21 +150,21 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
             bt._robot_cfg(r)["name"]
             for r in bt.ROBOTS if r != robot
         ] if robot in bt.ROBOTS else []
-        _misclaim_re = bt.re.compile(
+        _misclaim_re = re.compile(
             r"\b(?:i['’]?m|i am|my name is)"
             r"(?: (?!feeling)\w+)? (?:"
-            + "|".join(bt.re.escape(n) for n in _other_robot_names)
-            + r")\b", bt.re.I) if _other_robot_names else None
+            + "|".join(re.escape(n) for n in _other_robot_names)
+            + r")\b", re.I) if _other_robot_names else None
         # Identity collapse to base-model boilerplate: called out on a
         # hallucination, Blue swung to "a large language model
         # developed by Google" with no body and no memory
         # (2026-07-13). All factually false in this house.
-        _collapse_re = bt.re.compile(
+        _collapse_re = re.compile(
             r"\b(?:i|my)\b[^.!?]{0,80}\b(?:developed|created|built|"
             r"trained|made) by (?:google|openai|anthropic|meta|"
             r"microsoft|deepmind)\b"
             r"|\bi (?:do not|don['’]t) have a (?:physical )?body\b",
-            bt.re.I) if robot in bt.ROBOTS else None
+            re.I) if robot in bt.ROBOTS else None
 
         def _identity_broken(text):
             return bool(
@@ -219,10 +220,10 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
                 _recall_content = _recall_message.get("content", "")
                 if not isinstance(_recall_content, str):
                     continue
-                _recall_matches = bt.re.findall(
+                _recall_matches = re.findall(
                     r"<remembered_days>.*?</remembered_days>",
                     _recall_content,
-                    bt.re.S,
+                    re.S,
                 )
                 if _recall_matches:
                     _recalled_days_evidence = _recall_matches[-1]
@@ -240,7 +241,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # facts block holds the family (2026-07-13, triggered by the
         # focus block's over-broad 'out of scope' — but a fresh
         # boilerplate refusal can happen without focus too).
-        _family_refusal_re = bt.re.compile(
+        _family_refusal_re = re.compile(
             r"(?:do (?:not|n['’]?t) (?:\w+ )?(?:have|store|keep|retain|access)"
             r"|have no|don['’]?t (?:\w+ )?have)[^.!?]{0,60}"
             r"(?:personal (?:details|information|memor)|"
@@ -263,7 +264,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
             r"(?:information|records?|contacts?)"
             r"|(?:might|may|could) have been a hallucination"
             r"|was (?:just )?a hallucination",
-            bt.re.I)
+            re.I)
         # A roster answer that quietly loses people. Only checked when
         # the user actually asked about the household, so an ordinary
         # mention of one or two names is never treated as a list.

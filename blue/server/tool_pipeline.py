@@ -22,6 +22,7 @@ against the originals.
 
 from __future__ import annotations
 
+import re
 import json
 from typing import Any, Dict, List, Optional
 
@@ -128,7 +129,7 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
     document_self_reflection = bool(
         document_read_succeeded
         and bt.identity_request_kind(last_user_message) == "selfhood"
-        and bt.re.search(r"\b(?:reflect|relation)\w*\b", last_user_message, bt.re.I)
+        and re.search(r"\b(?:reflect|relation)\w*\b", last_user_message, re.I)
     )
     self_reflection_grounding = ""
     if document_self_reflection:
@@ -259,10 +260,10 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
             # A stubborn formatter must never turn a successful read into a
             # false capability denial. Return grounded evidence rather than
             # preserving the bad answer.
-            source_match = bt.re.search(
-                r"\[([^\]\n]+\.(?:pdf|docx?|txt|md))\]", tool_result, bt.re.I)
+            source_match = re.search(
+                r"\[([^\]\n]+\.(?:pdf|docx?|txt|md))\]", tool_result, re.I)
             source = source_match.group(1) if source_match else "local document"
-            evidence = bt.re.sub(r"\s+", " ", tool_result.split("\n", 2)[-1]).strip()
+            evidence = re.sub(r"\s+", " ", tool_result.split("\n", 2)[-1]).strip()
             evidence = evidence[:700].rstrip()
             if document_self_reflection:
                 fallback = (
@@ -537,10 +538,10 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                     bt.identity_request_kind(_detect_msg) in {
                         "shared_recall", "self_memory", "evolution", "origin",
                     }
-                    or bool(bt.re.search(
+                    or bool(re.search(
                         r"\b(?:remember|recall|what did you do|how was your day)\b",
                         _detect_msg,
-                        bt.re.I,
+                        re.I,
                     ))
                 )
                 if (bt.detect_web_refusal(content) and not _web_refusal_forced
@@ -550,7 +551,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                     _q = _detect_msg.strip()[:160]
                     # A bare follow-up ("tell me the latest") carries no subject —
                     # borrow it from the previous user turn.
-                    if len(bt.re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
+                    if len(re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
                         _prev_users = [m.get("content", "") for m in conversation_messages
                                        if m.get("role") == "user" and isinstance(m.get("content"), str)]
                         if len(_prev_users) >= 2:
