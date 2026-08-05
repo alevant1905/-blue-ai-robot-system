@@ -72,7 +72,7 @@ button:disabled{opacity:.46;cursor:default}.muted{color:var(--slate);font-size:.
 </head>
 <body>
 <h1>Panel Mode</h1>
-<p class="sub">Speak naturally with Blue, Hexia, and Casper in one room. Call a robot’s name to give them the floor; they answer once, then the floor returns to the room — say a name again for the next question. Say a name on its own and that robot waits for what you say next. Mentioning another robot inside the question does not switch speakers. Every robot still hears the full conversation.</p>
+<p class="sub">Speak naturally with Blue, Hexia, and Casper in one room. Call a robot’s name to give them the floor; they answer once, then the floor returns to the room — say a name again for the next question. Say a name on its own and that robot waits for what you say next. Mentioning another robot inside the question does not switch speakers. Every robot still hears the full conversation. Turn on <strong>continuous</strong> and they discuss the topic with each other in a random order, without waiting to be asked — say something at any time and they take it up.</p>
 
 <section class="panel">
   <div class="section-title">Discussion</div>
@@ -124,12 +124,13 @@ button:disabled{opacity:.46;cursor:default}.muted{color:var(--slate);font-size:.
       <button class="stop" id="interruptBtn" disabled>Stop talking</button>
       <button id="stopBtn" disabled>End panel</button>
       <button id="saveBtn" disabled>Save transcript</button>
+      <label class="muted"><input id="continuousChk" type="checkbox"> continuous discussion</label>
       <label class="muted"><input id="speakChk" type="checkbox" checked> speak replies aloud</label>
     </div>
   </div>
 </section>
 
-<main id="log" aria-live="polite"><div class="note">Start the panel, then say “Blue…”, “Hexia…”, “Casper…”, or “everyone…”.</div></main>
+<main id="log" aria-live="polite"><div class="note">Start the panel, then say “Blue…”, “Hexia…”, “Casper…”, or “everyone…”. Or tick continuous and let them talk it out.</div></main>
 
 <section class="panel composer">
   <textarea id="messageInput" maxlength="1600" placeholder="Call a robot by name, then ask your question…"></textarea>
@@ -152,9 +153,14 @@ const logEl=document.getElementById('log'),statusEl=document.getElementById('sta
 const startBtn=document.getElementById('startBtn'),stopBtn=document.getElementById('stopBtn');
 const interruptBtn=document.getElementById('interruptBtn'),saveBtn=document.getElementById('saveBtn'),sendBtn=document.getElementById('sendBtn');
 const micBtn=document.getElementById('micBtn'),inputEl=document.getElementById('messageInput');
-const audioEl=document.getElementById('panelAudio');
+const audioEl=document.getElementById('panelAudio'),continuousChk=document.getElementById('continuousChk');
 // The floor is a LIST, not one name: "everyone" hands it to all three at once.
 let running=false,busy=false,activeRobots=[],history=[],materials=[];
+// Continuous discussion: a random running order the loop walks through, and the
+// last robot who actually spoke, so the seam between two lineups (or between an
+// answer to Alex and the next free turn) never hands anyone two turns in a row.
+let loopActive=false,lineup=[],lineupIndex=0,lastRobotTurn='',continuousFailures=0;
+const CONTINUOUS_GAP_MS=1100;
 let recognition=null,listening=false,resumeListening=false,activeFinish=null,audioUrl='',audioAbort=null,turnAbort=null,turnVersion=0;
 let lastRobotSpeech='',echoGuardUntil=0,recognitionRestartAfter=0;
 const voicePrefs={{ voice_preferences_json|safe }};
@@ -167,26 +173,35 @@ function addTurn(speaker,text){
   const el=document.createElement('div');el.className='turn '+cfg.id;
   const who=document.createElement('div');who.className='who';who.textContent=cfg.name;
   const body=document.createElement('div');body.textContent=text;el.appendChild(who);el.appendChild(body);logEl.appendChild(el);
-  history.push({speaker:speaker,text:text});saveBtn.disabled=false;scrollDown();return el;
+  history.push({speaker:speaker,text:text});if(speaker!=='user')lastRobotTurn=speaker;saveBtn.disabled=false;scrollDown();return el;
 }
 function scrollDown(){requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}));}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+function continuousOn(){return !!continuousChk.checked;}
 // Accepts a name, a list of names, or nothing at all.
-function setActive(robot){
+function setActive(robot,label){
   const list=Array.isArray(robot)?robot.slice():(robot?[robot]:[]);
   activeRobots=list.filter(id=>IDS.indexOf(id)>=0);
   IDS.forEach(id=>{const card=document.getElementById('robot-'+id),state=card.querySelector('.robot-state'),
     holding=activeRobots.indexOf(id)>=0;
-    card.classList.toggle('listening',holding);state.textContent=holding?'listening':'hearing all';});
+    card.classList.toggle('listening',holding);state.textContent=holding?(label||'listening'):'hearing all';});
+}
+// Highlight a continuous speaker WITHOUT giving them the floor: nobody is being
+// addressed in continuous mode, so activeRobots must stay as Alex left it.
+function showSpeaking(id){
+  IDS.forEach(key=>{const card=document.getElementById('robot-'+key),state=card.querySelector('.robot-state'),on=key===id;
+    card.classList.toggle('listening',on);state.textContent=on?'speaking':'hearing all';});
 }
 function selectedSettings(){
   const out={};IDS.forEach(id=>{out[id]={role:document.getElementById('role-'+id).value.trim(),slang:document.getElementById('slang-'+id).value.trim(),documents:Array.from(document.querySelectorAll('#docs-'+id+' input[type=checkbox]:checked')).map(x=>x.value)};});return out;
 }
 function saveSettings(){
-  try{localStorage.setItem('bluePanelSettings',JSON.stringify({topic:document.getElementById('topic').value,robots:selectedSettings()}));}catch(e){}
+  try{localStorage.setItem('bluePanelSettings',JSON.stringify({topic:document.getElementById('topic').value,continuous:continuousOn(),robots:selectedSettings()}));}catch(e){}
 }
 function restoreSettings(){
   let data={};try{data=JSON.parse(localStorage.getItem('bluePanelSettings')||'{}')||{};}catch(e){}
   if(typeof data.topic==='string')document.getElementById('topic').value=data.topic;
+  continuousChk.checked=!!data.continuous;
   IDS.forEach(id=>{const cfg=(data.robots||{})[id]||{};if(typeof cfg.role==='string')document.getElementById('role-'+id).value=cfg.role;if(typeof cfg.slang==='string')document.getElementById('slang-'+id).value=cfg.slang;});
   return data.robots||{};
 }
@@ -295,7 +310,7 @@ function isStopCommand(raw){
   const text=String(raw||'').toLowerCase().replace(/[^a-z\s]/g,' ').replace(/\s+/g,' ').trim();
   return /^(?:(?:please|robots?|blue|hexia|casper)\s+)*(?:stop|stop talking|stop speaking|be quiet|quiet|enough|cancel)(?:\s+(?:now|please|talking|speaking))?$/.test(text);
 }
-function interruptReply(message){
+function interruptReply(message,keepGoing){
   turnVersion+=1;
   if(turnAbort){try{turnAbort.abort();}catch(e){}turnAbort=null;}
   if(activeFinish)activeFinish();else stopAudio();
@@ -303,11 +318,85 @@ function interruptReply(message){
   // Cut off mid-answer is still an answer that ended: the floor goes back to
   // the room rather than staying with whoever was talking.
   setActive('');
+  // "Stop talking" has to stop the discussion as well. A continuous panel that
+  // resumed a second later would simply be ignoring him. `keepGoing` is for the
+  // one case that is not a stop: Alex barging in on a turn to say his piece.
+  if(!keepGoing&&continuousOn()){
+    continuousChk.checked=false;saveSettings();
+    if(message!==false)message=message||'Discussion paused. Tick “continuous” when you want them talking again.';
+  }
   if(message!==false)setStatus(message||'Stopped. Panel is listening. Call a robot by name.');
   if(resumeListening&&running&&!listening)setTimeout(startRecognition,50);
 }
+// A random running order, refilled from the server so the weighting that keeps
+// nobody twice in a row and nobody starved lives in one place.
+async function refillLineup(){
+  const avoid=lastRobotTurn;
+  try{
+    const response=await fetch('/panel/lineup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turns:9,avoid:avoid})}),data=await response.json();
+    if(response.ok&&data.ok&&Array.isArray(data.lineup)&&data.lineup.length){lineup=data.lineup;lineupIndex=0;return;}
+  }catch(e){}
+  const out=[];let previous=avoid;
+  for(let i=0;i<9;i++){const options=IDS.filter(id=>id!==previous);previous=options[Math.floor(Math.random()*options.length)];out.push(previous);}
+  lineup=out;lineupIndex=0;
+}
+async function nextSpeaker(){
+  if(lineupIndex>=lineup.length)await refillLineup();
+  let id=lineup[lineupIndex++];
+  if(id===lastRobotTurn&&lineupIndex<lineup.length)id=lineup[lineupIndex++];
+  return id;
+}
+async function runContinuous(){
+  if(loopActive)return;loopActive=true;continuousFailures=0;
+  try{
+    while(running&&continuousOn()){
+      // Alex's own turn owns the floor while it runs; wait it out rather than
+      // talking over him.
+      if(busy){await sleep(180);continue;}
+      const topic=document.getElementById('topic').value.trim();
+      if(!topic&&!history.length){setStatus('Give them a topic, or say something, and they will take it from there.');await sleep(700);continue;}
+      const id=await nextSpeaker();if(!running||!continuousOn()||busy)continue;
+      const cfg=ROBOTS[id],thisTurn=++turnVersion;
+      busy=true;interruptBtn.disabled=false;showSpeaking(id);setStatus(cfg.name+' is thinking…');
+      try{
+        turnAbort=typeof AbortController!=='undefined'?new AbortController():null;
+        const options={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:id,mode:'continuous',text:'',topic:topic,history:history,settings:selectedSettings(),materials:materials})};
+        if(turnAbort)options.signal=turnAbort.signal;
+        const response=await fetch('/panel/turn',options);turnAbort=null;
+        const data=await response.json().catch(()=>null);
+        if(thisTurn!==turnVersion||!running)continue;
+        if(!response.ok||!data||!data.ok)throw new Error((data&&data.error)||'that turn could not be generated');
+        continuousFailures=0;
+        const el=addTurn(id,data.text);setStatus(cfg.name+' is speaking…');
+        await speakAs(cfg,data.text,el,data.eye_mood,thisTurn);
+      }catch(error){
+        if((error&&error.name==='AbortError')||thisTurn!==turnVersion)continue;
+        continuousFailures+=1;
+        addNote(cfg.name+' could not take a turn: '+((error&&error.message)||'unknown error'));
+        if(continuousFailures>=3){continuousChk.checked=false;saveSettings();setStatus('The discussion stopped: the robots could not keep answering.',true);}
+        else await sleep(1500);
+      }finally{
+        if(thisTurn===turnVersion){busy=false;turnAbort=null;interruptBtn.disabled=true;setActive(activeRobots);}
+      }
+      if(running&&continuousOn())await sleep(CONTINUOUS_GAP_MS);
+    }
+  }finally{loopActive=false;}
+}
+function setContinuous(on){
+  continuousChk.checked=!!on;saveSettings();
+  if(!continuousChk.checked){setStatus('Continuous discussion off. Call a robot by name.');return;}
+  if(!running)startPanel();
+  setStatus('They will discuss it on their own — say something whenever you want to join in.');
+  runContinuous();
+}
+continuousChk.onchange=()=>setContinuous(continuousChk.checked);
 async function submitUtterance(raw){
-  const text=String(raw||'').replace(/\s+/g,' ').trim();if(!text)return;if(isStopCommand(text)){interruptReply();return;}if(busy)return;if(!running)startPanel();
+  const text=String(raw||'').replace(/\s+/g,' ').trim();if(!text)return;if(isStopCommand(text)){interruptReply();return;}
+  // In a continuous discussion Alex would otherwise never get a word in: a
+  // robot is nearly always mid-turn, so his line cuts that turn short instead
+  // of being dropped. The discussion itself keeps running.
+  if(busy){if(!continuousOn())return;interruptReply(false,true);}
+  if(!running)startPanel();
   const thisTurn=++turnVersion;inputEl.value='';busy=true;sendBtn.disabled=true;interruptBtn.disabled=false;
   // Set only when a bare name was called and nobody answered yet — that is the
   // one case where the floor survives into the next utterance.
@@ -315,7 +404,10 @@ async function submitUtterance(raw){
   try{
     const routing=await resolveRouting(text),targets=routing.targets||[];addTurn('user',text);
     if(thisTurn!==turnVersion)return;
-    if(!targets.length){setStatus('Everyone heard that. Call Blue, Hexia, or Casper by name to choose who answers.',true);return;}
+    // Unaddressed, the remark reaches nobody — unless the discussion is running
+    // on its own, in which case it is simply the next thing said in the room and
+    // whoever speaks next answers it.
+    if(!targets.length){setStatus(continuousOn()?'Heard. They will pick it up.':'Everyone heard that. Call Blue, Hexia, or Casper by name to choose who answers.',!continuousOn());return;}
     for(const id of targets){if(thisTurn!==turnVersion||!running)return;await acknowledge(id);if(thisTurn!==turnVersion||!running)return;if(routing.nameOnly)continue;setStatus(ROBOTS[id].name+' is thinking…');
       turnAbort=typeof AbortController!=='undefined'?new AbortController():null;const options={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:id,text:text,topic:document.getElementById('topic').value.trim(),history:history,settings:selectedSettings(),materials:materials})};if(turnAbort)options.signal=turnAbort.signal;
       const response=await fetch('/panel/turn',options);turnAbort=null;
@@ -334,11 +426,13 @@ async function submitUtterance(raw){
       // it lights each robot in turn, so "everyone" used to end with only
       // Casper holding the floor and answering the next question alone.
       if(routing.nameOnly){heldForFollowUp=true;setActive(targets);setStatus(targets.map(id=>ROBOTS[id].name).join(', ')+' listening.');}
-      else setStatus('Panel is listening. Call a robot by name.');
+      else setStatus(continuousOn()?'Back to the discussion…':'Panel is listening. Call a robot by name.');
     }
   }catch(error){if(error&&error.name!=='AbortError'&&thisTurn===turnVersion)setStatus(error.message||'Panel turn failed.',true);}finally{if(thisTurn===turnVersion){if(!heldForFollowUp)setActive('');turnAbort=null;busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;if(resumeListening&&running&&!listening)startRecognition();}}
 }
-function startPanel(){running=true;startBtn.disabled=true;stopBtn.disabled=false;saveSettings();setStatus('Panel is listening. Call a robot by name.');}
+function startPanel(){running=true;startBtn.disabled=true;stopBtn.disabled=false;saveSettings();
+  if(continuousOn()){setStatus('They will discuss it on their own — say something whenever you want to join in.');runContinuous();}
+  else setStatus('Panel is listening. Call a robot by name.');}
 function stopPanel(){running=false;interruptReply(false);startBtn.disabled=false;stopBtn.disabled=true;setActive('');stopRecognition(false);setStatus('Panel ended. The transcript is still available.');}
 startBtn.onclick=startPanel;interruptBtn.onclick=()=>interruptReply();stopBtn.onclick=stopPanel;sendBtn.onclick=()=>submitUtterance(inputEl.value);inputEl.addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();submitUtterance(inputEl.value);}});
 

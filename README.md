@@ -34,6 +34,18 @@ Open **`/duet`** and Blue and Hexia hold a spoken, turn‑by‑turn conversation
 
 The duet speakers are the **same Blue and Hexia as in chat**: each turn carries the household facts (who everyone is), the current date, your explicit “remember this” notes, and memories relevant to the topic — so they speak as themselves, not as blank stage actors.
 
+### 🎙️ Panel mode — speak with all three
+
+Open **`/panel`** for one human-led conversation with Blue, Hexia, and Casper. Call a robot by name to give them the floor; a name-only call keeps that robot listening for your next sentence. You can also address several robots in one utterance or say **“everyone”** to hear from all three.
+
+- **Blue** acknowledges his name with green eyes and one nod.
+- **Casper** acknowledges with a green base light and one nod.
+- **Hexia** acknowledges with one nod.
+- Every panel turn includes the same complete transcript, so all three know what Alex and the other robots just heard and said.
+- Add a topic plus up to four shared websites or PDFs, and set a separate role, slang/register, and library reading list for each robot.
+- Use continuous browser speech recognition or type into the shared composer; replies use each robot's saved voice and physical head lip-sync.
+- Tick **continuous discussion** and the three of them talk it out on their own: a random running order (nobody twice in a row, nobody left out) with each turn answering the topic and the point the last speaker actually made. Say something at any moment — your line cuts the current turn short, joins the transcript, and the discussion carries on from it. "Stop talking" stops the discussion; tick the box again to restart it.
+
 ### 🧠 Memory & library
 
 - **Shared world, own self** — all three robots know the household (names, schedule, the document library), but each keeps its own evolving self‑profile and chat history.
@@ -48,6 +60,7 @@ All reachable from the home hub at `http://localhost:5000/`:
 | Page | What it's for |
 |------|----------------|
 | `/chat` · `/hexia` · `/casper` | Chat with Blue / Hexia / Casper (text + voice, image & file sharing) |
+| `/panel` | Human-led conversation with all three — name routing, acknowledgements, shared hearing, roles, slang, websites/PDFs, and per-robot library sources |
 | `/duet` | Blue & Hexia converse — topic, link (article/YouTube), roles, tone, slang, per‑robot sources |
 | `/banter` | Blue, Hexia & Casper riff together on a topic in Comedic Banter mode |
 | `/head` · `/head/hexia` · `/head/casper` | Calibrate each robot's motion, expressions and lip‑sync |

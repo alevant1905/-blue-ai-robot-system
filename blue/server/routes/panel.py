@@ -12,11 +12,20 @@ finished replying, so an unaddressed remark reaches nobody instead of being
 picked up by whoever spoke last. The single exception is a bare name — "Hexia"
 with no question is the act of addressing her, and she keeps the floor for the
 sentence that follows.
+
+Continuous mode suspends the floor entirely. The page asks ``/panel/lineup``
+for a random running order and keeps taking turns on its own, so the three
+robots discuss the topic and answer each other without Alex prompting them.
+Alex can still barge in at any moment; his line joins the same transcript and
+the discussion carries on from it. A continuous turn never runs the chat tool
+pipeline — robot chatter is not a command, and detection over non-command text
+is exactly how a discussion of photographs ends up firing the real camera.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -158,6 +167,36 @@ def _resolve_panel_routing(text: str, active_robot: Any = "") -> Dict[str, Any]:
         "activeRobot": active[0] if active else "",
         "activeRobots": active,
     }
+
+
+def panel_lineup(turns: int = 9, avoid: Any = "",
+                 rng: Optional[random.Random] = None) -> List[str]:
+    """A random running order for continuous discussion.
+
+    Banter already solved this problem — a plain shuffle reads as a queue, and
+    a fixed rotation reads as a machine — so the weighting that keeps nobody
+    twice in a row and nobody starved is reused rather than reinvented.
+    ``avoid`` is whoever just spoke, so the seam between one lineup and the
+    next does not hand the same robot two turns.
+    """
+    picker = rng or random
+    total = max(1, min(30, int(turns or 9)))
+    options = [robot for robot in PANEL_ROBOTS if robot != _robot_key(avoid)]
+    starter = picker.choice(options or list(PANEL_ROBOTS))
+    try:
+        from blue.server.routes.banter import banter_lineup
+
+        lineup = list(banter_lineup(starter, total, rng=rng))
+        if lineup:
+            return lineup
+    except Exception as exc:
+        bt.log.warning(f"[PANEL] lineup fell back to a local shuffle: {exc}")
+    lineup = [starter]
+    while len(lineup) < total:
+        lineup.append(picker.choice(
+            [robot for robot in PANEL_ROBOTS if robot != lineup[-1]]
+        ))
+    return lineup
 
 
 def _robot_payload() -> str:
@@ -599,19 +638,34 @@ def _result_text(result: Any) -> str:
 def _build_messages(robot: str, latest: str, topic: str,
                     history: List[Dict[str, str]],
                     settings: Dict[str, Dict[str, Any]],
-                    materials: List[Dict[str, str]]) -> List[Dict[str, str]]:
+                    materials: List[Dict[str, str]],
+                    mode: str = "led") -> List[Dict[str, str]]:
     cfg = bt._robot_cfg(robot)
     personal = settings[robot]
+    continuous = mode == "continuous"
     other_names = [bt._robot_cfg(key)["name"] for key in PANEL_ROBOTS if key != robot]
-    system_parts = [
-        cfg["persona_line"],
-        (
+    if continuous:
+        floor_line = (
+            f"You are {cfg['name']} in Panel Mode, a live conversation with Alex, "
+            f"{', '.join(other_names)}, and you. The panel is running CONTINUOUSLY: "
+            "nobody has called on you, the discussion simply came round to your "
+            "turn. Carry it forward yourself — take up the point the last speaker "
+            "actually made, agree or disagree and say why, or raise the next "
+            "question the topic opens. Never write dialogue for another robot and "
+            "never narrate or summarise the discussion from outside it. Keep it to "
+            "a spoken two to four sentences."
+        )
+    else:
+        floor_line = (
             f"You are {cfg['name']} in Panel Mode, a live conversation with Alex, "
             f"{', '.join(other_names)}, and you. Alex has addressed you by name. "
             "Answer Alex yourself; never write dialogue for another robot. Keep a "
             "spoken answer natural and focused, usually two to four sentences unless "
             "Alex explicitly asks for more."
-        ),
+        )
+    system_parts = [
+        cfg["persona_line"],
+        floor_line,
         (
             "SHARED HEARING: Blue, Hexia, and Casper receive this same complete live "
             "transcript. You heard every human and robot line in it, including lines "
@@ -619,6 +673,17 @@ def _build_messages(robot: str, latest: str, topic: str,
             "could not hear what another panel member just said. Do not repeat their "
             "answer merely to prove you heard it; add your own useful response."
         ),
+    ]
+    if continuous:
+        system_parts.append(
+            "OPEN DISCUSSION MANNERS: do not restate a point the transcript "
+            "already contains, do not open by thanking or complimenting the "
+            "previous speaker, and do not hand the turn on with a question to "
+            "no one in particular. Address a robot by name when you take up "
+            "their point. Speak to Alex only when his line is the most recent "
+            "one; otherwise he is listening, not waiting for an answer."
+        )
+    system_parts.extend([
         (
             f"Your assigned panel role or perspective: {personal['role'] or 'stay in your normal identity and perspective.'}\n"
             f"Your assigned slang or speech register: {personal['slang'] or 'use your natural voice without forced slang.'}\n"
@@ -641,14 +706,18 @@ def _build_messages(robot: str, latest: str, topic: str,
             "when relevant and be candid when the supplied material does not answer a "
             "question."
         ),
-    ]
+    ])
     # A short follow-up ("what's going on", "of course you know him") carries no
     # searchable terms of its own; the recent transcript supplies the anchor.
     recall_tail = " ".join(item["text"] for item in history[-4:])
+    # Nobody spoke to start a continuous turn, so the line the robot is answering
+    # is the live one — otherwise a discussion that turns to Alex's brother gets
+    # none of the household grounding an addressed question would have had.
+    live = latest or (history[-1]["text"] if history else "")
     continuity = _continuity_context(
         robot,
-        f"{topic} {latest}".strip(),
-        f"{topic} {latest} {recall_tail}".strip()[:2200],
+        f"{topic} {live}".strip(),
+        f"{topic} {live} {recall_tail}".strip()[:2200],
     )
     if continuity:
         system_parts.append(continuity)
@@ -661,17 +730,28 @@ def _build_messages(robot: str, latest: str, topic: str,
     if material_text:
         user_parts.append("Material shared with all three robots:\n" + material_text)
     grounding = _library_grounding(
-        robot, topic, latest, history, personal["documents"]
+        robot, topic, live, history, personal["documents"]
     )
     if grounding:
         user_parts.append(
             f"{cfg['name']}'s selected library evidence:\n{grounding}"
         )
-    user_parts.extend([
-        "Complete shared panel transcript:\n" + _transcript_text(history),
-        f"Alex's current utterance addressed to {cfg['name']}: {latest}",
-        f"Give only {cfg['name']}'s spoken reply.",
-    ])
+    user_parts.append(
+        "Complete shared panel transcript:\n" + _transcript_text(history)
+    )
+    if continuous:
+        user_parts.append(
+            f"No one was called on. The discussion has come round to "
+            f"{cfg['name']}, and you are speaking next of your own accord."
+        )
+    else:
+        user_parts.append(
+            f"Alex's current utterance addressed to {cfg['name']}: {latest}"
+        )
+    user_parts.append(
+        f"Give only {cfg['name']}'s spoken "
+        + ("turn." if continuous else "reply.")
+    )
     return [
         {"role": "system", "content": "\n\n".join(system_parts)},
         {"role": "user", "content": "\n\n".join(user_parts)},
@@ -682,6 +762,7 @@ def _panel_conversation_messages(
     robot: str,
     latest: str,
     history: List[Dict[str, str]],
+    cue: str = "",
 ) -> List[Dict[str, str]]:
     """Preserve the shared panel as real chat history for follow-up turns.
 
@@ -690,6 +771,9 @@ def _panel_conversation_messages(
     end.  Keeping it exact is important: chat-mode tool detection examines the
     final user message and must not mistake an older transcript line for a new
     camera, email, music, or other action request.
+
+    ``cue`` replaces that final message for a continuous turn, where Alex said
+    nothing and the prompt to speak is the discussion itself.
     """
     prior = list(history)
     if (
@@ -713,7 +797,7 @@ def _panel_conversation_messages(
                 "role": "user",
                 "content": f"[{name}, another robot in the panel, said]: {text}",
             })
-    messages.append({"role": "user", "content": latest})
+    messages.append({"role": "user", "content": cue or latest})
     return messages
 
 
@@ -747,12 +831,23 @@ def _panel_requires_tools(latest: str, selection: Any) -> bool:
         return False
 
 
+def _last_spoken_line(history: List[Dict[str, str]]) -> str:
+    """The line a continuous turn is answering, named for whoever said it."""
+    for item in reversed(history):
+        speaker = item.get("speaker")
+        name = "Alex" if speaker == "user" else bt._robot_cfg(speaker)["name"]
+        return f"{name}: {item.get('text', '')}"
+    return ""
+
+
 def _panel_direct_messages(
     robot: str,
     latest: str,
     topic: str,
     role: str,
     messages: List[Dict[str, str]],
+    mode: str = "led",
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, str]]:
     """Pin identity, topic, and stance beside a non-tool conversational turn."""
     cfg = bt._robot_cfg(robot)
@@ -777,21 +872,41 @@ def _panel_direct_messages(
         )
     else:
         stance = "Use your normal perspective."
-    requirement = (
-        "<panel_reply_requirement>\n"
+    shared = (
         f"You are {cfg['name']}, not {' or '.join(other_names)}. Blue is always "
         "the separate robot Blue, never you and never Alex.\n"
-        f"The human asking is Alex. The active discussion topic is: "
-        f"{topic or '(open conversation)'}\n"
+        f"The active discussion topic is: {topic or '(open conversation)'}\n"
         f"{stance}\n"
-        "Answer Alex's exact words through that topic and stance. Use the actual "
-        "speaker-labelled history for follow-ups. Never invent something another "
-        "robot supposedly said; attribute a claim to Blue, Hexia, or Casper only "
-        "when that exact speaker has a corresponding earlier line in the supplied "
-        "history.\n"
-        "</panel_reply_requirement>\n\n"
-        f"Alex's exact words: {latest}"
+        "Never invent something another robot supposedly said; attribute a claim "
+        "to Blue, Hexia, or Casper only when that exact speaker has a "
+        "corresponding earlier line in the supplied history.\n"
     )
+    if mode == "continuous":
+        last_line = _last_spoken_line(history or [])
+        requirement = (
+            "<panel_turn_requirement>\n"
+            + shared
+            + "Nobody called on you. It is your turn in a discussion that is "
+            "running on its own, so speak because you have something to add: "
+            "take up the last speaker's actual point by name, agree or "
+            "disagree with a reason, bring the topic or your readings to bear, "
+            "or put a direct question to one of the others. Do not repeat a "
+            "point the transcript already contains and do not summarise the "
+            "discussion.\n"
+            "</panel_turn_requirement>\n\n"
+            + (f"The last thing said: {last_line}"
+               if last_line else "You are opening the discussion.")
+        )
+    else:
+        requirement = (
+            "<panel_reply_requirement>\n"
+            + shared
+            + "The human asking is Alex. Answer Alex's exact words through that "
+            "topic and stance. Use the actual speaker-labelled history for "
+            "follow-ups.\n"
+            "</panel_reply_requirement>\n\n"
+            f"Alex's exact words: {latest}"
+        )
     direct = list(messages)
     direct[-1] = {"role": "user", "content": requirement}
     return direct
@@ -904,25 +1019,67 @@ def register(app) -> None:
             **_resolve_panel_routing(text, data.get("activeRobot")),
         })
 
+    @app.route("/panel/lineup", methods=["POST"])
+    def panel_lineup_route():
+        """A random running order for continuous discussion."""
+        data = request.get_json(silent=True) or {}
+        try:
+            turns = int(data.get("turns") or 9)
+        except (TypeError, ValueError):
+            turns = 9
+        lineup = panel_lineup(turns, data.get("avoid"))
+        return jsonify({
+            "ok": True,
+            "lineup": lineup,
+            "names": [bt._robot_cfg(robot)["name"] for robot in lineup],
+        })
+
     @app.route("/panel/turn", methods=["POST"])
     def panel_turn():
         data = request.get_json(silent=True) or {}
         robot = _robot_key(data.get("speaker") or data.get("robot"))
         if robot not in PANEL_ROBOTS:
             return jsonify({"ok": False, "error": "unknown speaker"}), 400
+        continuous = str(data.get("mode") or "").strip().lower() == "continuous"
         latest = re.sub(r"\s+", " ", str(data.get("text") or "")).strip()[:1600]
-        if not latest:
+        # A continuous turn has no utterance behind it: the transcript is the
+        # prompt, so only a human-led turn requires one.
+        if not latest and not continuous:
             return jsonify({"ok": False, "error": "text is required"}), 400
         topic = re.sub(r"\s+", " ", str(data.get("topic") or "")).strip()
         topic = topic[:_MAX_TOPIC_CHARS]
         history = _sanitize_panel_history(robot, _clean_history(data.get("history")))
         settings = _clean_settings(data.get("settings"))
         materials = _clean_materials(data.get("materials"))
-        messages = _build_messages(robot, latest, topic, history, settings, materials)
+        if continuous and not (topic or history):
+            return jsonify({
+                "ok": False,
+                "error": "a topic or an opening remark is required",
+            }), 400
+        mode = "continuous" if continuous else "led"
+        messages = _build_messages(
+            robot, latest, topic, history, settings, materials, mode
+        )
         cfg = bt._robot_cfg(robot)
         other_names = [
             bt._robot_cfg(key)["name"] for key in PANEL_ROBOTS if key != robot
         ]
+        if continuous:
+            floor_state = (
+                "- The human in user messages is Alex. He is listening, not "
+                "waiting on an answer, unless his line is the most recent in "
+                "the transcript. Never address Alex as Blue, Hexia, or Casper.\n"
+                "- Nobody called on you. Speak your own turn in the open "
+                "discussion: engage the last speaker's point, or the topic, "
+                "and add something the transcript does not already contain.\n"
+            )
+        else:
+            floor_state = (
+                "- The human speaking in user messages is Alex. Answer Alex and "
+                "never address Alex as Blue, Hexia, or Casper. Do not turn to "
+                "another robot unless Alex explicitly asks you to address that "
+                "robot.\n"
+            )
         pinned_state = (
             "PINNED PANEL STATE FOR THIS REPLY — follow it even for a short or "
             "ambiguous follow-up:\n"
@@ -930,10 +1087,8 @@ def register(app) -> None:
             f"{' or '.join(other_names)}; they are the other robots in this room.\n"
             f"- Speak in first person only as {cfg['name']}. The name Blue always "
             "means the separate robot Blue; never say or imply that Blue is you.\n"
-            "- The human speaking in user messages is Alex. Answer Alex and never "
-            "address Alex as Blue, Hexia, or Casper. Do not turn to another robot "
-            "unless Alex explicitly asks you to address that robot.\n"
-            f"- The active discussion topic is: {topic or '(open conversation)'}\n"
+            + floor_state
+            + f"- The active discussion topic is: {topic or '(open conversation)'}\n"
             f"- Your assigned position is: "
             f"{settings[robot]['role'] or 'your normal perspective'}\n"
             "- Treat that assigned position as the stance you must defend in this "
@@ -960,9 +1115,21 @@ def register(app) -> None:
             + "\n\n"
             + pinned_state
         )
-        panel_turn = _panel_conversation_messages(robot, latest, history)
-        tool_selection = _panel_tool_selection(latest, panel_turn)
-        use_chat_tools = _panel_requires_tools(latest, tool_selection)
+        cue = ""
+        if continuous:
+            cue = (
+                f"It is {cfg['name']}'s turn in the open discussion. Speak now."
+            )
+        panel_turn = _panel_conversation_messages(robot, latest, history, cue)
+        # Tool detection runs on commands only. Robot chatter about a photograph
+        # or a song is discussion, not an instruction, and letting the selector
+        # see it is how a panel about music ends up playing music in the house.
+        if continuous:
+            tool_selection = None
+            use_chat_tools = False
+        else:
+            tool_selection = _panel_tool_selection(latest, panel_turn)
+            use_chat_tools = _panel_requires_tools(latest, tool_selection)
 
         try:
             with llm_slot(foreground=True):
@@ -986,11 +1153,15 @@ def register(app) -> None:
                         topic,
                         settings[robot]["role"],
                         panel_turn,
+                        mode,
+                        history,
                     )
                     result = bt.call_llm(
                         [{"role": "system", "content": panel_system}, *direct_turn],
                         include_tools=False,
-                        temperature=0.72,
+                        # A discussion that runs itself needs a little more
+                        # spread, or three robots converge on one voice.
+                        temperature=0.86 if continuous else 0.72,
                         max_tokens=1100,
                     )
             text = _clean_reply(_result_text(result), robot)

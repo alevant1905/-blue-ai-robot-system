@@ -662,3 +662,199 @@ def test_everyone_holds_the_floor_for_all_three_in_the_page(panel_module):
     # The floor is a list throughout.
     assert "activeRobots=[]" in html
     assert "activeRobot:activeRobots" in html
+
+
+# --- Continuous discussion ------------------------------------------------
+
+
+def test_the_continuous_running_order_is_random_and_never_doubles_up(panel_module):
+    """Random, but not so random that anyone speaks twice in a row or vanishes."""
+    orders = set()
+    for _ in range(40):
+        lineup = panel_module.panel_lineup(9)
+        assert len(lineup) == 9
+        assert set(lineup) <= set(panel_module.PANEL_ROBOTS)
+        assert all(a != b for a, b in zip(lineup, lineup[1:]))
+        assert set(lineup) == set(panel_module.PANEL_ROBOTS)
+        orders.add(tuple(lineup))
+    assert len(orders) > 1, "a fixed rotation is not a random order"
+
+
+def test_the_next_lineup_does_not_hand_the_last_speaker_two_turns(panel_module):
+    for _ in range(30):
+        assert panel_module.panel_lineup(6, avoid="hexia")[0] != "hexia"
+        # Casper answers to several names; the seam must respect all of them.
+        assert panel_module.panel_lineup(6, avoid="casper")[0] != "pico"
+
+
+def test_the_lineup_endpoint_serves_the_page_a_running_order(panel_module):
+    response = _client(panel_module).post(
+        "/panel/lineup", json={"turns": 5, "avoid": "blue"}
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["ok"] is True
+    assert len(data["lineup"]) == 5
+    assert data["lineup"][0] != "blue"
+    assert data["names"][0] in {"Blue", "Hexia", "Casper"}
+
+
+def test_a_continuous_turn_needs_no_utterance_from_alex(panel_module):
+    """Nobody prompts the robot: the transcript and the topic are the prompt."""
+    response = _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "hexia",
+            "mode": "continuous",
+            "text": "",
+            "topic": "Whether cities should ban cars downtown",
+            "history": [
+                {"speaker": "user", "text": "Talk it over between you."},
+                {"speaker": "blue", "text": "Access improves when streets serve people."},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["speaker"] == "hexia"
+    call = panel_module._test_calls[-1]
+    assert call["pipeline"] == "conversation"
+    system = call["messages"][0]["content"]
+    assert "CONTINUOUSLY" in system
+    assert "OPEN DISCUSSION MANNERS" in system
+    assert "Nobody called on you" in system
+    assert "Blue: Access improves when streets serve people." in system
+    requirement = call["messages"][-1]["content"]
+    assert "<panel_turn_requirement>" in requirement
+    assert "The last thing said: Blue: Access improves when streets serve people." in requirement
+    # The human-led framing must not leak into a turn Alex never asked for.
+    assert "Alex has addressed you by name" not in system
+    assert "Alex's exact words" not in requirement
+
+
+def test_a_continuous_turn_answers_the_other_robots_not_only_the_topic(panel_module):
+    _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "pico",
+            "mode": "continuous",
+            "topic": "Whether cities should ban cars downtown",
+            "history": [
+                {"speaker": "blue", "text": "Access improves when streets serve people."},
+                {"speaker": "hexia", "text": "Deliveries would collapse within a week."},
+            ],
+        },
+    )
+
+    call = panel_module._test_calls[-1]
+    prompt = call["messages"][0]["content"] + call["messages"][-1]["content"]
+    assert "take up the last speaker's actual point by name" in prompt
+    assert "Do not repeat a point the transcript already contains" in prompt
+    # Both other robots' lines are in the transcript it answers from.
+    assert "Hexia: Deliveries would collapse within a week." in call["messages"][0]["content"]
+    assert {
+        "role": "user",
+        "content": "[Blue, another robot in the panel, said]: Access improves when streets serve people.",
+    } in call["messages"]
+
+
+def test_continuous_chatter_never_reaches_the_tool_pipeline(panel_module):
+    """Robot discussion is not a command. Letting the selector see it is how a
+    panel that talks about photographs ends up firing the real camera."""
+    response = _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "blue",
+            "mode": "continuous",
+            "topic": "what do you see in street photography",
+            "history": [
+                {"speaker": "hexia", "text": "what do you see when a street empties out"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert panel_module._test_calls[-1]["pipeline"] == "conversation"
+
+
+def test_a_continuous_turn_still_carries_the_household_memory(panel_module):
+    _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "blue",
+            "mode": "continuous",
+            "topic": "What Felix would make of all this",
+            "history": [{"speaker": "hexia", "text": "Alex's brother would disagree."}],
+        },
+    )
+
+    system = panel_module._test_calls[-1]["messages"][0]["content"]
+    assert "<known_facts>" in system
+    assert "Brother Name: Felix" in system
+    assert "<earlier_sessions>" in system
+
+
+def test_a_continuous_turn_is_grounded_on_the_line_it_is_answering(panel_module):
+    """Alex said nothing, so the last spoken line is the live utterance. Without
+    that, a discussion that turns to his family gets none of the grounding the
+    same question typed into chat would have had."""
+    _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "pico",
+            "mode": "continuous",
+            "topic": "How households divide their time",
+            "history": [
+                {"speaker": "blue", "text": "Alex's daughters would settle this quickly."},
+            ],
+        },
+    )
+
+    assert "<family>" in panel_module._test_calls[-1]["messages"][0]["content"]
+    assert "daughters" in panel_module._test_memory.searched[-1]
+
+
+def test_a_continuous_turn_without_a_topic_or_transcript_is_refused(panel_module):
+    response = _client(panel_module).post(
+        "/panel/turn", json={"speaker": "blue", "mode": "continuous"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["ok"] is False
+
+
+def test_a_human_led_turn_still_requires_an_utterance(panel_module):
+    response = _client(panel_module).post(
+        "/panel/turn", json={"speaker": "blue", "topic": "anything"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "text is required"
+
+
+def test_the_page_runs_the_discussion_itself_in_continuous_mode(panel_module):
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert 'id="continuousChk"' in html
+    assert "async function runContinuous()" in html
+    assert "mode:'continuous'" in html
+    # The order comes from the server's weighted lineup, with a local fallback.
+    assert "'/panel/lineup'" in html
+    assert "async function nextSpeaker()" in html
+    assert "id===lastRobotTurn" in html
+
+
+def test_alex_can_barge_into_a_running_discussion(panel_module):
+    """Without this, a robot is always mid-turn and he can never get a word in."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "if(busy){if(!continuousOn())return;interruptReply(false,true);}" in html
+    # An unaddressed remark is dropped in human-led mode but joins the discussion
+    # when it is running on its own.
+    assert "continuousOn()?'Heard. They will pick it up.'" in html
+
+
+def test_stopping_the_talking_stops_the_discussion(panel_module):
+    """"Stop talking" that resumed a second later would just be ignoring him."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "if(!keepGoing&&continuousOn()){" in html
+    assert "continuousChk.checked=false;saveSettings();" in html
