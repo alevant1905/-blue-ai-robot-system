@@ -167,7 +167,10 @@ let running=false,busy=false,activeRobots=[],history=[],materials=[];
 // Continuous discussion: a random running order the loop walks through, and the
 // last robot who actually spoke, so the seam between two lineups (or between an
 // answer to Alex and the next free turn) never hands anyone two turns in a row.
-let loopActive=false,lineup=[],lineupIndex=0,lastRobotTurn='',continuousFailures=0;
+let loopActive=false,lineup=[],lineupFilling=false,lastRobotTurn='',continuousFailures=0;
+// A turn requested ahead of time, and the transcript version it answers. Every
+// line said bumps the version, which is how a prepared turn learns it is stale.
+let pendingTurn=null,historyVersion=0;
 let recognition=null,listening=false,resumeListening=false,activeFinish=null,audioUrl='',audioAbort=null,turnAbort=null,turnVersion=0;
 let lastRobotSpeech='',echoGuardUntil=0,recognitionRestartAfter=0;
 const voicePrefs={{ voice_preferences_json|safe }};
@@ -180,7 +183,7 @@ function addTurn(speaker,text){
   const el=document.createElement('div');el.className='turn '+cfg.id;
   const who=document.createElement('div');who.className='who';who.textContent=cfg.name;
   const body=document.createElement('div');body.textContent=text;el.appendChild(who);el.appendChild(body);logEl.appendChild(el);
-  history.push({speaker:speaker,text:text});if(speaker!=='user')lastRobotTurn=speaker;saveBtn.disabled=false;scrollDown();return el;
+  history.push({speaker:speaker,text:text});historyVersion+=1;if(speaker!=='user')lastRobotTurn=speaker;saveBtn.disabled=false;scrollDown();return el;
 }
 function scrollDown(){requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}));}
 function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
@@ -339,6 +342,9 @@ function isStopCommand(raw){
 function interruptReply(message,keepGoing){
   turnVersion+=1;
   if(turnAbort){try{turnAbort.abort();}catch(e){}turnAbort=null;}
+  // Anything prepared ahead was an answer to the room as it stood a moment ago.
+  // Whether he is stopping them or cutting in, that room no longer exists.
+  discardPreparedTurn();
   if(activeFinish)activeFinish();else stopAudio();
   busy=false;sendBtn.disabled=false;interruptBtn.disabled=true;
   // Cut off mid-answer is still an answer that ended: the floor goes back to
@@ -354,24 +360,73 @@ function interruptReply(message,keepGoing){
   if(message!==false)setStatus(message||'Stopped. Panel is listening. Call a robot by name.');
   if(resumeListening&&running&&!listening)setTimeout(startRecognition,50);
 }
-// A random running order, refilled from the server so the weighting that keeps
-// nobody twice in a row and nobody starved lives in one place.
+// A random running order, topped up from the server so the weighting that keeps
+// nobody twice in a row and nobody starved lives in one place. The queue is
+// kept ahead of the discussion because the next speaker has to be known while
+// the current one is still talking — that is what makes preparing ahead work.
+function localLineup(avoid,count){
+  const out=[];let previous=avoid;
+  for(let i=0;i<count;i++){const options=IDS.filter(id=>id!==previous);previous=options[Math.floor(Math.random()*options.length)];out.push(previous);}
+  return out;
+}
 async function refillLineup(){
-  const avoid=lastRobotTurn;
+  if(lineupFilling)return;lineupFilling=true;
+  const avoid=lineup.length?lineup[lineup.length-1]:lastRobotTurn;
+  let served=null;
   try{
     const response=await fetch('/panel/lineup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turns:9,avoid:avoid})}),data=await response.json();
-    if(response.ok&&data.ok&&Array.isArray(data.lineup)&&data.lineup.length){lineup=data.lineup;lineupIndex=0;return;}
+    if(response.ok&&data.ok&&Array.isArray(data.lineup)&&data.lineup.length)served=data.lineup;
   }catch(e){}
-  const out=[];let previous=avoid;
-  for(let i=0;i<9;i++){const options=IDS.filter(id=>id!==previous);previous=options[Math.floor(Math.random()*options.length)];out.push(previous);}
-  lineup=out;lineupIndex=0;
+  lineup=lineup.concat(served||localLineup(avoid,9));
+  lineupFilling=false;
 }
-async function nextSpeaker(){
-  if(lineupIndex>=lineup.length)await refillLineup();
-  let id=lineup[lineupIndex++];
-  if(id===lastRobotTurn&&lineupIndex<lineup.length)id=lineup[lineupIndex++];
+// Synchronous on purpose: a turn is prepared the moment the previous one starts
+// speaking, and waiting on the network for the name would defeat that.
+function nextSpeaker(){
+  if(!lineup.length)lineup=localLineup(lastRobotTurn,3);
+  // Drop anyone who would speak twice in a row — at the seam between two
+  // lineups, or after a robot has just answered Alex out of order.
+  while(lineup.length&&lineup[0]===lastRobotTurn)lineup.shift();
+  const id=lineup.length?lineup.shift():localLineup(lastRobotTurn,1)[0];
+  if(lineup.length<4)refillLineup();
   return id;
 }
+// One requested turn: the robot, the transcript it was built from, and its own
+// abort handle. `basis` is what makes a prepared turn safe — if anything was
+// said after it was requested, the answer it prepared is to a conversation that
+// no longer exists and it must be thrown away rather than spoken.
+function requestTurn(id,speculative){
+  const controller=typeof AbortController!=='undefined'?new AbortController():null;
+  const ticket={id:id,basis:historyVersion,abort:controller,ready:false};
+  const options={method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({speaker:id,mode:'continuous',text:'',speculative:!!speculative,
+      topic:document.getElementById('topic').value.trim(),history:history,
+      settings:selectedSettings(),materials:materials})};
+  if(controller)options.signal=controller.signal;
+  ticket.promise=fetch('/panel/turn',options).then(response=>response.json().catch(()=>null).then(data=>{
+    if(!response.ok||!data||!data.ok)throw new Error((data&&data.error)||'that turn could not be generated');
+    return data;
+  }));
+  // Settle the flag either way so nothing is left as an unhandled rejection.
+  ticket.promise.then(()=>{ticket.ready=true;},()=>{ticket.ready=true;});
+  return ticket;
+}
+// Prepare the NEXT robot's turn while this one is being spoken. The line just
+// spoken is already in the transcript, so the prepared answer really does
+// respond to it — the only thing it cannot know about is Alex interrupting,
+// which is exactly what `basis` catches.
+function primeNextTurn(){
+  if(pendingTurn||!running||!continuousOn())return;
+  pendingTurn=requestTurn(nextSpeaker(),true);
+}
+function takePreparedTurn(){
+  const ticket=pendingTurn;pendingTurn=null;
+  if(!ticket)return null;
+  if(ticket.basis!==historyVersion){dropTicket(ticket);return null;}
+  return ticket;
+}
+function dropTicket(ticket){if(ticket&&ticket.abort){try{ticket.abort.abort();}catch(e){}}}
+function discardPreparedTurn(){dropTicket(pendingTurn);pendingTurn=null;}
 async function runContinuous(){
   if(loopActive)return;loopActive=true;continuousFailures=0;
   try{
@@ -381,19 +436,22 @@ async function runContinuous(){
       if(busy){await sleep(180);continue;}
       const topic=document.getElementById('topic').value.trim();
       if(!topic&&!history.length){setStatus('Give them a topic, or say something, and they will take it from there.');await sleep(700);continue;}
-      const id=await nextSpeaker();if(!running||!continuousOn()||busy)continue;
-      const cfg=ROBOTS[id],thisTurn=++turnVersion;
-      busy=true;interruptBtn.disabled=false;showSpeaking(id);setStatus(cfg.name+' is thinking…');
+      // Whatever was prepared during the last turn, if the room has not moved
+      // on since; otherwise ask now and wait for it as before.
+      let ticket=takePreparedTurn();
+      if(!ticket){
+        if(!running||!continuousOn()||busy)continue;
+        ticket=requestTurn(nextSpeaker(),false);
+      }
+      const cfg=ROBOTS[ticket.id],thisTurn=++turnVersion;
+      busy=true;interruptBtn.disabled=false;showSpeaking(ticket.id);turnAbort=ticket.abort;
+      setStatus(cfg.name+(ticket.ready?' is speaking…':' is thinking…'));
       try{
-        turnAbort=typeof AbortController!=='undefined'?new AbortController():null;
-        const options={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:id,mode:'continuous',text:'',topic:topic,history:history,settings:selectedSettings(),materials:materials})};
-        if(turnAbort)options.signal=turnAbort.signal;
-        const response=await fetch('/panel/turn',options);turnAbort=null;
-        const data=await response.json().catch(()=>null);
+        const data=await ticket.promise;turnAbort=null;
         if(thisTurn!==turnVersion||!running)continue;
-        if(!response.ok||!data||!data.ok)throw new Error((data&&data.error)||'that turn could not be generated');
         continuousFailures=0;
-        const el=addTurn(id,data.text);setStatus(cfg.name+' is speaking…');
+        const el=addTurn(ticket.id,data.text);setStatus(cfg.name+' is speaking…');
+        primeNextTurn();
         await speakAs(cfg,data.text,el,data.eye_mood,thisTurn);
       }catch(error){
         if((error&&error.name==='AbortError')||thisTurn!==turnVersion)continue;
@@ -406,11 +464,11 @@ async function runContinuous(){
       }
       await pauseBetweenTurns();
     }
-  }finally{loopActive=false;}
+  }finally{loopActive=false;discardPreparedTurn();}
 }
 function setContinuous(on){
   continuousChk.checked=!!on;saveSettings();
-  if(!continuousChk.checked){setStatus('Continuous discussion off. Call a robot by name.');return;}
+  if(!continuousChk.checked){discardPreparedTurn();setStatus('Continuous discussion off. Call a robot by name.');return;}
   if(!running)startPanel();
   setStatus('They will discuss it on their own — say something whenever you want to join in.');
   runContinuous();

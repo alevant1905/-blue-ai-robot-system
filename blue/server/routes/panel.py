@@ -1041,6 +1041,10 @@ def register(app) -> None:
         if robot not in PANEL_ROBOTS:
             return jsonify({"ok": False, "error": "unknown speaker"}), 400
         continuous = str(data.get("mode") or "").strip().lower() == "continuous"
+        # A turn prepared while the previous robot is still speaking has not been
+        # asked for by anyone yet, so it must not hold the single local model in
+        # front of a turn Alex is actually waiting on.
+        speculative = continuous and bool(data.get("speculative"))
         latest = re.sub(r"\s+", " ", str(data.get("text") or "")).strip()[:1600]
         # A continuous turn has no utterance behind it: the transcript is the
         # prompt, so only a human-led turn requires one.
@@ -1132,7 +1136,7 @@ def register(app) -> None:
             use_chat_tools = _panel_requires_tools(latest, tool_selection)
 
         try:
-            with llm_slot(foreground=True):
+            with llm_slot(foreground=not speculative):
                 if use_chat_tools:
                     result = bt.process_with_tools(
                         panel_turn,

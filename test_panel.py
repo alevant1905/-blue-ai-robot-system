@@ -815,6 +815,37 @@ def test_a_continuous_turn_is_grounded_on_the_line_it_is_answering(panel_module)
     assert "daughters" in panel_module._test_memory.searched[-1]
 
 
+def test_a_prepared_turn_lets_a_live_one_have_the_model_first(panel_module, monkeypatch):
+    """Nobody has asked for a speculative turn yet, so it must not hold the one
+    local model in front of a turn Alex is actually waiting on."""
+    import contextlib
+
+    priorities = []
+
+    @contextlib.contextmanager
+    def recording_slot(foreground=False):
+        priorities.append(foreground)
+        yield
+
+    monkeypatch.setattr(panel_module, "llm_slot", recording_slot)
+    client = _client(panel_module)
+    discussion = {
+        "speaker": "blue",
+        "mode": "continuous",
+        "topic": "Whether cities should ban cars downtown",
+        "history": [{"speaker": "hexia", "text": "Deliveries would collapse."}],
+    }
+    client.post("/panel/turn", json={**discussion, "speculative": True})
+    client.post("/panel/turn", json=discussion)
+    # A human-led turn is never speculative, whatever the page claims.
+    client.post(
+        "/panel/turn",
+        json={"speaker": "blue", "text": "Blue, your view?", "speculative": True},
+    )
+
+    assert priorities == [False, True, True]
+
+
 def test_a_continuous_turn_without_a_topic_or_transcript_is_refused(panel_module):
     response = _client(panel_module).post(
         "/panel/turn", json={"speaker": "blue", "mode": "continuous"}
@@ -840,8 +871,35 @@ def test_the_page_runs_the_discussion_itself_in_continuous_mode(panel_module):
     assert "mode:'continuous'" in html
     # The order comes from the server's weighted lineup, with a local fallback.
     assert "'/panel/lineup'" in html
-    assert "async function nextSpeaker()" in html
-    assert "id===lastRobotTurn" in html
+    assert "while(lineup.length&&lineup[0]===lastRobotTurn)lineup.shift();" in html
+    # The queue is kept ahead and read without awaiting: the next speaker has to
+    # be known while the current one is still talking.
+    assert "function nextSpeaker(){" in html
+    assert "async function nextSpeaker" not in html
+    assert "if(lineup.length<4)refillLineup();" in html
+
+
+def test_the_next_turn_is_prepared_while_the_last_one_is_still_speaking(panel_module):
+    """Speech is the slow part. Asking for the next turn only after it ends
+    leaves a hole in the conversation the length of a whole generation."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    # Requested after the line is added to the transcript and before it is
+    # spoken, so the prepared answer really does respond to what was just said.
+    assert "setStatus(cfg.name+' is speaking…');\n        primeNextTurn();\n        await speakAs(" in html
+    assert "let ticket=takePreparedTurn();" in html
+    assert "speculative:!!speculative" in html
+
+
+def test_a_prepared_turn_is_thrown_away_once_the_room_moves_on(panel_module):
+    """It answered a conversation that no longer exists — Alex cut in, or the
+    discussion was stopped — so it must never be spoken."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "ticket={id:id,basis:historyVersion" in html
+    assert "if(ticket.basis!==historyVersion){dropTicket(ticket);return null;}" in html
+    # Every line said moves the version on, which is what makes it stale.
+    assert "history.push({speaker:speaker,text:text});historyVersion+=1;" in html
+    # Interrupting, stopping, and unticking all drop it.
+    assert html.count("discardPreparedTurn()") >= 4
 
 
 def test_the_pause_between_turns_is_adjustable_while_they_talk(panel_module):
