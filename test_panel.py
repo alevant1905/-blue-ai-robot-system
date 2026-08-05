@@ -885,7 +885,7 @@ def test_the_next_turn_is_prepared_while_the_last_one_is_still_speaking(panel_mo
     html = _client(panel_module).get("/panel").get_data(as_text=True)
     # Requested after the line is added to the transcript and before it is
     # spoken, so the prepared answer really does respond to what was just said.
-    assert "setStatus(cfg.name+' is speaking…');\n        primeNextTurn();\n        await speakAs(" in html
+    assert re.search(r"addTurn\(ticket\.id.*?primeNextTurn\(\);\s*await speakAs\(", html, re.S)
     assert "let ticket=takePreparedTurn();" in html
     assert "speculative:!!speculative" in html
 
@@ -923,6 +923,19 @@ def test_alex_can_barge_into_a_running_discussion(panel_module):
     # An unaddressed remark is dropped in human-led mode but joins the discussion
     # when it is running on its own.
     assert "continuousOn()?'Heard. They will pick it up.'" in html
+
+
+def test_a_robot_saying_stop_does_not_stop_the_panel(panel_module):
+    """The microphone hears the robots too. A robot whose own line contained
+    "stop" — "we should stop pretending" — was heard as Alex calling the room
+    to order, and it cut itself off mid-sentence. The echo guard already knew
+    those were its own words; it was simply consulted second."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "function classifyHeard(text){" in html
+    assert html.index("isLikelyRobotEcho(heard)") < html.index("isStopCommand(heard)")
+    # The handler asks once, and never tests for a stop before the echo guard.
+    assert "const kind=classifyHeard(heard);if(kind==='echo')" in html
+    assert "if(heard&&isStopCommand(heard)){interruptReply();return;}" not in html
 
 
 def test_stopping_the_talking_stops_the_discussion(panel_module):

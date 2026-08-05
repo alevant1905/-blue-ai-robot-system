@@ -284,6 +284,19 @@ function isLikelyRobotEcho(text){
   const hasDistinctiveWord=words.some(word=>word.length>=6&&spokenWords.has(word));
   return hasDistinctiveWord&&overlap/words.length>=.8;
 }
+// What the microphone just picked up, decided in one place and in this order.
+// The echo test MUST come first. A robot whose own line contains "stop" —
+// "we should stop pretending", "enough of that" — was otherwise heard by the
+// microphone as Alex calling the room to order, and cut itself off mid
+// sentence. Those are exactly the short utterances the stop pattern matches,
+// and exactly the ones the echo test recognises as the robot's own words.
+function classifyHeard(text){
+  const heard=String(text||'').trim();
+  if(!heard)return 'nothing';
+  if(isLikelyRobotEcho(heard))return 'echo';
+  if(isStopCommand(heard))return 'stop';
+  return 'speech';
+}
 function flushRecognitionAfterSpeech(){
   echoGuardUntil=Date.now()+4000;recognitionRestartAfter=Date.now()+700;
   if(recognition&&listening&&resumeListening){try{recognition.abort();}catch(e){}}
@@ -524,7 +537,7 @@ function setupRecognition(){
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){micBtn.disabled=true;document.getElementById('micStatus').textContent='Voice recognition is not available in this browser; use the text box.';return;}
   recognition=new SR();recognition.continuous=true;recognition.interimResults=true;recognition.lang='en-CA';
   recognition.onstart=()=>{listening=true;micBtn.classList.add('on');micBtn.textContent='Stop listening';document.getElementById('micStatus').textContent='Listening for a robot name…';};
-  recognition.onresult=event=>{let finalText='',interim='';for(let i=event.resultIndex;i<event.results.length;i++){const t=event.results[i][0].transcript;if(event.results[i].isFinal)finalText+=t;else interim+=t;}const heard=(finalText||interim).trim();if(heard&&isStopCommand(heard)){interruptReply();return;}if(heard&&isLikelyRobotEcho(heard)){document.getElementById('micStatus').textContent='Ignoring robot audio…';return;}if(interim&&!busy)document.getElementById('micStatus').textContent='Hearing: '+interim;if(finalText&&!busy)submitUtterance(finalText);};
+  recognition.onresult=event=>{let finalText='',interim='';for(let i=event.resultIndex;i<event.results.length;i++){const t=event.results[i][0].transcript;if(event.results[i].isFinal)finalText+=t;else interim+=t;}const heard=(finalText||interim).trim();const kind=classifyHeard(heard);if(kind==='echo'){document.getElementById('micStatus').textContent='Ignoring robot audio…';return;}if(kind==='stop'){interruptReply();return;}if(interim&&!busy)document.getElementById('micStatus').textContent='Hearing: '+interim;if(finalText&&!busy)submitUtterance(finalText);};
   recognition.onerror=event=>{if(event.error!=='aborted'&&event.error!=='no-speech')document.getElementById('micStatus').textContent='Microphone: '+event.error;};
   recognition.onend=()=>{listening=false;micBtn.classList.remove('on');micBtn.textContent='Start listening';if(resumeListening&&running)setTimeout(startRecognition,Math.max(250,recognitionRestartAfter-Date.now()));};
 }
