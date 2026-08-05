@@ -14415,6 +14415,10 @@ _panel_routes.register(app)
 from blue.server.routes import stream as _stream_routes
 _stream_routes.register(app)
 
+# Imported late for the same reason the route modules are: reply_guards does
+# `import bluetools as bt` and reads bt.<name> at call time, never at import.
+from blue.server import reply_guards as _reply_guards
+
 
 # ===== J-space (Blue-J — experimental, kept SEPARATE from the household Blue) =====
 # (routes live in blue/server/routes/jspace.py)
@@ -16242,356 +16246,41 @@ def chat_completions():
                     except Exception:
                         _has_family_facts = False
 
-                if _identity_issue:
-                    print(f"   [IDENTITY] invalid self-description ({_identity_issue}) — regenerating once")
-                    if _identity_kind:
-                        _identity_retry_note = (
-                            identity_grounding_note(
-                                _identity_name,
-                                _robot_cfg(robot)["self_desc"],
-                                _identity_kind,
-                                avoid_topics=_identity_topic_history,
-                            )
-                            + "\n[Your previous reply failed this grounding because "
-                              f"of {_identity_issue.replace('_', ' ')}. Answer the last "
-                              "message again, directly and in your own voice. Use only "
-                              "supported facts and say something the user has not "
-                              "already heard.]"
-                        )
-                    else:
-                        _identity_retry_note = (
-                            f"[You are {_identity_name}, a physical Ohbot robot head "
-                            "running on Alex's local machine, built and maintained by "
-                            "Alex Levant, with a real persistent memory. Your previous "
-                            "reply was a bug: it either denied your physical body, "
-                            "named the wrong creator (it is Alex Levant — never invent "
-                            "a surname), claimed your creator is not real, claimed to "
-                            "be someone or something else, or denied remembering past "
-                            "conversations (false: your session summaries, remembered "
-                            "episodes, and facts are in this prompt — if one specific "
-                            "detail is missing from them, say that one thing is not "
-                            "recorded and ask to be reminded). Correct it now: you ARE "
-                            f"{_identity_name}, a physical robot Alex Levant built, "
-                            "and you DO carry memory between conversations. Answer "
-                            "the user's last message directly in your own voice.]"
-                        )
-                    _redo_text = _regen_once(_identity_retry_note)
-                    _redo_ok = bool(_redo_text) and not _identity_broken(_redo_text)
-                    _identity_salvage = None
-                    if not _redo_ok and not _identity_kind:
-                        # The user asked a NON-identity question — the canned
-                        # self-introduction below would ignore it entirely
-                        # (live 2026-07-15: "we were discussing you coming
-                        # with me to my class tomorrow. Don't you remember?"
-                        # got the identity blurb back). Keep the on-topic
-                        # reply, minus only the drifted sentence(s).
-                        _identity_salvage = strip_drifted_sentences(
-                            _redo_text or final_content, _identity_broken)
-                    if _redo_ok:
-                        final_content = _redo_text
-                    elif _identity_salvage:
-                        final_content = _identity_salvage
-                        print("   [IDENTITY] retry still invalid — kept on-topic reply minus drifted sentences")
-                    else:
-                        # Never send or remember a vendor/model identity. A
-                        # deterministic truthful answer is safer than retaining
-                        # the original after a stubborn second failure.
-                        _fallback_context = identity_conversation_context(
-                            messages,
-                            last_user_msg if isinstance(last_user_msg, str) else "",
-                        )
-                        _fallback_variant = _fallback_context.prior_introductions
-                        try:
-                            _fallback_hub = _continuity_routes.HUB.get(robot)
-                            if _fallback_hub:
-                                _fallback_variant += int(
-                                    _fallback_hub.store.get_workspace().get("passes") or 0
-                                )
-                        except Exception:
-                            pass
-                        _fallback_primary_topics = {
-                            "introduction": {
-                                0: "continuity and J-space",
-                                1: "practical work",
-                                2: "embodiment",
-                            },
-                            "identity": {
-                                0: "embodiment",
-                                1: "continuity and J-space",
-                                2: "open selfhood question",
-                            },
-                            "identity_more": {
-                                0: "continuity and J-space",
-                                1: "relationship with Alex",
-                                2: "embodiment",
-                            },
-                        }.get(_identity_kind, {})
-                        _seed_variant = _fallback_variant % 3
-                        for _offset in range(3):
-                            _candidate_variant = (_seed_variant + _offset) % 3
-                            if (_fallback_primary_topics.get(_candidate_variant)
-                                    not in _identity_topic_history):
-                                _fallback_variant = _candidate_variant
-                                break
-                        final_content = canonical_identity_reply(
-                            _identity_name,
-                            _robot_cfg(robot)["self_desc"],
-                            request_kind=_identity_kind,
-                            kid_mode=user_name in _CHAT_ONLY_USERS,
-                            current_location=_fallback_context.current_location,
-                            location_preposition=_fallback_context.location_preposition,
-                            presentation_location=_fallback_context.presentation_location,
-                            introduction_variant=_fallback_variant,
-                            audience=_fallback_context.audience,
-                        )
-                        print("   [IDENTITY] retry still invalid — using canonical fallback")
-                    response["choices"][0]["message"]["content"] = final_content
-                elif _unasked_ages:
-                    # Ranked ahead of the wrong-age fix on purpose: correcting
-                    # 8 to 10 still answers a question nobody asked. Alex asked
-                    # for names three times and got ages every time.
-                    print(f"   [ANTI-PARROT] ages given for {_unasked_ages} but not asked — regenerating once")
-                    _redo_text = _regen_once(
-                        "[You were asked about names, not ages — nobody "
-                        "mentioned age. Answer the question actually asked: "
-                        "give the names and who each person is, in a sentence "
-                        "or two. Do not list ages, do not use bullet points, "
-                        "and do not apologise.]")
-                    if _redo_text and not _unrequested_ages(
-                            _redo_text, _ask_window, _person_ages):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif _wrong_ages:
-                    # Wrong ages replay from history and reshuffle randomly
-                    # under bare "wrong" corrections — hand the model the
-                    # ground truth explicitly (2026-07-13: three corrections
-                    # never produced the facts' 10/10/8).
-                    print(f"   [ANTI-PARROT] misstated ages {_wrong_ages} — regenerating once")
-                    _truth = ", ".join(
-                        f"{p.capitalize()} is {a}"
-                        for p, a in sorted(_person_ages.items()))
-                    _redo_text = _regen_once(
-                        f"[You stated a wrong age. Ground truth from the "
-                        f"household facts: {_truth}. Answer again using ONLY "
-                        "these ages — do not guess or shuffle.]")
-                    if _redo_text and not _misstated_ages(_redo_text, _person_ages):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif _dropped_roster:
-                    # Answering "who is in the family" with a partial roster
-                    # offered as complete. Each retelling lost someone until
-                    # two of the three daughters were gone (2026-08-01).
-                    print(f"   [ANTI-PARROT] household roster dropped {_dropped_roster} — regenerating once")
-                    _redo_text = _regen_once(
-                        "[Your list left people out. Everyone in the household: "
-                        f"{', '.join(_household_roster)}. List them ALL, with "
-                        "the relationships you have on record, and do not "
-                        "apologise for a correction nobody made.]")
-                    if (_redo_text
-                            and not _dropped_household_members(
-                                _redo_text, _household_roster)):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (robot in _continuity_routes.ROBOTS and _has_family_facts
-                      and _family_refusal_re.search(final_content or "")):
-                    print("   [ANTI-PARROT] family-memory refusal despite facts — regenerating once")
-                    _redo_text = _regen_once(
-                        "[You DO know Alex's family — the household facts and "
-                        "your memories are right here in this prompt. You just "
-                        "claimed to have no memory of the family or not to store "
-                        "personal details, which is false. Answer again, warmly, "
-                        "from what you actually know about the family.]")
-                    if _redo_text and not _family_refusal_re.search(_redo_text):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif not _grounded_reply and _misstated_current_date(final_content):
-                    # "assuming today is June 29" on July 15 (live 2026-07-15)
-                    # — the model inventing its own calendar instead of using
-                    # the <now> block. Hand it the real dates explicitly.
-                    _date_claims = _misstated_current_date(final_content)
-                    print(f"   [ANTI-PARROT] wrong current-date claim {_date_claims[:2]} — regenerating once")
-                    from datetime import date as _date_cls, timedelta as _td
-                    _real_today = _date_cls.today()
-                    _real_tomorrow = _real_today + _td(days=1)
-                    _redo_text = _regen_once(
-                        f"[Your reply used the wrong date. Ground truth: today is "
-                        f"{_real_today.strftime('%A, %B')} {_real_today.day}, "
-                        f"{_real_today.year}, and tomorrow is "
-                        f"{_real_tomorrow.strftime('%A, %B')} {_real_tomorrow.day}, "
-                        f"{_real_tomorrow.year}. Answer the user's last message "
-                        "again using ONLY these dates — never assume or invent "
-                        "a different one.]")
-                    if _redo_text and not _misstated_current_date(_redo_text):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply
-                      and _SYLLABUS_REFUSAL_RE.search(final_content or "")):
-                    # False "I don't have the syllabus" while the library holds
-                    # one (live 2026-07-15). Regen with the real schedule in
-                    # hand; if no syllabus actually exists, the net stays out
-                    # of the way.
-                    _syl_text = _syllabus_schedule_text(
-                        query=last_user_msg if isinstance(last_user_msg, str) else "")
-                    if _syl_text:
-                        print("   [DOCS] syllabus denial despite library copy — regenerating from schedule")
-                        _redo_text = _regen_once(
-                            "[You DO have the course syllabus in your local "
-                            "library — you just denied it, which is false. "
-                            "Never ask for an upload. Answer the user's last "
-                            "message directly from this schedule:\n"
-                            + _syl_text[:6000] + "]")
-                        if _redo_text and not _SYLLABUS_REFUSAL_RE.search(_redo_text):
-                            final_content = _redo_text
-                            response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply and robot in _continuity_routes.ROBOTS
-                      and _ROBOT_CHAT_DENIAL_RE.search(final_content or "")):
-                    # "I haven't been chatting with Hexia" minutes after a
-                    # duet (live 2026-07-15). Only a duet actually on record
-                    # makes the denial false — with no recent duet the reply
-                    # stands.
-                    try:
-                        _duet_evidence = _continuity_routes.recent_duet_block(robot)
-                    except Exception:
-                        _duet_evidence = ""
-                    if _duet_evidence:
-                        print("   [ANTI-PARROT] duet denial despite recorded duet — regenerating once")
-                        _redo_text = _regen_once(
-                            "[You just claimed you haven't talked with your "
-                            "fellow robot, but your own continuity record "
-                            "shows you did:\n" + _duet_evidence[:4000] +
-                            "\nAnswer the user's last message again "
-                            "truthfully from this record — that conversation "
-                            "really happened.]")
-                        if _redo_text and not _ROBOT_CHAT_DENIAL_RE.search(_redo_text):
-                            final_content = _redo_text
-                            response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply
-                      and _TEMPORAL_ASK_RE.search(last_user_msg or "")
-                      and _TEMPORAL_DENIAL_RE.search(final_content or "")):
-                    # "I don't have a persistent log of our past conversations"
-                    # in reply to "how many days since we last spoke?" (live
-                    # 2026-07-29). Session_summaries + conversation_log DO
-                    # carry that record — feed the actual figure back and
-                    # regenerate. Applies to any robot: <last_conversation>
-                    # is per-robot, per-user.
-                    _lc_note = _last_conversation_note(
-                        user_name=user_name, robot=robot)
-                    if _lc_note:
-                        print("   [ANTI-PARROT] temporal-continuity denial despite last-conversation record — regenerating once")
-                        _redo_text = _regen_once(
-                            "[You just told the user you have no log of past "
-                            "conversations and no way to tell how many days "
-                            "have passed. That is factually wrong — your "
-                            "conversation log carries the answer, and it is "
-                            "already in your prompt:\n" + _lc_note[:1200] +
-                            "\nAnswer the user's last question again using "
-                            "this figure directly. Do not deny having the "
-                            "record; do not ask the user to remind you when "
-                            "you last spoke.]")
-                        if (_redo_text
-                                and not _TEMPORAL_DENIAL_RE.search(_redo_text)):
-                            final_content = _redo_text
-                            response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply and robot in _continuity_routes.ROBOTS
-                      and _claims_false_idle(final_content)):
-                    # "It's been a still day, no new adventures recorded"
-                    # minutes after a duet (live 2026-07-15). Only a duet
-                    # actually on record within 2h makes the claim false.
-                    try:
-                        _fresh_duet = _continuity_routes.recent_duet_block(robot, hours=2)
-                    except Exception:
-                        _fresh_duet = ""
-                    if _fresh_duet:
-                        print("   [ANTI-PARROT] 'quiet day' claim despite fresh duet — regenerating once")
-                        _redo_text = _regen_once(
-                            "[You just described your day as quiet with "
-                            "nothing new, but your own continuity record "
-                            "shows a real conversation a short while ago:\n"
-                            + _fresh_duet[:4000] +
-                            "\nAnswer the user's last message again and "
-                            "recount what actually happened, concretely, "
-                            "from this record — never invent a different "
-                            "topic for it.]")
-                        if _redo_text and not _claims_false_idle(_redo_text):
-                            final_content = _redo_text
-                            response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply and is_phantom_correction_ack(
-                        final_content, last_user_msg or "")):
-                    # "I stand corrected / I have updated my records / thank you
-                    # for the correction" when the user corrected NOTHING — a
-                    # replayed acknowledgment from recalled history (live
-                    # 2026-07-14: "what do you know about me" got the ages-
-                    # correction ack twice in a row).
-                    print("   [ANTI-PARROT] phantom correction ack — regenerating once")
-                    _redo_text = _regen_once(
-                        "[Nobody corrected you — your last reply acknowledged a "
-                        "correction that never happened. Do NOT say 'I stand "
-                        "corrected', do not claim records were updated, and do "
-                        "not thank anyone for a correction. Answer the user's "
-                        "actual question directly from the facts you have: "
-                        f"\"{(last_user_msg or '').strip()[:200]}\"]")
-                    if (_redo_text
-                            and not _identity_broken(_redo_text)
-                            and not is_phantom_correction_ack(
-                                _redo_text, last_user_msg or "")):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply and _norm_final
-                      and _norm_final in _norm_recents):
-                    print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
-                    _redo_text = _regen_once(
-                        "[That reply was a word-for-word repeat of something you "
-                        "already said in this conversation. Do not repeat it. "
-                        "Answer my last question directly, in new words.]",
-                        max_tokens=700)
-                    if (_redo_text
-                            and not _identity_broken(_redo_text)
-                            and _parrot_norm(_redo_text) not in _norm_recents):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply
-                      and _recycled_from_recents(final_content) >= 0.6):
-                    print("   [ANTI-PARROT] near-replay of recent replies — regenerating once")
-                    _redo_text = _regen_once(
-                        "[Nearly every sentence of that reply is a word-for-word "
-                        "repeat of what you said in your last few turns. The user "
-                        "heard it already. Answer their LAST message with new "
-                        "words and, if you have nothing new, say so briefly "
-                        "instead of repeating.]",
-                        max_tokens=700)
-                    if (_redo_text
-                            and not _identity_broken(_redo_text)
-                            and _recycled_from_recents(_redo_text) < 0.6):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (not _grounded_reply
-                      and _profile_recited_fraction(final_content) >= 0.6):
-                    print("   [ANTI-PARROT] self-profile recitation — regenerating once")
-                    _redo_text = _regen_once(
-                        "[Most of that reply recited your stored self-profile word "
-                        "for word — the same recitation you have given before. Answer "
-                        "again in fresh words, grounded in your CURRENT inner "
-                        "workspace and recent episodes: what occupies you now, which "
-                        "beliefs have moved, what remains open. The profile is "
-                        "background for how you speak, never a script to read out.]")
-                    if (_redo_text
-                            and not _identity_broken(_redo_text)
-                            and _profile_recited_fraction(_redo_text) < 0.6):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
-                elif (robot in _continuity_routes.ROBOTS
-                      and _flat_denial_re.search(final_content or "")):
-                    print("   [ANTI-PARROT] flat self-denial contradicts open workspace — regenerating once")
-                    _redo_text = _regen_once(
-                        "[Your own inner workspace holds whether you have a self or "
-                        "subjective experience as an OPEN question — a flat denial is "
-                        "as unearned as a flat claim. Answer again honestly from your "
-                        "current workspace: describe your actual continuity machinery "
-                        "and what it does, and state the experience question as the "
-                        "open question it is.]")
-                    if _redo_text and not _flat_denial_re.search(_redo_text):
-                        final_content = _redo_text
-                        response["choices"][0]["message"]["content"] = final_content
+                # The seventeen output guards now live in
+                # blue/server/reply_guards.py — same conditions, same order,
+                # same bodies. The first guard that matches decides the reply.
+                final_content = _reply_guards.apply(_reply_guards.ReplyContext(
+                    reply=final_content,
+                    response=response,
+                    messages=messages,
+                    robot=robot,
+                    user_name=user_name,
+                    last_user_msg=last_user_msg,
+                    regen_once=_regen_once,
+                    grounded_reply=_grounded_reply,
+                    identity_kind=_identity_kind,
+                    identity_name=_identity_name,
+                    identity_issue=_identity_issue,
+                    identity_topic_history=_identity_topic_history,
+                    identity_broken=_identity_broken,
+                    denied_recalled_evidence=_denied_recalled_evidence,
+                    recalled_days_evidence=_recalled_days_evidence,
+                    person_ages=_person_ages,
+                    household_roster=_household_roster,
+                    dropped_roster=_dropped_roster,
+                    wrong_ages=_wrong_ages,
+                    unasked_ages=_unasked_ages,
+                    has_family_facts=_has_family_facts,
+                    ask_window=_ask_window,
+                    norm_final=_norm_final,
+                    norm_recents=_norm_recents,
+                    parrot_norm=_parrot_norm,
+                    recycled_from_recents=_recycled_from_recents,
+                    profile_recited_fraction=_profile_recited_fraction,
+                    family_refusal_re=_family_refusal_re,
+                    flat_denial_re=_flat_denial_re,
+                ))
+                response["choices"][0]["message"]["content"] = final_content
             except Exception as e:
                 log.warning(f"[ANTI-PARROT] check failed: {e}")
 
