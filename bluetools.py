@@ -115,6 +115,17 @@ import sys
 if __name__ == "__main__":
     sys.modules.setdefault("bluetools", sys.modules[__name__])
 
+# A log line must never be able to fail a chat turn. Progress messages are
+# full of "✓", and on a Windows console or a redirected pipe using the legacy
+# cp1252 codepage, printing one raises UnicodeEncodeError from inside the
+# request handler — which escapes as a 500 and makes Ohbot say "I'm having
+# trouble connecting" for reasons that have nothing to do with the model.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Third-party
 import requests
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
@@ -10940,9 +10951,17 @@ def purge_old_camera_images(messages: List[Dict]) -> List[Dict]:
     """
     print(f"   [VISION-CLEANUP] Checking conversation for old camera images...")
 
-    # Find all messages with camera images
+    # Find all messages with camera images.
+    #
+    # The system message is skipped: it carries the "CAMERA DISCIPLINE:" rule,
+    # so the bare 'CAMERA' substring counted it as a captured image. That is
+    # the phantom in "Found 1 camera image(s)" on turns where no photo was
+    # ever taken — and with a real capture present it made two, so the older
+    # one (index 0, the system prompt) was popped.
     camera_indices = []
     for i, msg in enumerate(messages):
+        if msg.get('role') == 'system':
+            continue
         content = msg.get('content', '')
         if isinstance(content, str):
             if 'CAMERA' in content or 'camera_capture_' in content or 'camera_NEW_' in content:
@@ -12302,12 +12321,24 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             print(f"   [PERSPECTIVE] chat compose error: {_pe}")
 
     # Fast check: scan text content only (no str() on entire messages with base64)
-    _has_camera_content = False
-    for msg in conversation_messages:
+    #
+    # The system message is EXCLUDED, and that exclusion is load-bearing. It
+    # contains the line "CAMERA DISCIPLINE: use the camera when someone asks
+    # you to look", so the bare substring 'CAMERA' matched it on every single
+    # turn. That made _has_camera_content always true, and the purge below
+    # then deleted index 0 — the whole system prompt: persona, identity,
+    # <known_facts>, <family>, the memory blocks and every rule — on any turn
+    # where the user was not asking about vision. Blue answered from the
+    # conversation thread alone, which is why he sounded like himself while
+    # having lost the household (2026-08-04).
+    def _is_camera_message(msg) -> bool:
+        if msg.get('role') == 'system':
+            return False
         text = _get_text_content(msg)
-        if 'CAMERA' in text or 'camera_NEW_' in text or 'camera_capture_' in text:
-            _has_camera_content = True
-            break
+        return ('CAMERA' in text or 'camera_NEW_' in text
+                or 'camera_capture_' in text)
+
+    _has_camera_content = any(_is_camera_message(m) for m in conversation_messages)
 
     if _has_camera_content:
         conversation_messages = purge_old_camera_images(conversation_messages)
@@ -12335,11 +12366,12 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
         if not asks_about_vision:
             # Count camera messages using cheap text extraction
-            camera_indices = set()
-            for idx, msg in enumerate(conversation_messages):
-                text = _get_text_content(msg)
-                if 'camera_NEW_' in text or 'CAMERA' in text:
-                    camera_indices.add(idx)
+            # Same exclusion as above — this is the set that actually does the
+            # deleting, so the system message must never appear in it.
+            camera_indices = {
+                idx for idx, msg in enumerate(conversation_messages)
+                if _is_camera_message(msg)
+            }
 
             if camera_indices or description_count > 0:
                 remove_set = camera_indices | messages_to_remove
@@ -13057,7 +13089,26 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         if not response:
             return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
 
-        assistant_message = response["choices"][0]["message"]
+        # A malformed reply must degrade, not raise. LM Studio can answer with
+        # {"error": ...} or an empty choices list — an unloaded model, a
+        # context overflow that survived the retrim, a template rejection. The
+        # bare subscript here turned all of those into an IndexError that
+        # escaped to a 500, which is precisely the path that makes Ohbot say
+        # "I'm having trouble connecting" instead of anything useful.
+        assistant_message = None
+        if isinstance(response, dict):
+            choices = response.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict) and isinstance(first.get("message"), dict):
+                    assistant_message = first["message"]
+        if assistant_message is None:
+            log.error(f"[LLM] Unusable response shape: {str(response)[:300]}")
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": "Sorry — my language model returned something I "
+                           "couldn't read. Could you say that again?",
+            }}]}
         tool_calls = assistant_message.get("tool_calls", [])
 
         if not tool_calls:
@@ -16141,6 +16192,13 @@ def chat_completions():
                     r"persistent memor|memor[a-z]* of past|"
                     r"(?:real[- ]?world )?facts about (?:you|your)|"
                     r"memor[a-z]* (?:of|about) (?:your |the )?(?:family|you)|"
+                    # "no record of your family" is the phrasing the models
+                    # actually reach for, and it was not covered — the guard
+                    # only knew "memory of" and "information about". The same
+                    # miss showed up in Panel Mode for a named relative
+                    # ("I don't have any record of a Felix", 2026-08-04).
+                    r"record[a-z]* (?:of|about|on) "
+                    r"(?:your |the |a |an )?(?:family|relatives?|brother|sister|parents?)|"
                     r"information about (?:your |the )?family)"
                     r"|i (?:respect your privacy and|do(?:n['’]?t| not))"
                     r"[^.!?]{0,40}store personal"
