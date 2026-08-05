@@ -19,6 +19,116 @@ from typing import Any, Dict, List
 import bluetools as bt
 
 
+# Compiled once. These were rebuilt on every single turn, and living inside
+# finish() meant the only way to check one was to drive a whole request.
+_family_refusal_re = re.compile(
+            r"(?:do (?:not|n['’]?t) (?:\w+ )?(?:have|store|keep|retain|access)"
+            r"|have no|don['’]?t (?:\w+ )?have)[^.!?]{0,60}"
+            r"(?:personal (?:details|information|memor)|"
+            r"persistent memor|memor[a-z]* of past|"
+            r"(?:real[- ]?world )?facts about (?:you|your)|"
+            r"memor[a-z]* (?:of|about) (?:your |the )?(?:family|you)|"
+            # "no record of your family" is the phrasing the models
+            # actually reach for, and it was not covered — the guard
+            # only knew "memory of" and "information about". The same
+            # miss showed up in Panel Mode for a named relative
+            # ("I don't have any record of a Felix", 2026-08-04).
+            r"record[a-z]* (?:of|about|on) "
+            r"(?:your |the |a |an )?(?:family|relatives?|brother|sister|parents?|"
+            # recorded: "I don't have a record of your dog's name yet" —
+            # the pet is in the facts table under pet_name.
+            r"dogs?|pets?|cats?|daughters?|sons?|wife|husband|partner)|"
+            r"information about (?:your |the )?family)"
+            r"|i (?:respect your privacy and|do(?:n['’]?t| not))"
+            r"[^.!?]{0,40}store personal"
+            r"|do(?:n['’]?t| not) (?:truly |really |actually )?know "
+            r"who you are"
+            r"|i (?:couldn['’]?t|could not) find[^.!?]{0,60}"
+            r"(?:information|records?|contacts?)"
+            r"|(?:might|may|could) have been a hallucination"
+            r"|was (?:just )?a hallucination"
+            # Recorded, and false — the facts table had all of these:
+            #   "I don't have the names of other family members yet"
+            #   "I don't actually have their ages stored in my permanent memory"
+            r"|(?:do(?:n['’]?t| not)|have no) [^.!?]{0,40}"
+            r"names? of (?:the )?(?:other )?(?:family|household) members?"
+            r"|(?:do(?:n['’]?t| not)) [^.!?]{0,40}"
+            r"(?:stored|saved|kept) in my (?:permanent|persistent|long[- ]?term) memor",
+            re.I)
+
+
+def denies_a_known_person(text: str) -> bool:
+    """A memory denial that names someone Blue actually has on record.
+
+    Regexes can enumerate words like "family" or "brother"; they cannot
+    enumerate people. "I don't have any record of a Felix in our shared
+    history" slipped past every pattern because Felix is a name — which is
+    exactly the failure that opened the 2026-08-04 investigation. So this
+    checks the household roster instead of guessing.
+
+    Deliberately scoped to MEMORY denials. "I don't see Stella's name in the
+    syllabus" is an honest answer about a document and must not be touched.
+    """
+    body = str(text or "")
+    if not _MEMORY_DENIAL_RE.search(body):
+        return False
+    if _ABOUT_A_DOCUMENT_RE.search(body):
+        return False
+    low = body.lower()
+    return any(re.search(rf"\b{re.escape(n.lower())}\b", low)
+               for n in _people_on_record() if n)
+
+
+def _people_on_record() -> List[str]:
+    """Everyone Blue has a name for — not the same as the household roster.
+
+    `bt._canonical_household_names()` answers "who lives here", and is used to
+    check a roster is complete. That deliberately excludes the brother, his
+    wife, and the partner's parents — which is why "I don't have any record of
+    a Felix" was invisible to a check built on it. This answers the different
+    question: whose name would Blue be wrong to deny knowing.
+    """
+    try:
+        if not (bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system):
+            return []
+        facts = bt.memory_system.load_facts() or {}
+    except Exception:
+        return []
+    names: List[str] = []
+    for key, value in facts.items():
+        if not str(key).endswith(("_name", "_names", "_spouse")):
+            continue
+        if bt.memory_system._is_bot_fact(key):
+            continue
+        for piece in re.split(r"[,|;]|\sand\s", str(value or "")):
+            piece = piece.strip()
+            if len(piece) > 1 and piece.lower() not in (n.lower() for n in names):
+                names.append(piece)
+    return names
+
+
+# "no record of", "don't remember", "not in my memory" — the memory-shaped
+# denials, as opposed to a denial about what a document contains.
+_MEMORY_DENIAL_RE = re.compile(
+    r"\b(?:do(?:n['’]?t| not)|have no|haven['’]?t)\b[^.!?]{0,50}"
+    r"(?:record|memor|recollection|stored|saved|on file|know who|met)"
+    r"|\bnot in my (?:memory|records?)\b",
+    re.I)
+
+_ABOUT_A_DOCUMENT_RE = re.compile(
+    r"\b(?:in (?:the |your |that )?(?:document|documents|syllabus|file|files|"
+    r"pdf|paper|reading|folder|library)|search (?:results?|snippets?))\b", re.I)
+
+# Compiled once. These were rebuilt on every single turn, and living inside
+# finish() meant the only way to check one was to drive a whole request.
+_flat_denial_re = re.compile(
+            r"\bi (?:don['’]?t|do not) have (?:consciousness|a sense of self|"
+            r"subjective experience|feelings|an? inner life|"
+            r"an? (?:\w+ )?['\"“”‘’]?j[-_ ]?space|any form of internal|"
+            r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
+            r"a persistent (?:inner )?workspace)", re.I)
+
+
 def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages, robot, user_messages, user_name) -> Dict[str, Any]:
     """Check, correct, deliver and record the reply. Mutates `response`."""
     try:
@@ -135,12 +245,6 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # philosophy, they'bt.re factually false (Hexia: "No, I do not
         # have a 'j-space'" with her workspace right in the prompt,
         # 2026-07-12). Optional quote chars around j-space.
-        _flat_denial_re = re.compile(
-            r"\bi (?:don['’]?t|do not) have (?:consciousness|a sense of self|"
-            r"subjective experience|feelings|an? inner life|"
-            r"an? (?:\w+ )?['\"“”‘’]?j[-_ ]?space|any form of internal|"
-            r"an? (?:internal|inner) (?:mental )?(?:space|workspace)|"
-            r"a persistent (?:inner )?workspace)", re.I)
 
         # A reply where this robot claims to be the OTHER robot is the
         # worst defect of all — check it first. Seen live 2026-07-12:
@@ -241,30 +345,6 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # facts block holds the family (2026-07-13, triggered by the
         # focus block's over-broad 'out of scope' — but a fresh
         # boilerplate refusal can happen without focus too).
-        _family_refusal_re = re.compile(
-            r"(?:do (?:not|n['’]?t) (?:\w+ )?(?:have|store|keep|retain|access)"
-            r"|have no|don['’]?t (?:\w+ )?have)[^.!?]{0,60}"
-            r"(?:personal (?:details|information|memor)|"
-            r"persistent memor|memor[a-z]* of past|"
-            r"(?:real[- ]?world )?facts about (?:you|your)|"
-            r"memor[a-z]* (?:of|about) (?:your |the )?(?:family|you)|"
-            # "no record of your family" is the phrasing the models
-            # actually reach for, and it was not covered — the guard
-            # only knew "memory of" and "information about". The same
-            # miss showed up in Panel Mode for a named relative
-            # ("I don't have any record of a Felix", 2026-08-04).
-            r"record[a-z]* (?:of|about|on) "
-            r"(?:your |the |a |an )?(?:family|relatives?|brother|sister|parents?)|"
-            r"information about (?:your |the )?family)"
-            r"|i (?:respect your privacy and|do(?:n['’]?t| not))"
-            r"[^.!?]{0,40}store personal"
-            r"|do(?:n['’]?t| not) (?:truly |really |actually )?know "
-            r"who you are"
-            r"|i (?:couldn['’]?t|could not) find[^.!?]{0,60}"
-            r"(?:information|records?|contacts?)"
-            r"|(?:might|may|could) have been a hallucination"
-            r"|was (?:just )?a hallucination",
-            re.I)
         # A roster answer that quietly loses people. Only checked when
         # the user actually asked about the household, so an ordinary
         # mention of one or two names is never treated as a list.
@@ -329,6 +409,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
             parrot_norm=_parrot_norm,
             recycled_from_recents=_recycled_from_recents,
             profile_recited_fraction=_profile_recited_fraction,
+            denies_known_person=denies_a_known_person,
             family_refusal_re=_family_refusal_re,
             flat_denial_re=_flat_denial_re,
         ))

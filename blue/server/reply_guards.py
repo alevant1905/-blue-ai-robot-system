@@ -72,6 +72,7 @@ class ReplyContext:
     # threshold, and these two get .search() called on them.
     recycled_from_recents: Callable[..., float] = lambda *a, **k: 0.0
     profile_recited_fraction: Callable[..., float] = lambda *a, **k: 0.0
+    denies_known_person: Callable[[str], bool] = lambda text: False
     family_refusal_re: Any = _NEVER_MATCHES
     flat_denial_re: Any = _NEVER_MATCHES
 
@@ -341,8 +342,12 @@ def guard_family_refusal(ctx) -> Optional[str]:
     _regen_once = ctx.regen_once
     robot = ctx.robot
     response = ctx.response
+    # The regex catches the phrasings; ctx.denies_known_person catches the
+    # ones that name a person, which no pattern can enumerate ("I don't have
+    # any record of a Felix").
     if not ((robot in bt._continuity_routes.ROBOTS and _has_family_facts
-      and _family_refusal_re.search(final_content or ""))):
+      and (_family_refusal_re.search(final_content or "")
+           or ctx.denies_known_person(final_content or "")))):
         return None
     print("   [ANTI-PARROT] family-memory refusal despite facts — regenerating once")
     _redo_text = _regen_once(
@@ -351,9 +356,34 @@ def guard_family_refusal(ctx) -> Optional[str]:
         "claimed to have no memory of the family or not to store "
         "personal details, which is false. Answer again, warmly, "
         "from what you actually know about the family.]")
-    if _redo_text and not _family_refusal_re.search(_redo_text):
+    if (_redo_text and not _family_refusal_re.search(_redo_text)
+            and not ctx.denies_known_person(_redo_text)):
         final_content = _redo_text
         response["choices"][0]["message"]["content"] = final_content
+    return final_content
+
+
+def guard_clock_denial(ctx) -> Optional[str]:
+    """Refusing to say what day or time it is, with <now> in the prompt.
+
+    Recorded four different ways: "I can't give you an accurate reading of
+    what day and time it is", "I don't actually have direct access to your
+    device's clock". Distinct from guard_wrong_date, which catches asserting
+    the WRONG date — this catches declining to give one at all.
+    """
+    final_content = ctx.reply
+    if ctx.grounded_reply or not bt._CLOCK_DENIAL_RE.search(final_content or ""):
+        return None
+    now = bt._build_now_block()
+    print("   [ANTI-PARROT] denied knowing the date/time — regenerating once")
+    _redo_text = ctx.regen_once(
+        "[You just said you cannot tell what day or time it is. That is "
+        "false: the current date and time are in your prompt, below. You do "
+        "not need the user's device clock — answer from this and do not "
+        "hedge about accuracy.]\n" + now)
+    if _redo_text and not bt._CLOCK_DENIAL_RE.search(_redo_text):
+        final_content = _redo_text
+        ctx.response["choices"][0]["message"]["content"] = final_content
     return final_content
 
 
@@ -716,6 +746,7 @@ GUARDS = [
     guard_wrong_ages,
     guard_dropped_roster,
     guard_family_refusal,
+    guard_clock_denial,
     guard_wrong_date,
     guard_syllabus_refusal,
     guard_robot_relationship_denial,

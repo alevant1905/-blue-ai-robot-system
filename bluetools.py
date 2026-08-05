@@ -9334,6 +9334,13 @@ def detect_web_refusal(response: str) -> bool:
 _DOCUMENT_REFUSAL_RE = re.compile(
     r"\b(?:i (?:still )?(?:cannot|can['\u2019]?t|am unable to) "
     r"(?:access|read|retrieve|extract|open|see) (?:the |that |this )?(?:text|file|pdf|document)"
+    # "I can't open or read the contents of files in your documents folder" \u2014
+    # recorded twice, and false: search_documents returns the file's real text.
+    # The compound verb and the "contents of"/"full text of" object were both
+    # outside the alternation above.
+    r"|i (?:cannot|can['\u2019]?t|am unable to) (?:open or read|read or open|open|read)"
+    r"[^.!?]{0,30}(?:contents? of|full text of)[^.!?]{0,40}"
+    r"(?:file|files|document|documents|pdf)"
     r"|i (?:currently )?lack (?:the )?(?:specific )?(?:pdf[- ]reading )?tool"
     r"|i do not have (?:a |the )?(?:pdf[- ]reading|file[- ]reading) tool"
     r"|search_documents (?:can|could) only (?:scan|search|look for) keywords"
@@ -13889,6 +13896,25 @@ def _claims_false_idle(text: str) -> bool:
 # timestamp when we last spoke" (live 2026-07-29) when session_summaries
 # and conversation_log carry exactly that. First-person capability denial
 # about temporal continuity — same family as the syllabus/family denials.
+# Refusing to say what day or time it is, while <now> sits in the prompt with
+# the exact date and time. Recorded four different ways in conversation_log
+# ("I can't give you an accurate reading of what day and time it is", "I don't
+# actually have direct access to your device's clock"). Kept separate from
+# _TEMPORAL_DENIAL_RE, which is about recalling past CONVERSATIONS — a
+# different mistake needing a different correction.
+_CLOCK_DENIAL_RE = re.compile(
+    r"\bi (?:do (?:not|n['’]?t)|don['’]?t|can(?:not|['’]t))\b[^.!?]{0,90}"
+    r"(?:"
+    r"(?:reading|sense|idea|way of knowing|access) of (?:what|the current)?\s*"
+    r"(?:day|date|time)"
+    r"|(?:direct |real[- ]?time )?access to (?:your |the )?"
+    r"(?:device['’]?s? )?(?:system )?(?:clock|timezone|time zone)"
+    r"|(?:give|tell) you (?:an? )?(?:accurate|precise|exact|current)?\s*"
+    r"(?:reading of )?(?:what )?(?:day|date|time)"
+    r"|know what (?:day|date|time) it is"
+    r")",
+    re.I)
+
 _TEMPORAL_DENIAL_RE = re.compile(
     r"\bi (?:do (?:not|n['’]?t)|don['’]?t|can(?:'|not|['’]t))\b"
     r"[^.!?]{0,80}\b(?:persistent|history|log|record|timestamp|"

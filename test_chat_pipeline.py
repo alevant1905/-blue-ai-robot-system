@@ -381,3 +381,34 @@ def test_the_guarded_reply_is_what_the_post_returns(chat):
     response = chat.ask("do you remember our family?", stream_id="chartest2")
 
     assert "don't have any record" not in reply_of(response).lower()
+
+
+def test_a_clock_denial_is_regenerated_end_to_end(chat):
+    """Proves the wiring, not just the pattern: a recorded denial goes in, the
+    guard fires inside the real pipeline, and the corrected reply comes out."""
+    chat.model.queue(
+        "I don't actually have direct access to your device's clock or "
+        "timezone settings, so I can't tell you.",
+        "It's Tuesday, and just gone lunchtime.",
+    )
+    # NOT "what time is it?" — that is confidently routed to the get_local_time
+    # tool and the model never gets to deny anything. The recorded denials all
+    # happened when the clock came up incidentally, which is this shape.
+    response = chat.ask("how has your morning been so far?")
+
+    text = reply_of(response)
+    assert "device's clock" not in text, "the clock denial reached the user"
+    assert len(chat.model.payloads) >= 2, "the guard never regenerated"
+
+
+def test_a_denial_naming_someone_on_record_is_regenerated(chat):
+    """The Felix case, through the whole pipeline. No pattern can enumerate
+    people, so this one is checked against the facts table."""
+    chat.model.queue(
+        "I don't have any record of a Felix in our shared history.",
+        "Felix is your brother — he's in Waterloo with Svetlana.",
+    )
+    response = chat.ask("do you remember Felix?")
+
+    assert "don't have any record" not in reply_of(response).lower()
+    assert len(chat.model.payloads) >= 2, "the guard never regenerated"

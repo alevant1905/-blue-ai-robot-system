@@ -105,8 +105,11 @@ def test_the_guard_order_is_the_old_chain_order():
     assert names[0] == "guard_denied_recall"
     assert names[1] == "guard_identity"
     assert names[-1] == "guard_false_idle"
-    assert len(names) == 17
-    assert len(set(names)) == 17, "a guard is registered twice"
+    # 17 lifted from the original chain, plus guard_clock_denial added from
+    # the recorded-reply audit. Update deliberately when adding a guard —
+    # this assertion exists to make an accidental change visible.
+    assert len(names) == 18
+    assert len(set(names)) == 18, "a guard is registered twice"
 
 
 # --------------------------------------------------------------------------
