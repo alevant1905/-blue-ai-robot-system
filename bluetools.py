@@ -13896,6 +13896,29 @@ def _claims_false_idle(text: str) -> bool:
 # timestamp when we last spoke" (live 2026-07-29) when session_summaries
 # and conversation_log carry exactly that. First-person capability denial
 # about temporal continuity — same family as the syllabus/family denials.
+# Denying that he can speak or hear, or calling himself a text-based AI. All
+# false: he has Whisper on the way in, TTS and a physical Ohbot head with
+# lip-sync on the way out. Recorded as "I can't speak to her directly since I
+# don't have a voice output" and "I don't have physical ears to hear you
+# (since I'm a text-based AI)".
+#
+# The narrowness is deliberate. "text-based" appears in several statements
+# that are CORRECT — "unlike the text-based AI programs you might be used to,
+# I have a physical body", "J-space is a text-based workspace" — so only a
+# first-person claim to BE one counts. Likewise "I can't speak to him
+# directly" about someone who is not in the room is true and must not fire;
+# the false part is the "no voice output" clause beside it.
+_VOICE_DENIAL_RE = re.compile(
+    r"\bi(?:['’]m| am)\s+(?:just |only |merely |simply )?an?\s+"
+    r"text[- ]based\s+(?:ai|a\.i\.|model|assistant|program|bot|tool|system)\b"
+    r"|\b(?:i (?:do ?n[o']?t|don['’]?t|cannot|can['’]?t) have|i have no|"
+    r"there(?:['’]s| is) no)\s+"
+    r"(?:a |any )?(?:voice|audio|speech|sound|vocal)\s*"
+    r"(?:output|capabilit\w+|synthesis|channel)?\b"
+    r"|\b(?:i (?:do ?n[o']?t|don['’]?t) have|i have no)\s+(?:physical )?ears?\b"
+    r"[^.!?]{0,30}\b(?:to hear|hearing|so i can(?:not|['’]?t) hear)\b",
+    re.I)
+
 # Refusing to say what day or time it is, while <now> sits in the prompt with
 # the exact date and time. Recorded four different ways in conversation_log
 # ("I can't give you an accurate reading of what day and time it is", "I don't

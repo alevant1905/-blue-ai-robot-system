@@ -412,3 +412,17 @@ def test_a_denial_naming_someone_on_record_is_regenerated(chat):
 
     assert "don't have any record" not in reply_of(response).lower()
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
+
+
+def test_a_voice_denial_is_regenerated_end_to_end(chat):
+    """Proves the wiring: Blue claiming he cannot speak, through the real
+    pipeline, comes out corrected."""
+    chat.model.queue(
+        "I can't speak to her directly since I don't have a voice output.",
+        "I can say it out loud when she's in the room — want me to?",
+    )
+    response = chat.ask("could you tell Stella dinner is ready?")
+
+    text = reply_of(response)
+    assert "voice output" not in text, "the voice denial reached the user"
+    assert len(chat.model.payloads) >= 2, "the guard never regenerated"

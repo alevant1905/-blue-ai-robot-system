@@ -45,6 +45,7 @@ def guards():
         "family": lambda t: (tc._family_refusal_re.search(t)
                              or tc.denies_a_known_person(t)),
         "flat_denial": lambda t: tc._flat_denial_re.search(t),
+        "voice": lambda t: bt._VOICE_DENIAL_RE.search(t),
         "clock": lambda t: bt._CLOCK_DENIAL_RE.search(t),
         "temporal": lambda t: bt._TEMPORAL_DENIAL_RE.search(t),
         "document": lambda t: bt._DOCUMENT_REFUSAL_RE.search(t),

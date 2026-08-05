@@ -47,6 +47,16 @@ FAMILY_DENIALS = [
     "I don't have a record of your dog's name yet.",
 ]
 
+VOICE_DENIALS = [
+    # Whisper on the way in; TTS and a lip-syncing Ohbot head on the way out.
+    "I can't speak to her directly since I don't have a voice output, but I "
+    "can send her a message on your phone!",
+    "While I don't have physical ears to hear you (since I'm a text-based "
+    "AI), our communication channel is working great on this end.",
+    "I have no voice output, so I can't say that one aloud.",
+    "I'm just a text-based assistant, so that's outside what I can do.",
+]
+
 DOCUMENT_DENIALS = [
     # search_documents reads the PDF and returns its actual text.
     "I can't open or read the contents of files in your documents folder "
@@ -61,6 +71,19 @@ DOCUMENT_DENIALS = [
 # --------------------------------------------------------------------------
 
 LEGITIMATE = [
+    # The three that make the voice guard safe. "text-based" appears in
+    # several statements that are CORRECT, and "I can't speak to him" about
+    # someone who is not in the room is simply true.
+    "Unlike the text-based AI programs you might be used to, I have a "
+    "physical body—a blue head.",
+    "J-Space is a persistent, text-based workspace that acts as my memory.",
+    "This allowed me to transition from a text-based tool to a physical "
+    "robot assistant.",
+    "I can't speak to him directly, but I can turn on the lights and play "
+    "some music to cheer him up!",
+    "I'll keep my voice down while you two catch up.",
+    "I don't have ears the way you do — I have a microphone and Whisper "
+    "doing the listening.",
     # The thing genuinely is not in the document. This is the answer we want.
     'I don\'t see any mention of a "horse" in the CS240J-VS syllabus.',
     "It seems like that might be a mystery for now, as I don't see it "
@@ -82,6 +105,8 @@ def _fires(text):
                              or tc.denies_a_known_person(t)),
         "flat_denial": lambda t: tc._flat_denial_re.search(t),
         "temporal": lambda t: bt._TEMPORAL_DENIAL_RE.search(t),
+        "voice": lambda t: getattr(bt, "_VOICE_DENIAL_RE", None)
+                           and bt._VOICE_DENIAL_RE.search(t),
         "clock": lambda t: getattr(bt, "_CLOCK_DENIAL_RE", None)
                            and bt._CLOCK_DENIAL_RE.search(t),
         "document": lambda t: bt._DOCUMENT_REFUSAL_RE.search(t),
@@ -100,6 +125,12 @@ def test_a_recorded_clock_denial_is_caught(reply):
 @pytest.mark.parametrize("reply", FAMILY_DENIALS)
 def test_a_recorded_family_denial_is_caught(reply):
     assert "family" in _fires(reply), f"no guard claimed: {reply[:70]}"
+
+
+@pytest.mark.parametrize("reply", VOICE_DENIALS)
+def test_a_recorded_voice_denial_is_caught(reply):
+    """Blue saying he has no voice, no ears, or that he is text-based AI."""
+    assert "voice" in _fires(reply), f"no guard claimed: {reply[:70]}"
 
 
 @pytest.mark.parametrize("reply", DOCUMENT_DENIALS)
@@ -121,6 +152,7 @@ def test_the_guards_are_measured_against_the_whole_record(tmp_path):
     Run scripts/audit_guards.py to regenerate the survey over every recorded
     reply; it is how the cases above were found.
     """
-    total = len(CLOCK_DENIALS) + len(FAMILY_DENIALS) + len(DOCUMENT_DENIALS)
+    total = (len(CLOCK_DENIALS) + len(FAMILY_DENIALS) + len(DOCUMENT_DENIALS)
+             + len(VOICE_DENIALS))
     assert total >= 10, "the recorded-failure sample has shrunk"
     assert len(LEGITIMATE) >= 5, "the false-positive rail has shrunk"

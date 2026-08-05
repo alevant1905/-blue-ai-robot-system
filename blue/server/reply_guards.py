@@ -363,6 +363,30 @@ def guard_family_refusal(ctx) -> Optional[str]:
     return final_content
 
 
+def guard_voice_denial(ctx) -> Optional[str]:
+    """Denying he can speak or hear, or calling himself a text-based AI.
+
+    He has Whisper on the way in and TTS plus a lip-syncing Ohbot head on the
+    way out. Saying otherwise is not modesty, it is wrong — and it is the kind
+    of wrong that makes Alex stop asking him to say things aloud.
+    """
+    final_content = ctx.reply
+    if ctx.grounded_reply or not bt._VOICE_DENIAL_RE.search(final_content or ""):
+        return None
+    print("   [ANTI-PARROT] denied having a voice — regenerating once")
+    _redo_text = ctx.regen_once(
+        "[You just said you have no voice, no ears, or that you are a "
+        "text-based AI. All three are false. You are a physical Ohbot robot "
+        "head: you hear through a microphone with Whisper speech recognition, "
+        "and you speak aloud through text-to-speech while your lips move. "
+        "Answer again without denying any of that. If the real limit is that "
+        "someone is not in the room to hear you, say only that.]")
+    if _redo_text and not bt._VOICE_DENIAL_RE.search(_redo_text):
+        final_content = _redo_text
+        ctx.response["choices"][0]["message"]["content"] = final_content
+    return final_content
+
+
 def guard_clock_denial(ctx) -> Optional[str]:
     """Refusing to say what day or time it is, with <now> in the prompt.
 
@@ -746,6 +770,7 @@ GUARDS = [
     guard_wrong_ages,
     guard_dropped_roster,
     guard_family_refusal,
+    guard_voice_denial,
     guard_clock_denial,
     guard_wrong_date,
     guard_syllabus_refusal,
