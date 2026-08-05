@@ -844,6 +844,20 @@ def test_the_page_runs_the_discussion_itself_in_continuous_mode(panel_module):
     assert "id===lastRobotTurn" in html
 
 
+def test_the_pause_between_turns_is_adjustable_while_they_talk(panel_module):
+    """A captured gap would only take effect the next time the panel started."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert 'id="paceRange"' in html
+    assert 'type="range" min="0" max="8"' in html
+    assert "await pauseBetweenTurns();" in html
+    # Read live, and waited out in slices, so a drag is felt during the gap.
+    assert "function paceMs(){const seconds=parseFloat(paceRange.value);" in html
+    assert "const remaining=paceMs()-(Date.now()-started);" in html
+    # The setting survives a reload with the rest of the panel settings.
+    assert "pace:parseFloat(paceRange.value)" in html
+    assert "if(typeof data.pace==='number'" in html
+
+
 def test_alex_can_barge_into_a_running_discussion(panel_module):
     """Without this, a robot is always mid-turn and he can never get a word in."""
     html = _client(panel_module).get("/panel").get_data(as_text=True)

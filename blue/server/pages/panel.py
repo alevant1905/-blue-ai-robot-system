@@ -50,6 +50,9 @@ button:disabled{opacity:.46;cursor:default}.muted{color:var(--slate);font-size:.
 .doc-list .folder{font-size:.68em;text-transform:uppercase;letter-spacing:.06em;color:var(--slate);padding:6px 4px 2px}
 .local-head{margin-top:9px;font-size:.75em;padding:5px 8px;display:none}
 .session-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pace{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:10px;
+  padding-top:9px;border-top:1px solid rgba(100,116,139,.18)}
+.pace input{flex:1;min-width:150px;max-width:320px}.pace .value{font-variant-numeric:tabular-nums}
 #status{color:var(--slate);font-size:.9em;min-height:1.4em}.live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#94a3b8;margin-right:6px}
 .live-dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(53,182,90,.12)}
 #log{display:flex;flex-direction:column;gap:11px;margin:14px 0 18px;min-height:90px}
@@ -128,6 +131,10 @@ button:disabled{opacity:.46;cursor:default}.muted{color:var(--slate);font-size:.
       <label class="muted"><input id="speakChk" type="checkbox" checked> speak replies aloud</label>
     </div>
   </div>
+  <label class="pace muted" for="paceRange">Pause between turns
+    <input id="paceRange" type="range" min="0" max="8" step="0.1" value="1.1">
+    <span class="value" id="paceLabel">1.1 s · natural</span>
+  </label>
 </section>
 
 <main id="log" aria-live="polite"><div class="note">Start the panel, then say “Blue…”, “Hexia…”, “Casper…”, or “everyone…”. Or tick continuous and let them talk it out.</div></main>
@@ -154,13 +161,13 @@ const startBtn=document.getElementById('startBtn'),stopBtn=document.getElementBy
 const interruptBtn=document.getElementById('interruptBtn'),saveBtn=document.getElementById('saveBtn'),sendBtn=document.getElementById('sendBtn');
 const micBtn=document.getElementById('micBtn'),inputEl=document.getElementById('messageInput');
 const audioEl=document.getElementById('panelAudio'),continuousChk=document.getElementById('continuousChk');
+const paceRange=document.getElementById('paceRange'),paceLabel=document.getElementById('paceLabel');
 // The floor is a LIST, not one name: "everyone" hands it to all three at once.
 let running=false,busy=false,activeRobots=[],history=[],materials=[];
 // Continuous discussion: a random running order the loop walks through, and the
 // last robot who actually spoke, so the seam between two lineups (or between an
 // answer to Alex and the next free turn) never hands anyone two turns in a row.
 let loopActive=false,lineup=[],lineupIndex=0,lastRobotTurn='',continuousFailures=0;
-const CONTINUOUS_GAP_MS=1100;
 let recognition=null,listening=false,resumeListening=false,activeFinish=null,audioUrl='',audioAbort=null,turnAbort=null,turnVersion=0;
 let lastRobotSpeech='',echoGuardUntil=0,recognitionRestartAfter=0;
 const voicePrefs={{ voice_preferences_json|safe }};
@@ -178,6 +185,23 @@ function addTurn(speaker,text){
 function scrollDown(){requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}));}
 function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
 function continuousOn(){return !!continuousChk.checked;}
+// Read live, never captured: dragging the slider mid-discussion changes the very
+// next pause rather than the next time the panel is started.
+function paceMs(){const seconds=parseFloat(paceRange.value);return isNaN(seconds)?1100:Math.round(seconds*1000);}
+function paceWord(seconds){seconds=+seconds;return seconds<=0.2?'straight on':seconds<=1.5?'natural':seconds<=3?'unhurried':seconds<=5.5?'slow':'long pauses';}
+function renderPace(){paceLabel.textContent=(+paceRange.value).toFixed(1)+' s · '+paceWord(paceRange.value);}
+paceRange.addEventListener('input',renderPace);
+paceRange.addEventListener('change',saveSettings);
+// The gap is waited out in slices so a change to the slider — or Alex taking
+// the floor — is felt at once instead of after a pause he has already changed.
+async function pauseBetweenTurns(){
+  const started=Date.now();
+  while(running&&continuousOn()&&!busy){
+    const remaining=paceMs()-(Date.now()-started);
+    if(remaining<=0)return;
+    await sleep(Math.min(200,remaining));
+  }
+}
 // Accepts a name, a list of names, or nothing at all.
 function setActive(robot,label){
   const list=Array.isArray(robot)?robot.slice():(robot?[robot]:[]);
@@ -196,12 +220,14 @@ function selectedSettings(){
   const out={};IDS.forEach(id=>{out[id]={role:document.getElementById('role-'+id).value.trim(),slang:document.getElementById('slang-'+id).value.trim(),documents:Array.from(document.querySelectorAll('#docs-'+id+' input[type=checkbox]:checked')).map(x=>x.value)};});return out;
 }
 function saveSettings(){
-  try{localStorage.setItem('bluePanelSettings',JSON.stringify({topic:document.getElementById('topic').value,continuous:continuousOn(),robots:selectedSettings()}));}catch(e){}
+  try{localStorage.setItem('bluePanelSettings',JSON.stringify({topic:document.getElementById('topic').value,continuous:continuousOn(),pace:parseFloat(paceRange.value),robots:selectedSettings()}));}catch(e){}
 }
 function restoreSettings(){
   let data={};try{data=JSON.parse(localStorage.getItem('bluePanelSettings')||'{}')||{};}catch(e){}
   if(typeof data.topic==='string')document.getElementById('topic').value=data.topic;
   continuousChk.checked=!!data.continuous;
+  if(typeof data.pace==='number'&&isFinite(data.pace))paceRange.value=Math.min(8,Math.max(0,data.pace));
+  renderPace();
   IDS.forEach(id=>{const cfg=(data.robots||{})[id]||{};if(typeof cfg.role==='string')document.getElementById('role-'+id).value=cfg.role;if(typeof cfg.slang==='string')document.getElementById('slang-'+id).value=cfg.slang;});
   return data.robots||{};
 }
@@ -378,7 +404,7 @@ async function runContinuous(){
       }finally{
         if(thisTurn===turnVersion){busy=false;turnAbort=null;interruptBtn.disabled=true;setActive(activeRobots);}
       }
-      if(running&&continuousOn())await sleep(CONTINUOUS_GAP_MS);
+      await pauseBetweenTurns();
     }
   }finally{loopActive=false;}
 }

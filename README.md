@@ -44,7 +44,7 @@ Open **`/panel`** for one human-led conversation with Blue, Hexia, and Casper. C
 - Every panel turn includes the same complete transcript, so all three know what Alex and the other robots just heard and said.
 - Add a topic plus up to four shared websites or PDFs, and set a separate role, slang/register, and library reading list for each robot.
 - Use continuous browser speech recognition or type into the shared composer; replies use each robot's saved voice and physical head lip-sync.
-- Tick **continuous discussion** and the three of them talk it out on their own: a random running order (nobody twice in a row, nobody left out) with each turn answering the topic and the point the last speaker actually made. Say something at any moment — your line cuts the current turn short, joins the transcript, and the discussion carries on from it. "Stop talking" stops the discussion; tick the box again to restart it.
+- Tick **continuous discussion** and the three of them talk it out on their own: a random running order (nobody twice in a row, nobody left out) with each turn answering the topic and the point the last speaker actually made. Say something at any moment — your line cuts the current turn short, joins the transcript, and the discussion carries on from it. "Stop talking" stops the discussion; tick the box again to restart it. **Pause between turns** sets the gap from 0 to 8 seconds and can be dragged while they are talking — the change lands on the very next pause.
 
 ### 🧠 Memory & library
 
