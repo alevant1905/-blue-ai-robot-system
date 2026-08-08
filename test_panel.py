@@ -687,6 +687,32 @@ def test_the_next_lineup_does_not_hand_the_last_speaker_two_turns(panel_module):
         assert panel_module.panel_lineup(6, avoid="casper")[0] != "pico"
 
 
+def test_alex_can_name_who_opens_the_discussion(panel_module):
+    """His choice of opener outranks the no-repeat rule: it is a decision about
+    this discussion, not an accident of the last one."""
+    for _ in range(20):
+        assert panel_module.panel_lineup(9, first="hexia")[0] == "hexia"
+        assert panel_module.panel_lineup(9, avoid="pico", first="pico")[0] == "pico"
+        # Casper answers to several names.
+        assert panel_module.panel_lineup(9, first="casper")[0] == "pico"
+    # No choice means the running order picks, still avoiding a repeat.
+    assert all(
+        panel_module.panel_lineup(9, avoid="blue", first="")[0] != "blue"
+        for _ in range(20)
+    )
+
+
+def test_the_lineup_endpoint_takes_the_chosen_opener(panel_module):
+    response = _client(panel_module).post(
+        "/panel/lineup", json={"turns": 4, "avoid": "hexia", "starter": "hexia"}
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["lineup"][0] == "hexia"
+    assert data["names"][0] == "Hexia"
+
+
 def test_the_lineup_endpoint_serves_the_page_a_running_order(panel_module):
     response = _client(panel_module).post(
         "/panel/lineup", json={"turns": 5, "avoid": "blue"}
@@ -815,6 +841,65 @@ def test_a_continuous_turn_is_grounded_on_the_line_it_is_answering(panel_module)
     assert "daughters" in panel_module._test_memory.searched[-1]
 
 
+def _material(label, fresh=False):
+    source = {
+        "kind": "pdf",
+        "label": label,
+        "url": "",
+        "brief": f"An excerpt from {label} about kerb space and delivery windows.",
+    }
+    if fresh:
+        source["fresh"] = True
+    return source
+
+
+def test_a_document_handed_over_mid_discussion_is_taken_up(panel_module):
+    """Appending it silently to a list the panel has carried for ten turns
+    changes nothing about the next turn. Alex added it because he wants it
+    used now."""
+    response = _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "hexia",
+            "mode": "continuous",
+            "topic": "Whether cities should ban cars downtown",
+            "history": [{"speaker": "blue", "text": "Deliveries would adapt."}],
+            "materials": [
+                _material("older-study.pdf"),
+                _material("kerb-space-2026.pdf", fresh=True),
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    system = panel_module._test_calls[-1]["messages"][0]["content"]
+    # The material itself is marked, and the turn is told to use it.
+    assert "kerb-space-2026.pdf (pdf) — JUST HANDED TO THE PANEL" in system
+    assert "older-study.pdf (pdf)]" in system
+    assert "just put kerb-space-2026.pdf in front of the panel" in system
+    assert "Alex has just handed the panel kerb-space-2026.pdf" in system
+    assert "do not pretend to have read more of it" in system
+
+
+def test_material_already_in_hand_is_not_announced_again(panel_module):
+    """Greeting the same document every turn is how it stops being read."""
+    _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "hexia",
+            "mode": "continuous",
+            "topic": "Whether cities should ban cars downtown",
+            "history": [{"speaker": "blue", "text": "Deliveries would adapt."}],
+            "materials": [_material("kerb-space-2026.pdf")],
+        },
+    )
+
+    system = panel_module._test_calls[-1]["messages"][0]["content"]
+    assert "kerb-space-2026.pdf" in system
+    assert "JUST HANDED TO THE PANEL" not in system
+    assert "has just handed the panel" not in system
+
+
 def test_a_prepared_turn_lets_a_live_one_have_the_model_first(panel_module, monkeypatch):
     """Nobody has asked for a speculative turn yet, so it must not hold the one
     local model in front of a turn Alex is actually waiting on."""
@@ -894,10 +979,11 @@ def test_a_prepared_turn_is_thrown_away_once_the_room_moves_on(panel_module):
     """It answered a conversation that no longer exists — Alex cut in, or the
     discussion was stopped — so it must never be spoken."""
     html = _client(panel_module).get("/panel").get_data(as_text=True)
-    assert "ticket={id:id,basis:historyVersion" in html
-    assert "if(ticket.basis!==historyVersion){dropTicket(ticket);return null;}" in html
-    # Every line said moves the version on, which is what makes it stale.
+    assert "ticket={id:id,basis:roomBasis()" in html
+    assert "if(ticket.basis!==roomBasis()){dropTicket(ticket);return null;}" in html
+    # Every line said — and every document handed over — moves it on.
     assert "history.push({speaker:speaker,text:text});historyVersion+=1;" in html
+    assert "function roomBasis(){return historyVersion+'/'+materialsVersion;}" in html
     # Interrupting, stopping, and unticking all drop it.
     assert html.count("discardPreparedTurn()") >= 4
 
@@ -923,6 +1009,37 @@ def test_alex_can_barge_into_a_running_discussion(panel_module):
     # An unaddressed remark is dropped in human-led mode but joins the discussion
     # when it is running on its own.
     assert "continuousOn()?'Heard. They will pick it up.'" in html
+
+
+def test_the_page_lets_alex_choose_who_opens(panel_module):
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert 'id="starterSel"' in html
+    assert 'value="pico">Casper</option>' in html
+    # Only on a fresh discussion, and the choice clears the no-repeat memory so
+    # it is not dropped for having just answered Alex.
+    assert "async function openLineup()" in html
+    assert "if(first)lastRobotTurn='';" in html
+    assert "if(!lineupOpened){await openLineup();" in html
+
+
+def test_the_page_can_pause_the_discussion_between_turns(panel_module):
+    """Pausing is not stopping: the running order and anything already prepared
+    survive it, and Alex can still ask them things while it is held."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert 'id="pauseBtn"' in html
+    assert "function setPaused(on){" in html
+    assert "if(paused){await sleep(200);continue;}" in html
+    assert "pauseBtn.textContent=(paused&&live)?'Resume discussion':'Pause discussion';" in html
+    # Nothing is prepared while it is held.
+    assert "if(pendingTurn||!running||!continuousOn()||paused)return;" in html
+
+
+def test_the_page_hands_a_document_over_mid_discussion(panel_module):
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "source.fresh=true;materials.push(source);materialsVersion+=1;" in html
+    # A turn prepared before it arrived has not read it, so it is thrown away.
+    assert "if(running){discardPreparedTurn();addNote('Alex hands the panel '" in html
+    assert "function clearFreshMaterials()" in html
 
 
 def test_a_robot_saying_stop_does_not_stop_the_panel(panel_module):

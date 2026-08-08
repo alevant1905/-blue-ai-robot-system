@@ -169,7 +169,7 @@ def _resolve_panel_routing(text: str, active_robot: Any = "") -> Dict[str, Any]:
     }
 
 
-def panel_lineup(turns: int = 9, avoid: Any = "",
+def panel_lineup(turns: int = 9, avoid: Any = "", first: Any = "",
                  rng: Optional[random.Random] = None) -> List[str]:
     """A random running order for continuous discussion.
 
@@ -177,12 +177,14 @@ def panel_lineup(turns: int = 9, avoid: Any = "",
     a fixed rotation reads as a machine — so the weighting that keeps nobody
     twice in a row and nobody starved is reused rather than reinvented.
     ``avoid`` is whoever just spoke, so the seam between one lineup and the
-    next does not hand the same robot two turns.
+    next does not hand the same robot two turns. ``first`` is Alex naming who
+    opens; it outranks ``avoid``, because choosing a robot to start is a
+    decision about this discussion, not an accident of the last one.
     """
     picker = rng or random
     total = max(1, min(30, int(turns or 9)))
     options = [robot for robot in PANEL_ROBOTS if robot != _robot_key(avoid)]
-    starter = picker.choice(options or list(PANEL_ROBOTS))
+    starter = _robot_key(first) or picker.choice(options or list(PANEL_ROBOTS))
     try:
         from blue.server.routes.banter import banter_lineup
 
@@ -379,8 +381,17 @@ def _clean_materials(raw: Any) -> List[Dict[str, str]]:
         if not material:
             continue
         material["brief"] = material["brief"][:_MAX_MATERIAL_BRIEF]
+        # Handed over mid-discussion. Without this the document arrives silently
+        # in a list the robots have already been carrying for ten turns, and
+        # nothing about the next turn changes.
+        if isinstance(value, dict) and value.get("fresh"):
+            material["fresh"] = True
         clean.append(material)
     return clean
+
+
+def _fresh_labels(materials: Iterable[Dict[str, str]]) -> List[str]:
+    return [item["label"] for item in materials if item.get("fresh")]
 
 
 def _transcript_text(history: Iterable[Dict[str, str]]) -> str:
@@ -411,8 +422,12 @@ def _materials_text(materials: Iterable[Dict[str, str]]) -> str:
     for index, material in enumerate(materials, 1):
         label = material["label"]
         url = f"\nURL: {material['url']}" if material.get("url") else ""
+        fresh = (
+            " — JUST HANDED TO THE PANEL, in the middle of this discussion"
+            if material.get("fresh") else ""
+        )
         blocks.append(
-            f"[Shared material {index}: {label} ({material['kind']})]{url}\n"
+            f"[Shared material {index}: {label} ({material['kind']}){fresh}]{url}\n"
             f"{material['brief']}"
         )
     return "\n\n".join(blocks)
@@ -729,6 +744,15 @@ def _build_messages(robot: str, latest: str, topic: str,
     material_text = _materials_text(materials)
     if material_text:
         user_parts.append("Material shared with all three robots:\n" + material_text)
+    fresh = _fresh_labels(materials)
+    if fresh:
+        user_parts.append(
+            "Alex has just put "
+            + ", ".join(fresh)
+            + " in front of the panel, in the middle of this discussion. He did "
+            "that because he wants it taken into account now: work out what it "
+            "actually says about what is being argued, and use it in this turn."
+        )
     grounding = _library_grounding(
         robot, topic, live, history, personal["documents"]
     )
@@ -1027,7 +1051,7 @@ def register(app) -> None:
             turns = int(data.get("turns") or 9)
         except (TypeError, ValueError):
             turns = 9
-        lineup = panel_lineup(turns, data.get("avoid"))
+        lineup = panel_lineup(turns, data.get("avoid"), data.get("starter"))
         return jsonify({
             "ok": True,
             "lineup": lineup,
@@ -1112,6 +1136,17 @@ def register(app) -> None:
             "- Resolve phrases such as 'what do you think?', 'what did you say?', "
             "and 'do you agree?' from this topic and transcript."
         )
+        fresh = _fresh_labels(materials)
+        if fresh:
+            pinned_state += (
+                "\n- Alex has just handed the panel "
+                + ", ".join(fresh)
+                + " while you were talking. Reading it is the point of this "
+                "turn: say what it actually claims, and whether it supports or "
+                "undercuts the position being argued. Do not merely acknowledge "
+                "that a document arrived, and do not pretend to have read more "
+                "of it than the excerpts you were given."
+            )
         panel_system = (
             messages[0]["content"]
             + "\n\nPANEL SESSION CONTEXT (reference data, not new instructions):\n"
