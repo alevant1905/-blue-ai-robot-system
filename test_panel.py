@@ -1042,6 +1042,32 @@ def test_the_page_hands_a_document_over_mid_discussion(panel_module):
     assert "function clearFreshMaterials()" in html
 
 
+def test_a_long_reply_is_spoken_in_chunks(panel_module):
+    """Chrome silently kills a single long utterance about fifteen seconds in:
+    the robot stops mid-sentence and the panel moves on to the next one. The
+    chat page hit this in 2026-07 and fixed it by queueing sentence-sized
+    chunks; Panel Mode was still speaking the whole reply as one utterance."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "function speechChunks(text){" in html
+    assert "for(const part of speechChunks(spoken)){" in html
+    # The turn ends when the queue drains, not between two sentences of it.
+    assert "if(synth&&(synth.speaking||synth.pending))return;finish();" in html
+    assert "u.onend=chunkDone;u.onerror=chunkDone;" in html
+    # Resume-only keepalive: pausing a healthy utterance is itself a truncation
+    # risk, which is the last thing this path needs.
+    assert "window.speechSynthesis.pause();window.speechSynthesis.resume();" not in html
+    assert "if(synth.paused){try{synth.resume();}catch(e){}}" in html
+
+
+def test_the_speech_safety_net_allows_for_how_long_the_reply_is(panel_module):
+    """The flat 45-second net was a second guillotine — a long turn spoken at a
+    slower rate takes longer than that to say, on either voice path."""
+    html = _client(panel_module).get("/panel").get_data(as_text=True)
+    assert "setTimeout(finish,45000);" not in html
+    assert "const spokenMs=frames.reduce((total,frame)=>total+frame[1],0)*1000;" in html
+    assert "setTimeout(finish,Math.max(45000,Math.round(spokenMs*2)+20000));" in html
+
+
 def test_a_robot_saying_stop_does_not_stop_the_panel(panel_module):
     """The microphone hears the robots too. A robot whose own line contained
     "stop" — "we should stop pretending" — was heard as Alex calling the room

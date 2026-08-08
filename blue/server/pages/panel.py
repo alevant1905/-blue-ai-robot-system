@@ -342,6 +342,32 @@ function waitForBrowserVoice(id,timeoutMs){
   return new Promise(resolve=>{const started=Date.now(),timer=setInterval(()=>{if(ready()||Date.now()-started>=(timeoutMs||3500)){clearInterval(timer);resolve(ready());}},100);});
 }
 function pickedBrowserVoice(id){const name=preferredBrowserVoiceName(id),voices=browserVoices();if(name){const found=voices.find(v=>v.name===name);if(found)return found;}const cfg=ROBOTS[id]||{},wanted=cfg.preferFemale?['Samantha','Victoria','Karen','Microsoft Zira']:['Daniel','Aaron','Arthur','Microsoft David'];for(const x of wanted){const found=voices.find(v=>v.name===x||v.name.indexOf(x)===0);if(found)return found;}return voices.find(v=>/^en/i.test(v.lang||''))||voices[0]||null;}
+// Chrome silently kills a single long utterance about fifteen seconds in — the
+// robot stops mid-sentence and the panel simply moves on to the next one. The
+// chat page hit this in 2026-07 and fixed it the same way: speak the reply as
+// sentence-sized chunks queued together. The queue survives a long reply, and
+// cancel() still clears the whole thing at once, so stopping them is unharmed.
+function speechChunks(text){
+  const sentences=String(text||'').match(/[^.!?…]+[.!?…]*\s*/g)||[text];
+  const out=[];let current='';
+  for(const sentence of sentences){
+    if(current&&(current.length+sentence.length)>220){out.push(current);current='';}
+    current+=sentence;
+  }
+  if(current.trim())out.push(current);
+  return out.length?out:[String(text||'')];
+}
+// Resume only, and only when the engine has paused itself. The older trick of
+// calling pause() then resume() on a HEALTHY utterance every few seconds is
+// itself a truncation risk, which is the last thing this path needs.
+function speechKeepAlive(){
+  const timer=setInterval(()=>{
+    const synth=window.speechSynthesis;
+    if(!synth||(!synth.speaking&&!synth.pending)){clearInterval(timer);return;}
+    if(synth.paused){try{synth.resume();}catch(e){}}
+  },4000);
+  return timer;
+}
 function lipFrames(text,rate){const words=(text.match(/[^\s]+/g)||[]),frames=[],scale=1/(rate||1);words.forEach(word=>{const core=word.replace(/[^A-Za-z0-9\u00C0-\u024F]/g,''),duration=Math.min(.72,Math.max(.14,Math.max(1,core.length)*.058))*scale,moves=Math.max(1,Math.round(Math.max(1,core.length)/3)),per=duration/moves;for(let i=0;i<moves;i++){frames.push([.58+Math.random()*.4,per*.62]);frames.push([.08,per*.38]);}frames.push([0,(/[.!?]/.test(word.slice(-1))?.38:/[,;:]/.test(word.slice(-1))?.2:.055)*scale]);});return frames;}
 function headLip(cfg,frames){if(localCall('localHeadLip',[cfg.head,frames]))return;if(!DRIVES_SERVER_HEADS)return;fetch('/head/'+cfg.head+'/lip-seq',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frames:frames})}).catch(()=>{});}
 function headLipStop(cfg){if(localCall('localHeadLipStop',[cfg.head]))return;if(!DRIVES_SERVER_HEADS)return;fetch('/head/'+cfg.head+'/lip',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"on":false}'}).catch(()=>{});}
@@ -360,10 +386,18 @@ async function speakAs(cfg,text,el,mood,turnToken){
     const finish=()=>{if(done)return;done=true;if(activeFinish===finish)activeFinish=null;if(keepAlive)clearInterval(keepAlive);stopAudio();if(started){headLipStop(cfg);el.classList.remove('speaking');}if(speechWasEnabled)flushRecognitionAfterSpeech();resolve();};
     activeFinish=finish;
     if(!speechWasEnabled){embody();setTimeout(finish,700);return;}
-    const browserSpeak=()=>{if(done||turnToken!==turnVersion)return;embody();try{const u=new SpeechSynthesisUtterance(spoken),v=pickedBrowserVoice(cfg.id);if(v){u.voice=v;u.lang=v.lang||'en-US';}u.rate=rate;u.pitch=cfg.voicePitch||1;u.onend=finish;u.onerror=finish;window.speechSynthesis.speak(u);keepAlive=setInterval(()=>{try{if(window.speechSynthesis.speaking){window.speechSynthesis.pause();window.speechSynthesis.resume();}}catch(e){}},9000);}catch(e){finish();}};
+    // Fires per chunk: the turn is over only when the whole queue has drained
+    // (or been cancelled), never between two sentences of the same reply.
+    const chunkDone=()=>{const synth=window.speechSynthesis;if(synth&&(synth.speaking||synth.pending))return;finish();};
+    const browserSpeak=()=>{if(done||turnToken!==turnVersion)return;embody();try{const voice=pickedBrowserVoice(cfg.id);for(const part of speechChunks(spoken)){const u=new SpeechSynthesisUtterance(part);if(voice){u.voice=voice;u.lang=voice.lang||'en-US';}u.rate=rate;u.pitch=cfg.voicePitch||1;u.onend=chunkDone;u.onerror=chunkDone;window.speechSynthesis.speak(u);}keepAlive=speechKeepAlive();}catch(e){finish();}};
     const pref=voicePrefs[cfg.id]||{};
     if(pref.provider==='edge'&&pref.voice){audioAbort=typeof AbortController!=='undefined'?new AbortController():null;const options={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:spoken,voice:pref.voice,rate:rate,pitch:cfg.voicePitch||1})};if(audioAbort)options.signal=audioAbort.signal;fetch('/tts/synthesize',options).then(r=>{if(!r.ok)throw new Error();return r.blob();}).then(blob=>{if(done||turnToken!==turnVersion)return;audioUrl=URL.createObjectURL(blob);audioEl.src=audioUrl;audioEl.onended=finish;audioEl.onerror=finish;embody();return audioEl.play();}).catch(e=>{if(!done&&(!e||e.name!=='AbortError'))browserSpeak();});}else browserSpeak();
-    setTimeout(finish,45000);
+    // The last-resort net for a synthesis that dies without firing onend. A
+    // flat 45 seconds was itself cutting long replies off — the lip schedule
+    // already estimates how long this reply takes to say, so allow that with
+    // generous headroom instead of guessing.
+    const spokenMs=frames.reduce((total,frame)=>total+frame[1],0)*1000;
+    setTimeout(finish,Math.max(45000,Math.round(spokenMs*2)+20000));
   });
 }
 Promise.all(IDS.map(id=>fetch('/tts/preferences/'+id).then(r=>r.json()).catch(()=>null))).then(values=>values.forEach((value,index)=>{if(value&&value.ok)voicePrefs[IDS[index]]={provider:value.provider||'browser',voice:value.voice||''};}));
