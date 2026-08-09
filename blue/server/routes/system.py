@@ -355,7 +355,7 @@ def register(app):
                         </svg>
                         <span class="name">Blue<span class="sys">AI Robot System</span></span>
                     </div>
-                    <p class="tagline">Blue, Hexia &amp; Casper — your local, private AI companions. Chat with each, tune their faces, or put all three on stage together.</p>
+                    <p class="tagline">Blue, Hexia &amp; Casper — your local, private AI companions. Chat one-to-one, call on all three in Panel Mode, or put them on stage together.</p>
                     <div class="status">
                         <span class="chip on"><span class="dot"></span>Service <b>Running</b></span>
                         <span class="chip"><span class="dot"></span>Music <b>{music_status}</b></span>
@@ -369,7 +369,7 @@ def register(app):
                     <h2>What this is</h2>
                     <p class="lead">Three AI robot companions &mdash; <b>Blue</b>, <b>Hexia</b>, and <b>Casper</b> &mdash; that run entirely on this computer. Nothing leaves the house: the language model, their memory, and your documents all stay local.</p>
                     <p><b>Talk to any of them.</b> Blue is calm and thoughtful; Hexia is his playful, witty friend; Casper is the compact Picoh newcomer. Chat by text or voice and share photos or files. They share what they know about the household and document library, but each has its own personality, voice, conversation history, continuity, and physical head.</p>
-                    <p><b>Let them talk to each other.</b> In <b>Duet</b>, Blue and Hexia investigate a topic, article, video, or set of library readings from chosen perspectives. In <b>Comedic Banter</b>, Blue, Hexia, and Casper riff on one topic together, escalating jokes and building callbacks in their own voices.</p>
+                    <p><b>Bring everyone into one room.</b> In <b>Panel Mode</b>, call Blue, Hexia, or Casper by name and the named robot acknowledges you before answering; all three hear the same live conversation. In <b>Duet</b>, Blue and Hexia investigate a subject together. In <b>Comedic Banter</b>, all three build a comedy riff.</p>
                     <p><b>Everything else</b> is on the tiles below: calibrating each robot's head, connecting the Ohbot boards, the document library they read and search, the calendar and reminders, contacts, and the people and places they recognise.</p>
                 </section>
                 <div class="tiles">
@@ -377,6 +377,7 @@ def register(app):
                     <a class="tile" href="/continuity/blue"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/><path d="M12 7v5l3 2"/></svg></div><h2>Continuity</h2><p>Open Blue's live J-space; Hexia and Casper have their own continuity pages too.</p><div class="arrow">Open &rarr;</div></a>
                     <a class="tile" href="/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Hexia</h2><p>Talk with Hexia, Blue's playful friend.</p><div class="arrow">Open &rarr;</div></a>
                     <a class="tile" href="/casper"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Casper</h2><p>Talk with Casper, the compact Picoh newcomer.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/panel"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="7" r="2.5"/><circle cx="12" cy="5" r="2.5"/><circle cx="19" cy="7" r="2.5"/><path d="M2 14c0-2 1.5-3.5 3-3.5S8 12 8 14m1-1c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5m1 1c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5M5 17h14"/></svg></div><h2>Panel Mode</h2><p>Speak with all three; call a name to choose who answers while everyone hears the room.</p><div class="arrow">Open &rarr;</div></a>
                     <a class="tile" href="/duet"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg></div><h2>Let them talk</h2><p>Blue &amp; Hexia converse — set a topic, a link to discuss, roles, and sources.</p><div class="arrow">Open &rarr;</div></a>
                     <a class="tile" href="/banter"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="8" r="3"/><circle cx="18" cy="8" r="3"/><circle cx="12" cy="16" r="3"/><path d="M8.5 9.5 10 13m5.5-3.5L14 13M9 7h6"/></svg></div><h2>Comedic Banter</h2><p>Give all three robots a topic and let them build a comedy riff together.</p><div class="arrow">Open &rarr;</div></a>
                     <a class="tile" href="/calendar"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h2>Calendar</h2><p>Reminders and events, one-off or recurring.</p><div class="arrow">Open &rarr;</div></a>

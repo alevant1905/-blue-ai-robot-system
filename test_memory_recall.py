@@ -15,6 +15,7 @@ if you change one, re-run that audit rather than trusting these cases alone.
 """
 
 import pytest
+from datetime import datetime, timedelta
 
 from blue_memory_improved import (
     EnhancedMemorySystem, _extract_proper_names, _is_spelling_variant,
@@ -166,3 +167,111 @@ def test_filler_questions_yield_too_few_terms_to_search():
     assert len(_topic_terms("Hey Blue, how are you doing today?")) < 2
     assert _topic_terms("") == set()
     assert _topic_terms(None) == set()
+
+
+def test_cross_day_chat_and_past_answers_are_namespaced_per_robot(tmp_path):
+    memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
+    memory.log_conversation(
+        "Alex", "user", "The Laurier governance proposal needs a refusal rule.",
+        robot="blue")
+    memory.log_conversation(
+        "Alex", "assistant",
+        "The Laurier governance proposal should give the university a concrete "
+        "right to refuse model reuse, with a named decision maker. "
+        + "Governance detail grounded in the proposal. " * 14,
+        robot="blue")
+    memory.log_conversation(
+        "Alex", "user", "The moon garden needs silver flowers.", robot="hexia")
+    memory.log_conversation(
+        "Alex", "assistant",
+        "The moon garden gets silver flowers and one theatrically suspicious owl. "
+        + "A moonlit detail in Hexia's own telling. " * 15,
+        robot="hexia")
+
+    old = (datetime.now() - timedelta(days=2)).replace(
+        hour=12, minute=0, second=0, microsecond=0).isoformat()
+    conn = memory._conn()
+    conn.execute("UPDATE conversation_log SET timestamp = ?", (old,))
+    conn.commit()
+    conn.close()
+
+    blue_days = memory._build_session_history_block(robot="blue")
+    hexia_days = memory._build_session_history_block(robot="hexia")
+    assert "Laurier governance" in blue_days
+    assert "moon garden" not in blue_days
+    assert "moon garden" in hexia_days
+    assert "Laurier governance" not in hexia_days
+
+    blue_answers = memory._substantive_answer_corpus(robot="blue")
+    hexia_answers = memory._substantive_answer_corpus(robot="hexia")
+    assert any("right to refuse" in answer for _, answer, _ in blue_answers)
+    assert not any("moon garden" in answer for _, answer, _ in blue_answers)
+    assert any("moon garden" in answer for _, answer, _ in hexia_answers)
+    assert not any("right to refuse" in answer for _, answer, _ in hexia_answers)
+
+
+def test_recalled_days_returns_the_coherent_older_house_exchange(tmp_path):
+    """A current recall probe must retrieve the old exchange, not itself.
+
+    This reproduces the 2026-08-03 failure: the durable log contained the
+    offer, Alex's excitement, and the 8 PM decision time, while recall only
+    surfaced the newly-created one-line "looked at a house" note.
+    """
+    memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
+    turns = [
+        ("user", "today me and Stella put down an offer on a new house"),
+        ("assistant", "That is huge news. How are you feeling about it?"),
+        ("user", "i feel excited. we will know by tomorrow 8pm"),
+        ("assistant", "That is a thrilling mix of excitement and suspense."),
+    ]
+    for role, content in turns:
+        memory.log_conversation("Alex", role, content, robot="blue")
+
+    old = (datetime.now() - timedelta(days=12)).replace(
+        hour=15, minute=53, second=0, microsecond=0)
+    conn = memory._conn()
+    old_rows = conn.execute(
+        "SELECT id FROM conversation_log ORDER BY id ASC"
+    ).fetchall()
+    for offset, row in enumerate(old_rows):
+        conn.execute(
+            "UPDATE conversation_log SET timestamp = ? WHERE id = ?",
+            ((old + timedelta(seconds=offset * 20)).isoformat(), row["id"]),
+        )
+    conn.commit()
+    conn.close()
+
+    live = [
+        {
+            "role": "user",
+            "content": (
+                "remember i told you that we went to look at that house that "
+                "we might buy?"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "Yes, I remember you telling me about the house.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "i want you to examine your memory and tell me what we "
+                "discussed about the house"
+            ),
+        },
+    ]
+    # The request is logged before context building in the live endpoint; it
+    # must never win its own retrieval ranking.
+    memory.log_conversation(
+        "Alex", "user", live[-1]["content"], robot="blue"
+    )
+
+    block = memory._build_recalled_days_block(
+        live[-1]["content"], robot="blue", messages=live
+    )
+
+    assert "put down an offer on a new house" in block
+    assert "feel excited" in block
+    assert "tomorrow 8pm" in block
+    assert block.count("examine your memory") == 0

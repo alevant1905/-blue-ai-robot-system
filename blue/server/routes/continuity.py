@@ -216,7 +216,8 @@ def _age_text(value: str) -> str:
         return f"{seconds // 60} minutes ago"
     if seconds < 86400:
         return f"{seconds // 3600} hours ago"
-    return f"{seconds // 86400} days ago"
+    days = seconds // 86400
+    return "yesterday" if days == 1 else f"{days} days ago"
 
 
 def _salience_for_exchange(user_text: str, tools: List[Dict[str, Any]]) -> float:
@@ -1054,6 +1055,225 @@ class RobotContinuity:
             + "\n</j_space>"
         )
 
+    def conversation_memory_block(
+        self,
+        query: str = "",
+        max_lines: int = 9,
+        include_humans: bool = True,
+        include_robots: bool = True,
+        include_banter_wording: bool = True,
+    ) -> str:
+        """Return a compact, retrieved slice of this robot's own conversations.
+
+        The full episode journal is durable, but ``jspace_context_block`` only
+        shows the latest few *events*. Reflection and idle entries can therefore
+        push real conversations out of sight, and a relevant exchange from a
+        week ago is invisible on a two-word follow-up.  This view deliberately
+        selects exchanges instead: recent turns, the latest encounter with each
+        fellow robot/human, and older turns relevant to the live query.
+
+        Every row comes from this robot's private continuity store.  That keeps
+        awareness broad without making Blue claim Hexia's unwitnessed chat (or
+        vice versa) as a first-person memory.
+        """
+        try:
+            exchanges = self.store.list_episodes(limit=1200, kind="exchange")
+        except Exception:
+            return ""
+        if not exchanges:
+            return ""
+
+        robot_names = {
+            str(cfg.get("name") or "").strip()
+            for cfg in getattr(bt, "ROBOTS", {}).values()
+            if str(cfg.get("name") or "").strip()
+        } or {"Blue", "Hexia", "Casper"}
+        other_robot_names = robot_names - {self.name}
+        self_aliases = {self.name.lower(), self.robot.lower()}
+        if self.robot == "pico":
+            self_aliases.update({"pico", "picoh", "casper", "caspar"})
+
+        def counterparts(episode: Dict[str, Any]) -> List[str]:
+            return [
+                str(person).strip()
+                for person in (episode.get("participants") or [])
+                if str(person).strip()
+                and str(person).strip().lower() not in self_aliases
+            ]
+
+        eligible: List[Dict[str, Any]] = []
+        for episode in exchanges:
+            people = counterparts(episode)
+            is_robot_exchange = (
+                str(episode.get("source") or "") in {"duet", "banter"}
+                or any(person in other_robot_names for person in people)
+            )
+            if is_robot_exchange and not include_robots:
+                continue
+            if not is_robot_exchange and not include_humans:
+                continue
+            eligible.append(episode)
+        if not eligible:
+            return ""
+
+        # Use content words from the live turn to retrieve older exchanges.
+        stop = {
+            "about", "after", "again", "also", "been", "before", "could",
+            "does", "doing", "from", "have", "just", "know", "more", "that",
+            "their", "them", "then", "there", "these", "they", "this", "what",
+            "when", "where", "which", "with", "would", "your", "you", "were",
+        }
+        query_terms = {
+            token for token in re.findall(r"[a-z0-9]+", (query or "").lower())
+            if len(token) >= 3 and token not in stop
+        }
+
+        chosen: List[Dict[str, Any]] = []
+        chosen_ids: set[str] = set()
+
+        def choose(episode: Optional[Dict[str, Any]]) -> None:
+            if not episode:
+                return
+            episode_id = str(episode.get("id") or episode.get("seq") or "")
+            if episode_id in chosen_ids:
+                return
+            chosen_ids.add(episode_id)
+            chosen.append(episode)
+
+        # Relationship coverage first: the latest real exchange with every
+        # counterpart remains visible even after a burst of unrelated chat.
+        covered_people: set[str] = set()
+        covered_humans = 0
+        for episode in eligible:
+            for person in counterparts(episode):
+                if person in covered_people:
+                    continue
+                source = str(episode.get("source") or "")
+                is_fellow_robot = person in other_robot_names
+                # Cover both fellow robots, plus a small number of actual human
+                # chat partners. Synthetic banter participants such as "Alex's
+                # topic" must not crowd query-relevant memories out of the cap.
+                if not is_fellow_robot and (source != "chat" or covered_humans >= 3):
+                    continue
+                choose(episode)
+                covered_people.add(person)
+                if not is_fellow_robot:
+                    covered_humans += 1
+
+        # A few recent turns preserve conversational momentum.
+        for episode in eligible[:4]:
+            choose(episode)
+
+        # Pull back older exchanges that share the live turn's content words.
+        if query_terms:
+            ranked = []
+            for index, episode in enumerate(eligible):
+                details = episode.get("details") or {}
+                haystack = " ".join((
+                    str(episode.get("summary") or ""),
+                    str(details.get("user_text") or ""),
+                    str(details.get("reply") or ""),
+                    " ".join(counterparts(episode)),
+                )).lower()
+                words = set(re.findall(r"[a-z0-9]+", haystack))
+                overlap = len(query_terms.intersection(words))
+                if overlap:
+                    ranked.append((overlap, float(episode.get("salience") or 0), -index, episode))
+            for _, _, _, episode in sorted(ranked, reverse=True)[:4]:
+                choose(episode)
+
+        limit = max(1, min(int(max_lines or 9), 14))
+        # Coverage can exceed the budget in a very social journal. Prefer a
+        # concise slice, then render it chronologically so it reads as history.
+        chosen = chosen[:limit]
+        chosen.sort(key=lambda item: int(item.get("seq") or 0))
+
+        denial_re = re.compile(
+            r"\b(?:don['\u2019]?t|do not) (?:actually )?know who\b|"
+            r"\b(?:don['\u2019]?t|do not|didn['\u2019]?t|did not) "
+            r"(?:actually )?have direct (?:memory|memories|record)|"
+            r"\bno direct (?:memory|memories|record)|"
+            r"\bnever (?:met|spoken|talked)|"
+            r"\bnot in my (?:memory|records?)|"
+            r"\b(?:made|make) (?:that|it|all that) up\b|"
+            r"\binvented (?:it|that|a backstory)\b",
+            re.I,
+        )
+        fact_refusal_re = re.compile(
+            r"\b(?:don['\u2019]?t|do not) have (?:a |any )?(?:record|information|memory)|"
+            r"\bcan(?:not|'t) (?:remember|access|find)\b|"
+            r"\b(?:don['\u2019]?t|do not) have[^.!?]{0,100}\b"
+            r"(?:previous|past|prior|earlier) (?:conversation|chat|interaction) "
+            r"(?:history|records?)\b|"
+            r"\b(?:don['\u2019]?t|do not) (?:actually )?"
+            r"(?:retain|keep|carry|store) (?:any )?(?:past|previous|prior|earlier) "
+            r"(?:interactions?|conversations?|chats?|discussions?|exchanges?|history|facts?)\b|"
+            r"\bonce (?:they|those|the conversation|an interaction) (?:are|is) no "
+            r"longer part of (?:my|the) immediate context\b",
+            re.I,
+        )
+        lines: List[str] = []
+        for episode in chosen:
+            people = counterparts(episode)
+            partner = " and ".join(people) or "someone"
+            source = str(episode.get("source") or "chat")
+            kind = "robot conversation" if source in {"duet", "banter"} else "human conversation"
+            when = _parse_time(episode.get("occurred_at"))
+            if when:
+                local_when = when.astimezone()
+                stamp = local_when.strftime("%Y-%m-%d %I:%M %p %Z").replace(" 0", " ")
+            else:
+                stamp = "time unknown"
+            if source == "banter" and not include_banter_wording:
+                lines.append(
+                    f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; prior "
+                    f"comedic banter with {partner}] You performed a set together. "
+                    "Its wording is omitted so an old joke cannot overwrite the live set."
+                )
+                continue
+            details = episode.get("details") or {}
+            heard = re.sub(r"\s+", " ", str(details.get("user_text") or "")).strip()
+            replied = re.sub(r"\s+", " ", str(details.get("reply") or "")).strip()
+            if not heard:
+                heard = str(episode.get("summary") or "").strip()
+
+            # Old replies are evidence of what was said, not current truth. Do
+            # not put a known refusal/relationship denial back into the prompt;
+            # it otherwise teaches the model to repeat the exact failure this
+            # memory layer is meant to cure.
+            unsafe_reply = bool(fact_refusal_re.search(replied))
+            if replied and other_robot_names:
+                named_other = any(
+                    re.search(rf"\b{re.escape(name)}\b", replied, re.I)
+                    for name in other_robot_names
+                )
+                unsafe_reply = unsafe_reply or (named_other and bool(denial_re.search(replied)))
+            reply_part = (
+                " The old answer was unreliable, so only the topic is retained."
+                if unsafe_reply else
+                f" You replied: {_clip(replied, 180)}" if replied else ""
+            )
+            lines.append(
+                f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; {kind} with "
+                f"{partner}] {partner} said: {_clip(heard, 260)}{reply_part}"
+            )
+
+        if not lines:
+            return ""
+        return (
+            "<conversation_memory>\n"
+            f"A retrieved slice of {self.name}'s own durable conversation journal. "
+            "Every line is an exchange you personally took part in, including chats "
+            "outside the current browser window. Use it silently to preserve "
+            "relationships, callbacks, and continuity; do not announce that you are "
+            "reading a log and do not recite the list. A prior reply records what was "
+            "said then, not necessarily what is true now: current identity, household "
+            "facts, corrections, and tool results outrank old wording. Relative words "
+            "inside an old line (today, tomorrow, now) belong to that line's timestamp.\n"
+            + "\n".join(lines)
+            + "\n</conversation_memory>"
+        )
+
     def temporal_recall_block(
         self,
         user_text: str,
@@ -1543,6 +1763,27 @@ def jspace_context_block(robot: str) -> str:
     (the duet injects it into each speaker's turn prompt)."""
     hub = _hub(robot)
     return hub.jspace_context_block() if hub else ""
+
+
+def conversation_memory_block(
+    robot: str,
+    query: str = "",
+    max_lines: int = 9,
+    include_humans: bool = True,
+    include_robots: bool = True,
+    include_banter_wording: bool = True,
+) -> str:
+    """A query-aware slice of a robot's own human and robot conversations."""
+    hub = _hub(robot)
+    if not hub:
+        return ""
+    return hub.conversation_memory_block(
+        query=query,
+        max_lines=max_lines,
+        include_humans=include_humans,
+        include_robots=include_robots,
+        include_banter_wording=include_banter_wording,
+    )
 
 
 def duet_context_block(robot: str) -> str:

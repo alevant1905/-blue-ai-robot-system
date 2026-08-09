@@ -3990,6 +3990,26 @@ def register(app):
         # would pull a robot-to-robot talk off its subject.
         mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
         _mem_got = []
+        # A duet is spoken by the same autobiographical robot as solo chat.
+        # Retrieve a small, relevant slice of that robot's own past human and
+        # robot exchanges so relationships and callbacks survive mode changes.
+        # Privacy mode intentionally omits it because human-chat episodes can
+        # contain household details.
+        if not no_family:
+            try:
+                from blue.server.routes import continuity as _continuity
+                conversation_block = _continuity.conversation_memory_block(
+                    speaker,
+                    query=mem_query,
+                    max_lines=7,
+                    include_humans=True,
+                    include_robots=True,
+                )
+                if conversation_block:
+                    sys_p += "\n\n" + conversation_block
+                    _mem_got.append("conversations")
+            except Exception as exc:
+                bt.log.warning(f"[DUET] conversation-memory injection failed: {exc}")
         try:
             if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not no_family:
                 # Household facts — the same authoritative block chat injects every
@@ -4029,12 +4049,14 @@ def register(app):
                             _mem_got.append(f"memories({len(mem_lines)})")
                     # Day recaps give the pair a shared sense of their recent life with
                     # Alex ("remember Tuesday's...") in free duets.
-                    sess_block = bt.memory_system._build_session_history_block()
+                    sess_block = bt.memory_system._build_session_history_block(
+                        robot=speaker)
                     if sess_block:
                         sys_p += "\n\n" + sess_block
                         _mem_got.append("sessions")
                     if mem_query:
-                        days_block = bt.memory_system._build_recalled_days_block(mem_query)
+                        days_block = bt.memory_system._build_recalled_days_block(
+                            mem_query, robot=speaker)
                         if days_block:
                             sys_p += "\n\n" + days_block
                             _mem_got.append("days")

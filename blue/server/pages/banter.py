@@ -22,10 +22,15 @@ h1{font-size:1.62em;margin:0 0 4px}
 .panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;
   padding:15px;margin-bottom:15px;box-shadow:var(--shadow)}
 .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
-input[type=text]{flex:1;min-width:260px;padding:11px 13px;border:1px solid var(--line);
+input[type=text],input[type=url]{flex:1;min-width:260px;padding:11px 13px;border:1px solid var(--line);
+  border-radius:9px;background:var(--paper);color:var(--ink);font:inherit}
+input[type=file]{flex:1;min-width:260px;padding:8px;border:1px dashed var(--line);
   border-radius:9px;background:var(--paper);color:var(--ink);font:inherit}
 select,button{padding:9px 12px;border:1px solid var(--line);border-radius:8px;
   background:var(--paper);color:var(--ink);font:inherit;cursor:pointer}
+[hidden]{display:none!important}
+.source-controls{padding:10px 0 3px;border-top:1px solid rgba(100,116,139,.18);margin-top:10px}
+.source-controls .controls{margin-bottom:3px}
 button.primary{background:#1a2e1a;color:#fff;border-color:#1a2e1a}
 button:disabled{opacity:.48;cursor:default}
 .muted{color:var(--slate);font-size:.88em}
@@ -62,11 +67,25 @@ button:disabled{opacity:.48;cursor:default}
 </head>
 <body>
 <h1>Comedic Banter</h1>
-<p class="sub">Give Blue, Hexia, and Casper a topic. They riff in a shifting order—nobody twice in a row, nobody left out—build callbacks, and land the routine together. Blue talks like a boomer, Hexia like Gen X, Casper like Gen Z, each with their own voice, face, and head.</p>
+<p class="sub">Give Blue, Hexia, and Casper a topic, website, or PDF. They read the same material, riff in a shifting order—nobody twice in a row, nobody left out—build callbacks, and land the routine together.</p>
 
 <div class="panel">
   <div class="controls">
-    <input id="topic" type="text" maxlength="500" placeholder="Give them a topic — e.g. why printers can sense fear">
+    <input id="topic" type="text" maxlength="500" placeholder="Topic or angle — optional when discussing a source">
+  </div>
+  <div class="source-controls">
+    <div class="controls">
+      <label class="muted">Discuss a source
+        <select id="sourceKind">
+          <option value="none" selected>No source · topic only</option>
+          <option value="website">Website</option>
+          <option value="pdf">PDF from this device</option>
+        </select>
+      </label>
+      <input id="sourceUrl" type="url" maxlength="1200" placeholder="https://example.com/article" hidden>
+      <input id="sourcePdf" type="file" accept="application/pdf,.pdf" hidden>
+    </div>
+    <div id="sourceInfo" class="muted">Optional: choose a website or PDF and the robots will discuss its actual contents.</div>
   </div>
   <div class="controls">
     <label class="muted">Length
@@ -140,15 +159,24 @@ const pauseBtn=document.getElementById('pauseBtn');
 const stopBtn=document.getElementById('stopBtn');
 const saveBtn=document.getElementById('saveBtn');
 const audioEl=document.getElementById('banterAudio');
+const sourceKindEl=document.getElementById('sourceKind');
+const sourceUrlEl=document.getElementById('sourceUrl');
+const sourcePdfEl=document.getElementById('sourcePdf');
+const sourceInfoEl=document.getElementById('sourceInfo');
 const DRIVES_SERVER_HEADS=(typeof blueDeviceTag==='function')?(blueDeviceTag()==='windows'):true;
 
 let running=false,paused=false,history=[],transcript=[],sessionId='',sessionEnded=true;
 let pauseWaiters=[],activeFinish=null,audioUrl='',audioAbort=null;
 let neuralVoices=[];
+let preparedSource=null,activeSource=null,activeTopic='';
 const serverPrefs={blue:{provider:'browser',voice:''},hexia:{provider:'browser',voice:''},pico:{provider:'browser',voice:''}};
 
 function setStatus(text,error){
   statusEl.textContent=text||'';statusEl.className=error?'error':'';
+}
+function setSourceControlsDisabled(value){
+  document.getElementById('topic').disabled=!!value;
+  sourceKindEl.disabled=!!value;sourceUrlEl.disabled=!!value;sourcePdfEl.disabled=!!value;
 }
 function addNote(text){
   const el=document.createElement('div');el.className='note';el.textContent=text;
@@ -168,6 +196,19 @@ function energyWord(n){
 document.getElementById('energy').addEventListener('input',function(){
   document.getElementById('energyLabel').textContent=energyWord(this.value);
 });
+
+function syncSourcePicker(){
+  const kind=sourceKindEl.value;
+  sourceUrlEl.hidden=kind!=='website';sourcePdfEl.hidden=kind!=='pdf';
+  preparedSource=null;
+  sourceInfoEl.textContent=kind==='website'?'Paste the exact page the robots should read.':
+    kind==='pdf'?'Choose a text-based PDF up to 24 MB. It is read temporarily, not saved to the library.':
+    'Optional: choose a website or PDF and the robots will discuss its actual contents.';
+}
+sourceKindEl.addEventListener('change',syncSourcePicker);
+sourceUrlEl.addEventListener('input',()=>{preparedSource=null;});
+sourcePdfEl.addEventListener('change',()=>{preparedSource=null;});
+syncSourcePicker();
 
 function browserVoices(){
   const voices=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
@@ -394,7 +435,7 @@ async function endSession(){
 }
 async function stopRun(message){
   running=false;setPaused(false);cancelCurrentSpeech();await endSession();
-  startBtn.disabled=false;pauseBtn.disabled=true;stopBtn.disabled=true;
+  startBtn.disabled=false;pauseBtn.disabled=true;stopBtn.disabled=true;setSourceControlsDisabled(false);
   setStatus(message||'Stopped.');
 }
 stopBtn.onclick=()=>stopRun('Stopped.');
@@ -430,15 +471,52 @@ async function fetchLineup(starter,total){
   }catch(e){}
   return localLineup(starter,total);
 }
+async function prepareSource(){
+  const kind=sourceKindEl.value;
+  if(kind==='none')return null;
+  if(preparedSource)return preparedSource;
+  const form=new FormData();form.append('kind',kind);
+  if(kind==='website'){
+    const url=sourceUrlEl.value.trim();
+    if(!url)throw new Error('Paste the website address first.');
+    form.append('url',url);
+  }else{
+    const file=sourcePdfEl.files&&sourcePdfEl.files[0];
+    if(!file)throw new Error('Choose a PDF first.');
+    if(file.size>24*1024*1024)throw new Error('That PDF is larger than 24 MB.');
+    form.append('file',file,file.name);
+  }
+  sourceInfoEl.textContent=kind==='website'?'Reading and preparing the website…':'Reading and preparing the PDF…';
+  const response=await fetch('/banter/source',{method:'POST',body:form});
+  const data=await response.json().catch(()=>null);
+  if(!response.ok||!data||!data.source){
+    throw new Error((data&&data.error)||'The source could not be prepared.');
+  }
+  preparedSource=data.source;
+  sourceInfoEl.textContent='Ready: '+preparedSource.label+' · '+
+    Number(data.sourceCharacters||0).toLocaleString()+' readable characters';
+  return preparedSource;
+}
 async function runBanter(){
-  const topic=document.getElementById('topic').value.trim();
-  if(!topic){setStatus('Give them a topic first.',true);document.getElementById('topic').focus();return;}
+  const enteredTopic=document.getElementById('topic').value.trim();
+  if(!enteredTopic&&sourceKindEl.value==='none'){
+    setStatus('Give them a topic or choose a source first.',true);
+    document.getElementById('topic').focus();return;
+  }
+  startBtn.disabled=true;
+  setStatus(sourceKindEl.value==='none'?'Getting the set ready…':'Reading the source before the set…');
+  let source=null;
+  try{source=await prepareSource();}
+  catch(error){startBtn.disabled=false;setStatus(error&&error.message?error.message:'The source could not be prepared.',true);return;}
+  const topic=enteredTopic||(source?'what stands out, fails, or deserves scrutiny in '+source.label:'');
+  activeTopic=topic;activeSource=source;setSourceControlsDisabled(true);
   running=true;paused=false;history=[];transcript=[];logEl.innerHTML='';
   sessionId='banter-'+Date.now()+'-'+Math.random().toString(36).slice(2,8);sessionEnded=false;
   const total=parseInt(document.getElementById('turns').value,10)||9;
   const energy=parseInt(document.getElementById('energy').value,10)||6;
   startBtn.disabled=true;pauseBtn.disabled=false;stopBtn.disabled=false;saveBtn.disabled=true;
   addNote('Topic: '+topic+' · '+total+' turns · '+energyWord(energy)+' energy');
+  if(source)addNote('Shared source: '+source.label);
   setStatus('Working out who jumps in first…');
   const lineup=await fetchLineup(document.getElementById('starter').value,total);
   if(!running)return;
@@ -455,7 +533,7 @@ async function runBanter(){
         const response=await fetch('/banter/turn',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({sessionId:sessionId,speaker:speaker,topic:topic,history:history,
             turnIndex:index,plannedTurns:total,energy:energy,
-            noFamily:document.getElementById('noFamilyChk').checked})});
+            noFamily:document.getElementById('noFamilyChk').checked,source:source})});
         data=await response.json().catch(()=>null);
         if(response.ok&&data&&data.text)break;
       }catch(e){data=null;}
@@ -472,7 +550,8 @@ async function runBanter(){
   }
   if(running){
     running=false;await endSession();startBtn.disabled=false;pauseBtn.disabled=true;stopBtn.disabled=true;
-    setStatus('That is the set. Give them another topic whenever you like.');
+    setSourceControlsDisabled(false);
+    setStatus('That is the set. Give them another topic or source whenever you like.');
     addNote('End of set.');
   }
 }
@@ -480,10 +559,18 @@ startBtn.onclick=runBanter;
 document.getElementById('topic').addEventListener('keydown',event=>{
   if(event.key==='Enter'&&!running)runBanter();
 });
+sourceUrlEl.addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&!running)runBanter();
+});
 saveBtn.onclick=()=>{
   if(!transcript.length)return;
-  const topic=document.getElementById('topic').value.trim();
+  const topic=activeTopic||document.getElementById('topic').value.trim();
   const lines=['# Comedic Banter','',`**Topic:** ${topic}`,''];
+  if(activeSource){
+    lines.push(`**Source:** ${activeSource.label}`);
+    if(activeSource.url)lines.push(`**URL:** ${activeSource.url}`);
+    lines.push('');
+  }
   transcript.forEach(turn=>{lines.push('**'+turn.name+':** '+turn.text,'');});
   const blob=new Blob([lines.join('\n')],{type:'text/markdown;charset=utf-8'});
   const url=URL.createObjectURL(blob),link=document.createElement('a');

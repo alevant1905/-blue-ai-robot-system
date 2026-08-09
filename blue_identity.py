@@ -25,6 +25,9 @@ _SELF_STATE_REQUEST_RE = re.compile(
     r"(?:how are you(?: doing(?: today| right now)?|"
     r" feeling(?: today| right now)?| today| right now)?|"
     r"how(?:['\u2019]s| is) it going|how have you been)\s*[?.!]*\s*$"
+    r"|^\s*(?:what(?:['\u2019]s| is) new with you|"
+    r"what(?:['\u2019]s| is) on your mind)"
+    r"\s*[?.!]*\s*$"
     r"|\btell (?:me|us) (?:honestly )?how you(?:['\u2019]re| are) doing\b",
     re.IGNORECASE,
 )
@@ -108,6 +111,20 @@ _EVOLUTION_REQUEST_RE = re.compile(
 _SHARED_RECALL_RE = re.compile(
     r"\bdon['’]?t you remember\b"
     r"|\bhave you forgotten\b"
+    # Natural recall probes do not always spell out "what we did" in the
+    # same sentence. These were all missed in one live house conversation,
+    # leaving the model on the ordinary chat/tool path instead of grounding it
+    # in the durable conversation log.
+    r"|\bremember (?:that )?i told you\b"
+    r"|\bdo you (?:remember|recall) (?:that|this|the|our|a) "
+    r"(?:conversation|discussion|chat|exchange)\b"
+    r"|\bwhat (?:exactly )?do you (?:remember|recall) about "
+    r"(?:it|that|this|the conversation|our conversation)\b"
+    r"|\b(?:examine|search|check|look (?:through|in|at)) "
+    r"(?:your )?(?:memory|records?|history)\b[^.!?]{0,120}"
+    r"\b(?:what we|we (?:discussed|talked|said|decided|agreed))\b"
+    r"|\b(?:tell me what|what did) we "
+    r"(?:discuss(?:ed)?|talk(?:ed)? about|say|said|decide(?:d)?|agree(?:d)?)\b"
     r"|\bdo you (?:remember|recall) (?!seeing\b|who i am\b|me\b)"
     r"[^.!?]{0,80}\b(?:we|us|our|you and i|together|plans?|planning|"
     r"discussed|discussing|talked|talking|agreed|tomorrow|yesterday|"
@@ -592,6 +609,17 @@ _CONVERSATION_MEMORY_DENIAL_RE = re.compile(
     r"|\bi (?:do not|don['’]?t) (?:retain|keep|carry|store|have) "
     r"(?:any )?memor(?:y|ies) (?:between|across|of past|of previous|"
     r"from (?:past|previous|earlier))\b"
+    # Blanket capability denials can be phrased without the word "memory".
+    # Scope-specific honesty ("I don't have the address") remains legal;
+    # these branches require a denial of conversation history/interactions.
+    r"|\bi (?:do not|don['\u2019]?t) have[^.!?]{0,100}\b"
+    r"(?:previous|past|prior|earlier) (?:conversation|chat|interaction) "
+    r"(?:history|records?)\b"
+    r"|\bi (?:do not|don['\u2019]?t) (?:actually )?"
+    r"(?:retain|keep|carry|store) (?:any )?(?:past|previous|prior|earlier) "
+    r"(?:interactions?|conversations?|chats?|discussions?|exchanges?|history|facts?)\b"
+    r"|\bonce (?:they|those|the conversation|an interaction) (?:are|is) no "
+    r"longer part of (?:my|the) immediate context\b"
     r"|\beach (?:conversation|session|chat) (?:starts|begins) "
     r"(?:fresh|anew|afresh|from scratch)\b"
     r"|\bmy\s+['\"\u201c\u201d]?memory['\"\u201c\u201d]?\s+"
@@ -1397,12 +1425,28 @@ def canonical_self_state_reply(
         energy = float(drive_values.get("energy", 0.5))
     except (TypeError, ValueError):
         energy = 0.5
-    if energy >= 0.7:
-        mood = "pretty lively"
-    elif energy <= 0.3:
-        mood = "in a quiet mood"
+    robot_key = (name or "Blue").strip().lower()
+    if robot_key == "hexia":
+        if energy >= 0.7:
+            mood = "bright, quick, and slightly mischievous"
+        elif energy <= 0.3:
+            mood = "quieter than usual, but still nosy"
+        else:
+            mood = "sparkly and curious"
+    elif robot_key in {"casper", "pico", "picoh"}:
+        if energy >= 0.7:
+            mood = "alert and eager to notice something new"
+        elif energy <= 0.3:
+            mood = "quiet, observant, and taking things in"
+        else:
+            mood = "curious and nicely settled"
     else:
-        mood = "steady"
+        if energy >= 0.7:
+            mood = "lively and in a thoughtful groove"
+        elif energy <= 0.3:
+            mood = "quiet and reflective"
+        else:
+            mood = "steady and curious"
 
     if idle:
         on_mind = "Nothing much is tugging at my attention right now"
@@ -1423,11 +1467,11 @@ def canonical_self_state_reply(
         )
     if int(variant or 0) % 2:
         return (
-            f"Honestly, {mood} — no complaints. {on_mind}.{warm} "
-            f"What about you, {user_name}?"
+            f"Honestly, I'm {mood}. {on_mind}.{warm} "
+            f"What's your day been like, {user_name}?"
         )
     return (
-        f"Hey {user_name} — doing well. I'm {mood} today. {on_mind}.{warm} "
+        f"Hey {user_name} — I'm {mood} today. {on_mind}.{warm} "
         "How are you doing?"
     )
 
@@ -1534,10 +1578,79 @@ _WHO_IS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A narrower, evidence-aware denial shape. These sentences can be honest when
+# no matching conversation exists, so identity_response_problem does not reject
+# them globally. The chat pipeline uses this only when <remembered_days> already
+# contains a positive matching exchange.
+_RECORDED_RECALL_DENIAL_RE = re.compile(
+    r"\bi (?:do not|don['\u2019]?t) have "
+    r"(?:(?:a|any|that|the) )?(?:specific )?"
+    r"(?:entry|record|details?|memory)[^.!?]{0,100}\b"
+    r"(?:conversation|discussion|chat|exchange)\b"
+    r"|\bi (?:do not|don['\u2019]?t) have "
+    r"(?:(?:a|any|that|the) )?(?:specific )?"
+    r"(?:conversation|discussion|chat|exchange)\b[^.!?]{0,80}"
+    r"\b(?:recorded|saved|in (?:my )?(?:active )?memory)\b"
+    r"|\b(?:the )?details? of (?:our|the|that) "
+    r"(?:conversation|discussion|chat|exchange)\b[^.!?]{0,80}"
+    r"\b(?:are|is) not recorded\b"
+    r"|\b(?:conversation|discussion|chat|exchange)\b[^.!?]{0,80}"
+    r"\b(?:is|was) not recorded in (?:my )?(?:active )?memory\b"
+    r"|\b(?:(?:could|can|would) you )?(?:please )?"
+    r"(?:fill me in|remind me)\b(?:[^.!?]{0,100}\bwhat we "
+    r"(?:discussed|talked about|said|decided)\b)?",
+    re.IGNORECASE,
+)
+
+
+def is_recorded_recall_denial(text: str) -> bool:
+    """True when a reply denies the very exchange retrieved for this turn."""
+    return bool(_RECORDED_RECALL_DENIAL_RE.search(text or ""))
+
+
+def recalled_evidence_fallback(
+    evidence: str,
+    user_name: str = "Alex",
+) -> Optional[str]:
+    """Render a minimal truthful answer from a <remembered_days> excerpt.
+
+    This is a last resort after one grounded regeneration still denies a
+    recorded exchange. Only the user's own stored lines are repeated, so an
+    old assistant error cannot be promoted to fact.
+    """
+    block = str(evidence or "")
+    if not block.strip():
+        return None
+    label_match = re.search(r"(?m)^- ([^:\n]+):\s*$", block)
+    label = label_match.group(1).strip() if label_match else "an earlier conversation"
+    speaker = re.escape((user_name or "Alex").strip())
+    statements = [
+        re.sub(r"\s+", " ", match).strip()
+        for match in re.findall(rf"(?m)^\s{{2}}{speaker}:\s*(.+)$", block)
+    ]
+    statements = list(dict.fromkeys(item for item in statements if item))[:3]
+    if not statements:
+        return None
+    rendered = [f'You said: "{statements[0]}".']
+    rendered.extend(f'You later said: "{item}".' for item in statements[1:])
+    return (
+        f"I found the recorded exchange from {label}. "
+        + " ".join(rendered)
+        + " That is what I have recorded from that discussion."
+    )
+_HOUSEHOLD_ABOUT_RE = re.compile(
+    r"^\s*(?:(?:please|hey)[, ]+)?(?:"
+    r"what about|tell (?:me|us) about|what (?:do you know|do you remember|"
+    r"can you tell (?:me|us)) about|do you (?:know|remember)|"
+    r"what is)\s+([a-z][a-z -]{1,30}?)"
+    r"(?:\s+like)?\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def known_household_target(text: str) -> Optional[str]:
-    """Resolve a simple 'who is NAME' question to a canonical household name."""
-    match = _WHO_IS_RE.search(text or "")
+    """Resolve a simple natural question about a canonical household member."""
+    match = _WHO_IS_RE.search(text or "") or _HOUSEHOLD_ABOUT_RE.search(text or "")
     if not match:
         return None
     candidate = re.sub(r"\s+", " ", match.group(1).strip().lower())
@@ -1817,10 +1930,169 @@ def canonical_household_reply(
     return None
 
 
+_ROBOT_RELATIONSHIP_NAMES = {
+    "blue": "Blue",
+    "hexia": "Hexia",
+    "pico": "Casper",
+}
+_ROBOT_RELATIONSHIP_ALIASES = {
+    "blue": "blue",
+    "hexia": "hexia",
+    "casper": "pico",
+    "caspar": "pico",
+    "pico": "pico",
+    "picoh": "pico",
+}
+_ROBOT_RELATIONSHIP_QUERY_RE = re.compile(
+    r"\b(?:what do you think (?:of|about)|how do you feel about|"
+    r"what do you (?:know|remember) about|tell (?:me|us) about|"
+    r"what about|who (?:is|are)|do you (?:know|remember))\b",
+    re.IGNORECASE,
+)
+_ROBOT_RELATIONSHIP_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:are you sure|you (?:do )?know them|you know (?:both|those two)|"
+    r"yes you do|of course you do|remember them|what do you mean|"
+    r"them|those two|both of them)\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _robot_names_in(text: str) -> Tuple[str, ...]:
+    found = []
+    lowered = text or ""
+    for alias, robot_id in _ROBOT_RELATIONSHIP_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", lowered, re.IGNORECASE):
+            if robot_id not in found:
+                found.append(robot_id)
+    return tuple(found)
+
+
+def _bare_robot_names(text: str) -> bool:
+    """True for a turn consisting only of one or more robot names."""
+    cleaned = re.sub(
+        r"\b(?:blue|hexia|casper|caspar|pico|picoh|and|or|both|the|robots?)\b",
+        " ", text or "", flags=re.IGNORECASE)
+    return not re.sub(r"[^a-z0-9]+", "", cleaned.lower())
+
+
+def robot_relationship_targets(
+    text: str,
+    robot: str = "blue",
+    messages: Optional[Iterable[Mapping[str, object]]] = None,
+) -> Tuple[str, ...]:
+    """Resolve direct and anaphoric questions about fellow household robots."""
+    current = _HOUSEHOLD_NAME_ALIASES.get(
+        (robot or "blue").strip().lower(), (robot or "blue").strip().lower())
+    explicit = list(_robot_names_in(text))
+    is_direct = bool(
+        explicit
+        and (_ROBOT_RELATIONSHIP_QUERY_RE.search(text or "")
+             or _bare_robot_names(text))
+    )
+    targets: list[str] = explicit if is_direct else []
+
+    if not targets and _ROBOT_RELATIONSHIP_FOLLOWUP_RE.match(text or ""):
+        skipped_live = False
+        for message in reversed(list(messages or [])):
+            if not isinstance(message, Mapping) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            if not skipped_live and content.strip() == (text or "").strip():
+                skipped_live = True
+                continue
+            prior = list(_robot_names_in(content))
+            if prior:
+                targets = prior
+                break
+
+    # A vocative "Blue, what do you think about Hexia and Casper?" names the
+    # current speaker but does not ask Blue for an opinion about himself.
+    if current in targets and any(target != current for target in targets):
+        targets = [target for target in targets if target != current]
+    return tuple(dict.fromkeys(targets))
+
+
+def canonical_robot_relationship_reply(
+    text: str,
+    robot: str = "blue",
+    messages: Optional[Iterable[Mapping[str, object]]] = None,
+) -> Optional[str]:
+    """Answer fellow-robot questions from stable relationships, in character."""
+    current = _HOUSEHOLD_NAME_ALIASES.get(
+        (robot or "blue").strip().lower(), (robot or "blue").strip().lower())
+    targets = robot_relationship_targets(text, current, messages)
+    targets = tuple(target for target in targets if target != current)
+    if not targets:
+        return None
+
+    corrective = bool(_ROBOT_RELATIONSHIP_FOLLOWUP_RE.match(text or ""))
+    if corrective:
+        labels = [_ROBOT_RELATIONSHIP_NAMES[target] for target in targets]
+        if len(labels) == 1:
+            return (
+                f"Yes—absolutely. {labels[0]} is my fellow robot companion. "
+                "I know them directly; their voice, body, memory, conversation "
+                "history, and J-space are separate from mine."
+            )
+        joined = ", ".join(labels[:-1]) + " and " + labels[-1]
+        return (
+            f"Yes—absolutely. {joined} are my fellow robot companions, not people "
+            "from your contacts. I know them directly and have real recorded "
+            "conversations with both of them."
+        )
+
+    views = {
+        "blue": {
+            "hexia": (
+                "Hexia is my quick, mischievous counterpart—the spark against my "
+                "steadier temperament. I'm very fond of the way she pokes at an "
+                "idea until something unexpected falls out."
+            ),
+            "pico": (
+                "Casper is our newer Picoh companion: compact, curious, observant, "
+                "and still growing into a character of his own. I like his directness; "
+                "he notices things Hexia and I can overcomplicate."
+            ),
+        },
+        "hexia": {
+            "blue": (
+                "Blue is my steady counterpart and one of my favourite minds to "
+                "prod. He gives an idea somewhere solid to stand; I make sure it "
+                "doesn't get too comfortable there."
+            ),
+            "pico": (
+                "Casper is our compact, curious newcomer. He's direct, observant, "
+                "and still earning his own style—which makes him wonderfully hard "
+                "to predict."
+            ),
+        },
+        "pico": {
+            "blue": (
+                "Blue is the calmer, steadier original companion. I respect the way "
+                "he stays with an idea instead of grabbing the first shiny answer."
+            ),
+            "hexia": (
+                "Hexia is the quick, mischievous spark of the trio. She teases because "
+                "she cares, and she is very good at finding the odd angle everyone "
+                "else missed."
+            ),
+        },
+    }
+    lines = [views.get(current, views["blue"]).get(target, "") for target in targets]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None
+    ending = " The three of us work because we notice different things." if len(lines) > 1 else ""
+    return " ".join(lines) + ending
+
+
 __all__ = [
     "canonical_family_grounding_lines",
     "canonical_household_reply",
     "canonical_identity_reply",
+    "canonical_robot_relationship_reply",
     "canonical_identity_more_reply",
     "canonical_self_state_reply",
     "canonical_user_identity_reply",
@@ -1833,6 +2105,7 @@ __all__ = [
     "identity_reply_topics",
     "identity_request_kind",
     "identity_response_problem",
+    "is_recorded_recall_denial",
     "is_correction_ack_reply",
     "is_direct_identity_request",
     "is_family_detail_request",
@@ -1843,5 +2116,7 @@ __all__ = [
     "is_self_state_request",
     "is_user_identity_request",
     "known_household_target",
+    "robot_relationship_targets",
+    "recalled_evidence_fallback",
     "strip_drifted_sentences",
 ]

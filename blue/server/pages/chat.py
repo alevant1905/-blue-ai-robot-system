@@ -935,15 +935,21 @@ CHAT_HTML = """
         // (nod_yes / shake_no) as data.head_gesture; we drive it like lip-sync
         // (local Web Serial head else the server head). Vilda's iPad never moves
         // the physical robot.
-        function doHeadGesture(gesture) {
+        function doHeadGesture(gesture, times) {
             if (isVilda || !gesture) return;
-            const body = { action: gesture, times: 2 };
+            const body = { action: gesture, times: times || 2 };
             try {
                 if (!localHeadControl(ROBOT.head, '/head/action', body)) {
                     fetch('/head/' + ROBOT.head + '/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 }
             } catch (e) {}
         }
+
+        // Called by name in hands-free wake mode: answer the call with a single
+        // nod the moment the name lands, the way the panel acknowledges a robot
+        // before it starts thinking. Nothing waits on it — the nod goes out
+        // while the reply is still being composed.
+        function acknowledgeName() { doHeadGesture('nod_yes', 1); }
 
         function speakBrowser(text) {
             if (!speakOn || !('speechSynthesis' in window)) return;
@@ -2193,6 +2199,7 @@ CHAT_HTML = """
                     }
                 } else if (rest === '') {
                     // Just "Blue" alone — arm for the next utterance.
+                    acknowledgeName();
                     hfWakeArmed = true;
                     if (hfArmedTimer) clearTimeout(hfArmedTimer);
                     hfArmedTimer = setTimeout(function () {
@@ -2202,6 +2209,9 @@ CHAT_HTML = """
                     setHfStatus('armed');
                     return;
                 } else {
+                    // Name plus a message in one breath — still a call, so the
+                    // nod comes first, then the answer.
+                    acknowledgeName();
                     message = rest;
                 }
             }

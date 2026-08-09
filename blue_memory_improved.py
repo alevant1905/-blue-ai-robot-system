@@ -1915,7 +1915,7 @@ class EnhancedMemorySystem:
                 "content": last_conv_block,
             })
 
-        session_block = self._build_session_history_block()
+        session_block = self._build_session_history_block(robot=robot)
         if session_block:
             context_parts.append({
                 "role": "system",
@@ -1925,7 +1925,8 @@ class EnhancedMemorySystem:
         # 2b-ii) Long-term recall — an older day-recap pulled back by semantic
         #     relevance to the current message, reaching past the by-date window.
         if user_msg:
-            recalled_block = self._build_recalled_days_block(user_msg)
+            recalled_block = self._build_recalled_days_block(
+                user_msg, robot=robot, messages=messages)
             if recalled_block:
                 context_parts.append({
                     "role": "system",
@@ -1936,7 +1937,8 @@ class EnhancedMemorySystem:
         #     blocks above record that a subject came up; this carries what he
         #     actually wrote about it, which is what "what were your ideas?"
         #     is asking for.
-        past_answers_block = self._build_past_answers_block(messages, user_msg)
+        past_answers_block = self._build_past_answers_block(
+            messages, user_msg, robot=robot)
         if past_answers_block:
             context_parts.append({
                 "role": "system",
@@ -3339,24 +3341,76 @@ class EnhancedMemorySystem:
         except Exception:
             return []
 
-    def _build_session_history_block(self) -> str:
-        """Recaps of the last few days' conversations, for cross-day
-        continuity. Empty string when there's nothing to show."""
-        rows = self._recent_session_rows()
-        if not rows:
+    def _recent_robot_session_days(self, robot: str = "blue") -> List[str]:
+        """Recent past dates on which this specific robot spoke with humans."""
+        try:
+            conn = self._conn()
+            today = datetime.now().date().isoformat()
+            rows = conn.execute(
+                "SELECT substr(timestamp, 1, 10) AS d "
+                "FROM conversation_log WHERE robot = ? "
+                "AND substr(timestamp, 1, 10) < ? "
+                "GROUP BY d ORDER BY d DESC LIMIT ?",
+                ((robot or "blue"), today, SESSION_HISTORY_INJECT),
+            ).fetchall()
+            conn.close()
+            return [str(row["d"]) for row in rows if row["d"]]
+        except Exception:
+            return []
+
+    def _build_session_history_block(self, robot: str = "blue") -> str:
+        """Recent human-chat continuity, namespaced to one robot.
+
+        ``session_summaries`` predates multiple robots and combines every
+        robot's rows under one date. Injecting those rows as "your recent
+        conversations" let Hexia inherit Blue's answers and Casper inherit
+        Hexia's. Build this prompt view directly from the already namespaced
+        conversation log instead; the legacy summaries remain available for
+        maintenance and analytics, but never define first-person ownership.
+        """
+        days = self._recent_robot_session_days(robot)
+        if not days:
             return ""
-        lines = []
-        for r in rows:
-            label = self._friendly_day_label(r["session_id"])
-            lines.append(f"- {label}: {r['summary'][:300]}")
+        lines: List[str] = []
+        try:
+            conn = self._conn()
+            for day in days:
+                rows = conn.execute(
+                    "SELECT user_name, content FROM conversation_log "
+                    "WHERE robot = ? AND role = 'user' "
+                    "AND substr(timestamp, 1, 10) = ? "
+                    "ORDER BY id DESC LIMIT 6",
+                    ((robot or "blue"), day),
+                ).fetchall()
+                snippets: List[str] = []
+                for row in reversed(rows):
+                    content = re.sub(r"\s+", " ", row["content"] or "").strip()
+                    if len(content) < 4 or content.startswith(("{", "[", "```")):
+                        continue
+                    speaker = (row["user_name"] or "the user").strip()
+                    snippets.append(f"{speaker}: {content[:120]}")
+                if snippets:
+                    lines.append(
+                        f"- {self._friendly_day_label(day)}: "
+                        + " | ".join(snippets[-4:])
+                    )
+            conn.close()
+        except Exception:
+            return ""
+        if not lines:
+            return ""
+        robot_name = {
+            "blue": "Blue", "hexia": "Hexia", "pico": "Casper",
+        }.get((robot or "blue").lower(), "this robot")
         return (
             "<earlier_sessions>\n"
-            "Recaps of your recent conversations, drawn from the conversation "
-            "log. These are a real record of what was discussed and you may "
+            f"Recent human conversations that YOU ({robot_name}) personally took "
+            "part in, drawn from your namespaced conversation log. These are a "
+            "real record of what was discussed and you may "
             "answer from them directly — if the user asks what came up "
             "yesterday or earlier this week, use these rather than saying you "
-            "have no record. They are summaries, so they are reliable about "
-            "TOPICS and dates but thin on exact wording and detail: give what "
+            "have no record. They are compact excerpts, so they are reliable about "
+            "TOPICS, dates, and the visible wording but thin on full detail: give what "
             "you have and offer to dig further, rather than either hedging it "
             "all away or inventing specifics. Don't recite them verbatim or "
             "list them back unprompted.\n"
@@ -3369,51 +3423,152 @@ class EnhancedMemorySystem:
             "\n</earlier_sessions>"
         )
 
-    def _build_recalled_days_block(self, user_msg: str) -> str:
-        """Surface an older day-recap that is topically relevant to what the
-        user just said.
+    def _build_recalled_days_block(
+        self,
+        user_msg: str,
+        robot: str = "blue",
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Retrieve coherent older exchanges from one robot's chat log.
 
-        <earlier_sessions> shows a fixed handful of days by date; this reaches
-        anywhere by semantic relevance, so a conversation from weeks or months
-        ago can resurface when its topic comes up again. This is the durable,
-        long-term recall Blue asked for. Empty string when nothing matches.
-
-        Dedup is against the days <earlier_sessions> ACTUALLY shows, not the
-        age cutoff this used to apply (discard anything newer than
-        SESSION_HISTORY_INJECT days). The cutoff was a proxy for "already shown
-        by date", and a leaky one: it let through an echo of any shown day
-        older than the cutoff, which happens whenever the user skips a few
-        days — the fixed list reaches back further than the cutoff does.
-        (It did not, as once suspected, block recent days from surfacing here:
-        at most SESSION_HISTORY_INJECT summarized days can fall inside the
-        cutoff, so those days are always in the shown list anyway. The reason
-        a recent day reads as unavailable is the framing on the block that
-        carries it, not this filter.)"""
+        The legacy row ranker searched assistant prose as well as user facts,
+        allowed the just-logged live question to retrieve itself, and returned
+        one clipped row without its follow-ups. For autobiographical recall,
+        past user statements are the reliable anchors; the nearby turns then
+        reconstruct what was actually discussed.
+        """
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
+
+        recall_scaffolding = {
+            "conversation", "conversations", "discussed", "discussion",
+            "examine", "exactly", "history", "memory", "memories",
+            "recall", "record", "records", "remember", "remembered",
+            "told",
+        }
+        query_terms = _topic_terms(user_msg) - recall_scaffolding
+        live_texts: Set[str] = set()
+        # Pull the subject from preceding user turns for anaphoric asks such as
+        # "what exactly do you remember about it?" Do not learn search terms
+        # from assistant replies; a hallucinated reply must not steer recall.
+        for message in (messages or [])[-8:]:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            normalized = re.sub(r"\s+", " ", content).strip().lower()
+            if normalized:
+                live_texts.add(normalized)
+            if message.get("role") == "user":
+                query_terms |= _topic_terms(content[:600]) - recall_scaffolding
+        if not query_terms:
+            return ""
+
         try:
-            hits = self.search_memories(user_msg, top_k=2, mem_type="session")
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT id, timestamp, user_name, role, content FROM ("
+                "SELECT id, timestamp, user_name, role, content "
+                "FROM conversation_log WHERE robot = ? "
+                "ORDER BY id DESC LIMIT 3000) ORDER BY id ASC",
+                ((robot or "blue"),),
+            ).fetchall()
+            conn.close()
         except Exception:
             return ""
-        if not hits:
+
+        today = datetime.now().date().isoformat()
+        ranked: List[Tuple[int, float, str, int]] = []
+        robot_key = (robot or "blue").lower()
+        robot_names = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper"}
+        expected_name = robot_names.get(robot_key, "Blue")
+        other_names = [name for key, name in robot_names.items() if key != robot_key]
+
+        for index, row in enumerate(rows):
+            if row["role"] != "user":
+                continue
+            content = re.sub(r"\s+", " ", row["content"] or "").strip()
+            if len(content) < 4 or content.startswith(("{", "[", "```")):
+                continue
+            if content.lower() in live_texts:
+                continue
+            day = str(row["timestamp"] or "")[:10]
+            # The endpoint logs the live user message on a background thread
+            # before context construction. Excluding today prevents that race
+            # from making the current question its own best memory.
+            if not day or day == today:
+                continue
+            words = set(re.findall(r"[a-z0-9]+", content.lower()))
+            overlap = query_terms.intersection(words)
+            if not overlap:
+                continue
+            # A pasted document with one ambient hit (often "house") is not an
+            # autobiographical anchor. Short statements keep the one-word path
+            # because "we bought a house" may be the complete stored fact.
+            if len(content) > 1400 and len(overlap) < 2:
+                continue
+            density = len(overlap) / max(1, len(words))
+            ranked.append(
+                (len(overlap), density, str(row["timestamp"] or ""), index)
+            )
+        if not ranked:
             return ""
-        already_shown = {r["session_id"] for r in self._recent_session_rows()}
+        ranked.sort(reverse=True)
+
         lines: List[str] = []
-        seen: set = set()
-        for h in hits:
-            subj = h.get("subject") or ""
-            m = re.search(r"(\d{4}-\d{2}-\d{2})", subj)
-            if not m:
+        seen_days: Set[str] = set()
+        # A single surviving subject word ("house") should produce the best
+        # matching day, not a second weak day matched by conversational
+        # scaffolding. Richer multi-term queries may legitimately span two.
+        max_days = 1 if len(query_terms) <= 2 else 2
+        for _, _, _, anchor_index in ranked:
+            anchor = rows[anchor_index]
+            day = str(anchor["timestamp"] or "")[:10]
+            if day in seen_days:
                 continue
-            day = m.group(1)
-            if day in already_shown or day in seen:
-                continue
-            seen.add(day)
-            content = (h.get("content") or "").strip()
-            prefix = f"{subj}:"
-            if content.startswith(prefix):
-                content = content[len(prefix):].strip()
-            lines.append(f"- {self._friendly_day_label(day)}: {content[:280]}")
+            seen_days.add(day)
+            try:
+                anchor_time = datetime.fromisoformat(str(anchor["timestamp"]))
+            except (TypeError, ValueError):
+                anchor_time = None
+
+            excerpt: List[str] = []
+            # Six turns cover an assertion, Blue's reply, and two follow-ups.
+            # A day boundary or 20-minute gap marks a different conversation.
+            for row in rows[anchor_index:anchor_index + 6]:
+                if str(row["timestamp"] or "")[:10] != day:
+                    break
+                if anchor_time:
+                    try:
+                        row_time = datetime.fromisoformat(str(row["timestamp"]))
+                        if abs((row_time - anchor_time).total_seconds()) > 20 * 60:
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                content = re.sub(r"\s+", " ", row["content"] or "").strip()
+                if (len(content) < 4 or content.startswith(("{", "[", "```"))
+                        or content.lower() in live_texts):
+                    continue
+                if row["role"] == "assistant" and (
+                        self._is_assistant_refusal(content)
+                        or "having trouble connecting" in content.lower()
+                        or is_correction_ack_reply(content)
+                        or bool(identity_response_problem(
+                            content, expected_name, other_names=other_names))):
+                    continue
+                speaker = (
+                    expected_name if row["role"] == "assistant"
+                    else (row["user_name"] or "The user")
+                )
+                excerpt.append(f"  {speaker}: {content[:420]}")
+            if excerpt:
+                lines.append(
+                    f"- {self._friendly_day_label(day)}:\n" + "\n".join(excerpt)
+                )
+            if len(lines) >= max_days:
+                break
+
         if not lines:
             return ""
         return self._remembered_days_wrapper(lines)
@@ -3421,11 +3576,14 @@ class EnhancedMemorySystem:
     def _remembered_days_wrapper(self, lines: List[str]) -> str:
         return (
             "<remembered_days>\n"
-            "A past day's recap that resurfaced because it relates to what the "
+            "Past conversation excerpts that resurfaced because they relate to what the "
             "user just said — from the conversation log, so you may answer "
-            "from it directly rather than saying you have no record. Same "
+            "from it directly rather than saying you have no record. The excerpt "
+            "below is a POSITIVE MATCH for the current question: state its concrete "
+            "user-provided facts when asked what was discussed, and never ask the "
+            "user to repeat facts shown here. Same "
             "caveat as <earlier_sessions>: reliable about topics and dates, "
-            "thin on detail, and the date is when you TALKED about it, not "
+            "and the date is when you TALKED about it, not "
             "necessarily when the thing happened — an event described as "
             "\"tomorrow\" or \"upcoming\" was tomorrow relative to that date "
             "and has almost certainly passed. Weave it in only if it genuinely "
@@ -3456,8 +3614,10 @@ class EnhancedMemorySystem:
             terms |= _topic_terms(m["content"][:600])
         return terms
 
-    def _substantive_answer_corpus(self) -> List[Tuple[str, str, str]]:
-        """(timestamp, content, lowered) for Blue's substantive past answers.
+    def _substantive_answer_corpus(
+        self, robot: str = "blue"
+    ) -> List[Tuple[str, str, str]]:
+        """(timestamp, content, lowered) for one robot's past answers.
 
         Held in memory and refreshed on a TTL so term rarity can be measured
         across the whole corpus rather than guessed. Tool echoes and attachment
@@ -3465,9 +3625,19 @@ class EnhancedMemorySystem:
         machine string and an attachment read-back is the user's own document
         coming home — neither is something Blue wrote."""
         now = time.time()
-        cached = getattr(self, "_answer_corpus_cache", None)
+        robot_key = (robot or "blue").strip().lower()
+        caches = getattr(self, "_answer_corpus_cache_by_robot", None)
+        cache_times = getattr(self, "_answer_corpus_at_by_robot", None)
+        if not isinstance(caches, dict):
+            caches = {}
+            self._answer_corpus_cache_by_robot = caches
+        if not isinstance(cache_times, dict):
+            cache_times = {}
+            self._answer_corpus_at_by_robot = cache_times
+        cached = caches.get(robot_key)
         if (cached is not None
-                and now - getattr(self, "_answer_corpus_at", 0.0) < NAME_LEXICON_TTL_SEC):
+                and now - float(cache_times.get(robot_key, 0.0))
+                < NAME_LEXICON_TTL_SEC):
             return cached
         settle = (datetime.now()
                   - timedelta(hours=PAST_ANSWER_SETTLE_HOURS)).isoformat()
@@ -3476,26 +3646,36 @@ class EnhancedMemorySystem:
             rows = conn.execute(
                 "SELECT timestamp, content FROM conversation_log "
                 "WHERE role = 'assistant' AND length(content) >= ? "
-                "AND timestamp <= ? ORDER BY timestamp DESC LIMIT 2000",
-                (SUBSTANTIVE_ANSWER_MIN_CHARS, settle),
+                "AND timestamp <= ? AND robot = ? "
+                "ORDER BY timestamp DESC LIMIT 2000",
+                (SUBSTANTIVE_ANSWER_MIN_CHARS, settle, robot_key),
             ).fetchall()
             conn.close()
         except Exception:
             return cached if cached is not None else []
         corpus: List[Tuple[str, str, str]] = []
+        robot_names = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper"}
+        expected_name = robot_names.get(robot_key, "Blue")
+        other_names = [name for key, name in robot_names.items() if key != robot_key]
         for r in rows:
             content = r["content"] or ""
             low = content.lower()
             if low.startswith("playing ") or "[attached document:" in low:
                 continue
+            if (self._is_assistant_refusal(content)
+                    or is_correction_ack_reply(content)
+                    or identity_response_problem(
+                        content, expected_name, other_names=other_names)):
+                continue
             corpus.append((r["timestamp"], content, low))
-        self._answer_corpus_cache = corpus
-        self._answer_corpus_at = now
+        caches[robot_key] = corpus
+        cache_times[robot_key] = now
         return corpus
 
     def _search_past_answers(self, terms: Set[str],
-                             limit: int = 2) -> List[Dict[str, Any]]:
-        """Substantive things Blue said before that match these topic terms.
+                             limit: int = 2,
+                             robot: str = "blue") -> List[Dict[str, Any]]:
+        """Substantive things one robot said before that match these terms.
 
         Scored by term RARITY, not term count. Counting hits alone matched "turn
         off all the lights" against a two-week-old autobiography, because both
@@ -3505,7 +3685,7 @@ class EnhancedMemorySystem:
         "today" pulls nothing."""
         if len(terms) < PAST_ANSWER_MIN_TERM_HITS:
             return []
-        corpus = self._substantive_answer_corpus()
+        corpus = self._substantive_answer_corpus(robot=robot)
         if not corpus:
             return []
         total = len(corpus)
@@ -3530,8 +3710,9 @@ class EnhancedMemorySystem:
                 for sc, ts, c in scored[:limit]]
 
     def _build_past_answers_block(self, messages: List[Dict[str, Any]],
-                                  user_msg: str) -> str:
-        """Surface Blue's own earlier substantive answers on this topic.
+                                  user_msg: str,
+                                  robot: str = "blue") -> str:
+        """Surface this robot's own earlier substantive answers on this topic.
 
         The day-recap blocks say THAT something was discussed; this says WHAT
         was actually written. Without it "what were your ideas?" has no source,
@@ -3540,7 +3721,7 @@ class EnhancedMemorySystem:
             return ""
         try:
             terms = self._topic_query_terms(messages, user_msg)
-            hits = self._search_past_answers(terms)
+            hits = self._search_past_answers(terms, robot=robot)
         except Exception:
             return ""
         if not hits:
@@ -3553,9 +3734,12 @@ class EnhancedMemorySystem:
             if len(excerpt) > PAST_ANSWER_EXCERPT_CHARS:
                 excerpt = excerpt[:PAST_ANSWER_EXCERPT_CHARS].rsplit(" ", 1)[0] + " […]"
             lines.append(f"--- {label} ---\n{excerpt}")
+        robot_name = {
+            "blue": "Blue", "hexia": "Hexia", "pico": "Casper",
+        }.get((robot or "blue").lower(), "this robot")
         return (
             "<earlier_answers>\n"
-            "Things YOU wrote earlier that relate to what the user is asking "
+            f"Things YOU ({robot_name}) wrote earlier that relate to what the user is asking "
             "about now, quoted from the conversation log. This is your own "
             "work, recorded verbatim — when the user asks what you said, what "
             "your ideas were, or to go over something again, answer from this. "

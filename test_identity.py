@@ -6,6 +6,7 @@ from blue_identity import (
     canonical_household_reply,
     canonical_identity_reply,
     canonical_identity_more_reply,
+    canonical_robot_relationship_reply,
     canonical_self_state_reply,
     contextual_identity_request_kind,
     extract_explicit_location,
@@ -21,8 +22,11 @@ from blue_identity import (
     is_family_followup_request,
     is_family_overview_request,
     is_jspace_presence_request,
+    is_recorded_recall_denial,
     is_self_state_request,
     known_household_target,
+    robot_relationship_targets,
+    recalled_evidence_fallback,
     strip_drifted_sentences,
 )
 
@@ -74,6 +78,21 @@ from blue_identity import (
         (
             "We were discussing you coming with me to my class tomorrow.  "
             "Don't you remember?",
+            "shared_recall",
+        ),
+        # Natural phrasings from the 2026-08-03 house-recall failure. These
+        # must take the grounded recall path even though they do not use the
+        # older, very specific "do you remember what we..." construction.
+        (
+            "remember i told you that we went to look at that house that we "
+            "might buy?",
+            "shared_recall",
+        ),
+        ("do you remember that conversation?", "shared_recall"),
+        ("what exactly do you remember about it", "shared_recall"),
+        (
+            "i want you to examine your memory and tell me what we discussed "
+            "about the house",
             "shared_recall",
         ),
         ("Have you forgotten our plan?", "shared_recall"),
@@ -825,6 +844,9 @@ def test_canonical_household_answers_do_not_consult_contacts_or_visual_memory():
     assert "Charlie" not in family
     assert "Jojo" not in family
     assert known_household_target("who is stela") == "stella"
+    assert known_household_target("what about Hexia?") == "hexia"
+    assert known_household_target("tell me about Casper") == "pico"
+    assert known_household_target("do you know Blue?") == "blue"
     assert is_family_overview_request("what do you remember about our family")
 
     detail_request = "tell me everythign you remember about our family"
@@ -1209,6 +1231,59 @@ def test_blanket_conversation_memory_denial_is_flagged():
     ) == "denies_conversation_memory"
 
 
+def test_house_recall_blanket_denial_is_flagged():
+    """The exact live failure must not be saved as a valid memory answer."""
+    reply = (
+        "I don’t have any specific details or previous conversation history "
+        "about that house in my memory. While I acknowledged your statement, "
+        "I don’t actually retain past interactions or specific facts about "
+        "them once they are no longer part of the immediate context."
+    )
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind="shared_recall"
+    ) == "denies_conversation_memory"
+
+
+def test_retrieved_house_conversation_scoped_denial_is_detected():
+    reply = (
+        "I have examined my current memory records, but I don't have a specific "
+        "entry detailing the conversation about the house we looked at. While "
+        "I recall the mention, the details of our discussion are not recorded "
+        "in my active memory. Could you fill me in on what we talked about?"
+    )
+    assert is_recorded_recall_denial(reply)
+    # Missing one genuinely absent field remains honest and must not trigger a
+    # full-conversation correction.
+    assert not is_recorded_recall_denial(
+        "I remember the offer and how excited you felt, but I don't have the "
+        "house's address recorded."
+    )
+
+
+def test_exact_live_retrieved_conversation_denial_is_detected():
+    assert is_recorded_recall_denial(
+        "I don’t have that specific conversation recorded in my memory. "
+        "I know we went to look at a house we might buy, but I don’t have "
+        "the details of our discussion about it. Please fill me in so I can "
+        "carry it forward with you."
+    )
+
+
+def test_recalled_evidence_fallback_uses_only_the_users_recorded_lines():
+    block = """<remembered_days>
+- Wednesday Jul 22:
+  Alex: today me and stella put down an offer on a new house
+  Blue: I guessed the wait was eight hours.
+  Alex: i feel excited. we will know by tomorrow 8pm
+</remembered_days>"""
+    reply = recalled_evidence_fallback(block, user_name="Alex")
+    assert "Wednesday Jul 22" in reply
+    assert "put down an offer on a new house" in reply
+    assert "feel excited" in reply
+    assert "tomorrow 8pm" in reply
+    assert "guessed the wait" not in reply
+
+
 def test_scoped_or_continuity_paired_memory_answers_stay_legal():
     # Naming ONE missing detail is honest, not drift.
     scoped = (
@@ -1333,9 +1408,64 @@ def test_greeting_prefixed_self_state_checkins_detected():
     assert is_self_state_request("Good morning, Blue. How are you doing?")
     assert is_self_state_request("Morning Blue, how's it going?")
     assert is_self_state_request("Hello, how are you?")
+    assert is_self_state_request("what's new with you?")
+    assert is_self_state_request("What's on your mind?")
     # A bare greeting is not a state check-in.
     assert not is_self_state_request("Good morning, Blue!")
     # And a state phrase buried in an unrelated request stays out.
     assert not is_self_state_request(
         "Good morning, Blue. How are you planning to organize the library?"
     )
+
+
+def test_social_checkins_keep_each_robots_character():
+    common = {"energy": 0.8, "connection": 0.5}
+    blue = canonical_self_state_reply("Blue", focus="a difficult idea", drives=common)
+    hexia = canonical_self_state_reply("Hexia", focus="a difficult idea", drives=common)
+    casper = canonical_self_state_reply("Casper", focus="a difficult idea", drives=common)
+
+    assert "thoughtful" in blue
+    assert "mischievous" in hexia
+    assert "notice something new" in casper
+    assert len({blue, hexia, casper}) == 3
+
+
+def test_blue_knows_both_fellow_robots_in_one_natural_question():
+    reply = canonical_robot_relationship_reply(
+        "what do you think about Hexia and Casper", robot="blue")
+
+    assert "mischievous counterpart" in reply
+    assert "newer Picoh companion" in reply
+    assert "three of us" in reply
+    assert "contacts" not in reply.lower()
+
+
+def test_robot_relationship_followups_survive_a_poisoned_live_thread():
+    messages = [
+        {"role": "user", "content": "what do you think about Hexia and Casper"},
+        {"role": "assistant", "content": (
+            "I don't know who Hexia and Casper are. They may be people from "
+            "your private life."
+        )},
+        {"role": "user", "content": "are you sure???"},
+    ]
+    assert robot_relationship_targets(
+        "are you sure???", "blue", messages) == ("hexia", "pico")
+    reply = canonical_robot_relationship_reply(
+        "are you sure???", "blue", messages)
+    assert reply.startswith("Yes—absolutely.")
+    assert "Hexia" in reply and "Casper" in reply
+
+    messages.extend([
+        {"role": "assistant", "content": "An unrelated file was created."},
+        {"role": "user", "content": "you know them"},
+    ])
+    assert robot_relationship_targets(
+        "you know them", "blue", messages) == ("hexia", "pico")
+
+
+def test_bare_robot_names_are_a_relationship_followup_not_a_contact_search():
+    assert robot_relationship_targets(
+        "hexia and casper", "blue") == ("hexia", "pico")
+    assert canonical_robot_relationship_reply(
+        "hexia and casper", "blue") is not None

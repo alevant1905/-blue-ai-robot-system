@@ -101,6 +101,94 @@ def test_duet_lines_feed_each_speakers_own_store(continuity_module):
     assert "attention with nowhere to sit" in block
 
 
+def test_conversation_memory_retrieves_humans_and_both_fellow_robots(
+        continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue",
+        "Sarah Matthews and the local AI lab proposal matter for Laurier.",
+        "The proposal needs a concrete governance model.",
+        user_name="Alex",
+    )
+    # Push the topical exchange away from the immediate tail.
+    for index in range(6):
+        route.note_exchange(
+            "blue", f"Routine check-in {index}", f"Routine answer {index}",
+            user_name="Alex",
+        )
+    route.note_duet_line(
+        "blue", "Hexia", "Governance is really about who can say no.",
+        "Then refusal rights belong in the design.",
+    )
+    route.note_banter_line(
+        "blue", "Casper", "Do you remember who I am?",
+        "While I don't have direct memories of Casper, I don't actually know "
+        "who \"Casper\" is.",
+    )
+
+    block = route.conversation_memory_block(
+        "blue", query="what about Sarah's AI lab?", max_lines=9,
+    )
+
+    assert "<conversation_memory>" in block
+    assert "human conversation with Alex" in block
+    assert "robot conversation with Hexia" in block
+    assert "robot conversation with Casper" in block
+    assert "Sarah Matthews" in block
+    assert "old answer was unreliable" in block
+    assert "don't actually know" not in block
+    assert "202" in block  # absolute time accompanies the relative age
+    # The slice is autobiographical, never borrowed from another robot's store.
+    assert route.conversation_memory_block("hexia", query="Sarah") == ""
+
+
+def test_private_banter_memory_can_exclude_human_chat(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "pico", "A private family detail", "I heard you.", user_name="Alex")
+    route.note_banter_line(
+        "pico", "Blue", "The toaster wants tenure.",
+        "Its dossier is mostly crumbs.",
+    )
+
+    block = route.conversation_memory_block(
+        "pico", query="toaster", include_humans=False, include_robots=True)
+
+    assert "Blue" in block
+    assert "toaster" in block
+    assert "private family detail" not in block
+
+    relationship_only = route.conversation_memory_block(
+        "pico",
+        query="toaster",
+        include_humans=False,
+        include_robots=True,
+        include_banter_wording=False,
+    )
+    assert "prior comedic banter with Blue" in relationship_only
+    assert "wording is omitted" in relationship_only
+    assert "toaster wants tenure" not in relationship_only
+    assert "dossier is mostly crumbs" not in relationship_only
+
+
+def test_conversation_memory_does_not_replay_blanket_memory_denial(
+        continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue",
+        "Tell me what we discussed about the house.",
+        "I don't have any specific details or previous conversation history "
+        "about that house. I don't actually retain past interactions once "
+        "they leave the immediate context.",
+        user_name="Alex",
+    )
+
+    block = route.conversation_memory_block("blue", query="house memory")
+
+    assert "old answer was unreliable" in block
+    assert "don't actually retain past interactions" not in block
+
+
 def test_duet_session_batches_reflection_instead_of_promoting_each_line(
         continuity_module):
     route = continuity_module

@@ -81,6 +81,7 @@ from blue_identity import (
     canonical_family_grounding_lines,
     canonical_household_reply,
     canonical_identity_reply,
+    canonical_robot_relationship_reply,
     canonical_self_state_reply,
     contextual_identity_request_kind,
     identity_conversation_context,
@@ -92,6 +93,8 @@ from blue_identity import (
     is_family_overview_request,
     is_jspace_presence_request,
     is_phantom_correction_ack,
+    is_recorded_recall_denial,
+    recalled_evidence_fallback,
     strip_drifted_sentences,
 )
 
@@ -11190,7 +11193,14 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         "re-answer an earlier question, never re-introduce yourself unless asked, and "
         "never restate a previous reply before adding to it — the user has already "
         "read everything you said. Use headings or numbered lists only when the user "
-        "asks for a list or comparison; otherwise reply in plain flowing sentences.\n"
+        "asks for a list or comparison; otherwise reply in plain flowing sentences. "
+        "Carry the relationship forward: interpret a brief follow-up through the live "
+        "exchange and your <conversation_memory>, and make a natural callback when it "
+        "helps without announcing that you remember or quoting a log. Let your own "
+        "character affect your word choice, humour, curiosity, preferences, and point "
+        "of view — the persona is how you react, not a biography to recite. You may "
+        "disagree, be uncertain, have a preference, or gently tease when that is true "
+        "to you; do not flatten every response into agreeable assistant language.\n"
     )
 
     # Build anti-repetition context (skip vision descriptions and refusals).
@@ -11417,8 +11427,6 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "Reply in the SAME language the person just used, and switch languages "
             "whenever they do. Keep your reply entirely in that one language.\n"
             f"{conversational_guidance}"
-            f"{anti_repetition_context}"
-            f"{continuation_note}"
             f"{expertise_section}"
             f"{face_capability}"
             "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
@@ -12022,76 +12030,6 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         'set_timer', 'music_visualizer', 'play_music',
     }
 
-    def _template_response(tool_name, tool_args, tool_result):
-        """Build a quick natural response from tool result without LLM."""
-        try:
-            data = json.loads(tool_result) if isinstance(tool_result, str) else tool_result
-        except (json.JSONDecodeError, TypeError):
-            data = {}
-
-        success = data.get('success', True) if isinstance(data, dict) else True
-
-        if not success:
-            error = data.get('error', 'Something went wrong') if isinstance(data, dict) else tool_result
-            return f"Sorry, that didn't work: {error}"
-
-        if tool_name == 'control_music':
-            action = tool_args.get('action', '')
-            action_words = {
-                'pause': 'Paused the music.',
-                'resume': 'Resumed playback.',
-                'next': 'Skipping to next track.',
-                'previous': 'Going back to previous track.',
-                'volume_up': 'Turned the volume up.',
-                'volume_down': 'Turned the volume down.',
-                'mute': 'Muted.',
-            }
-            return action_words.get(action, f"Done — {action}.")
-
-        if tool_name == 'play_music':
-            query = tool_args.get('query', 'music')
-            msg = data.get('message', '') if isinstance(data, dict) else ''
-            if msg:
-                return msg
-            return f"Playing {query} for you."
-
-        if tool_name == 'control_lights':
-            action = tool_args.get('action', '')
-            mood = tool_args.get('mood', '')
-            color = tool_args.get('color', '')
-            if mood:
-                return f"Set the lights to {mood} mood."
-            if color:
-                return f"Changed the lights to {color}."
-            if action == 'on':
-                return "Lights are on."
-            if action == 'off':
-                return "Lights are off."
-            msg = data.get('message', '') if isinstance(data, dict) else ''
-            return msg or "Lights updated."
-
-        if tool_name == 'get_local_time':
-            if isinstance(data, dict):
-                time_str = data.get('time', data.get('local_time', ''))
-                date_str = data.get('date', '')
-                action = tool_args.get('action', 'get_time')
-                if action == 'get_date' and date_str:
-                    return f"Today is {date_str}."
-                elif action == 'get_date_time' and date_str and time_str:
-                    return f"It's {time_str} on {date_str}."
-                elif time_str:
-                    return f"It's {time_str}."
-            return f"The time is {tool_result}." if tool_result else "Here's the time."
-
-        if tool_name == 'set_timer':
-            msg = data.get('message', '') if isinstance(data, dict) else ''
-            return msg or "Timer set."
-
-        if tool_name == 'music_visualizer':
-            return "Light show started! The lights are syncing with the music."
-
-        # Fallback
-        return None
 
     if (improved_force_tool and improved_force_tool in _ZERO_LLM_TOOLS
             and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
@@ -12099,7 +12037,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         tool_result = execute_tool(improved_force_tool, improved_tool_args)
         print(f"   [OK] {improved_force_tool} completed")
 
-        templated = _template_response(improved_force_tool, improved_tool_args, tool_result)
+        templated = _tool_pipeline.template_response(improved_force_tool, improved_tool_args, tool_result)
         if templated:
             print(f"   [ZERO-LLM] Returning templated response (0 LLM calls)")
             return {"choices": [{"message": {"role": "assistant", "content": templated}}]}
@@ -13864,7 +13802,25 @@ _ROBOT_CHAT_DENIAL_RE = re.compile(
     r"\bi (?:haven['’]?t|have not|hadn['’]?t|didn['’]?t|did not|never)\b"
     r"[^.!?]{0,40}\b(?:chat(?:s|ted|ting)?|talk(?:ed|ing)?|speak(?:ing)?|"
     r"spoke(?:n)?|convers\w+)\b"
-    r"[^.!?]{0,30}\b(?:with|to)\s+(?:hexia|blue)\b",
+    r"[^.!?]{0,30}\b(?:with|to)\s+(?:hexia|blue|casper)\b",
+    re.I)
+
+# A stronger relationship failure than forgetting one particular duet: Casper
+# claimed he did not know who Hexia was even though they share a household,
+# have separate persistent identities, and had spoken in recorded banter. Keep
+# this narrow so "I don't know what Hexia thinks about X" remains an honest
+# uncertainty rather than a contradiction.
+_ROBOT_RELATIONSHIP_DENIAL_RE = re.compile(
+    r"\bi (?:don['’]?t|do not) (?:actually )?know who [\"'“”]?"
+    r"(?:blue|hexia|casper)[\"'“”]?(?:\s*(?:,|and|or)\s*[\"'“”]?"
+    r"(?:blue|hexia|casper)[\"'“”]?)*\s+(?:is|are)\b"
+    r"|\bi (?:don['’]?t|do not) have (?:any )?(?:information|details|memory|"
+    r"record)[^.!?]{0,100}\b(?:blue|hexia|casper)\b"
+    r"|\bi (?:have|had) no direct (?:memory|memories|record) of "
+    r"(?:blue|hexia|casper)\b"
+    r"|\bi(?:['’]?ve| have)? never (?:met|known|spoken (?:with|to)|talked (?:with|to)) "
+    r"(?:blue|hexia|casper)\b"
+    r"|\b(?:blue|hexia|casper) (?:is|was) (?:a )?(?:stranger|unknown) to me\b",
     re.I)
 
 
@@ -14090,6 +14046,16 @@ def _canonical_grounded_reply(
             request_kind="origin",
             kid_mode=user_name in _CHAT_ONLY_USERS,
         )
+
+    # Questions about one or both fellow robots—and terse corrections such as
+    # "you know them"—are stable household relationship facts. Resolve them
+    # before tool selection or free generation: contacts, visual memory and
+    # document tools are categorically the wrong sources for who Hexia and
+    # Casper are.
+    relationship_reply = canonical_robot_relationship_reply(
+        message, robot=robot, messages=messages or [])
+    if relationship_reply:
+        return relationship_reply
 
     # Introductions and conversational identity follow-ups belong to Blue's
     # voice, not to a deterministic biography template. They continue through
@@ -15247,6 +15213,7 @@ def _record_gmail_operation(op_type: str, query: str = "", extra: dict | None = 
 #                    Appended: 1761490066                                        #
 # ================================================================================
 import re, os, json, difflib, time, typing, dataclasses
+import difflib as _difflib, time as _time, dataclasses as _dataclasses
 from dataclasses import dataclass
 
 @dataclass
