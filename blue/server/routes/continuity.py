@@ -1559,8 +1559,18 @@ _DUET_ACTIVE_TTL_SECONDS = 20 * 60
 # out the whole reflection. Nothing about "note what changed" is urgent, so
 # hold it until the conversation goes quiet. Duet already had this idea; this
 # extends it to chat, panel and banter via the coordinator's foreground mark.
+# 20s was calibrated when a reflection cost ~3s. A reasoning model made it
+# 13-28s, so the pass now outlasts the pause it was waiting for and lands on
+# the next message; and a conversation with ordinary thinking pauses produced
+# a pass per gap (three on 2026-08-12 for six turns, each concluding "nothing
+# material moved"). 90s is longer than someone pauses mid-conversation and
+# shorter than they take to come back, so a conversation yields ONE pass, which
+# coalescing then merges. Reflection is not judged by importance to get this:
+# scoring is a length proxy — "my brother felix is visiting next week" (0.448)
+# ranks below "i have most of the readings now" (0.488) — so any importance
+# threshold would defer short, consequential turns. Batching defers nothing.
 _CONVERSATION_QUIET_SECONDS = float(
-    os.environ.get("BLUE_CONTINUITY_QUIET_SECONDS", "20") or 20
+    os.environ.get("BLUE_CONTINUITY_QUIET_SECONDS", "90") or 90
 )
 
 

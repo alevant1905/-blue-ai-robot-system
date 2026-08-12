@@ -919,3 +919,31 @@ def test_a_reflection_mid_generation_hands_the_model_to_a_waiting_turn(
     assert outcome["result"] == "preempted"
     assert closed, "the connection must be dropped or the model keeps going"
     assert waited < 1.0, f"the live turn still waited {waited:.1f}s for the model"
+
+
+def test_a_thinking_pause_is_still_a_conversation(continuity_module, monkeypatch):
+    """One pass per conversation, not one per gap in it.
+
+    On 2026-08-12 six turns produced three separate reflection passes, because
+    every ordinary pause over 20s let one start. Each cost 13-28s of the one
+    loaded model and each concluded "nothing material moved". The window has to
+    be longer than someone pauses mid-conversation.
+    """
+    route = continuity_module
+    clock = {"quiet": 0.0}
+    monkeypatch.setattr(route, "seconds_since_foreground", lambda: clock["quiet"])
+
+    for still_talking in (5, 21, 47, 60, 89):
+        clock["quiet"] = still_talking
+        assert route._conversation_is_live(), \
+            f"a {still_talking}s pause is thinking, not the end of the conversation"
+
+    clock["quiet"] = 120
+    assert not route._conversation_is_live(), \
+        "two minutes of silence is over; reflect now"
+
+
+def test_the_quiet_window_can_be_turned_off(continuity_module, monkeypatch):
+    monkeypatch.setattr(route_quiet := continuity_module, "_CONVERSATION_QUIET_SECONDS", 0)
+    monkeypatch.setattr(route_quiet, "seconds_since_foreground", lambda: 0.0)
+    assert not route_quiet._conversation_is_live()
