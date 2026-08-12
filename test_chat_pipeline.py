@@ -473,3 +473,50 @@ def test_call_llm_carries_the_cancel_callback_through_to_the_client(monkeypatch)
     assert callable(seen.get("should_cancel"))
     assert result == {"cancelled": True}, \
         "a cancelled result must pass through the response polisher untouched"
+
+
+# --------------------------------------------------------------------------
+# What the model is offered on an ordinary turn
+# --------------------------------------------------------------------------
+
+def _tool_names(payload):
+    return {t["function"]["name"] for t in (payload.get("tools") or [])}
+
+
+def test_a_conversational_turn_is_offered_the_reflex_set_only(chat):
+    """53 schemas re-prefill on every turn because they render after the
+    system message: ~8.3k tokens to answer "I'm working on DH201"."""
+    chat.ask("I'm working on DH201 right now.")
+
+    offered = _tool_names(chat.model.main[-1])
+    assert offered, "some tools must remain — the detector is not always right"
+    assert offered <= bt._REFLEX_TOOL_NAMES
+    assert "capture_camera" in offered, \
+        "the one tool measurably wanted on a turn the selector called chat"
+    assert "auto_reply_emails" not in offered
+
+
+def test_a_turn_the_selector_has_an_opinion_about_still_acts(chat):
+    """Trimming must not touch a turn with detected intent."""
+    chat.ask("search my documents for the reading list")
+
+    assert any(call["tool"] == "search_documents" for call in chat.executed), \
+        f"the detected tool never ran: {[c['tool'] for c in chat.executed]}"
+    for payload in chat.model.main:
+        offered = _tool_names(payload)
+        assert not (offered and offered <= bt._REFLEX_TOOL_NAMES), \
+            "a turn with detected intent was handed the conversational subset"
+
+
+def test_a_forced_tool_survives_reflex_scope(chat):
+    """force_tool wins. The retry that turns a phantom claim into a real
+    action passes through here, and must still see the tool it forces —
+    send_gmail is not in the reflex set."""
+    bt.call_lm_studio(
+        [{"role": "user", "content": "send that email"}],
+        force_tool="send_gmail", tool_scope="reflex",
+    )
+
+    payload = chat.model.main[-1]
+    assert _tool_names(payload) == {"send_gmail"}
+    assert payload["tool_choice"] == "required"

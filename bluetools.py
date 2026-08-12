@@ -9837,8 +9837,29 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
                          "finish_reason": finish_reason or "stop"}]}
 
 
+# What the model may still reach for on a turn where the selector found no
+# intent at all. The full array is 53 schemas, ~8,300 tokens, and because the
+# schemas render AFTER the system message they are re-prefilled on EVERY turn:
+# measured on two consecutive real turns, the stable cached prefix is ~6,400
+# tokens and the tools are 79% of what gets re-processed, worth ~2.4s a turn.
+#
+# Chosen for cost-of-a-miss, not frequency: the physical acts, where phrasing
+# varies most and a silent no-op is worst. Measured over 60 real messages the
+# selector called conversational, the model reached for a tool in one of them
+# — capture_camera on "look at the location" — and the reflex set keeps that
+# save. Anything outside this set that the model wanted and could not call
+# lands on detect_hallucinated_action, which forces the real tool on a retry.
+_REFLEX_TOOL_NAMES = {
+    "capture_camera", "view_image",           # the measured miss
+    "control_lights", "control_music", "play_music",
+    "create_reminder",
+    "search_documents", "web_search",
+    "get_weather", "get_local_time",
+}
+
+
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
-                   on_token=None) -> Dict:
+                   on_token=None, tool_scope: str = "full") -> Dict:
     global _vision_queue, _last_vision_recognition
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
@@ -10197,6 +10218,16 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 if tool['function']['name'] not in blocked_tools
             ]
             print(f"   [FILTER] Iteration {iteration}: Blocked {len(TOOLS) - len(tools_to_use)} overused tools")
+
+        # Applied last so it composes with the iteration filter above rather
+        # than being silently replaced by it.
+        if tool_scope == "reflex" and not force_tool:
+            reflex = [t for t in tools_to_use
+                      if t['function']['name'] in _REFLEX_TOOL_NAMES]
+            if reflex:
+                print(f"   [TOOLS] Conversational turn — offering {len(reflex)} "
+                      f"reflex tools instead of {len(tools_to_use)}")
+                tools_to_use = reflex
 
         if force_tool:
             # Filter tools to ONLY the forced tool so "required" has no other choice

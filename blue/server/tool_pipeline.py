@@ -404,6 +404,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
     incremented on entry, so it has to exist first.
     """
     iteration = 0
+    _conversational_turn = False
     _web_refusal_forced = False
     _leaked_tool_forced = False
     _phantom_claim_corrected = False
@@ -424,6 +425,12 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                     force_tool = None
                 else:
                     print("   [ALLOW] No clear tool intent - letting model decide")
+                    # Let it decide from the reflex set rather than all 53
+                    # schemas: they render after the system message and so are
+                    # re-prefilled every turn (~2.4s). A tool outside the set
+                    # that the model wanted is recovered by the hallucinated
+                    # action check below, which forces it on a retry.
+                    _conversational_turn = True
 
             # Carry over a force_tool set by the previous iteration's hallucination
             # detector — this MUST run with tools enabled, otherwise the retry is
@@ -456,6 +463,8 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 force_tool=force_tool,
                 iteration=iteration,
                 on_token=on_token,
+                tool_scope=("reflex" if _conversational_turn and not force_tool
+                            else "full"),
             )
 
             if not response:
