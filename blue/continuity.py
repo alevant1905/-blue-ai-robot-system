@@ -632,6 +632,83 @@ class ContinuityStore:
             )
             return int(cur.lastrowid)
 
+    # Triggers whose queued jobs may be merged. A reflection integrates "what
+    # has happened since the last pass", so two queued exchange jobs ask for
+    # the same work over overlapping episodes. Duet, banter and correction
+    # carry distinct instructions and are left alone.
+    COALESCING_TRIGGERS = ("exchange", "idle", "perception")
+
+    def coalesce_pending(
+        self,
+        triggers: Optional[Iterable[str]] = None,
+        max_episode_ids: int = 60,
+    ) -> int:
+        """Merge queued same-trigger jobs into one. Returns jobs collapsed.
+
+        One job is enqueued per exchange, but a reflection holds the single
+        loaded model for tens of seconds — so during a conversation they arrive
+        faster than they can run and drain long after Alex has stopped talking.
+        Collapsing the run into one job over the union of its episodes keeps
+        the reflection (nothing is dropped) without the backlog.
+        """
+        wanted = tuple(triggers) if triggers is not None else self.COALESCING_TRIGGERS
+        if not wanted:
+            return 0
+        collapsed = 0
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for trigger in wanted:
+                rows = conn.execute(
+                    "SELECT id, episode_ids_json, prompt_text FROM reflection_jobs "
+                    "WHERE status = 'pending' AND trigger = ? ORDER BY id ASC",
+                    (trigger,),
+                ).fetchall()
+                if len(rows) < 2:
+                    continue
+                keep = rows[0]
+                merged: List[str] = []
+                seen = set()
+                for row in rows:
+                    for episode_id in self._decode_json(row["episode_ids_json"], []):
+                        if episode_id and episode_id not in seen:
+                            seen.add(episode_id)
+                            merged.append(episode_id)
+                # The newest instruction wins: the older ones describe the same
+                # work over a subset of the same episodes.
+                prompt = next(
+                    (row["prompt_text"] for row in reversed(rows) if row["prompt_text"]),
+                    keep["prompt_text"],
+                )
+                conn.execute(
+                    "UPDATE reflection_jobs SET episode_ids_json = ?, prompt_text = ? "
+                    "WHERE id = ?",
+                    (json.dumps(merged[-max_episode_ids:]),
+                     _clip(prompt, 4000), keep["id"]),
+                )
+                conn.executemany(
+                    "UPDATE reflection_jobs SET status = 'superseded', "
+                    "completed_at = ?, error = ? WHERE id = ?",
+                    [(_now(), f"Merged into reflection job {keep['id']}", row["id"])
+                     for row in rows[1:]],
+                )
+                collapsed += len(rows) - 1
+            conn.commit()
+        return collapsed
+
+    def requeue_reflection(self, job_id: int, reason: str = "") -> None:
+        """Return a claimed job to the queue without spending an attempt.
+
+        Preemption is not failure: the job was abandoned because a human
+        started talking. Counting it would retire the reflection after three
+        interruptions, which is exactly what a talkative day looks like.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE reflection_jobs SET status = 'pending', claimed_at = NULL, "
+                "attempts = MAX(attempts - 1, 0), error = ? WHERE id = ?",
+                (_clip(reason, 1000), int(job_id)),
+            )
+
     def claim_reflection(self) -> Optional[Dict[str, Any]]:
         stale_before = (
             datetime.now(timezone.utc) - timedelta(minutes=15)

@@ -23,7 +23,9 @@ import bluetools as bt
 from flask import jsonify, render_template_string, request
 
 from blue.continuity import ContinuityStore, DEFAULT_DRIVES, DRIVE_LABELS
-from blue.llm_coordinator import llm_slot, seconds_since_foreground
+from blue.llm_coordinator import (
+    llm_slot, preemption_check, seconds_since_foreground,
+)
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
     identity_request_kind,
@@ -161,15 +163,32 @@ def _safe_json(value: Any) -> Any:
         return str(value)
 
 
+class ReflectionPreempted(Exception):
+    """Raised when a reflection gave the model back to a human mid-generation.
+
+    Distinct from failure on purpose: the job is intact and must go back on
+    the queue unpenalised, not be retried immediately or retired after three
+    interruptions.
+    """
+
+
 def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
           max_tokens: int = 1900) -> str:
     try:
         with llm_slot(foreground=False):
+            # Sampled inside the slot: everything before this point was the
+            # queue, and only a turn arriving from here on is one this call is
+            # standing in front of.
             result = bt.call_llm(
                 messages,
                 include_tools=False,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                should_cancel=preemption_check(),
+            )
+        if isinstance(result, dict) and result.get("cancelled"):
+            raise ReflectionPreempted(
+                f"yielded the model after {result.get('partial_chars', 0)} chars"
             )
         choices = (result or {}).get("choices") or []
         choice = choices[0] if choices else {}
@@ -190,6 +209,8 @@ def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
         # after it — _parse_reflection tries the post-think tail first and
         # falls back to the full text.
         return text.strip()
+    except ReflectionPreempted:
+        raise          # not a failure — the worker requeues it
     except Exception as exc:
         bt.log.warning(f"[JSPACE] continuity LLM call failed: {exc}")
         return ""
@@ -882,10 +903,26 @@ class RobotContinuity:
                     self.wake.wait(timeout=2)
                     self.wake.clear()
                     continue
+                # Whatever queued up during the conversation is one pass, not
+                # one per exchange. Done here rather than at enqueue time so a
+                # job is never merged into one already being worked on.
+                collapsed = self.store.coalesce_pending()
+                if collapsed:
+                    print(f"   [JSPACE {self.robot}] merged {collapsed} queued "
+                          f"reflection(s) into the next pass")
                 job = self.store.claim_reflection()
                 if job:
                     self._process_reflection_job(job)
                     continue
+            except ReflectionPreempted as exc:
+                # Alex started talking. Put it back untouched and go quiet —
+                # the guard at the top of the loop now holds it until he stops.
+                if job:
+                    self.store.requeue_reflection(
+                        job["id"], f"Preempted by a live turn: {exc}")
+                    print(f"   [JSPACE {self.robot}] reflection yielded to a "
+                          f"live turn ({exc}); requeued")
+                continue
             except Exception as exc:
                 bt.log.warning(f"[JSPACE {self.robot}] continuity job failed: {exc}")
                 if job:

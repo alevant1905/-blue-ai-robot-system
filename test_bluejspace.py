@@ -1,6 +1,9 @@
 """Integration tests for the per-robot continuity layer and owner API."""
 
 import importlib
+import json
+import threading
+import time
 import logging
 import sys
 import types
@@ -666,3 +669,253 @@ def test_owner_routes_correct_delete_and_wipe(continuity_module):
     assert b"/continuity/casper" in casper_page.data
     casper_state = client.get("/continuity/casper/state").get_json()
     assert casper_state["robot"] == "casper"
+
+
+# ---------------------------------------------------------------------------
+# Not competing with the person talking
+#
+# A reflection is enqueued after every exchange and holds the one loaded model
+# for as long as it takes to think. Measured on 2026-08-12: jobs claimed 20s
+# after each reply, running 13-28s each, so Alex's next message waited out a
+# reflection that had started one second before he sent it, and the queue was
+# still draining three minutes after he stopped talking.
+# ---------------------------------------------------------------------------
+
+def test_queued_exchange_reflections_collapse_into_one_pass(continuity_module):
+    """A conversation is one reflection, not one per exchange."""
+    store = continuity_module.HUB["blue"].store
+    first = store.enqueue_reflection("exchange", ["ep-1"], "integrate the first")
+    second = store.enqueue_reflection("exchange", ["ep-2", "ep-3"], "")
+    third = store.enqueue_reflection("exchange", ["ep-3", "ep-4"], "integrate the last")
+    untouched = store.enqueue_reflection("duet", ["ep-5"], "a duet has its own prompt")
+
+    assert store.coalesce_pending() == 2
+
+    job = store.claim_reflection()
+    assert job["id"] == first, "the oldest job carries the merged work"
+    assert job["episode_ids"] == ["ep-1", "ep-2", "ep-3", "ep-4"], \
+        "every episode survives the merge, deduped and in order"
+    assert job["prompt_text"] == "integrate the last", \
+        "the newest instruction wins; the older ones describe a subset"
+
+    store.finish_reflection(job["id"])
+    remaining = store.claim_reflection()
+    assert remaining["id"] == untouched, "a duet job is never merged away"
+    assert second != third != untouched          # ids really were distinct
+
+
+def test_coalescing_leaves_a_lone_job_alone(continuity_module):
+    store = continuity_module.HUB["blue"].store
+    job_id = store.enqueue_reflection("exchange", ["ep-1"], "integrate this")
+    assert store.coalesce_pending() == 0
+    claimed = store.claim_reflection()
+    assert claimed["id"] == job_id
+    assert claimed["episode_ids"] == ["ep-1"]
+
+
+def test_preempted_reflection_is_requeued_without_spending_an_attempt(
+        continuity_module):
+    """Three interruptions must not retire a reflection."""
+    store = continuity_module.HUB["blue"].store
+    store.enqueue_reflection("exchange", ["ep-1"], "integrate this")
+
+    for _ in range(4):
+        job = store.claim_reflection()
+        assert job is not None, "a preempted job stays claimable"
+        assert job["attempts"] == 1
+        store.requeue_reflection(job["id"], "Preempted by a live turn")
+
+    job = store.claim_reflection()
+    assert job["episode_ids"] == ["ep-1"], "the work is intact"
+
+    # A real failure still counts, so a genuinely broken job is retired.
+    store.fail_reflection(job["id"], "model returned no content")
+    store.fail_reflection(store.claim_reflection()["id"], "again")
+    store.fail_reflection(store.claim_reflection()["id"], "and again")
+    assert store.claim_reflection() is None
+
+
+def test_a_live_turn_stops_the_reflection_mid_generation(continuity_module,
+                                                         monkeypatch):
+    """The gate cannot help once the reflection is already generating."""
+    route = continuity_module
+    seen = {}
+
+    def cancelled_call(messages, **kwargs):
+        seen["should_cancel"] = kwargs.get("should_cancel")
+        return {"cancelled": True, "partial_chars": 412}
+
+    monkeypatch.setattr(route.bt, "call_llm", cancelled_call)
+
+    with pytest.raises(route.ReflectionPreempted):
+        route._call([{"role": "user", "content": "reflect"}])
+
+    assert callable(seen["should_cancel"]), \
+        "the transport is given a way to abandon the call"
+
+
+def test_preemption_predicate_flips_when_a_turn_takes_the_model():
+    from blue.llm_coordinator import llm_slot, preemption_check
+
+    should_cancel = preemption_check()
+    assert not should_cancel(), "nothing has asked for the model yet"
+
+    with llm_slot(foreground=False):
+        pass
+    assert not should_cancel(), "other background work is not a reason to yield"
+
+    with llm_slot(foreground=True):
+        pass
+    assert should_cancel(), "a foreground turn wants the model"
+
+
+def test_abandonable_call_never_sends_the_callback_to_lm_studio(monkeypatch):
+    """should_cancel is a python callable, not a payload field."""
+    from blue.llm import LMStudioClient
+
+    client = LMStudioClient()
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}'
+            captured["talked"] = True          # now a turn arrives
+            yield b'data: {"choices":[{"delta":{"content":" more"}}]}'
+
+        def close(self):
+            captured["closed"] = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        captured["payload"] = json
+        return Response()
+
+    monkeypatch.setattr("blue.llm.requests.post", fake_post)
+
+    result = client.chat([{"role": "user", "content": "reflect"}],
+                         should_cancel=lambda: bool(captured.get("talked")))
+
+    assert result == {"cancelled": True, "partial_chars": len("partial")}
+    assert captured["closed"], "the connection is dropped so the model stops"
+    assert "should_cancel" not in captured["payload"]
+    assert captured["payload"]["stream"] is True
+
+
+def test_an_uninterrupted_abandonable_call_returns_a_normal_reply(monkeypatch):
+    from blue.llm import LMStudioClient
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            def sse(delta, finish=None):
+                choice = {"delta": delta}
+                if finish:
+                    choice["finish_reason"] = finish
+                return b"data: " + json.dumps({"choices": [choice]}).encode()
+
+            yield sse({"reasoning_content": "thinking"})
+            yield sse({"content": '{"changed":'})
+            yield sse({"content": '"nothing"}'}, finish="stop")
+            yield b'data: [DONE]'
+
+        def close(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("blue.llm.requests.post",
+                        lambda *a, **k: Response())
+
+    client = LMStudioClient()
+    result = client.chat([{"role": "user", "content": "reflect"}],
+                         should_cancel=lambda: False)
+
+    message = result["choices"][0]["message"]
+    assert message["content"] == '{"changed":"nothing"}'
+    assert message["reasoning_content"] == "thinking", \
+        "a reflection's JSON sometimes lands in the think block"
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_a_reflection_mid_generation_hands_the_model_to_a_waiting_turn(
+        continuity_module, monkeypatch):
+    """The whole point: Alex sends a message while a reflection is running.
+
+    Before, his turn queued behind the rest of the reflection — 13-28s of
+    someone else's thinking. The reflection must notice, drop the connection
+    so the model actually stops, and release the gate.
+    """
+    from blue.llm import LMStudioClient
+    from blue.llm_coordinator import llm_slot
+
+    route = continuity_module
+    generating = threading.Event()
+    closed = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            for _ in range(4000):        # a long reflection
+                generating.set()
+                yield b'data: {"choices":[{"delta":{"content":"thinking "}}]}'
+                time.sleep(0.005)
+
+        def close(self):
+            closed.append(True)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("blue.llm.requests.post", lambda *a, **k: Response())
+    client = LMStudioClient()
+    monkeypatch.setattr(
+        route.bt, "call_llm",
+        lambda messages, **kwargs: client.chat(
+            messages,
+            should_cancel=kwargs.get("should_cancel"),
+            max_tokens=kwargs.get("max_tokens"),
+        ),
+    )
+
+    outcome = {}
+
+    def reflect():
+        try:
+            route._call([{"role": "user", "content": "reflect"}])
+            outcome["result"] = "ran to completion"
+        except route.ReflectionPreempted:
+            outcome["result"] = "preempted"
+
+    worker = threading.Thread(target=reflect, daemon=True)
+    worker.start()
+    assert generating.wait(5), "the reflection never started generating"
+
+    asked_at = time.monotonic()
+    with llm_slot(foreground=True):
+        waited = time.monotonic() - asked_at
+
+    worker.join(5)
+    assert outcome["result"] == "preempted"
+    assert closed, "the connection must be dropped or the model keeps going"
+    assert waited < 1.0, f"the live turn still waited {waited:.1f}s for the model"

@@ -32,10 +32,18 @@ _LOCAL = threading.local()
 # signal for it — every user-facing surface already asks for foreground.
 _LAST_FOREGROUND_AT = 0.0
 
+# Not starting a reflection while someone is talking still leaves the case the
+# gate cannot help with: the reflection was already generating when Alex hit
+# send. Serializing then means his turn waits out the rest of it — measured at
+# 13-28s. This counter is the signal a background call watches to give the
+# model back mid-generation; it moves on every foreground acquisition.
+_FOREGROUND_EPOCH = 0
+
 
 def _mark_foreground() -> None:
-    global _LAST_FOREGROUND_AT
+    global _LAST_FOREGROUND_AT, _FOREGROUND_EPOCH
     _LAST_FOREGROUND_AT = time.monotonic()
+    _FOREGROUND_EPOCH += 1
 
 
 def seconds_since_foreground() -> float:
@@ -43,6 +51,23 @@ def seconds_since_foreground() -> float:
     if not _LAST_FOREGROUND_AT:
         return float("inf")
     return max(0.0, time.monotonic() - _LAST_FOREGROUND_AT)
+
+
+def foreground_epoch() -> int:
+    """A counter that advances whenever a foreground call takes the model."""
+    return _FOREGROUND_EPOCH
+
+
+def preemption_check():
+    """A predicate that becomes true once a foreground call wants the model.
+
+    Take it at the top of a background call and pass it to the transport; the
+    epoch is sampled now, so only foreground work arriving *after* this point
+    counts. Marked on the way in to the gate as well as out, so a turn that is
+    still queued for the model already preempts.
+    """
+    start = _FOREGROUND_EPOCH
+    return lambda: _FOREGROUND_EPOCH != start
 
 
 @contextmanager

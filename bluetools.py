@@ -1598,6 +1598,7 @@ from blue.utils import strip_conversational_filler, strip_pasted_block
 # for the head). The module is defensive: if a library isn't installed or a
 # board isn't connected, all head calls are no-ops and chat keeps running.
 from blue import head as blue_head
+from blue import llm as _blue_llm   # shared abandonable transport
 from blue.mood_eyes import mood_eye_color
 from blue.agreement import agreement_gesture
 # Every call to the single local model goes through this gate, so a background
@@ -1947,8 +1948,20 @@ class LMStudioClient:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
+        should_cancel: Optional[Any] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
+        """One chat completion against the local model.
+
+        ``should_cancel`` makes the call abandonable: it is polled while the
+        reply streams in and, when it goes true, the connection is dropped so
+        the model stops generating and is free for whoever asked for it. The
+        caller gets ``{"cancelled": True}`` and no reply — background work
+        (continuity reflection) uses it to get out of a live turn's way.
+        It is declared here rather than left to **kwargs because everything
+        in kwargs is sent to LM Studio as a payload field, and a function is
+        not JSON.
+        """
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -1968,6 +1981,13 @@ class LMStudioClient:
             payload.update(extra)
         if kwargs:
             payload.update(kwargs)
+
+        if should_cancel is not None:
+            # Background priority: this call exists to be interrupted, so it
+            # must not take the foreground slot the blocking path below does.
+            with llm_slot(foreground=False):
+                return _blue_llm.stream_abandonable(
+                    self.base_url, payload, self.timeout, should_cancel)
 
         # Retry logic with exponential backoff
         import time

@@ -426,3 +426,50 @@ def test_a_voice_denial_is_regenerated_end_to_end(chat):
     text = reply_of(response)
     assert "voice output" not in text, "the voice denial reached the user"
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
+
+
+# --------------------------------------------------------------------------
+# The transport the pipeline actually uses
+# --------------------------------------------------------------------------
+
+def test_the_live_client_accepts_a_cancel_callback_without_sending_it(monkeypatch):
+    """There are two LMStudioClient classes; this is the one chat calls.
+
+    Adding ``should_cancel`` to the copy in blue/llm.py alone was not enough:
+    on the live path the callback fell through **kwargs into the request body
+    and every reflection died with "Object of type function is not JSON
+    serializable" — silently, since _call swallows the error and returns "".
+    Unit tests against the other copy all passed.
+    """
+    seen = {}
+
+    def stream_abandonable(url, payload, timeout, should_cancel):
+        seen["payload"] = payload
+        seen["should_cancel"] = should_cancel
+        return {"cancelled": True, "partial_chars": 7}
+
+    monkeypatch.setattr(bt._blue_llm, "stream_abandonable", stream_abandonable)
+
+    result = bt._LM.chat([{"role": "user", "content": "reflect"}],
+                         max_tokens=1900, should_cancel=lambda: True)
+
+    assert result == {"cancelled": True, "partial_chars": 7}
+    assert "should_cancel" not in seen["payload"], \
+        "a python callable must never reach the request body"
+    assert callable(seen["should_cancel"])
+    assert seen["payload"]["max_tokens"] == 1900
+
+
+def test_call_llm_carries_the_cancel_callback_through_to_the_client(monkeypatch):
+    """call_llm is wrapped twice; the kwarg has to survive both layers."""
+    seen = {}
+    monkeypatch.setattr(
+        bt._LM, "chat",
+        lambda messages, **kwargs: seen.update(kwargs) or {"cancelled": True})
+
+    result = bt.call_llm([{"role": "user", "content": "reflect"}],
+                         include_tools=False, should_cancel=lambda: True)
+
+    assert callable(seen.get("should_cancel"))
+    assert result == {"cancelled": True}, \
+        "a cancelled result must pass through the response polisher untouched"
