@@ -29,6 +29,30 @@ from typing import Any, Dict, List, Optional
 import bluetools as bt
 
 
+def _missing_required_args(tool_name: str, tool_args: Dict[str, Any]) -> List[str]:
+    """Required schema parameters that `tool_args` has no usable value for.
+
+    Used to refuse a forced execution that would act on nothing. Unknown
+    tools report nothing missing — this guards a known bad shape, it is not
+    a validator."""
+    for spec in bt.TOOLS:
+        fn = spec.get("function", {}) if isinstance(spec, dict) else {}
+        if fn.get("name") != tool_name:
+            continue
+        required = (fn.get("parameters") or {}).get("required") or []
+        args = tool_args or {}
+
+        def unusable(name: str) -> bool:
+            if name not in args:
+                return True
+            value = args[name]
+            # 0 and False are real values; "" and None are not.
+            return value is None or (isinstance(value, str) and not value.strip())
+
+        return [name for name in required if unusable(name)]
+    return []
+
+
 def template_response(tool_name, tool_args, tool_result):
     """Build a quick natural response from tool result without LLM."""
     try:
@@ -502,7 +526,18 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
                     # Use selector's extracted params if available, otherwise let LLM retry
                     tool_args = improved_tool_args if improved_tool_args is not None else {}
-                    if tool_args is not None:
+                    # ...but never run a tool with nothing to act on. The old
+                    # `is not None` test was always true, so a detector that
+                    # returned extracted_params={} (remember_person does) ran
+                    # the tool with {} — "[OK] Remembered person:" with a blank
+                    # name, writing an empty row (live 2026-08-13). If the
+                    # schema needs arguments the selector could not supply,
+                    # let the model's own answer stand.
+                    missing = _missing_required_args(correct_tool, tool_args)
+                    if missing:
+                        print(f"   [SKIP] not direct-executing {correct_tool} — "
+                              f"no {', '.join(missing)} was extracted")
+                    else:
                         print(f"   [RETRY] Direct-executing {correct_tool} with extracted params")
                         tool_result = bt.execute_tool(correct_tool, tool_args)
                         conversation_messages.append({

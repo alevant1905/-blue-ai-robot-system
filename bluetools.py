@@ -10581,13 +10581,69 @@ def _build_focus_block() -> str:
     )
 
 
-def _build_now_block() -> str:
+def _mentioned_date_intervals(text: str, today=None) -> List[str]:
+    """Pre-computed "how far away is that date" lines for dates named in `text`.
+
+    The model cannot be trusted with calendar arithmetic. Told the move was
+    "October 28th" on August 13, it answered "October 28th is less than six
+    weeks away" — it is eleven — and then built the rest of the reply on that
+    (live 2026-08-13). Same lesson as the syllabus grounding: resolve the
+    date in Python and hand over the answer.
+    """
+    from datetime import date, timedelta
+    if not text:
+        return []
+    if today is None:
+        today = date.today()
+    lines: List[str] = []
+    seen = set()
+    for m in re.finditer(
+            rf"\b({_MONTH_NAME_RE})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+            text, re.I):
+        try:
+            month = _MONTHS_3.index(m.group(1)[:3].lower()) + 1
+            target = date(today.year, month, int(m.group(2)))
+        except ValueError:
+            continue
+        # A date months behind us almost always names next year's.
+        if (today - target).days > 180:
+            try:
+                target = date(today.year + 1, month, int(m.group(2)))
+            except ValueError:
+                continue
+        if target in seen:
+            continue
+        seen.add(target)
+        days = (target - today).days
+        pretty = f"{target.strftime('%A, %B')} {target.day}, {target.year}"
+        if days == 0:
+            lines.append(f"{pretty} is TODAY.")
+            continue
+        weeks, spare = divmod(abs(days), 7)
+        span = f"{abs(days)} day{'s' if abs(days) != 1 else ''}"
+        if weeks:
+            span += (f" ({weeks} week{'s' if weeks != 1 else ''}"
+                     + (f" and {spare} day{'s' if spare != 1 else ''}"
+                        if spare else "") + ")")
+        lines.append(
+            f"{pretty} is {span} "
+            + ("from today" if days > 0 else "ago") + ".")
+        if len(lines) >= 6:
+            break
+    return lines
+
+
+def _build_now_block(user_text: str = "") -> str:
     """Render the current local date/time + explicit relative-day resolutions.
 
     Without this, the LLM has no anchor for 'now' and treats relative phrases
     in chat history (e.g. yesterday's "tomorrow at 3pm") as if they were said
     today, so meetings drift forward each session. The resolutions below give
     it absolute dates to rewrite against.
+
+    `user_text` (this turn's message) additionally gets any calendar date it
+    names resolved to a distance in days/weeks, because the model gets that
+    arithmetic wrong on its own.
     """
     from datetime import datetime, timedelta
     now = datetime.now()
@@ -10595,6 +10651,14 @@ def _build_now_block() -> str:
     today_d = now.date()
     date_str = f"{today_d.strftime('%A, %B')} {today_d.day}, {today_d.year}"
     time_str = now.strftime("%I:%M %p").lstrip("0")
+    intervals = _mentioned_date_intervals(user_text, today_d)
+    interval_section = ""
+    if intervals:
+        interval_section = (
+            "Dates mentioned, already worked out for you — state these "
+            "distances as given and do NOT recompute them:\n"
+            + "\n".join(f"- {line}" for line in intervals) + "\n"
+        )
     return (
         "<now>\n"
         f"Current date: {date_str}\n"
@@ -10604,6 +10668,7 @@ def _build_now_block() -> str:
         f"\"yesterday\" was {(today_d - timedelta(days=1)).isoformat()}. "
         "Resolve any relative time phrase in chat history against THIS date, "
         "not the date the message was originally said.\n"
+        + interval_section +
         "</now>"
     )
 
@@ -11205,6 +11270,13 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     scholarly expertise, no reminder rules — and uses a warm, playful,
     age-appropriate persona instead. See _CHAT_ONLY_USERS / _SPEAKER_PROFILES.
     """
+    # The turn's own message, so <now> can resolve any date it names.
+    _turn_text = ""
+    for _m in reversed(conversation_messages or []):
+        if isinstance(_m, dict) and _m.get("role") == "user":
+            _turn_text = str(_m.get("content") or "")[:2000]
+            break
+
     if kid_mode:
         # A completely different Blue for the kids' iPad: sweet, simple, safe and
         # deliberately calendar-free (the schedule/reminder machinery is Alex's,
@@ -11212,7 +11284,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         return {
             "role": "system",
             "content": (
-                f"{_build_now_block()}\n\n"
+                f"{_build_now_block(_turn_text)}\n\n"
                 "You are Blue, a warm and playful robot friend talking with a "
                 "young child. Be sweet, gentle, patient and encouraging so she "
                 "feels happy and excited to talk to you. When she says hello or "
@@ -11358,7 +11430,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         expertise_block = _build_expertise_block()
         expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
 
-    now_block = _build_now_block()
+    now_block = _build_now_block(_turn_text)
     location_block = _build_location_block()
     activity_block = _build_current_activity_block()
     schedule_block = _build_upcoming_schedule_block()

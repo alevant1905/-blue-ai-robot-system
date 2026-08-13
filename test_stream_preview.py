@@ -199,3 +199,18 @@ def test_a_broken_client_pipe_does_not_fail_the_turn(monkeypatch):
 
     result = bt._stream_from_model({"messages": []}, exploding_sink)
     assert result["choices"][0]["message"]["content"] == "still answered"
+
+
+def test_no_hop_by_hop_headers_on_the_event_stream(client):
+    """PEP 3333 bars a WSGI app from setting "Connection". Waitress asserted
+    on it and killed the response for EVERY stream (live 2026-08-13):
+    AssertionError: Connection is a "hop-by-hop" header."""
+    stream_routes.open_stream("turn-hop")
+    stream_routes.close_stream("turn-hop")
+    resp = client.get("/chat/stream/turn-hop")
+    hop_by_hop = {
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade",
+    }
+    assert not {k.lower() for k, _ in resp.headers} & hop_by_hop
+    assert resp.headers["Cache-Control"].startswith("no-cache")

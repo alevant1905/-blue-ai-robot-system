@@ -418,3 +418,47 @@ def test_scheduling_requests_still_create_reminders(msg):
     assert not is_reminder_recall_request(msg)
     intent = CalendarDetector()._detect_create_event(msg)
     assert intent is not None and intent.tool_name == "create_reminder"
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-13: "Blue, that's not less than six weeks away." — a correction about
+# ARITHMETIC — selected remember_person at 0.95 and forced it. The bare
+# substring "that's not" was treated as a person being named, with no person
+# context required, and the detector supplied extracted_params={}, so the
+# pipeline direct-executed remember_person with no name at all.
+
+NOT_ABOUT_PEOPLE = [
+    "blue, that's not less than six weeks away",
+    "that's not what i asked",
+    "that's not the right course, it's dh399",
+    "no, that is not how the deadline works",
+    "i think you mixed up the dates",
+]
+
+ABOUT_PEOPLE = [
+    "that's not felix",
+    "that's not felix, that's alex",
+    "his name is felix",
+    "you're confusing him with felix",
+    "wrong person - she has glasses",
+]
+
+
+@pytest.mark.parametrize("msg", NOT_ABOUT_PEOPLE)
+def test_a_correction_about_facts_is_not_a_person_to_remember(msg):
+    assert _selected_tool(msg) != "remember_person"
+
+
+@pytest.mark.parametrize("msg", ABOUT_PEOPLE)
+def test_a_correction_about_a_person_still_reaches_remember_person(msg):
+    from blue.tool_selector.detectors.vision import VisionDetector
+    intent = VisionDetector()._detect_remember_person_intent(msg, {})
+    assert intent is not None and intent.tool_name == "remember_person"
+
+
+def test_person_context_words_match_whole_words_only():
+    """'hair' matched "chair", 'face' matched "surface", 'short' "shortly"."""
+    from blue.tool_selector.detectors.vision import VisionDetector
+    for msg in ("look at the chair", "i'll be back shortly",
+                "clean the surface of the table"):
+        assert VisionDetector()._detect_remember_person_intent(msg, {}) is None

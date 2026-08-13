@@ -23,6 +23,17 @@ _ZOOM_REGION_RE = re.compile(
     r"(top[- ]?left|top[- ]?right|bottom[- ]?left|bottom[- ]?right|left|right|top|bottom|middle|center|centre)\b")
 
 
+# Words that make a bare correction actually about a PERSON.
+_PERSON_CUE_RE = re.compile(
+    r"\b(?:he|him|his|she|her|hers|they|them|their|person|people|guy|man|men|"
+    r"woman|women|kid|boy|girl|brother|sister|dad|father|mom|mother|son|"
+    r"daughter|wife|husband|friend|neighbou?rs?|face|name)\b")
+# "that's not Felix." — a correction whose entire remainder is a short name.
+_NOT_A_NAME_RE = re.compile(
+    r"\bthat(?:'s| is|s)? not\s+(?:my\s+|the\s+)?[a-z][a-z'\-]{1,20}"
+    r"(?:\s+[a-z][a-z'\-]{1,20})?\s*[.!?]*\s*$")
+
+
 def extract_camera_view_args(msg_lower: str) -> dict:
     """Pull camera view-control params (look / zoom / zoom_region) out of a
     message. Empty dict when none are present (plain straight-on capture)."""
@@ -306,22 +317,15 @@ class VisionDetector(BaseDetector):
 
     def _detect_remember_person_intent(self, msg_lower: str, context: Dict) -> Optional[ToolIntent]:
         """Detect intent to store/update person information in visual memory."""
-        # Person-related context — must be present for any match
-        has_person_context = any(w in msg_lower for w in [
+        # Person-related context — must be present for any match. Whole words
+        # only: 'hair' matched "chair", 'face' matched "surface", 'short'
+        # matched "shortly".
+        has_person_context = has_any_word([
             'glasses', 'beard', 'mustache', 'hair', 'tall', 'short',
-            'wears', 'looks like', 'appearance', 'face',
-        ])
-        # Names being explicitly taught
-        has_name_teaching = any(s in msg_lower for s in [
-            'his name is', 'her name is', 'their name is',
-            "that's not", 'wrong person', 'wrong name',
-            "you're confusing", 'mixed up',
-        ])
+            'wears', 'appearance', 'face',
+        ], msg_lower) or 'looks like' in msg_lower
 
-        if not has_person_context and not has_name_teaching:
-            return None
-
-        # Remember/correction signals (only evaluated when person context exists)
+        # Remember/correction signals
         remember_signals = [
             'remember that', 'remember this', 'i want you to remember',
             "don't forget", 'keep in mind',
@@ -331,9 +335,33 @@ class VisionDetector(BaseDetector):
             'has glasses', 'has a beard', 'has a mustache',
             'not felix', 'not alex',
         ]
-
         has_remember = any(s in msg_lower for s in remember_signals)
         has_correction = any(s in msg_lower for s in correction_signals)
+
+        # Names being explicitly taught. Only these say "a person" on their own.
+        strong_name_teaching = any(s in msg_lower for s in [
+            'his name is', 'her name is', 'their name is',
+            'wrong person', 'wrong name',
+        ])
+        # These do not: "Blue, that's not less than six weeks away" forced
+        # remember_person at 0.95 (live 2026-08-13), and the pipeline then
+        # direct-executed it with EMPTY arguments. A generic correction needs
+        # something person-shaped alongside it.
+        generic_correction = any(s in msg_lower for s in [
+            "that's not", 'that is not', "thats not",
+            "you're confusing", 'youre confusing', 'mixed up',
+        ])
+        has_person_cue = (
+            has_person_context
+            or has_correction
+            or bool(_PERSON_CUE_RE.search(msg_lower))
+            or bool(_NOT_A_NAME_RE.search(msg_lower))
+        )
+        has_name_teaching = strong_name_teaching or (
+            generic_correction and has_person_cue)
+
+        if not has_person_context and not has_name_teaching:
+            return None
 
         if has_name_teaching:
             return ToolIntent(

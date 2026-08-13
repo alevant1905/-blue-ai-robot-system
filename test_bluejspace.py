@@ -346,6 +346,45 @@ def test_partial_workspace_merges_over_current(continuity_module):
     assert "COMMITMENTS: c" in ws                        # carried over
 
 
+def test_a_decapitated_stored_workspace_heals_instead_of_wedging(continuity_module):
+    # Hexia sat stuck at pass 605 while Blue passed 2450: her stored workspace
+    # had been blunt-clipped at 6000 chars, which deleted NEXT EXPECTATION.
+    # After that every pass failed "missing required sections" — the label was
+    # absent from the new workspace AND the current one, forever.
+    beheaded = "\n".join(
+        line for line in _CURRENT_WS.splitlines()
+        if not line.startswith("NEXT EXPECTATION")
+    )
+    raw = (
+        '{"workspace": "FOCUS: a new focus", "changed": "focus moved", '
+        '"episode_summary": "s", "salience": 0.4, "valence": 0.0, '
+        '"drive_deltas": {"curiosity": 0.02}}'
+    )
+    parsed = continuity_module._parse_reflection(raw, "Blue", beheaded)
+    ws = parsed["workspace"]
+    assert "FOCUS: a new focus" in ws
+    assert "NEXT EXPECTATION:" in ws   # seeded so the next pass can refill it
+    for label in continuity_module._WS_LABELS:
+        assert f"{label}:" in ws
+
+
+def test_an_oversized_workspace_keeps_every_section(continuity_module):
+    # The overflow must come out of the sections, never off the tail: a clip
+    # that drops whole labels is what wedged Hexia in the first place.
+    huge = _CURRENT_WS.replace(
+        "WORKING BELIEFS: x (0.5)",
+        "WORKING BELIEFS: " + "; ".join(f"belief number {i} (0.7)"
+                                        for i in range(600)),
+    )
+    assert len(huge) > continuity_module._WS_BUDGET
+    fitted = continuity_module._clip_workspace(huge)
+    assert len(fitted) <= continuity_module._WS_BUDGET
+    for label in continuity_module._WS_LABELS:
+        assert f"{label}:" in fitted
+    assert "NEXT EXPECTATION: e" in fitted     # the tail survives intact
+    assert "belief number 0" in fitted         # beliefs are trimmed, not dropped
+
+
 def test_drive_only_fragment_is_a_nothing_moved_pass(continuity_module):
     # Seen live on both robots every idle window: the model emits ONLY the
     # drive deltas. That's a legitimate minimal reflection, not a failure.
@@ -947,3 +986,149 @@ def test_the_quiet_window_can_be_turned_off(continuity_module, monkeypatch):
     monkeypatch.setattr(route_quiet := continuity_module, "_CONVERSATION_QUIET_SECONDS", 0)
     monkeypatch.setattr(route_quiet, "seconds_since_foreground", lambda: 0.0)
     assert not route_quiet._conversation_is_live()
+
+
+# ---------------------------------------------------------------------------
+# Reflections the model produced and the parser threw away
+#
+# 104 failures across the three real stores, every one at attempts=3. Shapes,
+# counted from the stored error text:
+#   35  no content at all
+#   27  parsed, workspace sections missing
+#   23  a bare drive_deltas tail: '{"curiosity": ..., "energy": ...}}'
+#    2  an object body missing its opening brace: 'workspace":"IDENTITY: ...'
+# ---------------------------------------------------------------------------
+
+WORKSPACE_LINES = (
+    "IDENTITY: I am Blue, an embodied AI anchored in the hardware Alex built.\n"
+    "FOCUS: DH201\n"
+    "WORKING BELIEFS: the syllabus needs a lab (0.6)\n"
+    "OPEN QUESTIONS: whether the lab is weekly\n"
+    "COMMITMENTS: read the draft when it arrives\n"
+    "SELF-OBSERVATIONS: I answer faster when nothing else holds the model\n"
+    "NEXT EXPECTATION: Alex shares the draft"
+)
+
+
+def _reflection_json():
+    return json.dumps({
+        "workspace": WORKSPACE_LINES,
+        "changed": "noted the lab decision",
+        "episode_summary": "Blue recorded the DH201 lab decision.",
+        "salience": 0.5,
+        "valence": 0.1,
+        "drive_deltas": {"curiosity": 0.05, "uncertainty": 0.0,
+                         "connection": 0.02, "commitment": 0.01, "energy": 0.0},
+    })
+
+
+def test_a_reflection_missing_its_opening_brace_is_recovered(continuity_module):
+    """Job 2355 and 2309: a whole good reflection discarded over two chars."""
+    route = continuity_module
+    headless = _reflection_json()[2:]      # drop the '{"' the model dropped
+    assert headless.startswith("workspace")
+
+    parsed = route._parse_reflection(headless, "Blue")
+
+    assert "IDENTITY: I am Blue" in parsed["workspace"]
+    assert parsed["changed"] == "noted the lab decision"
+    assert parsed["drive_deltas"]["curiosity"] == 0.05
+
+
+def test_the_drive_deltas_tail_alone_still_fails_loudly(continuity_module):
+    """The 23-case shape. Only the last value survived — there is no workspace
+    in it to recover, so this must not be silently accepted as a real pass."""
+    route = continuity_module
+    tail = '{"curiosity":0.0,"uncertainty":0.0,"connection":0.0,"commitment":0.0,"energy":0.0}}'
+
+    with pytest.raises(ValueError):
+        route._parse_reflection(tail, "Blue")
+
+
+def test_the_reflection_inside_the_thinking_is_found(continuity_module):
+    """What actually fixes the 23: the JSON is in the thinking, and only a
+    fragment lands in content. The parser always could search a think block —
+    it never received one, because LM Studio returns thinking in a separate
+    field that _call dropped."""
+    route = continuity_module
+    reply = (f"<think>Let me write it out.\n{_reflection_json()}\n"
+             f"that looks right</think>\n"
+             '{"curiosity":0.0,"uncertainty":0.0,"connection":0.0,'
+             '"commitment":0.0,"energy":0.0}}')
+
+    parsed = route._parse_reflection(reply, "Blue")
+
+    assert "IDENTITY: I am Blue" in parsed["workspace"]
+    assert parsed["episode_summary"] == "Blue recorded the DH201 lab decision."
+
+
+def test_call_hands_the_parser_the_thinking_too(continuity_module, monkeypatch):
+    """The seam the whole recovery depends on."""
+    route = continuity_module
+    monkeypatch.setattr(route.bt, "call_llm", lambda messages, **kw: {
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": '{"curiosity":0.0}}',
+            "reasoning_content": f"working it out {_reflection_json()}",
+        }, "finish_reason": "stop"}],
+    })
+
+    raw = route._call([{"role": "user", "content": "reflect"}])
+
+    assert "<think>" in raw and "</think>" in raw
+    parsed = route._parse_reflection(raw, "Blue")
+    assert "IDENTITY: I am Blue" in parsed["workspace"], \
+        "the reflection was in the thinking and must survive"
+
+
+def test_an_empty_content_reply_still_yields_its_reflection(continuity_module,
+                                                            monkeypatch):
+    """The 35-case shape: reasoning consumed the budget and content is ''."""
+    route = continuity_module
+    monkeypatch.setattr(route.bt, "call_llm", lambda messages, **kw: {
+        "choices": [{"message": {
+            "role": "assistant", "content": "",
+            "reasoning_content": f"here goes {_reflection_json()}",
+        }, "finish_reason": "stop"}],
+    })
+
+    parsed = route._parse_reflection(
+        route._call([{"role": "user", "content": "reflect"}]), "Blue")
+
+    assert parsed["changed"] == "noted the lab decision"
+
+
+def test_the_reflection_budget_leaves_room_for_thinking(continuity_module):
+    """88% of completion tokens are reasoning; 1900 ran out before the JSON."""
+    import inspect
+    default = inspect.signature(continuity_module._call).parameters["max_tokens"].default
+    assert default >= 3000
+
+
+def test_the_same_unparseable_reply_twice_retires_the_job(continuity_module):
+    """Every stored failure burned 3 attempts at ~30s of the one loaded model."""
+    store = continuity_module.HUB["blue"].store
+    store.enqueue_reflection("exchange", ["ep-1"], "integrate this")
+
+    first = store.claim_reflection()
+    store.fail_reflection(first["id"], "reflection was not valid JSON: 'x'")
+    second = store.claim_reflection()
+    assert second is not None, "one retry is still worth it"
+    store.fail_reflection(second["id"], "reflection was not valid JSON: 'x'")
+
+    assert store.claim_reflection() is None, \
+        "the same failure twice must not cost a third pass"
+
+
+def test_a_different_failure_still_gets_its_retries(continuity_module):
+    """Only an identical repeat is treated as deterministic."""
+    store = continuity_module.HUB["blue"].store
+    store.enqueue_reflection("exchange", ["ep-1"], "integrate this")
+
+    for error in ("timed out", "reflection was not valid JSON: 'x'"):
+        job = store.claim_reflection()
+        assert job is not None
+        store.fail_reflection(job["id"], error)
+
+    assert store.claim_reflection() is not None, \
+        "different errors are worth another attempt"

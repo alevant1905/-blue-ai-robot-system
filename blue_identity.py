@@ -1518,7 +1518,9 @@ _CORRECTION_ACK_RE = re.compile(
     # update my memory" — to questions that corrected nothing — went straight
     # through (2026-08-01).
     r"|\bthanks for catching (?:that|this|it)\b"
-    r"|\b(?:oops|whoops|my bad|my mistake|you(?:['’]re| are) right)\b"
+    # "(?: \w+ly)?" — the models reach for an adverb ("you're absolutely
+    # right", "you are completely right") far more often than the bare form.
+    r"|\b(?:oops|whoops|my bad|my mistake|you(?:['’]re| are)(?: \w+ly)? right)\b"
     r"|\bi (?:must have|may have|might have) (?:mixed|gotten|got|had) "
     r"(?:that|those|them|it|the \w+)?\s*(?:up|wrong|mixed up)?\b"
     r"|\blet me (?:get (?:that|this|it) (?:straight|right)|update my memory)\b"
@@ -1533,7 +1535,13 @@ _USER_CORRECTION_CUE_RE = re.compile(
     r"correction|correct (?:it|that|this|them)|actually|isn['’]?t|"
     r"aren['’]?t|wasn['’]?t|weren['’]?t|older|younger|there is no|"
     r"there(?:['’]s| is) not?)\b"
-    r"|\bno[,.!]",
+    r"|\bno[,.!]"
+    # The plainest correction there is. "Blue, that's not less than six weeks
+    # away" matched nothing above, so a legitimate acknowledgment was called
+    # phantom and burned a regeneration (live 2026-08-13).
+    r"|\b(?:that|this|it|those|these|you)(?:['’]re|['’]s| is| are| was| were)?"
+    r"\s+not\b"
+    r"|\bdidn['’]?t\b|\bdoesn['’]?t\b|\bdon['’]?t\b|\bnever said\b",
     re.IGNORECASE,
 )
 

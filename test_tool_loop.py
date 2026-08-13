@@ -202,3 +202,47 @@ def test_both_leaked_tool_call_formats_are_recognised():
 
     assert bt.parse_leaked_tool_call("just an ordinary sentence") is None
     assert bt.parse_leaked_tool_call('<tool_call>{not json}</tool_call>') is None
+
+
+# --------------------------------------------------------------------------
+# Not acting on nothing
+# --------------------------------------------------------------------------
+
+def test_a_forced_tool_with_no_arguments_is_not_executed(loop):
+    """"Blue, that's not less than six weeks away" forced remember_person; the
+    model sensibly declined to call it, and the retry path ran it anyway with
+    {} — "[OK] Remembered person:" with a blank name (live 2026-08-13). The
+    old test was `if tool_args is not None`, which is always true."""
+    from blue.server.tool_pipeline import _missing_required_args
+
+    assert _missing_required_args("remember_person", {}) == ["name"]
+    assert _missing_required_args("remember_person", {"name": "  "}) == ["name"]
+    assert _missing_required_args("remember_person", {"name": "Felix"}) == []
+    # 0 and False are real values, not missing ones.
+    assert _missing_required_args("set_volume", {"level": 0}) == []
+    # An unknown tool is not this guard's business.
+    assert _missing_required_args("no_such_tool", {}) == []
+
+
+def _forced(loop, text, tool, args):
+    from blue.server import tool_pipeline
+    return tool_pipeline.run_tool_loop(
+        text, None, [{"role": "user", "content": text}],
+        tool, args, False, text, 3, None, "Alex")
+
+
+def test_the_forced_retry_still_runs_when_the_selector_supplied_arguments(loop):
+    loop.model.queue("Noted — Felix it is.")
+    _forced(loop, "his name is felix", "remember_person", {"name": "Felix"})
+
+    assert [c["tool"] for c in loop.executed] == ["remember_person"]
+    assert loop.executed[0]["args"]["name"] == "Felix"
+
+
+def test_the_forced_retry_is_skipped_when_the_selector_supplied_nothing(loop):
+    loop.model.queue("Eleven weeks, not six.")
+    result = _forced(loop, "that's not less than six weeks away",
+                     "remember_person", {})
+
+    assert loop.executed == [], "a person was remembered with no name"
+    assert content_of(result)

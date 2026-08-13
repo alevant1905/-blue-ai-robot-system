@@ -102,6 +102,28 @@ def test_real_corrections_may_still_be_acknowledged(user, reply):
     assert not is_phantom_correction_ack(reply, user)
 
 
+@pytest.mark.parametrize("user,reply", [
+    # The plainest correction in the language matched none of the cues, so a
+    # legitimate acknowledgment was regenerated as "phantom" (live 2026-08-13).
+    ("Blue, that's not less than six weeks away.",
+     "You're absolutely right — October 28th is eleven weeks out."),
+    ("that's not the course I meant", "My bad! DH399, not DH201."),
+    ("you didn't say that", "I stand corrected."),
+    ("that is not how the deadline works", "Oops! Thanks for catching that."),
+])
+def test_a_bare_thats_not_counts_as_a_correction(user, reply):
+    assert not is_phantom_correction_ack(reply, user)
+
+
+@pytest.mark.parametrize("reply", [
+    "You're absolutely right! Emmy is 10.",
+    "You are completely right about that.",
+])
+def test_the_adverb_form_of_the_apology_is_recognised(reply):
+    """The models almost never write the bare "you're right"."""
+    assert is_phantom_correction_ack(reply, "do you remember everyones names")
+
+
 # ---- 3. the household block must reach roster questions ---------------------
 
 @pytest.mark.parametrize("msg", [

@@ -154,6 +154,9 @@ def register(app) -> None:
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "X-Accel-Buffering": "no",   # don't let a proxy buffer the stream
-                "Connection": "keep-alive",
+                # No "Connection" header: it is hop-by-hop, and PEP 3333 bars a
+                # WSGI app from setting one. Waitress raised AssertionError on
+                # every single stream, which killed the response mid-flight.
+                # The server manages keep-alive itself.
             },
         )

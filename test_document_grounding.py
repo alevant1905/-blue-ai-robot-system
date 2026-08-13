@@ -247,3 +247,49 @@ def test_face_match_is_saved_even_when_vision_prose_omits_the_name(
         "confidence": 0.84,
         "observation_id": 71,
     }
+
+
+# ---------------------------------------------------------------------------
+# Calendar arithmetic is resolved in Python, never left to the model.
+# Told on August 13 that the move was "October 28th", Blue answered "October
+# 28th is less than six weeks away" — it is eleven — and built the rest of the
+# reply (and a continuity belief) on top of that.
+
+def test_a_date_in_the_message_is_resolved_to_a_real_distance():
+    from datetime import date
+    lines = bt._mentioned_date_intervals(
+        "we're moving already October 28th into our new house",
+        date(2026, 8, 13))
+    assert lines == [
+        "Wednesday, October 28, 2026 is 76 days (10 weeks and 6 days) from today."
+    ]
+
+
+def test_every_date_named_is_resolved_and_past_ones_read_as_past():
+    from datetime import date
+    lines = bt._mentioned_date_intervals(
+        "is it aug 20 or sept 3? the july 4 reading was long", date(2026, 8, 13))
+    assert "August 20, 2026 is 7 days (1 week) from today." in lines[0]
+    assert "September 3, 2026 is 21 days (3 weeks) from today." in lines[1]
+    assert "July 4, 2026 is 40 days (5 weeks and 5 days) ago." in lines[2]
+
+
+def test_a_date_months_behind_us_means_next_year():
+    from datetime import date
+    lines = bt._mentioned_date_intervals("what about jan 5", date(2026, 8, 13))
+    assert "January 5, 2027" in lines[0]
+
+
+def test_a_message_with_no_date_adds_nothing():
+    from datetime import date
+    assert bt._mentioned_date_intervals("sell the house soon", date(2026, 8, 13)) == []
+    assert bt._mentioned_date_intervals("", date(2026, 8, 13)) == []
+
+
+def test_the_now_block_carries_the_resolution_into_the_prompt():
+    block = bt._build_now_block("we're moving October 28th")
+    assert "<now>" in block and block.rstrip().endswith("</now>")
+    assert "October 28" in block
+    assert "do NOT recompute" in block
+    # A turn that names no date keeps the block exactly as it was.
+    assert "already worked out" not in bt._build_now_block("hello there")

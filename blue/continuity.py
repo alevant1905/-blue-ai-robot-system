@@ -763,14 +763,21 @@ class ContinuityStore:
     def fail_reflection(self, job_id: int, error: str, retry: bool = True) -> None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT attempts FROM reflection_jobs WHERE id = ?", (int(job_id),)
+                "SELECT attempts, error FROM reflection_jobs WHERE id = ?",
+                (int(job_id),)
             ).fetchone()
             attempts = int(row["attempts"]) if row else 3
-            status = "pending" if retry and attempts < 3 else "failed"
+            message = _clip(error, 1000)
+            # A reply the model could not parse twice running is not going to
+            # parse on a third pass, and each pass is ~30s of the one loaded
+            # model. Every stored failure in the real store reached attempts=3
+            # this way; a repeat of the same error retires the job instead.
+            repeated = bool(row) and (row["error"] or "") == message
+            status = "pending" if retry and attempts < 3 and not repeated else "failed"
             conn.execute(
                 "UPDATE reflection_jobs SET status = ?, error = ?, "
                 "completed_at = ? WHERE id = ?",
-                (status, _clip(error, 1000), _now(), int(job_id)),
+                (status, message, _now(), int(job_id)),
             )
 
     def pending_reflections(self) -> int:

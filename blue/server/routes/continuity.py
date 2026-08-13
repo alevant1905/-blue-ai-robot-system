@@ -173,7 +173,13 @@ class ReflectionPreempted(Exception):
 
 
 def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
-          max_tokens: int = 1900) -> str:
+          max_tokens: int = 3200) -> str:
+    # 1900 was sized for a model that spent its budget on the answer. The
+    # loaded reasoning model spends 88% of completion tokens thinking (median
+    # 262 of 297 on a chat turn), so a reflection can exhaust the cap before
+    # it writes any JSON — 35 of 104 stored failures are "returned no
+    # content". A cap only binds when it is reached, so raising it costs
+    # nothing on the passes that already finish.
     try:
         with llm_slot(foreground=False):
             # Sampled inside the slot: everything before this point was the
@@ -194,6 +200,7 @@ def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
         choice = choices[0] if choices else {}
         message = choice.get("message") or {}
         text = message.get("content") or ""
+        reasoning = str(message.get("reasoning_content") or "")
         if not text:
             usage = (result or {}).get("usage") or {}
             prompt_chars = sum(len(str(item.get("content") or "")) for item in messages)
@@ -201,13 +208,24 @@ def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
                 "[JSPACE] reflection returned empty content "
                 f"(finish={choice.get('finish_reason')!r}, prompt_chars={prompt_chars}, "
                 f"completion_tokens={usage.get('completion_tokens')!r}, "
-                f"reasoning_chars={len(str(message.get('reasoning_content') or ''))}, "
+                f"reasoning_chars={len(reasoning)}, "
                 f"error={(result or {}).get('error')!r})"
             )
         # Think blocks are NOT stripped here: a reasoning model sometimes
-        # leaves the real reflection JSON inside <think> with only a fragment
-        # after it — _parse_reflection tries the post-think tail first and
-        # falls back to the full text.
+        # leaves the real reflection JSON inside its thinking with only a
+        # fragment after it — _parse_reflection tries the post-think tail
+        # first and falls back to the full text.
+        #
+        # That fallback was dead until now. It was written for a model that
+        # inlines <think>...</think> in the content; LM Studio returns the
+        # thinking in a SEPARATE reasoning_content field, so `text` was the
+        # fragment and the full text was the same fragment. Measured over 104
+        # real stored failures: 23 were a bare drive_deltas tail
+        # ('{"curiosity": ..., "energy": ...}}' — the object's last value plus
+        # its orphaned closing brace) and 35 had no content at all. Rebuilding
+        # the inline form gives the existing parser the whole reply to search.
+        if reasoning:
+            return f"<think>{reasoning}</think>\n{text}".strip()
         return text.strip()
     except ReflectionPreempted:
         raise          # not a failure — the worker requeues it
@@ -295,6 +313,50 @@ def _workspace_lines(text: str) -> Dict[str, str]:
     return out
 
 
+_WS_BUDGET = 6000
+_WS_SECTION_FLOOR = 80
+_WS_PLACEHOLDER = "(not yet recorded)"
+
+
+def _clip_workspace(text: str, limit: int = _WS_BUDGET) -> str:
+    """Fit a workspace inside `limit` without ever losing a whole section.
+
+    A plain _clip() truncates the tail, which deletes whichever labels happen
+    to sit at the end. That is not cosmetic: WORKING BELIEFS grows every pass,
+    and once it pushed the blob past 6000 the clip decapitated
+    NEXT EXPECTATION. From then on the stored workspace was missing a label,
+    so every later merge failed with "missing required sections" — Hexia sat
+    wedged at pass 605 while Blue ran on past 2450. Sections are trimmed
+    proportionally instead, each keeping a floor, so all seven survive."""
+    lines = _workspace_lines(text)
+    ordered = [lines[label] for label in _WS_LABELS if label in lines]
+    if not ordered:
+        return ""
+    joined = "\n".join(ordered)
+    if len(joined) <= limit:
+        return joined
+    # Every section keeps _WS_SECTION_FLOOR chars; the rest of the budget is
+    # shared out in proportion to how much each section actually wants.
+    body_budget = max(
+        0, limit - (len(ordered) - 1) - _WS_SECTION_FLOOR * len(ordered))
+    want = [max(0, len(line) - _WS_SECTION_FLOOR) for line in ordered]
+    total_want = sum(want) or 1
+    out = []
+    for line, wanted in zip(ordered, want):
+        allow = _WS_SECTION_FLOOR + int(body_budget * wanted / total_want)
+        if len(line) <= allow:
+            out.append(line)
+            continue
+        head = line[:max(0, allow - 3)]
+        # Prefer cutting at a ";" boundary so a belief list stays well-formed
+        # rather than ending mid-word.
+        cut = head.rfind(";")
+        if cut > _WS_SECTION_FLOOR:
+            head = head[:cut]
+        out.append(head.rstrip().rstrip(";") + "...")
+    return "\n".join(out)
+
+
 def _merge_workspace(new_ws: str, current_ws: str) -> str:
     """Merge a (possibly partial) new workspace over the current one.
 
@@ -303,17 +365,22 @@ def _merge_workspace(new_ws: str, current_ws: str) -> str:
     moved (or none at all, just drive deltas) — previously each of those was
     rejected outright ("missing required sections", 3 attempts, job failed,
     both robots, every idle window). Lines absent from the new workspace now
-    carry over from the current one; only a workspace missing a label in
-    BOTH is unrecoverable."""
+    carry over from the current one."""
     new_lines = _workspace_lines(new_ws)
     cur_lines = _workspace_lines(current_ws)
+    if not new_lines and not cur_lines:
+        return ""
     merged = []
     for label in _WS_LABELS:
         line = new_lines.get(label) or cur_lines.get(label)
         if not line:
-            return ""
+            # Missing from BOTH means the STORED workspace lost the label —
+            # historically a permanent wedge, since every later pass failed
+            # the same way and nothing could ever put the label back. Seed a
+            # placeholder so the next reflection refills it.
+            line = f"{label}: {_WS_PLACEHOLDER}"
         merged.append(line)
-    return "\n".join(merged)
+    return _clip_workspace("\n".join(merged))
 
 
 def _cap_duet_belief_confidence(workspace: str, current_workspace: str) -> str:
@@ -539,13 +606,39 @@ def _parse_reflection(raw: str, robot_name: str,
     if "</think>" in full:
         candidates.append(full.split("</think>")[-1].strip())
     candidates.append(full.replace("<think>", " ").replace("</think>", " ").strip())
+    candidates.extend(_brace_repaired(candidate) for candidate in list(candidates))
     last_error: Optional[ValueError] = None
     for candidate in candidates:
+        if not candidate:
+            continue
         try:
             return _parse_reflection_text(candidate, robot_name, current_workspace)
         except ValueError as exc:
             last_error = exc
     raise last_error if last_error else ValueError("reflection was empty")
+
+
+# An object body whose opening brace never made it into the reply: seen twice
+# in the stored failures, both starting `workspace":"IDENTITY: I am Blue...`
+# — a complete, good reflection discarded over two characters.
+_HEADLESS_OBJECT = re.compile(r'^\s*\\?"?(\w+)\\?"?\s*:\s*\S')
+
+
+def _brace_repaired(text: str) -> str:
+    """Put back an opening brace the model dropped. '' when not applicable."""
+    body = (text or "").strip()
+    if not body or body.startswith("{"):
+        return ""
+    if not _HEADLESS_OBJECT.match(body):
+        return ""
+    if body.endswith(","):
+        body = body[:-1]
+    # The tail brace is usually present (it closed the object it was given);
+    # add one only when the braces do not already balance.
+    repaired = "{" + ('"' if not body.lstrip().startswith('"') else "") + body
+    if repaired.count("{") > repaired.count("}"):
+        repaired += "}" * (repaired.count("{") - repaired.count("}"))
+    return repaired
 
 
 def _parse_reflection_text(raw: str, robot_name: str,
@@ -582,10 +675,13 @@ def _parse_reflection_text(raw: str, robot_name: str,
     # especially on idle passes) merges over the current one; a missing
     # workspace with real drive deltas is a legitimate "nothing moved" pass.
     workspace = _merge_workspace(
-        _clip(parsed.get("workspace"), 6000), current_workspace)
+        _clip_workspace(str(parsed.get("workspace") or "")), current_workspace)
     if not workspace:
         raise ValueError("reflection workspace is missing required sections")
-    workspace = _enforce_workspace_invariants(workspace, robot_name)
+    # Invariants can lengthen a line, and the store clips blunt at 6000 —
+    # re-fit section-wise so nothing gets decapitated on the way to SQLite.
+    workspace = _clip_workspace(
+        _enforce_workspace_invariants(workspace, robot_name))
     deltas = parsed.get("drive_deltas")
     if not isinstance(deltas, dict):
         deltas = {}
