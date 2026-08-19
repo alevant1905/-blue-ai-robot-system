@@ -631,3 +631,114 @@ def test_link_is_primary_over_checked_readings(duet_module):
     assert "_duet_preserve_inquiry_artifacts(prev, out)" in source
     assert "if (direction and not blocked" in source
     assert "rejectedDrafts" not in source
+
+
+# ---------------------------------------------------------------------------
+# Turn pressures
+# ---------------------------------------------------------------------------
+# `_duet_turn_pressures` was lifted out of `duet_turn`, where it had grown into
+# 142 lines of interlocking boolean soup. These pin the suppression order,
+# which is the part that is easy to break and impossible to see by reading.
+
+def _pressures(duet_module, **overrides):
+    kwargs = dict(
+        protocol=True, closing=False, mail=None, student_q_text="",
+        arc_stage="", arc_stuck="", nb_note="", direction="",
+        active_task_note="", artifact_plan_note="", artifact_mode_note="",
+        active_task_attempts=0, stalled=False, kernel_deadlocked=False,
+        kernel_health_in="", kernel_denied=False, operation_missed=False,
+        validation_rejected=False, promotion_rejected=False,
+    )
+    kwargs.update(overrides)
+    return duet_module._duet_turn_pressures(**kwargs)
+
+
+def _all_flags(pressures):
+    return {f: getattr(pressures, f) for f in pressures.__dataclass_fields__
+            if f != "task_context"}
+
+
+def test_no_pressure_applies_outside_a_protocol_turn(duet_module):
+    quiet = _pressures(duet_module, protocol=False, arc_stage="MECHANISM",
+                       nb_note="edit mode", active_task_note="ship it")
+    assert not any(_all_flags(quiet).values())
+
+
+def test_a_turn_already_spoken_for_carries_no_pressure(duet_module):
+    """A closing, a mail reply and a student's question each own the turn."""
+    for claim in ({"closing": True},
+                  {"mail": {"from_name": "someone"}},
+                  {"student_q_text": "what is a design variable?"}):
+        taken = _pressures(duet_module, arc_stage="MECHANISM",
+                           active_task_note="ship it", **claim)
+        assert not any(_all_flags(taken).values()), claim
+
+
+def test_compiler_pressure_suppresses_the_pressures_below_it(duet_module):
+    both = _pressures(duet_module, arc_stage="ARTIFACT COMPILER",
+                      arc_stuck="DESIGN SPACE")
+    assert both.compiler
+    assert not both.design_variable
+
+
+def test_a_structural_pressure_stands_mechanism_and_editor_down(duet_module):
+    free = _pressures(duet_module, arc_stage="MECHANISM")
+    assert free.mechanism
+
+    blocked = _pressures(duet_module, arc_stage="MECHANISM",
+                         arc_stuck="DEADLOCK")
+    assert blocked.deadlock
+    assert not blocked.mechanism
+    assert not blocked.artifact_editor
+
+
+def test_being_stuck_on_a_stage_counts_the_same_as_being_at_it(duet_module):
+    """Every stage test reads arc_stage and arc_stuck; neither may be dropped."""
+    for stage, flag in (("MECHANISM", "mechanism"),
+                        ("ARTIFACT EDITOR", "artifact_editor"),
+                        ("EVIDENCE", "discrimination"),
+                        ("PARADIGM", "paradigm"),
+                        ("KNOWLEDGE GRAPH", "mechanism")):
+        at = _pressures(duet_module, arc_stage=stage)
+        stuck = _pressures(duet_module, arc_stuck=stage)
+        assert getattr(at, flag), stage
+        assert getattr(stuck, flag), stage
+
+
+def test_execution_lock_needs_a_live_task_and_a_clear_field(duet_module):
+    locked = _pressures(duet_module, arc_stage="EXECUTION",
+                        active_task_note="run the comparison")
+    assert locked.task
+    assert locked.execution_lock
+
+    # Anything else pulling at the turn releases the lock.
+    contended = _pressures(duet_module, arc_stage="EXECUTION",
+                           arc_stuck="DESIGN SPACE",
+                           active_task_note="run the comparison")
+    assert contended.design_variable
+    assert not contended.execution_lock
+
+
+def test_task_context_pools_the_notes_and_is_capped(duet_module):
+    pooled = _pressures(duet_module, active_task_note="alpha",
+                        artifact_plan_note="beta", artifact_mode_note="gamma",
+                        nb_note="delta", direction="epsilon")
+    for piece in ("alpha", "beta", "gamma", "delta", "epsilon"):
+        assert piece in pooled.task_context
+
+    assert len(_pressures(duet_module, active_task_note="x" * 5000)
+               .task_context) == 2200
+
+
+def test_the_direction_only_joins_the_context_on_a_protocol_turn(duet_module):
+    assert "epsilon" not in _pressures(
+        duet_module, protocol=False, direction="epsilon").task_context
+
+
+def test_every_flag_is_a_real_bool(duet_module):
+    """Several of these were regex Match objects before the extraction."""
+    hot = _pressures(duet_module, arc_stage="MECHANISM",
+                     active_task_note="compare the two grids",
+                     nb_note="edit mode")
+    for name, value in _all_flags(hot).items():
+        assert value is True or value is False, name
