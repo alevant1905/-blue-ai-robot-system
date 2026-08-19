@@ -742,3 +742,83 @@ def test_every_flag_is_a_real_bool(duet_module):
                      nb_note="edit mode")
     for name, value in _all_flags(hot).items():
         assert value is True or value is False, name
+
+
+# --------------------------------------------------------------------------
+# The turn's job
+# --------------------------------------------------------------------------
+# `_duet_turn_job_directive` was a 235-line if/elif chain buried inside a
+# 349-line `if lines:` inside duet_turn. It is a PRIORITY chain, not a set of
+# independent tests: the first pressure or beat that applies claims the turn
+# and everything below it stands down. That ordering is the whole design and
+# the thing a later edit can silently invert, so it is pinned here.
+
+def _flags(duet_module, **on):
+    """A pressures record with everything off except what is named."""
+    fields = {f: False for f in duet_module._DuetPressures.__dataclass_fields__
+              if f != "task_context"}
+    fields.update(on)
+    return duet_module._DuetPressures(task_context="", **fields)
+
+
+def _job(duet_module, pressures=None, **overrides):
+    ph_name, ph_gloss, ph_jobs = duet_module._DUET_PROTO_PHASES[0]
+    phase = sorted(duet_module._DUET_INQUIRY_JOBS)[0]
+    kwargs = dict(
+        protocol=True, ot={"name": "Hexia"}, proto_job="builder",
+        ph_name=ph_name, ph_gloss=ph_gloss, ph_jobs=ph_jobs,
+        inquiry_phase=phase, inquiry_gloss="define the terms",
+        inquiry_job=sorted(duet_module._DUET_INQUIRY_JOBS[phase])[0],
+        source_audit_active=False, active_task_note="", arc_stuck="",
+        arc_break=False, monotony="", monotony_break=False,
+        stall_break=False, conclusion_beat=False, operation_missed=False,
+    )
+    kwargs.update(overrides)
+    return duet_module._duet_turn_job_directive(
+        pressures if pressures is not None else _flags(duet_module), **kwargs)
+
+
+def test_a_turn_with_nothing_pressing_gets_an_inquiry_round(duet_module):
+    assert "INQUIRY ROUND" in _job(duet_module, protocol=False)
+
+
+def test_only_one_job_is_ever_handed_out(duet_module):
+    """Compiler outranks deadlock; deadlock outranks the mechanism work."""
+    out = _job(duet_module, _flags(duet_module, compiler=True, deadlock=True,
+                                   mechanism=True))
+    assert "compilation comes first" in out
+    assert "DEADLOCK DETECTED" not in out
+
+    out = _job(duet_module, _flags(duet_module, deadlock=True, mechanism=True))
+    assert "DEADLOCK DETECTED" in out
+    assert "compilation comes first" not in out
+
+
+def test_an_execution_lock_narrows_the_active_task_job(duet_module):
+    locked = _job(duet_module, _flags(duet_module, task=True,
+                                      execution_lock=True))
+    assert "EXECUTION ONLY" in locked
+
+    open_task = _job(duet_module, _flags(duet_module, task=True))
+    assert "ACTIVE TASK" in open_task
+    assert "EXECUTION ONLY" not in open_task
+
+
+@pytest.mark.parametrize("flag", ["validation", "discrimination", "artifact"])
+def test_an_arc_break_outranks_the_three_jobs_that_yield_to_it(duet_module,
+                                                               flag):
+    """Those three branches carry an explicit `and not arc_break`."""
+    stuck = sorted(duet_module._DUET_ARC_ADVANCE)[0]
+    out = _job(duet_module, _flags(duet_module, **{flag: True}),
+               arc_break=True, arc_stuck=stuck)
+    assert "INQUIRY INTERVENTION" in out
+
+    # ...but without the break, the pressure keeps its turn.
+    assert "INQUIRY INTERVENTION" not in _job(
+        duet_module, _flags(duet_module, **{flag: True}))
+
+
+def test_a_source_audit_replaces_the_inquiry_task(duet_module):
+    audit = _job(duet_module, protocol=False, source_audit_active=True)
+    assert "REPORTED FACT" in audit
+    assert "corrective evidence audit" in audit

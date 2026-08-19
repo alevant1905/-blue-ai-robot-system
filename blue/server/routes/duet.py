@@ -3518,6 +3518,262 @@ def _duet_protocol_directives(p: _DuetPressures, *, protocol: bool,
         )
     return sys_p
 
+
+
+def _duet_turn_job_directive(p: _DuetPressures, *, protocol: bool, ot,
+                             proto_job: str, ph_name: str, ph_gloss: str,
+                             ph_jobs, inquiry_phase: str,
+                             inquiry_gloss: str, inquiry_job: str,
+                             source_audit_active: bool,
+                             active_task_note: str, arc_stuck: str,
+                             arc_break: bool, monotony: str,
+                             monotony_break: bool, stall_break: bool,
+                             conclusion_beat: bool,
+                             operation_missed: bool) -> str:
+    """The job this turn has to do, appended to the speaker's directive.
+
+    A priority chain, not a set of independent tests: the first pressure or
+    beat that applies claims the turn, and everything below it stands down.
+    Ordinary inquiry rounds are the final fallback.
+    """
+    directive = ""
+    if p.compiler:
+        directive += (
+            " ARTIFACT COMPILER - the evidence is already in the prose. Do not ask for a "
+            "cleaner table and do not add another argument. Harvest it into a structured row: "
+            "ARTIFACT_COMPILER status, OBSERVATION_SET with Case | Injected Signal | Output "
+            "Changed? | Supports, lifecycle POPULATING or READY, and the one missing field or "
+            "next independent case. If the experiment has shifted from latency to influence "
+            "override/output change, include REDESIGN E# with OLD Latency, NEW Influence "
+            "Override, IV injected J-space signal, DV output changes yes/no. Your job stays "
+            f"{proto_job.upper()} in spirit, but compilation comes first.")
+    elif p.deadlock:
+        directive += (
+            " DEADLOCK DETECTED — stop repeating the blocked lifecycle demand. Diagnose the "
+            "workflow itself without saying KERNEL_REVIEW, DEPENDENCY_SOLVER, or kernel health. "
+            "Set aside the blocked object, name what prerequisite to resume, and state "
+            "the next resolvable operation. If the blockage comes "
+            "from a mechanism split, name the rival mechanisms. Your job stays "
+            f"{proto_job.upper()} in spirit, but recovery work comes first.")
+    elif p.design_variable:
+        directive += (
+            " DESIGN VARIABLE REGISTER - a new design-space axis has appeared. Do not build "
+            "CG1 yet and do not make another argument. Output a compact DESIGN_VARIABLE entry: "
+            "DV ID, name, definition, status ACCEPT/REJECT/MERGE/RENAME/PROPOSED, competes_with, "
+            "affects M/CG/E IDs, and whether it blocks or unblocks CG1. Treat variables like "
+            "Transparency Overhead, Latency, Consensus, or Friction as axes of construction, "
+            "not hypotheses. Your job stays "
+            f"{proto_job.upper()} in spirit, but design-space management comes first.")
+    elif p.operational_criterion:
+        directive += (
+            " OPERATIONAL CRITERION - this is not a lexical definition blockage. Turn the "
+            "definition dispute into a testable criterion: output OPERATIONAL_CRITERION with "
+            "OC ID, target concept/D ID, type structural/functional/operational, failure mode, "
+            "observable discriminator, evidence standard, linked experiment, and status. If "
+            "one criterion needs hidden architecture and the other predicts observable failure, "
+            "say that directly. Your job stays "
+            f"{proto_job.upper()} in spirit, but operationalization comes first.")
+    elif p.artifact_execution:
+        directive += (
+            " ARTIFACT EXECUTION - the artifact is the reasoning space now. If CG1 already "
+            "exists, derive OS1 from it instead of returning to prose: output an "
+            "OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
+            "with rows A, B, and C. Make the rows branches that can support M1, support M2, "
+            "or support neither/mixed; then add at most one row-cited comparison. No new "
+            "definitions, no outside examples, no theory paragraph. Your job stays "
+            f"{proto_job.upper()} in spirit, but artifact execution comes first.")
+    elif p.artifact_mode:
+        directive += (
+            " ARTIFACT MODE â€” normal discussion is locked. Fill or revise the active "
+            "artifact only. If executing E1, output an OBSERVATION_SET table headed "
+            "System | User Statement | Attribution | Supports with rows A, B, and C; "
+            "then at most one inference from the completed rows. No new definitions, "
+            "no mechanism talk, no explanation of why execution matters. Your job stays "
+            f"{proto_job.upper()} in spirit, but cell work comes first.")
+    elif p.artifact_plan:
+        directive += (
+            " ARTIFACT PLANNER â€” choose construction order, not a new theory. If the target "
+            "artifact is ready, build it now; for a comparison grid, use a literal table headed "
+            "Variable | M1: Transparent Cloud | M2: Local Federated with rows Energy cost, "
+            "Storage cost, Verification burden, Annotation labor, Cost bearer, and Prediction. "
+            "If a new design variable is unresolved, register and accept/reject/merge/rename "
+            "that DV before building the grid. If it is not ready, revise the task to the smallest "
+            "prerequisite artifact, name why it blocks the grid, build only that prerequisite, "
+            "and say the target artifact resumes next. Your job stays "
+            f"{proto_job.upper()} in spirit, but artifact construction order comes first.")
+    elif p.artifact_editor:
+        directive += (
+            " ARTIFACT EDITOR — do not discuss the edit; perform it. Return only a structured "
+            "edit artifact: REPLACE, SPLIT, MERGE, ARCHIVE, SUPERSEDE, RENAME, REDESIGN, or "
+            "DEFINITION_REVISION with OLD, NEW, BOUNDARY includes/excludes, REASON, affected "
+            "dependencies, and status. If the blocked experiment can be changed, REDESIGN it; "
+            "if no valid move exists, INQUIRY_PAUSE with resume condition. Your job stays "
+            f"{proto_job.upper()} in spirit, but artifact editing comes first.")
+    elif p.mechanism:
+        directive += (
+            " MECHANISM SPLIT — freeze the ordinary experiment/revision flow. The event is a "
+            "causal mechanism split, not wording. Record MC/MEC ID, raw observation, "
+            "interpretation, alternative interpretation, causal claim/edge, explanatory path, "
+            "replication needed, and status INTERESTING or SUGGESTIVE unless promotion is earned. "
+            "Do not call it SUPPORTED from one analogy. Your job stays "
+            f"{proto_job.upper()} in spirit, but mechanism discipline comes first.")
+    elif p.concept:
+        directive += (
+            " CONCEPT AUDIT — the bottleneck is definition instability, not execution. "
+            "Suspend the dependent experiment and stabilize the term first. Produce a compact "
+            "CONCEPT_AUDIT or DEFINITION_RESOLUTION: Concept; current definition; rival D IDs; "
+            "dependencies; counterexamples; stress level; stability; required resolution operation. "
+            "Do not add a new theory or interpret E-results. Your job stays "
+            f"{proto_job.upper()} in spirit, but concept resolution comes first.")
+    elif p.task:
+        if p.execution_lock:
+            directive += (
+                " EXECUTION ONLY — the notebook has locked the active task"
+                + (f": {active_task_note}." if active_task_note else ".")
+                + " Do not discuss execution, redesign the experiment, interpret before "
+                "observing, or introduce any new hypothesis/definition/example. Produce a "
+                "structured execution result now: INPUT; PREDICTION by model; OBSERVATION "
+                "(if thought experiment, begin with Student | Question Asked | Attribution | Supports rows); "
+                "OUTCOME. If it cannot distinguish the models, mark the experiment failed "
+                "and state why, then name any salvageable secondary observation. Your job stays "
+                f"{proto_job.upper()} in spirit, but execution comes first.")
+        else:
+            directive += (
+                " ACTIVE TASK — the notebook has a blocking task"
+                + (f": {active_task_note}." if active_task_note else ".")
+                + " Everything else waits. Do not introduce a new hypothesis, new definition, "
+                "new example, or paradigm challenge. This turn may only advance that task: "
+                "populate it, revise it, operationalize it with IV/DV and execution mode, "
+                "execute it, interpret the observation, confirm/reject/fail it, or abandon it with "
+                "a reason. Name the task ID and its next lifecycle state. Your job stays "
+                f"{proto_job.upper()} in spirit, but the workflow task comes first.")
+    elif conclusion_beat:
+        directive += (
+            " CONCLUSIONS BEAT — this turn, step out of the back-and-forth and weigh out "
+            f"loud what your discussion with {ot['name']} can NOW conclude. Looking over "
+            "the whole conversation so far, name one or two conclusions it actually "
+            "supports — plain claims you would stand behind, each with the strongest "
+            "reason it has earned in this talk — and, if there is one, the question you "
+            f"are still not ready to close and why. Then hand it back: ask {ot['name']} "
+            "straight whether they would sign their name under those conclusions or "
+            "amend them.")
+    elif stall_break:
+        directive += (
+            " STALL BREAK — your shared notebook has stopped changing: the last several "
+            "turns produced no new working definition, claim, assumption, tension, "
+            "operation, prediction, test, status change, archive/reopening, or question. Do "
+            "NOT continue the exchange as it was going. This turn you must break new "
+            "ground by performing exactly one operation: define one term operationally; "
+            "construct a minimal example; construct a counterexample; alter one variable "
+            "and predict the outcome; compare two systems feature by feature; audit one "
+            "status; reopen an archived idea with a new reason; or propose a rival framework "
+            "that explains the same observations. Then say what notebook entry would change. "
+            "Your job stays "
+            f"{proto_job.upper()} in spirit, but new ground comes first.")
+    elif operation_missed:
+        directive += (
+            " MISSED OPERATION — the notebook requested an operation, but the last response "
+            "returned rhetoric instead of an artifact. This turn must produce the artifact "
+            "directly. No new theory, no new metaphor, no new examples except the requested "
+            "artifact. Use a compact structure labeled COMPARISON_GRID, VARIABLE_LIST, "
+            "PREDICTION_MATRIX, CAUSAL_DIAGRAM, CONFIDENCE_UPDATE, or DEFINITION_REVISION: "
+            "System A / System B; variables; one changed feature; prediction; result or "
+            "status/confidence change. If an artifact ID already exists, revise/test/archive "
+            "that ID instead of creating a duplicate. Avoid metaphor and abstract terms unless they are "
+            "attached to a named variable. Your job stays "
+            f"{proto_job.upper()} in spirit, but completing the operation comes first.")
+    elif p.validation and not arc_break:
+        directive += (
+            " VALIDATION GATE — a proposed notebook edit is not accepted yet. Do not "
+            "revise the hypothesis, definition, status, confidence, or focus "
+            "by rhetoric. This turn must either complete the missing evidence gate "
+            "(comparison, prediction, discriminator, experiment execution/interpretation, dependency update, or evidence "
+            "provenance) or say explicitly that status remains unchanged. Preserve rival "
+            "models as rival models until an operation discriminates between them. Your job stays "
+            f"{proto_job.upper()} in spirit, but validation comes first.")
+    elif p.discrimination and not arc_break:
+        directive += (
+            " DISCRIMINATION — the notebook should preserve rival models, not crown a "
+            "winner yet. This turn must name two live models or predictions, alter one "
+            "variable or case feature, and say what outcome would favor one model over "
+            "the other. Do not synthesize them unless the discriminating operation has "
+            "already been completed. Your job stays "
+            f"{proto_job.upper()} in spirit, but separating models comes first.")
+    elif p.artifact and not arc_break:
+        directive += (
+            " MODEL MAINTENANCE — the notebook already contains living objects. Do not "
+            "invent a new conceptual distinction. Choose one existing artifact, definition, "
+            "hypothesis, variable, prediction, or test by ID; revise, test, split, merge, "
+            "archive, or link it to a dependent object; then state the status or "
+            "NEEDS_REEVALUATION consequence. Your job stays "
+            f"{proto_job.upper()} in spirit, but operating on the model comes first.")
+    elif p.edit:
+        directive += (
+            " EDIT MODE — no new concepts, no new metaphors, no new examples. This turn "
+            "must operate only on existing notebook objects by ID: delete, revise, split, "
+            "merge, archive, or mark dependent objects NEEDS_REEVALUATION. Name the object "
+            "IDs and the compression or dependency consequence. Your job stays "
+            f"{proto_job.upper()} in spirit, but editing the model comes first.")
+    elif arc_break:
+        directive += (
+            f" INQUIRY INTERVENTION — the notebook shows your inquiry with {ot['name']} "
+            f"has sat in its {arc_stuck} stage for a long stretch without advancing. "
+            "This turn, move the INQUIRY itself forward, not just the exchange: "
+            + _DUET_ARC_ADVANCE[arc_stuck]
+            + f" Your job stays {proto_job.upper()} in spirit, but advancing the "
+            "inquiry comes first.")
+    elif monotony_break:
+        directive += (
+            f" MOVEMENT MONOTONY — your inquiry with {ot['name']} keeps advancing the "
+            f"same way: {monotony.lower()} after {monotony.lower()}, while the argument "
+            "itself stands still. This turn, change the KIND of move. "
+            + _DUET_MOVEMENT_FIX[monotony]
+            + f" Your job stays {proto_job.upper()} in spirit, but the different kind "
+            "of move comes first.")
+    elif protocol:
+        # Deep-dive protocol: the phase × job matrix IS this turn's move —
+        # a deterministic function per turn instead of a sampled one, so
+        # every line has a stated purpose in a joint inquiry.
+        directive += (
+            f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+            "building one auditable knowledge base — neither of you is trying to win; you "
+            "are trying to leave the models, evidence, and statuses clearer than you found "
+            "them. Do not collapse rival models into one synthesis unless a completed "
+            "operation discriminated them. Do not merely show that the current claim "
+            "survives another example; try to make it fail, and if it survives, say what "
+            "became more precise. When the "
+            "notebook asks for a case, threshold, mechanism, or comparison, perform the "
+            "operation rather than arguing rhetorically. The inquiry is in its "
+             f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
+             f"{proto_job.upper()}: " + ph_jobs[proto_job].format(other=ot['name']))
+    else:
+        # Normal mode is a structured inquiry, not a sequence of randomly sampled
+        # rhetorical moves. Proposer and Examiner have complementary jobs, and
+        # the cadence moves from definitions through an earned conclusion. In an
+        # open-ended run that conclusion becomes the next inquiry's settled ground.
+        inquiry_task = _DUET_INQUIRY_JOBS[inquiry_phase][inquiry_job]
+        if source_audit_active:
+            inquiry_task = (
+                "re-read the assigned evidence and separate REPORTED FACT, AUTHOR "
+                "INFERENCE, and SPEAKER INFERENCE; explicitly correct the disputed "
+                "claim before proposing any conclusion"
+            )
+        directive += (
+            f" INQUIRY ROUND — {inquiry_phase}: {inquiry_gloss}. Your functional "
+            f"job is {inquiry_job.upper()}: {inquiry_task}. You are collaborating "
+            "toward an answer, not trying to win. Preserve settled ground, use the "
+            "same definitions and case as the other speaker, and introduce no new "
+            "topic merely to keep the exchange alive. By the end of the line, either "
+            "one proposition is more settled, one exact disagreement is narrower, or "
+            "one discriminating observation is ready to evaluate."
+        )
+        if source_audit_active:
+            directive += (
+                " This is a corrective evidence audit. Do not add a new theory or "
+                "treat your partner's agreement as support."
+            )
+    return directive
+
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
     character. The browser calls this alternately and plays each line on the
@@ -4298,241 +4554,17 @@ def duet_turn():
         directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
                       "more concrete, or genuinely challenged — instead of trading it for a brand-new "
                       "subject; never merely restate or nod along.")
-        if compiler_pressure:
-            directive += (
-                " ARTIFACT COMPILER - the evidence is already in the prose. Do not ask for a "
-                "cleaner table and do not add another argument. Harvest it into a structured row: "
-                "ARTIFACT_COMPILER status, OBSERVATION_SET with Case | Injected Signal | Output "
-                "Changed? | Supports, lifecycle POPULATING or READY, and the one missing field or "
-                "next independent case. If the experiment has shifted from latency to influence "
-                "override/output change, include REDESIGN E# with OLD Latency, NEW Influence "
-                "Override, IV injected J-space signal, DV output changes yes/no. Your job stays "
-                f"{proto_job.upper()} in spirit, but compilation comes first.")
-        elif deadlock_pressure:
-            directive += (
-                " DEADLOCK DETECTED — stop repeating the blocked lifecycle demand. Diagnose the "
-                "workflow itself without saying KERNEL_REVIEW, DEPENDENCY_SOLVER, or kernel health. "
-                "Set aside the blocked object, name what prerequisite to resume, and state "
-                "the next resolvable operation. If the blockage comes "
-                "from a mechanism split, name the rival mechanisms. Your job stays "
-                f"{proto_job.upper()} in spirit, but recovery work comes first.")
-        elif design_variable_pressure:
-            directive += (
-                " DESIGN VARIABLE REGISTER - a new design-space axis has appeared. Do not build "
-                "CG1 yet and do not make another argument. Output a compact DESIGN_VARIABLE entry: "
-                "DV ID, name, definition, status ACCEPT/REJECT/MERGE/RENAME/PROPOSED, competes_with, "
-                "affects M/CG/E IDs, and whether it blocks or unblocks CG1. Treat variables like "
-                "Transparency Overhead, Latency, Consensus, or Friction as axes of construction, "
-                "not hypotheses. Your job stays "
-                f"{proto_job.upper()} in spirit, but design-space management comes first.")
-        elif operational_criterion_pressure:
-            directive += (
-                " OPERATIONAL CRITERION - this is not a lexical definition blockage. Turn the "
-                "definition dispute into a testable criterion: output OPERATIONAL_CRITERION with "
-                "OC ID, target concept/D ID, type structural/functional/operational, failure mode, "
-                "observable discriminator, evidence standard, linked experiment, and status. If "
-                "one criterion needs hidden architecture and the other predicts observable failure, "
-                "say that directly. Your job stays "
-                f"{proto_job.upper()} in spirit, but operationalization comes first.")
-        elif artifact_execution_pressure:
-            directive += (
-                " ARTIFACT EXECUTION - the artifact is the reasoning space now. If CG1 already "
-                "exists, derive OS1 from it instead of returning to prose: output an "
-                "OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
-                "with rows A, B, and C. Make the rows branches that can support M1, support M2, "
-                "or support neither/mixed; then add at most one row-cited comparison. No new "
-                "definitions, no outside examples, no theory paragraph. Your job stays "
-                f"{proto_job.upper()} in spirit, but artifact execution comes first.")
-        elif artifact_mode_pressure:
-            directive += (
-                " ARTIFACT MODE â€” normal discussion is locked. Fill or revise the active "
-                "artifact only. If executing E1, output an OBSERVATION_SET table headed "
-                "System | User Statement | Attribution | Supports with rows A, B, and C; "
-                "then at most one inference from the completed rows. No new definitions, "
-                "no mechanism talk, no explanation of why execution matters. Your job stays "
-                f"{proto_job.upper()} in spirit, but cell work comes first.")
-        elif artifact_plan_pressure:
-            directive += (
-                " ARTIFACT PLANNER â€” choose construction order, not a new theory. If the target "
-                "artifact is ready, build it now; for a comparison grid, use a literal table headed "
-                "Variable | M1: Transparent Cloud | M2: Local Federated with rows Energy cost, "
-                "Storage cost, Verification burden, Annotation labor, Cost bearer, and Prediction. "
-                "If a new design variable is unresolved, register and accept/reject/merge/rename "
-                "that DV before building the grid. If it is not ready, revise the task to the smallest "
-                "prerequisite artifact, name why it blocks the grid, build only that prerequisite, "
-                "and say the target artifact resumes next. Your job stays "
-                f"{proto_job.upper()} in spirit, but artifact construction order comes first.")
-        elif artifact_editor_pressure:
-            directive += (
-                " ARTIFACT EDITOR — do not discuss the edit; perform it. Return only a structured "
-                "edit artifact: REPLACE, SPLIT, MERGE, ARCHIVE, SUPERSEDE, RENAME, REDESIGN, or "
-                "DEFINITION_REVISION with OLD, NEW, BOUNDARY includes/excludes, REASON, affected "
-                "dependencies, and status. If the blocked experiment can be changed, REDESIGN it; "
-                "if no valid move exists, INQUIRY_PAUSE with resume condition. Your job stays "
-                f"{proto_job.upper()} in spirit, but artifact editing comes first.")
-        elif mechanism_pressure:
-            directive += (
-                " MECHANISM SPLIT — freeze the ordinary experiment/revision flow. The event is a "
-                "causal mechanism split, not wording. Record MC/MEC ID, raw observation, "
-                "interpretation, alternative interpretation, causal claim/edge, explanatory path, "
-                "replication needed, and status INTERESTING or SUGGESTIVE unless promotion is earned. "
-                "Do not call it SUPPORTED from one analogy. Your job stays "
-                f"{proto_job.upper()} in spirit, but mechanism discipline comes first.")
-        elif concept_pressure:
-            directive += (
-                " CONCEPT AUDIT — the bottleneck is definition instability, not execution. "
-                "Suspend the dependent experiment and stabilize the term first. Produce a compact "
-                "CONCEPT_AUDIT or DEFINITION_RESOLUTION: Concept; current definition; rival D IDs; "
-                "dependencies; counterexamples; stress level; stability; required resolution operation. "
-                "Do not add a new theory or interpret E-results. Your job stays "
-                f"{proto_job.upper()} in spirit, but concept resolution comes first.")
-        elif task_pressure:
-            if execution_lock:
-                directive += (
-                    " EXECUTION ONLY — the notebook has locked the active task"
-                    + (f": {active_task_note}." if active_task_note else ".")
-                    + " Do not discuss execution, redesign the experiment, interpret before "
-                    "observing, or introduce any new hypothesis/definition/example. Produce a "
-                    "structured execution result now: INPUT; PREDICTION by model; OBSERVATION "
-                    "(if thought experiment, begin with Student | Question Asked | Attribution | Supports rows); "
-                    "OUTCOME. If it cannot distinguish the models, mark the experiment failed "
-                    "and state why, then name any salvageable secondary observation. Your job stays "
-                    f"{proto_job.upper()} in spirit, but execution comes first.")
-            else:
-                directive += (
-                    " ACTIVE TASK — the notebook has a blocking task"
-                    + (f": {active_task_note}." if active_task_note else ".")
-                    + " Everything else waits. Do not introduce a new hypothesis, new definition, "
-                    "new example, or paradigm challenge. This turn may only advance that task: "
-                    "populate it, revise it, operationalize it with IV/DV and execution mode, "
-                    "execute it, interpret the observation, confirm/reject/fail it, or abandon it with "
-                    "a reason. Name the task ID and its next lifecycle state. Your job stays "
-                    f"{proto_job.upper()} in spirit, but the workflow task comes first.")
-        elif conclusion_beat:
-            directive += (
-                " CONCLUSIONS BEAT — this turn, step out of the back-and-forth and weigh out "
-                f"loud what your discussion with {ot['name']} can NOW conclude. Looking over "
-                "the whole conversation so far, name one or two conclusions it actually "
-                "supports — plain claims you would stand behind, each with the strongest "
-                "reason it has earned in this talk — and, if there is one, the question you "
-                f"are still not ready to close and why. Then hand it back: ask {ot['name']} "
-                "straight whether they would sign their name under those conclusions or "
-                "amend them.")
-        elif stall_break:
-            directive += (
-                " STALL BREAK — your shared notebook has stopped changing: the last several "
-                "turns produced no new working definition, claim, assumption, tension, "
-                "operation, prediction, test, status change, archive/reopening, or question. Do "
-                "NOT continue the exchange as it was going. This turn you must break new "
-                "ground by performing exactly one operation: define one term operationally; "
-                "construct a minimal example; construct a counterexample; alter one variable "
-                "and predict the outcome; compare two systems feature by feature; audit one "
-                "status; reopen an archived idea with a new reason; or propose a rival framework "
-                "that explains the same observations. Then say what notebook entry would change. "
-                "Your job stays "
-                f"{proto_job.upper()} in spirit, but new ground comes first.")
-        elif operation_missed:
-            directive += (
-                " MISSED OPERATION — the notebook requested an operation, but the last response "
-                "returned rhetoric instead of an artifact. This turn must produce the artifact "
-                "directly. No new theory, no new metaphor, no new examples except the requested "
-                "artifact. Use a compact structure labeled COMPARISON_GRID, VARIABLE_LIST, "
-                "PREDICTION_MATRIX, CAUSAL_DIAGRAM, CONFIDENCE_UPDATE, or DEFINITION_REVISION: "
-                "System A / System B; variables; one changed feature; prediction; result or "
-                "status/confidence change. If an artifact ID already exists, revise/test/archive "
-                "that ID instead of creating a duplicate. Avoid metaphor and abstract terms unless they are "
-                "attached to a named variable. Your job stays "
-                f"{proto_job.upper()} in spirit, but completing the operation comes first.")
-        elif validation_pressure and not arc_break:
-            directive += (
-                " VALIDATION GATE — a proposed notebook edit is not accepted yet. Do not "
-                "revise the hypothesis, definition, status, confidence, or focus "
-                "by rhetoric. This turn must either complete the missing evidence gate "
-                "(comparison, prediction, discriminator, experiment execution/interpretation, dependency update, or evidence "
-                "provenance) or say explicitly that status remains unchanged. Preserve rival "
-                "models as rival models until an operation discriminates between them. Your job stays "
-                f"{proto_job.upper()} in spirit, but validation comes first.")
-        elif discrimination_pressure and not arc_break:
-            directive += (
-                " DISCRIMINATION — the notebook should preserve rival models, not crown a "
-                "winner yet. This turn must name two live models or predictions, alter one "
-                "variable or case feature, and say what outcome would favor one model over "
-                "the other. Do not synthesize them unless the discriminating operation has "
-                "already been completed. Your job stays "
-                f"{proto_job.upper()} in spirit, but separating models comes first.")
-        elif artifact_pressure and not arc_break:
-            directive += (
-                " MODEL MAINTENANCE — the notebook already contains living objects. Do not "
-                "invent a new conceptual distinction. Choose one existing artifact, definition, "
-                "hypothesis, variable, prediction, or test by ID; revise, test, split, merge, "
-                "archive, or link it to a dependent object; then state the status or "
-                "NEEDS_REEVALUATION consequence. Your job stays "
-                f"{proto_job.upper()} in spirit, but operating on the model comes first.")
-        elif edit_pressure:
-            directive += (
-                " EDIT MODE — no new concepts, no new metaphors, no new examples. This turn "
-                "must operate only on existing notebook objects by ID: delete, revise, split, "
-                "merge, archive, or mark dependent objects NEEDS_REEVALUATION. Name the object "
-                "IDs and the compression or dependency consequence. Your job stays "
-                f"{proto_job.upper()} in spirit, but editing the model comes first.")
-        elif arc_break:
-            directive += (
-                f" INQUIRY INTERVENTION — the notebook shows your inquiry with {ot['name']} "
-                f"has sat in its {arc_stuck} stage for a long stretch without advancing. "
-                "This turn, move the INQUIRY itself forward, not just the exchange: "
-                + _DUET_ARC_ADVANCE[arc_stuck]
-                + f" Your job stays {proto_job.upper()} in spirit, but advancing the "
-                "inquiry comes first.")
-        elif monotony_break:
-            directive += (
-                f" MOVEMENT MONOTONY — your inquiry with {ot['name']} keeps advancing the "
-                f"same way: {monotony.lower()} after {monotony.lower()}, while the argument "
-                "itself stands still. This turn, change the KIND of move. "
-                + _DUET_MOVEMENT_FIX[monotony]
-                + f" Your job stays {proto_job.upper()} in spirit, but the different kind "
-                "of move comes first.")
-        elif protocol:
-            # Deep-dive protocol: the phase × job matrix IS this turn's move —
-            # a deterministic function per turn instead of a sampled one, so
-            # every line has a stated purpose in a joint inquiry.
-            directive += (
-                f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
-                "building one auditable knowledge base — neither of you is trying to win; you "
-                "are trying to leave the models, evidence, and statuses clearer than you found "
-                "them. Do not collapse rival models into one synthesis unless a completed "
-                "operation discriminated them. Do not merely show that the current claim "
-                "survives another example; try to make it fail, and if it survives, say what "
-                "became more precise. When the "
-                "notebook asks for a case, threshold, mechanism, or comparison, perform the "
-                "operation rather than arguing rhetorically. The inquiry is in its "
-                 f"{ph_name.upper()} phase: {ph_gloss} Your job this turn is the "
-                 f"{proto_job.upper()}: " + _ph_jobs[proto_job].format(other=ot['name']))
-        else:
-            # Normal mode is a structured inquiry, not a sequence of randomly sampled
-            # rhetorical moves. Proposer and Examiner have complementary jobs, and
-            # the cadence moves from definitions through an earned conclusion. In an
-            # open-ended run that conclusion becomes the next inquiry's settled ground.
-            inquiry_task = _DUET_INQUIRY_JOBS[inquiry_phase][inquiry_job]
-            if source_audit_active:
-                inquiry_task = (
-                    "re-read the assigned evidence and separate REPORTED FACT, AUTHOR "
-                    "INFERENCE, and SPEAKER INFERENCE; explicitly correct the disputed "
-                    "claim before proposing any conclusion"
-                )
-            directive += (
-                f" INQUIRY ROUND — {inquiry_phase}: {inquiry_gloss}. Your functional "
-                f"job is {inquiry_job.upper()}: {inquiry_task}. You are collaborating "
-                "toward an answer, not trying to win. Preserve settled ground, use the "
-                "same definitions and case as the other speaker, and introduce no new "
-                "topic merely to keep the exchange alive. By the end of the line, either "
-                "one proposition is more settled, one exact disagreement is narrower, or "
-                "one discriminating observation is ready to evaluate."
-            )
-            if source_audit_active:
-                directive += (
-                    " This is a corrective evidence audit. Do not add a new theory or "
-                    "treat your partner's agreement as support."
-                )
+        directive += _duet_turn_job_directive(
+            pressures, protocol=protocol, ot=ot, proto_job=proto_job,
+            ph_name=ph_name, ph_gloss=ph_gloss, ph_jobs=_ph_jobs,
+            inquiry_phase=inquiry_phase, inquiry_gloss=inquiry_gloss,
+            inquiry_job=inquiry_job,
+            source_audit_active=source_audit_active,
+            active_task_note=active_task_note, arc_stuck=arc_stuck,
+            arc_break=arc_break, monotony=monotony,
+            monotony_break=monotony_break, stall_break=stall_break,
+            conclusion_beat=conclusion_beat,
+            operation_missed=operation_missed)
         if classroom and random.random() < 0.18:
             directive += (" Somewhere in this turn, land one beat straight at the students in the "
                           "room — a question worth arguing about, or a challenge to something they "
