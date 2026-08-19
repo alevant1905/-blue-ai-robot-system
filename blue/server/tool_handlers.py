@@ -581,6 +581,60 @@ def _tool_get_sunrise_sunset(tool_name, tool_args):
         return json.dumps(result)
 
 
+def _tool_remember_fact(tool_name, tool_args):
+    """Write one household fact to the authoritative store.
+
+    Until this existed, the only route into the `facts` table was the
+    background LLM scrape. An explicit "update your memory: Athena is 11"
+    matched the extractor's `remember that ...` regex, which deliberately
+    files such things as a MEMORY, not a fact — and <known_facts> instructs
+    the model to trust facts OVER recalled memories. So the correction was
+    stored in the one place guaranteed to lose to the stale value, Blue
+    answered "I have updated my records", and the next turn contradicted the
+    user again. Alex hit that loop five times in one sitting (2026-08-19).
+    """
+    fact_key = (tool_args.get("fact_key") or "").strip()
+    fact_value = (tool_args.get("fact_value") or "").strip()
+    if not fact_key or not fact_value:
+        # Never claim a save we did not make: that confabulation is the whole
+        # reason this tool exists.
+        return json.dumps({
+            "success": False,
+            "message": "Nothing saved - both fact_key and fact_value are required.",
+        })
+
+    try:
+        saved = bt.save_blue_facts({fact_key: fact_value})
+    except Exception as e:
+        bt.log.error(f"[FACT] save failed for {fact_key!r}: {e}")
+        return json.dumps({
+            "success": False,
+            "message": f"Could not save {fact_key}: {e}",
+        })
+
+    if not saved:
+        # save_facts rejects junk (empty, over-long, key == value) silently.
+        print(f"   [FACT] rejected {fact_key}={fact_value!r}")
+        return json.dumps({
+            "success": False,
+            "message": (
+                f"{fact_key} was not saved - the value was rejected as junk. "
+                "Tell the user it did not save rather than claiming it did."
+            ),
+        })
+
+    print(f"   [OK] Remembered fact: {fact_key} = {fact_value}")
+    return json.dumps({
+        "success": True,
+        "fact_key": fact_key,
+        "fact_value": fact_value,
+        "message": (
+            f"Saved: {fact_key} = {fact_value}. This is now authoritative and "
+            "overrides older mentions in conversation history."
+        ),
+    })
+
+
 def _tool_remember_person(tool_name, tool_args):
     if bt.VISUAL_MEMORY_AVAILABLE:
         name = tool_args.get("name", "")
@@ -813,6 +867,7 @@ HANDLERS: Dict[str, Callable[..., Optional[str]]] = {
     "educational_activity": _tool_educational_activity,
     "get_local_time": _tool_get_local_time,
     "get_sunrise_sunset": _tool_get_sunrise_sunset,
+    "remember_fact": _tool_remember_fact,
     "remember_person": _tool_remember_person,
     "remember_place": _tool_remember_place,
     "who_do_i_know": _tool_who_do_i_know,

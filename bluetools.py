@@ -9855,6 +9855,10 @@ _REFLEX_TOOL_NAMES = {
     "create_reminder",
     "search_documents", "web_search",
     "get_weather", "get_local_time",
+    # "update your memory: Athena is 11" reads as conversational to the
+    # selector, and that is exactly the turn where a silent no-op is worst:
+    # the model answers "I have updated my records" having saved nothing.
+    "remember_fact",
 }
 
 

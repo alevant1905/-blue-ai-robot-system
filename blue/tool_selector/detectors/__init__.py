@@ -13,6 +13,7 @@ from .documents import DocumentsDetector
 from .web import WebDetector
 from .scholar import ScholarDetector
 from .vision import VisionDetector
+from .memory import MemoryDetector
 from .weather import WeatherDetector
 from .calendar import CalendarDetector
 from .simple_detectors import (
@@ -37,6 +38,7 @@ __all__ = [
     'WebDetector',
     'ScholarDetector',
     'VisionDetector',
+    'MemoryDetector',
     'WeatherDetector',
     'CalendarDetector',
     'AutomationDetector',

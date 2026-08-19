@@ -19,6 +19,7 @@ from .detectors import (
     WebDetector,
     ScholarDetector,
     VisionDetector,
+    MemoryDetector,
     WeatherDetector,
     CalendarDetector,
     AutomationDetector,
@@ -59,6 +60,7 @@ class ImprovedToolSelector:
         self.registry.register('weather', WeatherDetector(), enabled=True)
         self.registry.register('documents', DocumentsDetector(), enabled=True)
         self.registry.register('vision', VisionDetector(), enabled=True)
+        self.registry.register('memory', MemoryDetector(), enabled=True)
         self.registry.register('timers', TimersDetector(), enabled=True)
 
         # Supporting detectors

@@ -937,6 +937,48 @@ RAW_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "remember_fact",
+            "description": (
+                "Durably record a fact about the household when the user "
+                "states or corrects one, and ALWAYS when they ask you to "
+                "remember, update, or fix something you know. Facts saved "
+                "here are authoritative and override anything you recall "
+                "from conversation history. Use this whenever you would "
+                "otherwise say 'I have updated my records' — without "
+                "this call nothing is saved and you will contradict the "
+                "user again on the next turn. A corrected value simply "
+                "overwrites the old one: pass the same fact_key."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact_key": {
+                        "type": "string",
+                        "description": (
+                            "snake_case identifier for the single thing "
+                            "being recorded, specific enough that a later "
+                            "correction lands on the same key. Prefer "
+                            "'<person>_<attribute>' for anything about one "
+                            "person, e.g. 'athena_age', 'emmy_school', "
+                            "'stella_email'. Never bundle two people into "
+                            "one key."
+                        )
+                    },
+                    "fact_value": {
+                        "type": "string",
+                        "description": (
+                            "The value on its own, as short as it can be: "
+                            "'11', not 'Athena is 11 years old'."
+                        )
+                    }
+                },
+                "required": ["fact_key", "fact_value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "remember_person",
             "description": "Learn and remember information about a person you see. Use this when the user tells you who someone is or provides information about a person. This helps you recognize them in the future.",
             "parameters": {
