@@ -2042,7 +2042,7 @@ except Exception as _e:
     print(f"[WARN] Failed to init LM Studio client: {_e}")
     _LM = None
 
-def call_llm(
+def _raw_call_llm(
     messages: List[Dict[str, Any]],
     include_tools: bool = True,
     tool_choice: str = "auto",
@@ -2053,7 +2053,11 @@ def call_llm(
     tools_override: Optional[List[Dict[str, Any]]] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
-    """Unified LLM entrypoint: always uses local LM Studio.
+    """Raw LLM transport: always uses local LM Studio, no post-processing.
+
+    Callers should use `call_llm`, which wraps this with conversational
+    polishing. This exists as a separate name only so that wrapper has
+    something to delegate to.
 
     tools_override: when provided, this exact tool list is sent instead of
     the global TOOLS array (used by the email auto-reply to expose only a
@@ -2093,6 +2097,54 @@ def call_llm(
         )
     except Exception as e:
         return {"error": f"LM Studio request failed: {e}"}
+
+
+def call_llm(
+    messages: List[Dict[str, Any]],
+    include_tools: bool = True,
+    tool_choice: str = "auto",
+    force_tool: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    tools_override: Optional[List[Dict[str, Any]]] = None,
+    **kwargs: Any
+) -> Dict[str, Any]:
+    """Public LLM entrypoint: `_raw_call_llm` plus conversational polishing.
+
+    Everything in the app calls this rather than `_raw_call_llm` directly, so
+    replies come back cleaned and de-duplicated against the recent turn
+    history. See `polish_response_for_conversation` for what that involves.
+    """
+    result = _raw_call_llm(
+        messages,
+        include_tools=include_tools,
+        tool_choice=tool_choice,
+        force_tool=force_tool,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        extra=extra,
+        tools_override=tools_override,
+        **kwargs
+    )
+
+    try:
+        if isinstance(result, dict) and "choices" in result and messages:
+            choice = result["choices"][0]
+            msg = choice.get("message") or choice.get("delta") or {}
+            content = msg.get("content")
+            if content:
+                polished = polish_response_for_conversation(content, messages)
+                if "message" in choice:
+                    choice["message"]["content"] = polished
+                elif "delta" in choice:
+                    choice["delta"]["content"] = polished
+    except Exception:
+        # If polishing fails for any reason, fall back to the raw result.
+        pass
+
+    return result
+
 
 PROXY_PORT = 5000
 
@@ -15495,126 +15547,6 @@ def voice_email_handle_command(utterance: str, *, execute_tool_fn, dry_run: bool
 
 # End Voice Email Interface
 ###############################################################################
-
-def polish_response_for_conversation(response: str, conversation_messages: List[Dict]) -> str:
-    """Post-process LLM responses to sound more conversational and less repetitive.
-
-    - Cleans artifacts and extra whitespace
-    - Removes obviously duplicated sentences
-    - Softens robotic disclaimers ("As an AI...")
-    - Shortens responses that are near-duplicates of recent replies
-    - Optionally adds a light conversational opener when things sound stiff
-    """
-    if not response:
-        return ""
-
-    # Base cleaning first
-    cleaned = clean_response_text(response)
-
-    import re as _re
-    import random as _random
-
-    # Strip common robotic disclaimers
-    disclaimers = [
-        "as an ai language model",
-        "as a language model",
-        "as an ai",
-        "i am an ai assistant",
-        "i'm an ai assistant",
-    ]
-    lowered = cleaned.lower()
-    for d in disclaimers:
-        if d in lowered:
-            # Remove the sentence containing the disclaimer
-            parts = _re.split(r'(?<=[.!?])\s+', cleaned)
-            parts = [p for p in parts if d not in p.lower()]
-            cleaned = " ".join(parts).strip()
-            lowered = cleaned.lower()
-            break
-
-    # Remove exact duplicate sentences
-    sentences = _re.split(r'(?<=[.!?])\s+', cleaned)
-    seen = set()
-    unique_sentences = []
-    for s in sentences:
-        key = s.strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            unique_sentences.append(s)
-
-    shortened = " ".join(unique_sentences).strip()
-
-    # If this still looks very similar to recent messages, trim it further
-    try:
-        history_check = check_response_against_history(shortened, conversation_messages)
-        if history_check.get("is_duplicate"):
-            # Keep only the first couple of sentences to avoid droning on
-            parts = _re.split(r'(?<=[.!?])\s+', shortened)
-            shortened = " ".join(parts[:2]).strip()
-    except Exception:
-        # On any failure, just fall back to the shortened text
-        pass
-
-    # Add a light conversational opener if it starts very stiffly
-    boring_starts = (
-        "i can ", "i will ", "i am ", "i'm ", "as an ", "here is ", "here's ", "this is "
-    )
-    stripped = shortened.lstrip()
-    lower_prefix = stripped[:10].lower()
-    if any(lower_prefix.startswith(b) for b in boring_starts):
-        openers = ["Alright —", "Got it —", "Sure —", "Okay —"]
-        opener = _random.choice(openers)
-        if stripped:
-            stripped = stripped[0].lower() + stripped[1:]
-        shortened = f"{opener} {stripped}"
-
-    return shortened.strip()
-
-
-# === Conversational wrapper for call_llm (auto-added) ===
-_raw_call_llm = call_llm
-
-def call_llm(
-    messages: List[Dict[str, Any]],
-    include_tools: bool = True,
-    tool_choice: str = "auto",
-    force_tool: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-    temperature: Optional[float] = None,
-    extra: Optional[Dict[str, Any]] = None,
-    **kwargs: Any
-) -> Dict[str, Any]:
-    """Wrapper around original call_llm that polishes responses for conversation."""
-    result = _raw_call_llm(
-        messages,
-        include_tools=include_tools,
-        tool_choice=tool_choice,
-        force_tool=force_tool,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        extra=extra,
-        **kwargs
-    )
-
-    try:
-        if isinstance(result, dict) and "choices" in result and messages:
-            choice = result["choices"][0]
-            msg = choice.get("message") or choice.get("delta") or {}
-            content = msg.get("content")
-            if content:
-                polished = polish_response_for_conversation(content, messages)
-                if "message" in choice:
-                    choice["message"]["content"] = polished
-                elif "delta" in choice:
-                    choice["delta"]["content"] = polished
-    except Exception:
-        # If polishing fails for any reason, just fall back to the original result
-        pass
-
-    return result
-
-
-
 
 # === Enhanced conversational de-duplication ===
 def polish_response_for_conversation(response: str, conversation_messages: List[Dict]) -> str:
