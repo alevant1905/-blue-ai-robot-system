@@ -822,3 +822,48 @@ def test_a_source_audit_replaces_the_inquiry_task(duet_module):
     audit = _job(duet_module, protocol=False, source_audit_active=True)
     assert "REPORTED FACT" in audit
     assert "corrective evidence audit" in audit
+
+
+# --------------------------------------------------------------------------
+# Rejected drafts
+# --------------------------------------------------------------------------
+# Twenty-four booleans and a parallel name table were written once each, never
+# read while generating, and existed only to name what went wrong when both
+# attempts failed. The order they are reported in is part of the payload, so it
+# is fixed in _DUET_GUARDS rather than left to the order the guards run in.
+
+def test_rejections_report_in_the_declared_order(duet_module):
+    rejections = duet_module._DuetRejections()
+    rejections.note("phase_move")
+    rejections.note("family")
+    rejections.note("grounding")
+    assert rejections.names == ["family", "grounding", "phase_move"]
+
+
+def test_a_guard_reported_twice_appears_once(duet_module):
+    rejections = duet_module._DuetRejections()
+    rejections.note("repetition")
+    rejections.note("repetition")
+    assert rejections.names == ["repetition"]
+
+
+def test_nothing_rejected_reports_nothing(duet_module):
+    assert duet_module._DuetRejections().names == []
+
+
+def test_an_unknown_guard_name_is_refused(duet_module):
+    """A typo used to be a silently dead boolean; now it fails loudly."""
+    with pytest.raises(AssertionError):
+        duet_module._DuetRejections().note("no_such_guard")
+
+
+def test_every_guard_the_turn_can_report_is_declared(duet_module):
+    """The note() calls in duet_turn and _DUET_GUARDS must not drift apart."""
+    import ast
+    tree = ast.parse(open(duet_module.__file__, encoding="utf-8").read())
+    used = {n.args[0].value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "note"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "rejections"}
+    assert used == set(duet_module._DUET_GUARDS)

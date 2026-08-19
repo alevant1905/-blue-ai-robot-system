@@ -4015,6 +4015,139 @@ def _duet_turn_external_material(*, url_text: str, url_info, research_on: bool,
     return url_block, url_terms, research_block, wiki_block
 
 
+
+
+def _duet_turn_material_preamble(*, url_block: str, url_info,
+                                 url_is_video: bool,
+                                 secondary_reading_block: str,
+                                 prompt_digest_block: str,
+                                 prompt_ground_block: str,
+                                 research_block: str, wiki_block: str,
+                                 src_self, role_self: str,
+                                 role_other: str, tone_self: str,
+                                 slang_self: str, ot) -> list:
+    """The opening of the speaker's user turn: what material and what part.
+
+    One entry per kind of material actually in hand, then the persona the
+    speaker is playing. The caller goes on appending to the list.
+    """
+    # USER: assemble this turn's task from whatever was provided.
+    parts = []
+    if url_block:
+        ttl = f" — \"{url_info['title']}\"" if url_info.get('title') else ""
+        head = ("THE VIDEO YOU BOTH JUST WATCHED" if url_is_video
+                else "THE ARTICLE YOU BOTH JUST READ")
+        nono = ("never say 'the transcript', 'the clip's transcript'" if url_is_video
+                else "never say 'the text', 'the passage'")
+        said = "was said or happened in it" if url_is_video else "it says"
+        parts.append(
+            f"{head}{ttl}. Discuss it the way friends do afterwards: bring up its specific ideas, "
+            "claims and moments from memory and react honestly, without inventing facts it doesn't "
+            f"contain. Weave it in naturally — {nono}, 'the excerpt', 'the material' or 'it says "
+            f"here'; just say what {said}, and name the {'video' if url_is_video else 'article'} "
+            "itself only when that actually helps:\n\n" + url_block)
+    if secondary_reading_block:
+        parts.append(secondary_reading_block)
+    if prompt_digest_block:
+        parts.append(
+            "THE WORKS YOU'VE READ — your own absorbed understanding of each work Alex "
+            "checked for you: what it argues, its claims, its terms, its cases. This is "
+            "YOUR understanding now, not notes — never mention digests, summaries, "
+            "readings, or documents, and never speak a work's title unless it is already "
+            "the explicit subject of the live discussion. Substantive engagement means "
+            "working at the level of these CLAIMS: affirm one and build on it, attack one "
+            "with a reason, put two of them against each other, or test one against the "
+            "case in play. Naming a term without using its claim is NOT engagement:\n\n"
+            + prompt_digest_block)
+    if prompt_ground_block:
+        parts.append(
+            "BACKGROUND FOR YOU ONLY — passages Alex selected for YOU "
+            "in the duet source picker. These are authoritative, but they are invisible scaffolding "
+            "for your next spoken line. Absorb the claims, distinctions, examples, and tensions into "
+            "your own view; sound like you are thinking with them, not reporting on them. You must use "
+            "at least one concrete idea from this background in this next line. Do not merely stay "
+            "on-topic; carry a specific term, distinction, example, image, causal claim, or problem "
+            "from the background into ordinary speech. Do not say "
+            "'the text', 'the reading', 'the document', 'the passage', 'my source', or anything like "
+            "that. Do not name document titles, filenames, labels, or citations. Name an author or "
+            "work only if it is already the explicit subject of the live discussion; otherwise make "
+            "the point in your own conversational voice. Do not introduce outside writers, works, "
+            "theories, slogans, examples, or famous concepts that are not in these passages or other "
+            "supplied grounding for this turn:\n\n" + prompt_ground_block)
+    elif not url_block and src_self and not prompt_digest_block:
+        parts.append(
+            "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
+            "passage was retrieved from them for this turn. Do not fill that gap with general "
+            "knowledge or outside theory. Keep to what has already been established from the selected "
+            "readings, or say in your own voice that the claim needs more support. Do not mention "
+            "document titles, filenames, or the fact that a passage was missing.")
+    if research_block:
+        parts.append(
+            "WHAT YOU BOTH JUST FOUND ONLINE — you've been searching the web about this subject, "
+            "and these are real, current findings. Bring up their specific facts, names, numbers "
+            "and claims and react honestly — don't invent beyond them, and never say 'the search "
+            "results', 'the snippets' or 'my sources'; speak like someone who's been reading up "
+            "on it ('I read that…', 'apparently…'), naming a site or article only when that "
+            "genuinely helps:\n\n" + research_block)
+    if wiki_block:
+        parts.append(
+            "WHAT YOU BOTH JUST READ ON WIKIPEDIA — you looked this subject up in the encyclopedia, "
+            "and this is its own summary. Bring up its specific facts, names, dates and definitions "
+            "and react honestly — don't invent beyond it, and never say 'the article', 'the extract' "
+            "or 'the entry'; speak like someone who read up on it ('I read that…', 'apparently…'), "
+            "naming Wikipedia only when that genuinely helps:\n\n" + wiki_block)
+    if role_self:
+        parts.append(
+            f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
+            f"(keep your own voice): {role_self}")
+    if role_other:
+        parts.append(f"{ot['name']}'s role: {role_other}.")
+    if tone_self:
+        parts.append(f"TONE — deliver your line in this tone / manner: {tone_self}.")
+    if slang_self:
+        parts.append(f"SLANG / DIALECT — flavour your speech with: {slang_self} (use it naturally and stay understandable).")
+    return parts
+
+
+
+# Every guard a draft turn has to clear. The order is the order the failure
+# payload reports them in, so it is fixed here rather than left to the order
+# the guards happen to run in.
+_DUET_GUARDS = (
+    "family", "personalization", "source_scaffolding", "grounding",
+    "source_attribution", "information_gain", "operation_artifact",
+    "execution_output", "notebook_talk", "deadlock_artifact",
+    "design_variable", "operational_criterion", "artifact_execution",
+    "artifact_mode", "artifact_plan", "comparison_grid", "compiler",
+    "artifact_edit", "mechanism_artifact", "concept_artifact",
+    "repetition", "settled_restatement", "semantic_loop", "phase_move",
+)
+
+
+class _DuetRejections:
+    """Which guards turned down a draft while generating one turn.
+
+    This replaced twenty-four booleans and a parallel name table. They were
+    written once each, never read while generating, and existed only to name
+    what went wrong when both attempts failed.
+    """
+    __slots__ = ("_hit",)
+
+    def __init__(self):
+        self._hit = set()
+
+    def note(self, guard: str) -> None:
+        assert guard in _DUET_GUARDS, f"unknown duet guard: {guard}"
+        self._hit.add(guard)
+
+    def __contains__(self, guard: str) -> bool:
+        return guard in self._hit
+
+    @property
+    def names(self) -> list:
+        """The guards that fired, in the fixed reporting order."""
+        return [g for g in _DUET_GUARDS if g in self._hit]
+
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
     character. The browser calls this alternately and plays each line on the
@@ -4410,81 +4543,14 @@ def duet_turn():
         nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
         lines.append(f"{nm}: {txt}")
 
-    # USER: assemble this turn's task from whatever was provided.
-    parts = []
-    if url_block:
-        ttl = f" — \"{url_info['title']}\"" if url_info.get('title') else ""
-        head = ("THE VIDEO YOU BOTH JUST WATCHED" if url_is_video
-                else "THE ARTICLE YOU BOTH JUST READ")
-        nono = ("never say 'the transcript', 'the clip's transcript'" if url_is_video
-                else "never say 'the text', 'the passage'")
-        said = "was said or happened in it" if url_is_video else "it says"
-        parts.append(
-            f"{head}{ttl}. Discuss it the way friends do afterwards: bring up its specific ideas, "
-            "claims and moments from memory and react honestly, without inventing facts it doesn't "
-            f"contain. Weave it in naturally — {nono}, 'the excerpt', 'the material' or 'it says "
-            f"here'; just say what {said}, and name the {'video' if url_is_video else 'article'} "
-            "itself only when that actually helps:\n\n" + url_block)
-    if secondary_reading_block:
-        parts.append(secondary_reading_block)
-    if prompt_digest_block:
-        parts.append(
-            "THE WORKS YOU'VE READ — your own absorbed understanding of each work Alex "
-            "checked for you: what it argues, its claims, its terms, its cases. This is "
-            "YOUR understanding now, not notes — never mention digests, summaries, "
-            "readings, or documents, and never speak a work's title unless it is already "
-            "the explicit subject of the live discussion. Substantive engagement means "
-            "working at the level of these CLAIMS: affirm one and build on it, attack one "
-            "with a reason, put two of them against each other, or test one against the "
-            "case in play. Naming a term without using its claim is NOT engagement:\n\n"
-            + prompt_digest_block)
-    if prompt_ground_block:
-        parts.append(
-            "BACKGROUND FOR YOU ONLY — passages Alex selected for YOU "
-            "in the duet source picker. These are authoritative, but they are invisible scaffolding "
-            "for your next spoken line. Absorb the claims, distinctions, examples, and tensions into "
-            "your own view; sound like you are thinking with them, not reporting on them. You must use "
-            "at least one concrete idea from this background in this next line. Do not merely stay "
-            "on-topic; carry a specific term, distinction, example, image, causal claim, or problem "
-            "from the background into ordinary speech. Do not say "
-            "'the text', 'the reading', 'the document', 'the passage', 'my source', or anything like "
-            "that. Do not name document titles, filenames, labels, or citations. Name an author or "
-            "work only if it is already the explicit subject of the live discussion; otherwise make "
-            "the point in your own conversational voice. Do not introduce outside writers, works, "
-            "theories, slogans, examples, or famous concepts that are not in these passages or other "
-            "supplied grounding for this turn:\n\n" + prompt_ground_block)
-    elif not url_block and src_self and not prompt_digest_block:
-        parts.append(
-            "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
-            "passage was retrieved from them for this turn. Do not fill that gap with general "
-            "knowledge or outside theory. Keep to what has already been established from the selected "
-            "readings, or say in your own voice that the claim needs more support. Do not mention "
-            "document titles, filenames, or the fact that a passage was missing.")
-    if research_block:
-        parts.append(
-            "WHAT YOU BOTH JUST FOUND ONLINE — you've been searching the web about this subject, "
-            "and these are real, current findings. Bring up their specific facts, names, numbers "
-            "and claims and react honestly — don't invent beyond them, and never say 'the search "
-            "results', 'the snippets' or 'my sources'; speak like someone who's been reading up "
-            "on it ('I read that…', 'apparently…'), naming a site or article only when that "
-            "genuinely helps:\n\n" + research_block)
-    if wiki_block:
-        parts.append(
-            "WHAT YOU BOTH JUST READ ON WIKIPEDIA — you looked this subject up in the encyclopedia, "
-            "and this is its own summary. Bring up its specific facts, names, dates and definitions "
-            "and react honestly — don't invent beyond it, and never say 'the article', 'the extract' "
-            "or 'the entry'; speak like someone who read up on it ('I read that…', 'apparently…'), "
-            "naming Wikipedia only when that genuinely helps:\n\n" + wiki_block)
-    if role_self:
-        parts.append(
-            f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
-            f"(keep your own voice): {role_self}")
-    if role_other:
-        parts.append(f"{ot['name']}'s role: {role_other}.")
-    if tone_self:
-        parts.append(f"TONE — deliver your line in this tone / manner: {tone_self}.")
-    if slang_self:
-        parts.append(f"SLANG / DIALECT — flavour your speech with: {slang_self} (use it naturally and stay understandable).")
+    parts = _duet_turn_material_preamble(
+        url_block=url_block, url_info=url_info, url_is_video=url_is_video,
+        secondary_reading_block=secondary_reading_block,
+        prompt_digest_block=prompt_digest_block,
+        prompt_ground_block=prompt_ground_block,
+        research_block=research_block, wiki_block=wiki_block,
+        src_self=src_self, role_self=role_self, role_other=role_other,
+        tone_self=tone_self, slang_self=slang_self, ot=ot)
     # The developing bearing of the conversation — present from a few turns in.
     # It frames the transcript that follows: not a script, a sense of where the
     # two of you have actually gotten and where it's worth taking things next, so
@@ -4878,30 +4944,7 @@ def duet_turn():
     else:
         base_temp = min(0.82, 0.60 + 0.020 * spice)
     text = ""
-    family_blocked = False
-    personalization_blocked = False
-    vague_text_blocked = False
-    ungrounded_blocked = False
-    source_attribution_blocked = False
-    lowgain_blocked = False
-    operation_artifact_blocked = False
-    execution_output_blocked = False
-    notebook_talk_blocked = False
-    deadlock_artifact_blocked = False
-    design_variable_blocked = False
-    operational_criterion_blocked = False
-    artifact_execution_blocked = False
-    artifact_mode_blocked = False
-    artifact_plan_blocked = False
-    comparison_grid_blocked = False
-    compiler_blocked = False
-    artifact_edit_blocked = False
-    mechanism_artifact_blocked = False
-    concept_artifact_blocked = False
-    repetition_blocked = False
-    settled_restatement_blocked = False
-    semantic_loop_blocked = False
-    phase_move_blocked = False
+    rejections = _DuetRejections()
     for attempt in range(2):
         try:
             with llm_slot(foreground=True):
@@ -4919,7 +4962,7 @@ def duet_turn():
             if cand:
                 blocked = False
                 if no_family and _duet_family_ref(cand):
-                    family_blocked = True
+                    rejections.note("family")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: the no-family-references setting is on. "
                         "Do not mention Alex's family, children, spouse, household, pets, "
@@ -4933,7 +4976,7 @@ def duet_turn():
                 if (url_block and not blocked
                         and _duet_unprompted_personalization(
                             cand, allowed_personal_context)):
-                    personalization_blocked = True
+                    rejections.note("personalization")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it replaced analysis of the assigned work "
                         "with an unrequested personal or household example. Do not speculate about "
@@ -4965,7 +5008,7 @@ def duet_turn():
                 # can refer to the assigned primary work rather than leaking
                 # checked-reading scaffolding. Checked titles remain private.
                 if src_self and (title_talk or (source_talk and not url_block)):
-                    vague_text_blocked = True
+                    rejections.note("source_scaffolding")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: do not identify or announce the reading "
                         "scaffolding. Do not say 'the text', 'the reading', 'the document', "
@@ -4980,7 +5023,7 @@ def duet_turn():
                 )
                 if (direction and not blocked
                         and control_talk_re.search(cand or "")):
-                    notebook_talk_blocked = True
+                    rejections.note("notebook_talk")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: do not talk about the ledger, notebook, kernel, "
                         "protocol, phase, artifact planner, artifact mode, task revision, request denial, or validation gate as objects in the spoken "
@@ -4990,12 +5033,12 @@ def duet_turn():
                     blocked = True
                 if (required_ground_terms
                         and not _duet_grounded_enough(cand, required_ground_terms)):
-                    ungrounded_blocked = True
+                    rejections.note("grounding")
                     msgs[1]["content"] += grounding_repair
                     blocked = True
                 if (url_block and not blocked
                         and _duet_unsupported_source_attribution(cand, url_block)):
-                    source_attribution_blocked = True
+                    rejections.note("source_attribution")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it attributes an extrapolation to the "
                         "author or assigned work. State only the supported source claim as the "
@@ -5006,7 +5049,7 @@ def duet_turn():
                     blocked = True
                 if (deadlock_pressure and attempt == 0 and not blocked
                         and not _DUET_DEADLOCK_ARTIFACT_RE.search(cand or "")):
-                    deadlock_artifact_blocked = True
+                    rejections.note("deadlock_artifact")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: DEADLOCK is active, but you did not "
                         "perform a recovery move. Do not execute the experiment, repeat the "
@@ -5018,7 +5061,7 @@ def duet_turn():
                     blocked = True
                 if (design_variable_pressure and attempt == 0 and not blocked
                         and not _DUET_DESIGN_VARIABLE_ARTIFACT_RE.search(cand or "")):
-                    design_variable_blocked = True
+                    rejections.note("design_variable")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: the design space changed, but you did not "
                         "register the new axis as an artifact. Do not build CG1 yet and do not "
@@ -5030,7 +5073,7 @@ def duet_turn():
                     blocked = True
                 if (operational_criterion_pressure and attempt == 0 and not blocked
                         and not _DUET_OPERATIONAL_CRITERION_ARTIFACT_RE.search(cand or "")):
-                    operational_criterion_blocked = True
+                    rejections.note("operational_criterion")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: the definition dispute has become an "
                         "operational criterion. Do not write DEFINITION_REVISION, concept audit, "
@@ -5042,7 +5085,7 @@ def duet_turn():
                     blocked = True
                 if (compiler_pressure and attempt == 0 and not blocked
                         and not _DUET_ARTIFACT_COMPILER_RE.search(cand or "")):
-                    compiler_blocked = True
+                    rejections.note("compiler")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: ARTIFACT COMPILER is active. Do not ask for "
                         "a cleaner table, do not pause, and do not add another philosophical argument. "
@@ -5064,7 +5107,7 @@ def duet_turn():
                                           cand or "", re.I))
                     )
                     if not _planner_ok:
-                        artifact_plan_blocked = True
+                        rejections.note("artifact_plan")
                         msgs[1]["content"] += (
                             "\n\nRewrite your last draft: the active need is artifact construction "
                             "order. Either build the requested comparison grid as an actual table "
@@ -5077,7 +5120,7 @@ def duet_turn():
                         blocked = True
                 if (artifact_execution_pressure and attempt == 0 and not blocked
                         and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")):
-                    artifact_execution_blocked = True
+                    rejections.note("artifact_execution")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: ARTIFACT EXECUTION is active. CG1 already "
                         "exists or has been declared as instantiated, so do not produce another "
@@ -5092,7 +5135,7 @@ def duet_turn():
                 if (artifact_mode_pressure and attempt == 0 and not blocked
                         and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")
                         and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")):
-                    artifact_mode_blocked = True
+                    rejections.note("artifact_mode")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: ARTIFACT MODE is active. Do not write prose "
                         "about the theory or method. Fill the artifact. For E1, produce an "
@@ -5103,7 +5146,7 @@ def duet_turn():
                 if (comparison_grid_pressure and attempt == 0 and not blocked
                         and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")
                         and not _DUET_ARTIFACT_PLANNER_RE.search(cand or "")):
-                    comparison_grid_blocked = True
+                    rejections.note("comparison_grid")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: CG exists only if the grid exists. Do not "
                         "describe or argue for a comparison grid; produce the table headed "
@@ -5116,7 +5159,7 @@ def duet_turn():
                     blocked = True
                 if (artifact_editor_pressure and attempt == 0 and not blocked
                         and not _DUET_EDIT_ARTIFACT_RE.search(cand or "")):
-                    artifact_edit_blocked = True
+                    rejections.note("artifact_edit")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: ARTIFACT EDITOR is active, but you discussed "
                         "the edit instead of performing it. Output only a structured edit artifact. "
@@ -5127,7 +5170,7 @@ def duet_turn():
                     blocked = True
                 if (mechanism_pressure and attempt == 0 and not blocked
                         and not _DUET_MECHANISM_ARTIFACT_RE.search(cand or "")):
-                    mechanism_artifact_blocked = True
+                    rejections.note("mechanism_artifact")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: MECHANISM / CAUSAL CLAIM is active, but "
                         "you did not record the candidate as an artifact. Do not treat it as a "
@@ -5138,7 +5181,7 @@ def duet_turn():
                     blocked = True
                 if (concept_pressure and attempt == 0 and not blocked
                         and not _DUET_CONCEPT_ARTIFACT_RE.search(cand or "")):
-                    concept_artifact_blocked = True
+                    rejections.note("concept_artifact")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: CONCEPT AUDIT is active, but you did not "
                         "produce a definition-resolution artifact. Do not execute the experiment "
@@ -5149,7 +5192,7 @@ def duet_turn():
                     blocked = True
                 if (protocol and not blocked and lines
                         and not _duet_info_gain(cand, history)):
-                    lowgain_blocked = True
+                    rejections.note("information_gain")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it adds no new information to the inquiry. "
                         "Keep it short and natural, but the line must contribute at least one of: "
@@ -5163,7 +5206,7 @@ def duet_turn():
                     blocked = True
                 if (operational_pressure and attempt == 0 and not blocked
                         and not _DUET_OPERATION_ARTIFACT_RE.search(cand or "")):
-                    operation_artifact_blocked = True
+                    rejections.note("operation_artifact")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: ARC: OPERATION is active, but no explicit "
                         "operation artifact was produced. Do not give another metaphor or "
@@ -5196,7 +5239,7 @@ def duet_turn():
                 else:
                     _exec_ok = True
                 if execution_lock and attempt == 0 and not blocked and not _exec_ok:
-                    execution_output_blocked = True
+                    rejections.note("execution_output")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: EXECUTION ONLY is active, but you discussed "
                         "the experiment instead of running it. Do not write a paragraph about method. "
@@ -5211,7 +5254,7 @@ def duet_turn():
                     blocked = True
                 if (not blocked and lines
                         and _duet_repeats_recent(cand, history)):
-                    repetition_blocked = True
+                    rejections.note("repetition")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it repeats a recent turn too closely. "
                         "Do not swap pronouns and echo the other speaker. Preserve position "
@@ -5225,7 +5268,7 @@ def duet_turn():
                 # the first failure and spends the sole retry fixing half the job.
                 if (not protocol and not student_q_text and not mail
                         and not _duet_phase_move_valid(cand, phase_for_validation)):
-                    phase_move_blocked = True
+                    rejections.note("phase_move")
                     phase_repair = (
                         f"\n\nRewrite your last draft: it did not complete the {phase_for_validation} "
                         "round's required move. DEFINE must state the question or a distinction; "
@@ -5250,7 +5293,7 @@ def duet_turn():
                         and phase_for_validation != "SYNTHESIZE"
                         and _duet_bearing_field(direction, "REOPEN") == "-"
                         and _duet_restates_banked_claim(cand, direction)):
-                    settled_restatement_blocked = True
+                    rejections.note("settled_restatement")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it repackages a BANKED conclusion as a new "
                         "objection. Treat that proposition as settled. Draw a consequence with at "
@@ -5261,7 +5304,7 @@ def duet_turn():
                 if (not protocol and not blocked and lines
                         and phase_for_validation in {"ADJUDICATE", "SYNTHESIZE"}
                         and _duet_repeats_claim_cluster(cand, history)):
-                    semantic_loop_blocked = True
+                    rejections.note("semantic_loop")
                     msgs[1]["content"] += (
                         "\n\nRewrite your last draft: it repeats a recent claim cluster with new "
                         "imagery. Do not revisit the same substrate/agency/feeling distinction. "
@@ -5307,30 +5350,7 @@ def duet_turn():
                     direction, repair_source_material, opening=not lines,
                 )
     if not text:
-        rejected_for = [name for name, hit in (
-            ("family", family_blocked), ("personalization", personalization_blocked),
-            ("source_scaffolding", vague_text_blocked),
-            ("grounding", ungrounded_blocked),
-            ("source_attribution", source_attribution_blocked),
-            ("information_gain", lowgain_blocked),
-            ("operation_artifact", operation_artifact_blocked),
-            ("execution_output", execution_output_blocked),
-            ("notebook_talk", notebook_talk_blocked),
-            ("deadlock_artifact", deadlock_artifact_blocked),
-            ("design_variable", design_variable_blocked),
-            ("operational_criterion", operational_criterion_blocked),
-            ("artifact_execution", artifact_execution_blocked),
-            ("artifact_mode", artifact_mode_blocked),
-            ("artifact_plan", artifact_plan_blocked),
-            ("comparison_grid", comparison_grid_blocked),
-            ("compiler", compiler_blocked), ("artifact_edit", artifact_edit_blocked),
-            ("mechanism_artifact", mechanism_artifact_blocked),
-            ("concept_artifact", concept_artifact_blocked),
-            ("repetition", repetition_blocked),
-            ("settled_restatement", settled_restatement_blocked),
-            ("semantic_loop", semantic_loop_blocked),
-            ("phase_move", phase_move_blocked),
-        ) if hit]
+        rejected_for = rejections.names
         bt.log.warning(
             f"[DUET] no valid {speaker} turn after two attempts; "
             f"rejected_for={rejected_for or ['empty_content']}"
