@@ -11649,23 +11649,416 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     return system_msg
 
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None) -> Dict:
-    """Process conversation with tool support. `robot` selects which persona is
-    speaking (Blue by default; "hexia" for her chat page). `focus` carries the
-    chat Context panel's library picks ({"docs": [...], "folders": [...]}),
-    scoping Blue's document awareness and searches for this turn."""
-    global _ACTIVE_CHAT_ROBOT, _ACTIVE_FOCUS_DOCS, _ACTIVE_FOCUS_FOLDERS
-    _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
-    # Set the library-focus globals up front — build_dynamic_system_message and
-    # search_documents_rag both read them — and reset them every turn.
-    _focus = focus if isinstance(focus, dict) else {}
-    _ACTIVE_FOCUS_DOCS = [str(x).strip() for x in (_focus.get("docs") or []) if str(x).strip()]
-    _ACTIVE_FOCUS_FOLDERS = [str(x).strip() for x in (_focus.get("folders") or []) if str(x).strip()]
-    if _ACTIVE_FOCUS_DOCS or _ACTIVE_FOCUS_FOLDERS:
-        log.info(f"[FOCUS] {len(_ACTIVE_FOCUS_DOCS)} doc(s), "
-                 f"{len(_ACTIVE_FOCUS_FOLDERS)} folder(s) pinned for this turn")
-    conversation_messages = messages.copy()
 
+
+@dataclass(frozen=True)
+class _ChatToolChoice:
+    """What a turn needs decided before the model is consulted.
+
+    `reply` short-circuits everything else: the answer is already known and
+    no model call is wanted - a blocked tool, a clarifying question, or a
+    templated zero-LLM result.
+    """
+    reply: Optional[Dict[str, Any]] = None
+    detect_msg: str = ""
+    force_tool: Optional[str] = None
+    tool_args: Optional[Dict[str, Any]] = None
+    is_greeting: bool = False
+
+
+def _chat_choose_tool(conversation_messages, last_user_message, *,
+                      correction, user_name, pre_selection):
+    """Decide which tool, if any, this turn needs before the model is asked."""
+    # Every path that currently reaches the read below binds this, but only
+    # via a chain of coincidences (a correction can only force a zero-LLM
+    # tool, and those always template a reply and return). Bind it here so
+    # that stops being load-bearing.
+    is_greeting = False
+    from blue.tool_selector.detectors.vision import (
+        extract_camera_view_args, extract_email_snapshot_args,
+        is_email_snapshot_request)
+    # Detection sees the user's ASK only — attached document text once
+    # keyword-matched its way into starting real music (2026-07-10).
+    _detect_msg = _intent_text(last_user_message)
+    _detect_low = _detect_msg.lower()
+    if (is_email_snapshot_request(_detect_low)
+            and user_name not in _CHAT_ONLY_USERS):
+        print(f"   [SNAPSHOT-DETECT] ✅ Snapshot-by-email intent detected!")
+        improved_force_tool = "email_snapshot"
+        improved_tool_args = extract_email_snapshot_args(_detect_low)
+        if improved_tool_args:
+            print(f"   [SNAPSHOT-DETECT] Args: {improved_tool_args}")
+        is_greeting = False
+        print(f"   [SNAPSHOT-DETECT] Tool forced: email_snapshot (will execute in iteration 1)")
+    elif detect_camera_capture_intent(_detect_msg) and user_name not in _CHAT_ONLY_USERS:
+        print(f"   [CAMERA-DETECT] ✅ Camera capture intent detected!")
+        print(f"   [CAMERA-DETECT] Forcing NEW photo capture - bypassing tool selector")
+        # Force the capture_camera tool to be called
+        # This ensures a brand new photo is taken, not reusing old context
+        improved_force_tool = "capture_camera"
+        # Carry any aim/zoom the user asked for ("what's to your left",
+        # "zoom in on the table") into the forced capture.
+        improved_tool_args = extract_camera_view_args(_detect_low)
+        if improved_tool_args:
+            print(f"   [CAMERA-DETECT] View control: {improved_tool_args}")
+
+        # Skip tool selector and go straight to execution
+        is_greeting = False
+
+        print(f"   [CAMERA-DETECT] Tool forced: capture_camera (will execute in iteration 1)")
+    else:
+        # Normal tool selection flow
+        improved_force_tool = None
+        improved_tool_args = None
+
+    # process_with_tools is also called outside the HTTP endpoint (tests,
+    # integrations). Preserve document follow-ups there even when no contextual
+    # preselection was supplied by chat_completions.
+    if not improved_force_tool and pre_selection is None:
+        contextual_doc_query = _contextual_document_query(
+            _intent_text(last_user_message), conversation_messages)
+        if contextual_doc_query:
+            improved_force_tool = "search_documents"
+            improved_tool_args = {"query": contextual_doc_query, "max_results": 5}
+            is_greeting = False
+            print(f"   [DOC-CONTEXT] Forcing local document query: {contextual_doc_query}")
+
+    if not improved_force_tool and user_name not in _CHAT_ONLY_USERS:
+        live_query = _live_info_query_from_message(_detect_msg, conversation_messages)
+        if live_query:
+            improved_force_tool = "web_search"
+            improved_tool_args = {"query": live_query}
+            is_greeting = False
+            print(f"   [LIVE-INFO] Forcing web_search for current/live query: {live_query}")
+
+    # ================================================================================
+    # TOOL SELECTION: Improved (confidence-based) or Legacy (keyword-based)
+    # ================================================================================
+
+    # v8: Handle corrections first
+    if correction and correction['is_correction'] and correction['new_value']:
+        print(f"   [CORRECTION] Handling correction before tool selection")
+        if correction['correction_type'] == 'lights':
+            improved_force_tool = 'control_lights'
+            if correction['new_value'] in ['brighter', 'dimmer']:
+                improved_tool_args = {'action': 'brightness', 'brightness': 80 if correction['new_value'] == 'brighter' else 30}
+            else:
+                improved_tool_args = {'action': 'color', 'color': correction['new_value']}
+        elif correction['correction_type'] == 'music':
+            improved_force_tool = 'control_music'
+            improved_tool_args = {'action': correction['new_value']}
+        
+        if improved_force_tool:
+            print(f"   [CORRECTION] Forcing tool: {improved_force_tool} with {improved_tool_args}")
+
+    # ===== TOOL SELECTION (Single Path - Always Use Modular Selector) =====
+    if not improved_force_tool:
+        print(f"   [SELECTOR] Running modular confidence-based tool selection")
+
+        # Reuse pre-selection from endpoint if available (avoids running selector twice)
+        if pre_selection is not None:
+            selection_result = pre_selection
+            print(f"   [SELECTOR] Reusing pre-selection result")
+        else:
+            recent_history = conversation_messages[-5:] if len(conversation_messages) > 5 else conversation_messages
+            selection_result = TOOL_SELECTOR.select_tool(_intent_text(last_user_message), recent_history)
+
+        # Check if disambiguation is needed
+        if selection_result.needs_disambiguation:
+            print(f"   [SELECTOR] Low confidence - asking user for clarification")
+            # The clarifying question IS Blue's reply this turn — return it in
+            # the standard choices shape so chat_completions can read it like
+            # any other response. (A bare {'response':...} dict here used to
+            # KeyError on response['choices'] and 500 the whole request.)
+            clarify = (selection_result.disambiguation_prompt
+                       or "Could you tell me a bit more about what you'd like?")
+            return _ChatToolChoice(reply={"choices": [{"message": {
+                "role": "assistant",
+                "content": clarify,
+            }}]})
+
+        # Set variables for compatibility with rest of code
+        if selection_result.primary_tool:
+            selected_tool = selection_result.primary_tool
+
+            # Don't overwrite if priority detection (camera) already set a tool
+            if not improved_force_tool:
+                # Set tool name and args from selector
+                improved_force_tool = selected_tool.tool_name
+                improved_tool_args = selected_tool.extracted_params
+
+                # Log selection details
+                print(f"   [SELECTOR] Selected: {improved_force_tool}")
+                print(f"   [SELECTOR] Confidence: {selected_tool.confidence:.2f}")
+                print(f"   [SELECTOR] Priority: {selected_tool.priority}")
+                print(f"   [SELECTOR] Reason: {selected_tool.reason}")
+            else:
+                print(f"   [SELECTOR] Skipping selector - priority tool already set: {improved_force_tool}")
+
+            if selection_result.alternative_tools:
+                alt_names = [t.tool_name for t in selection_result.alternative_tools[:2]]
+                print(f"   [SELECTOR] Alternatives: {', '.join(alt_names)}")
+
+            if selection_result.compound_request:
+                print(f"   [SELECTOR] WARNING: Compound request (multiple tools needed)")
+
+            is_greeting = False
+        else:
+            # No tool needed - conversational response (but only if no priority tool set)
+            if not improved_force_tool:
+                improved_force_tool = None
+                improved_tool_args = None
+                print(f"   [SELECTOR] No tool needed - conversational response")
+            else:
+                print(f"   [SELECTOR] Keeping priority tool: {improved_force_tool}")
+
+            # Detect if it's a greeting/conversational message
+            greeting_patterns = ['hello', 'hi ', 'hey', 'good morning', 'good afternoon', 'good evening',
+                                'how are you', 'how\'s it going', 'what\'s up', 'sup', 'greetings',
+                                'nice to see you', 'good to see you']
+            is_greeting = any(pattern in _detect_low for pattern in greeting_patterns)
+
+    # ===== TOOL NAME NORMALIZATION =====
+    # Safety net: map any legacy/incorrect tool names to correct ones.
+    # This catches mismatches between what detectors return and what
+    # execute_tool / TOOLS array actually support.
+    _TOOL_NAME_MAP = {
+        'capture_camera_image': 'capture_camera',
+        'recognize_face': 'capture_camera',
+        'recognize_place': 'capture_camera',
+        'create_event': 'create_reminder',
+        'list_events': 'get_upcoming_reminders',
+        'set_reminder': 'create_reminder',
+        'list_notes': 'search_notes',
+        'calculate': 'run_javascript',
+        'get_date_time': 'get_local_time',
+        'visual_memory': 'recall_visual_memory',
+        'recall_vision': 'recall_visual_memory',
+    }
+    if improved_force_tool and improved_force_tool in _TOOL_NAME_MAP:
+        old_name = improved_force_tool
+        improved_force_tool = _TOOL_NAME_MAP[improved_force_tool]
+        print(f"   [NORMALIZE] Mapped tool name: {old_name} -> {improved_force_tool}")
+
+    # Chat-only users (Vilda's iPad): the PC webcam (capture_camera) is NEVER her
+    # camera. Her "eyes" are the iPad frame already staged in the vision queue by
+    # /chat/eyes when she taps Look. So never run capture_camera for her — drop
+    # the forced/selected tool and let that queued frame flow to the vision model
+    # below (call_lm_studio injects it). Without this, "Look, Blue!" trips the
+    # camera-intent path, runs the PC webcam, and clears her frame — so Blue
+    # describes whatever is by the PC instead of what the iPad sees.
+    if user_name in _CHAT_ONLY_USERS and improved_force_tool == "capture_camera":
+        print(f"   [KID] capture_camera suppressed for {user_name}; using iPad camera frame")
+        improved_force_tool = None
+        improved_tool_args = None
+
+    # Other off-limits tools (music, reminders) get a gentle decline.
+    if user_name in _CHAT_ONLY_USERS and improved_force_tool in _KID_BLOCKED_TOOLS:
+        print(f"   [KID] Blocked '{improved_force_tool}' for {user_name}")
+        return _ChatToolChoice(reply={"choices": [{"message": {"role": "assistant", "content":
+            "That's not something I can do here — but we can talk about anything "
+            "you like! What would you like to chat about?"}}]})
+
+    # ================================================================================
+    # ZERO-LLM PATH: For simple tools, execute and return a templated response
+    # without any LLM call at all. This is the fastest possible path.
+    # ================================================================================
+    _ZERO_LLM_TOOLS = {
+        'control_music', 'control_lights', 'get_local_time',
+        'set_timer', 'music_visualizer', 'play_music',
+    }
+
+
+    if (improved_force_tool and improved_force_tool in _ZERO_LLM_TOOLS
+            and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
+        print(f"\n[ZERO-LLM] Direct execution (no LLM call): {improved_force_tool} with {improved_tool_args}")
+        tool_result = execute_tool(improved_force_tool, improved_tool_args)
+        print(f"   [OK] {improved_force_tool} completed")
+
+        templated = _tool_pipeline.template_response(improved_force_tool, improved_tool_args, tool_result)
+        if templated:
+            print(f"   [ZERO-LLM] Returning templated response (0 LLM calls)")
+            return _ChatToolChoice(reply={"choices": [{"message": {"role": "assistant", "content": templated}}]})
+    return _ChatToolChoice(detect_msg=_detect_msg,
+                           force_tool=improved_force_tool,
+                           tool_args=improved_tool_args,
+                           is_greeting=is_greeting)
+
+
+def _chat_purge_stale_camera(conversation_messages, last_user_message):
+    """Drop old camera frames and their descriptions from the conversation.
+
+    Returns the conversation to use; the purge rebuilds the list.
+    """
+    # Purge old camera images from conversation to prevent confusion
+    # OPTIMIZATION: Quick scan using only string content (skip base64 image data in lists)
+    # Fast check: scan text content only (no str() on entire messages with base64)
+    #
+    # The system message is EXCLUDED, and that exclusion is load-bearing. It
+    # contains the line "CAMERA DISCIPLINE: use the camera when someone asks
+    # you to look", so the bare substring 'CAMERA' matched it on every single
+    # turn. That made _has_camera_content always true, and the purge below
+    # then deleted index 0 — the whole system prompt: persona, identity,
+    # <known_facts>, <family>, the memory blocks and every rule — on any turn
+    # where the user was not asking about vision. Blue answered from the
+    # conversation thread alone, which is why he sounded like himself while
+    # having lost the household (2026-08-04).
+    def _is_camera_message(msg) -> bool:
+        if msg.get('role') == 'system':
+            return False
+        text = _get_text_content(msg)
+        return ('CAMERA' in text or 'camera_NEW_' in text
+                or 'camera_capture_' in text)
+
+    _has_camera_content = any(_is_camera_message(m) for m in conversation_messages)
+
+    if _has_camera_content:
+        conversation_messages = purge_old_camera_images(conversation_messages)
+
+        vision_keywords = ['see', 'look', 'watch', 'view', 'show', 'picture', 'photo', 'image', 'camera', 'visual']
+        _msg_lower = last_user_message.lower() if isinstance(last_user_message, str) else ''
+        asks_about_vision = any(keyword in _msg_lower for keyword in vision_keywords)
+
+        messages_to_remove = set()
+        for i in range(len(conversation_messages) - 1):
+            current_msg = conversation_messages[i]
+            if current_msg.get('role') != 'user':
+                continue
+            user_content = _get_text_content(current_msg).lower()
+            if not any(kw in user_content for kw in ('see', 'look', 'watch', 'show', 'picture', 'photo')):
+                continue
+            next_msg = conversation_messages[i + 1] if i + 1 < len(conversation_messages) else None
+            if next_msg and next_msg.get('role') == 'assistant':
+                assistant_content = _get_text_content(next_msg).lower()
+                if any(phrase in assistant_content for phrase in _VISION_PHRASES):
+                    messages_to_remove.add(i)
+                    messages_to_remove.add(i + 1)
+
+        description_count = len(messages_to_remove)
+
+        if not asks_about_vision:
+            # Count camera messages using cheap text extraction
+            # Same exclusion as above — this is the set that actually does the
+            # deleting, so the system message must never appear in it.
+            camera_indices = {
+                idx for idx, msg in enumerate(conversation_messages)
+                if _is_camera_message(msg)
+            }
+
+            if camera_indices or description_count > 0:
+                remove_set = camera_indices | messages_to_remove
+                conversation_messages = [
+                    msg for idx, msg in enumerate(conversation_messages)
+                    if idx not in remove_set
+                ]
+                print(f"   [VISION-PURGE] Removed {len(remove_set)} vision-related message(s) ({len(camera_indices)} images, {description_count} descriptions) - not relevant to current query")
+        else:
+            if description_count > 0:
+                conversation_messages = [
+                    msg for idx, msg in enumerate(conversation_messages)
+                    if idx not in messages_to_remove
+                ]
+                print(f"   [VISION-PURGE] Removed {description_count} old photo description(s) to focus on current vision query")
+    return conversation_messages
+
+
+def _chat_self_context(conversation_messages, last_user_message, *,
+                       robot, user_name):
+    """Answer or pin whatever this turn asks about Blue himself.
+
+    An identity question, or a mention of the other robot, gets a grounding
+    note pinned beside the user's line so the model answers from fact rather
+    than invention. A request to write in Alex's voice is answered outright.
+
+    Pins go into `conversation_messages` in place. Returns
+    (reply_or_None, identity_kind); a reply means the turn is already done.
+    """
+    # "Write this from my perspective / in my voice" — compose a first-person
+    # piece in Alex's voice grounded in his publications and short-circuit the
+    # tool loop. Only when ALEX is the speaker: writing as Alex for someone else
+    # (e.g. Vilda on the iPad) would put words in the wrong person's mouth.
+    _luser = _intent_text(last_user_message)
+
+    # Identity prompts need the canonical self-description beside the live turn.
+    # Small local models weigh nearby text heavily; the same rule only in the large
+    # system message was not enough to stop base-model introductions on "who are
+    # you really?". This copy is model-facing only and is never saved as user text.
+    _identity_kind = contextual_identity_request_kind(
+        _luser, conversation_messages
+    )
+    if _identity_kind:
+        try:
+            _recent_identity_topics = tuple(dict.fromkeys(
+                topic
+                for message in conversation_messages[-10:]
+                if message.get("role") == "assistant"
+                and isinstance(message.get("content"), str)
+                for topic in identity_reply_topics(message["content"])
+            ))
+            _identity_note = identity_grounding_note(
+                _robot_cfg(robot)["name"],
+                _robot_cfg(robot)["self_desc"],
+                _identity_kind,
+                avoid_topics=_recent_identity_topics,
+            )
+            for _identity_i in range(len(conversation_messages) - 1, -1, -1):
+                _identity_m = conversation_messages[_identity_i]
+                if (_identity_m.get("role") == "user"
+                        and isinstance(_identity_m.get("content"), str)):
+                    conversation_messages[_identity_i] = {
+                        **_identity_m,
+                        "content": f"{_identity_note}\n\n{_identity_m['content']}",
+                    }
+                    print(f"   [IDENTITY] Pinned {_identity_kind} grounding beside live turn")
+                    break
+        except Exception as _identity_e:
+            log.warning(f"[IDENTITY] grounding pin failed: {_identity_e}")
+
+    # The <recent_duet> block in the system head was not enough: asked "what
+    # have you been up to" minutes after a duet, the model paraphrased the
+    # NEARBY grounding note ("reviewing our recent duet conversations with
+    # the other robot") and invented the topic — small local models weigh
+    # nearby text heavily, and the record sat thousands of tokens away in
+    # the system head (live 2026-07-15, second occurrence). When the turn is
+    # about the other robot or the robot's own recent activity, pin the
+    # recorded duet lines beside the live turn too. Model-facing only.
+    _other_robot_key = {"blue": "hexia", "hexia": "blue"}.get(
+        (robot or "").strip().lower())
+    if (_other_robot_key and user_name not in _CHAT_ONLY_USERS
+            and (re.search(rf"\b{_other_robot_key}\b", _luser, re.I)
+                 or _identity_kind in ("evolution", "shared_recall"))):
+        try:
+            _duet_pin = _continuity_routes.recent_duet_block(robot)
+            if _duet_pin:
+                for _duet_i in range(len(conversation_messages) - 1, -1, -1):
+                    _duet_m = conversation_messages[_duet_i]
+                    if (_duet_m.get("role") == "user"
+                            and isinstance(_duet_m.get("content"), str)):
+                        conversation_messages[_duet_i] = {
+                            **_duet_m,
+                            "content": f"{_duet_pin}\n\n{_duet_m['content']}",
+                        }
+                        print("   [DUET] Pinned recorded duet lines beside live turn")
+                        break
+        except Exception as _duet_e:
+            log.warning(f"[DUET] duet pin failed: {_duet_e}")
+
+    if _luser and (user_name or "Alex").strip().lower() == "alex" and _wants_perspective_write(_luser):
+        try:
+            _piece = _compose_in_alex_voice(_luser)
+            if _piece:
+                return {"choices": [{"message": {"role": "assistant", "content": _piece}}]}, _identity_kind
+        except Exception as _pe:
+            print(f"   [PERSPECTIVE] chat compose error: {_pe}")
+    return None, _identity_kind
+
+def _chat_system_message(conversation_messages, *, robot, user_name,
+                         voice, language, system_addendum):
+    """Build this turn's system message, splice it in, and trim the context.
+
+    Returns the conversation to use. It is not always the list that was
+    passed in: the trim rebuilds it, so the caller must take the result.
+    """
     # BUILD SYSTEM MESSAGE WITH MEMORY FACTS
     # Extract facts from .ocf conversations first (only if conversation has .ocf content)
     facts_preamble = build_system_preamble(robot_name=_robot_cfg(robot)["name"])
@@ -11809,160 +12202,42 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     except Exception:
         # If any error occurs while trimming, proceed without trimming
         pass
+    return conversation_messages
+
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None) -> Dict:
+    """Process conversation with tool support. `robot` selects which persona is
+    speaking (Blue by default; "hexia" for her chat page). `focus` carries the
+    chat Context panel's library picks ({"docs": [...], "folders": [...]}),
+    scoping Blue's document awareness and searches for this turn."""
+    global _ACTIVE_CHAT_ROBOT, _ACTIVE_FOCUS_DOCS, _ACTIVE_FOCUS_FOLDERS
+    _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
+    # Set the library-focus globals up front — build_dynamic_system_message and
+    # search_documents_rag both read them — and reset them every turn.
+    _focus = focus if isinstance(focus, dict) else {}
+    _ACTIVE_FOCUS_DOCS = [str(x).strip() for x in (_focus.get("docs") or []) if str(x).strip()]
+    _ACTIVE_FOCUS_FOLDERS = [str(x).strip() for x in (_focus.get("folders") or []) if str(x).strip()]
+    if _ACTIVE_FOCUS_DOCS or _ACTIVE_FOCUS_FOLDERS:
+        log.info(f"[FOCUS] {len(_ACTIVE_FOCUS_DOCS)} doc(s), "
+                 f"{len(_ACTIVE_FOCUS_FOLDERS)} folder(s) pinned for this turn")
+    conversation_messages = messages.copy()
+
+    conversation_messages = _chat_system_message(
+        conversation_messages, robot=robot, user_name=user_name,
+        voice=voice, language=language, system_addendum=system_addendum)
 
 
-    # Purge old camera images from conversation to prevent confusion
-    # OPTIMIZATION: Quick scan using only string content (skip base64 image data in lists)
     last_user_message = messages[-1].get("content", "") if messages else ""
 
-    # "Write this from my perspective / in my voice" — compose a first-person
-    # piece in Alex's voice grounded in his publications and short-circuit the
-    # tool loop. Only when ALEX is the speaker: writing as Alex for someone else
-    # (e.g. Vilda on the iPad) would put words in the wrong person's mouth.
-    _luser = _intent_text(last_user_message)
+    _self_reply, _identity_kind = _chat_self_context(
+        conversation_messages, last_user_message, robot=robot,
+        user_name=user_name)
+    if _self_reply is not None:
+        return _self_reply
 
-    # Identity prompts need the canonical self-description beside the live turn.
-    # Small local models weigh nearby text heavily; the same rule only in the large
-    # system message was not enough to stop base-model introductions on "who are
-    # you really?". This copy is model-facing only and is never saved as user text.
-    _identity_kind = contextual_identity_request_kind(
-        _luser, conversation_messages
-    )
-    if _identity_kind:
-        try:
-            _recent_identity_topics = tuple(dict.fromkeys(
-                topic
-                for message in conversation_messages[-10:]
-                if message.get("role") == "assistant"
-                and isinstance(message.get("content"), str)
-                for topic in identity_reply_topics(message["content"])
-            ))
-            _identity_note = identity_grounding_note(
-                _robot_cfg(robot)["name"],
-                _robot_cfg(robot)["self_desc"],
-                _identity_kind,
-                avoid_topics=_recent_identity_topics,
-            )
-            for _identity_i in range(len(conversation_messages) - 1, -1, -1):
-                _identity_m = conversation_messages[_identity_i]
-                if (_identity_m.get("role") == "user"
-                        and isinstance(_identity_m.get("content"), str)):
-                    conversation_messages[_identity_i] = {
-                        **_identity_m,
-                        "content": f"{_identity_note}\n\n{_identity_m['content']}",
-                    }
-                    print(f"   [IDENTITY] Pinned {_identity_kind} grounding beside live turn")
-                    break
-        except Exception as _identity_e:
-            log.warning(f"[IDENTITY] grounding pin failed: {_identity_e}")
-
-    # The <recent_duet> block in the system head was not enough: asked "what
-    # have you been up to" minutes after a duet, the model paraphrased the
-    # NEARBY grounding note ("reviewing our recent duet conversations with
-    # the other robot") and invented the topic — small local models weigh
-    # nearby text heavily, and the record sat thousands of tokens away in
-    # the system head (live 2026-07-15, second occurrence). When the turn is
-    # about the other robot or the robot's own recent activity, pin the
-    # recorded duet lines beside the live turn too. Model-facing only.
-    _other_robot_key = {"blue": "hexia", "hexia": "blue"}.get(
-        (robot or "").strip().lower())
-    if (_other_robot_key and user_name not in _CHAT_ONLY_USERS
-            and (re.search(rf"\b{_other_robot_key}\b", _luser, re.I)
-                 or _identity_kind in ("evolution", "shared_recall"))):
-        try:
-            _duet_pin = _continuity_routes.recent_duet_block(robot)
-            if _duet_pin:
-                for _duet_i in range(len(conversation_messages) - 1, -1, -1):
-                    _duet_m = conversation_messages[_duet_i]
-                    if (_duet_m.get("role") == "user"
-                            and isinstance(_duet_m.get("content"), str)):
-                        conversation_messages[_duet_i] = {
-                            **_duet_m,
-                            "content": f"{_duet_pin}\n\n{_duet_m['content']}",
-                        }
-                        print("   [DUET] Pinned recorded duet lines beside live turn")
-                        break
-        except Exception as _duet_e:
-            log.warning(f"[DUET] duet pin failed: {_duet_e}")
-
-    if _luser and (user_name or "Alex").strip().lower() == "alex" and _wants_perspective_write(_luser):
-        try:
-            _piece = _compose_in_alex_voice(_luser)
-            if _piece:
-                return {"choices": [{"message": {"role": "assistant", "content": _piece}}]}
-        except Exception as _pe:
-            print(f"   [PERSPECTIVE] chat compose error: {_pe}")
-
-    # Fast check: scan text content only (no str() on entire messages with base64)
-    #
-    # The system message is EXCLUDED, and that exclusion is load-bearing. It
-    # contains the line "CAMERA DISCIPLINE: use the camera when someone asks
-    # you to look", so the bare substring 'CAMERA' matched it on every single
-    # turn. That made _has_camera_content always true, and the purge below
-    # then deleted index 0 — the whole system prompt: persona, identity,
-    # <known_facts>, <family>, the memory blocks and every rule — on any turn
-    # where the user was not asking about vision. Blue answered from the
-    # conversation thread alone, which is why he sounded like himself while
-    # having lost the household (2026-08-04).
-    def _is_camera_message(msg) -> bool:
-        if msg.get('role') == 'system':
-            return False
-        text = _get_text_content(msg)
-        return ('CAMERA' in text or 'camera_NEW_' in text
-                or 'camera_capture_' in text)
-
-    _has_camera_content = any(_is_camera_message(m) for m in conversation_messages)
-
-    if _has_camera_content:
-        conversation_messages = purge_old_camera_images(conversation_messages)
-
-        vision_keywords = ['see', 'look', 'watch', 'view', 'show', 'picture', 'photo', 'image', 'camera', 'visual']
-        _msg_lower = last_user_message.lower() if isinstance(last_user_message, str) else ''
-        asks_about_vision = any(keyword in _msg_lower for keyword in vision_keywords)
-
-        messages_to_remove = set()
-        for i in range(len(conversation_messages) - 1):
-            current_msg = conversation_messages[i]
-            if current_msg.get('role') != 'user':
-                continue
-            user_content = _get_text_content(current_msg).lower()
-            if not any(kw in user_content for kw in ('see', 'look', 'watch', 'show', 'picture', 'photo')):
-                continue
-            next_msg = conversation_messages[i + 1] if i + 1 < len(conversation_messages) else None
-            if next_msg and next_msg.get('role') == 'assistant':
-                assistant_content = _get_text_content(next_msg).lower()
-                if any(phrase in assistant_content for phrase in _VISION_PHRASES):
-                    messages_to_remove.add(i)
-                    messages_to_remove.add(i + 1)
-
-        description_count = len(messages_to_remove)
-
-        if not asks_about_vision:
-            # Count camera messages using cheap text extraction
-            # Same exclusion as above — this is the set that actually does the
-            # deleting, so the system message must never appear in it.
-            camera_indices = {
-                idx for idx, msg in enumerate(conversation_messages)
-                if _is_camera_message(msg)
-            }
-
-            if camera_indices or description_count > 0:
-                remove_set = camera_indices | messages_to_remove
-                conversation_messages = [
-                    msg for idx, msg in enumerate(conversation_messages)
-                    if idx not in remove_set
-                ]
-                print(f"   [VISION-PURGE] Removed {len(remove_set)} vision-related message(s) ({len(camera_indices)} images, {description_count} descriptions) - not relevant to current query")
-        else:
-            if description_count > 0:
-                conversation_messages = [
-                    msg for idx, msg in enumerate(conversation_messages)
-                    if idx not in messages_to_remove
-                ]
-                print(f"   [VISION-PURGE] Removed {description_count} old photo description(s) to focus on current vision query")
+    conversation_messages = _chat_purge_stale_camera(
+        conversation_messages, last_user_message)
 
     max_iterations = _settings.MAX_ITERATIONS
-    iteration = 0
     # When the hallucination detector fires it sets `pending_force_tool` to
     # the tool the model claimed it called. The next iteration must (a) use
     # that tool, and (b) NOT be silenced by the no-tools-after-iter-1 cap.
@@ -12015,211 +12290,15 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # Snapshot-by-email is checked FIRST: "email me a photo of what you see"
     # contains the plain camera triggers too, and a bare capture_camera would
     # take the photo but never send it.
-    from blue.tool_selector.detectors.vision import (
-        extract_camera_view_args, extract_email_snapshot_args,
-        is_email_snapshot_request)
-    # Detection sees the user's ASK only — attached document text once
-    # keyword-matched its way into starting real music (2026-07-10).
-    _detect_msg = _intent_text(last_user_message)
-    _detect_low = _detect_msg.lower()
-    if (is_email_snapshot_request(_detect_low)
-            and user_name not in _CHAT_ONLY_USERS):
-        print(f"   [SNAPSHOT-DETECT] ✅ Snapshot-by-email intent detected!")
-        improved_force_tool = "email_snapshot"
-        improved_tool_args = extract_email_snapshot_args(_detect_low)
-        if improved_tool_args:
-            print(f"   [SNAPSHOT-DETECT] Args: {improved_tool_args}")
-        is_greeting = False
-        print(f"   [SNAPSHOT-DETECT] Tool forced: email_snapshot (will execute in iteration 1)")
-    elif detect_camera_capture_intent(_detect_msg) and user_name not in _CHAT_ONLY_USERS:
-        print(f"   [CAMERA-DETECT] ✅ Camera capture intent detected!")
-        print(f"   [CAMERA-DETECT] Forcing NEW photo capture - bypassing tool selector")
-        # Force the capture_camera tool to be called
-        # This ensures a brand new photo is taken, not reusing old context
-        improved_force_tool = "capture_camera"
-        # Carry any aim/zoom the user asked for ("what's to your left",
-        # "zoom in on the table") into the forced capture.
-        improved_tool_args = extract_camera_view_args(_detect_low)
-        if improved_tool_args:
-            print(f"   [CAMERA-DETECT] View control: {improved_tool_args}")
-
-        # Skip tool selector and go straight to execution
-        is_greeting = False
-
-        print(f"   [CAMERA-DETECT] Tool forced: capture_camera (will execute in iteration 1)")
-    else:
-        # Normal tool selection flow
-        improved_force_tool = None
-        improved_tool_args = None
-
-    # process_with_tools is also called outside the HTTP endpoint (tests,
-    # integrations). Preserve document follow-ups there even when no contextual
-    # preselection was supplied by chat_completions.
-    if not improved_force_tool and _pre_selection is None:
-        contextual_doc_query = _contextual_document_query(
-            _intent_text(last_user_message), conversation_messages)
-        if contextual_doc_query:
-            improved_force_tool = "search_documents"
-            improved_tool_args = {"query": contextual_doc_query, "max_results": 5}
-            is_greeting = False
-            print(f"   [DOC-CONTEXT] Forcing local document query: {contextual_doc_query}")
-
-    if not improved_force_tool and user_name not in _CHAT_ONLY_USERS:
-        live_query = _live_info_query_from_message(_detect_msg, conversation_messages)
-        if live_query:
-            improved_force_tool = "web_search"
-            improved_tool_args = {"query": live_query}
-            is_greeting = False
-            print(f"   [LIVE-INFO] Forcing web_search for current/live query: {live_query}")
-
-    # ================================================================================
-    # TOOL SELECTION: Improved (confidence-based) or Legacy (keyword-based)
-    # ================================================================================
-
-    # v8: Handle corrections first
-    if correction and correction['is_correction'] and correction['new_value']:
-        print(f"   [CORRECTION] Handling correction before tool selection")
-        if correction['correction_type'] == 'lights':
-            improved_force_tool = 'control_lights'
-            if correction['new_value'] in ['brighter', 'dimmer']:
-                improved_tool_args = {'action': 'brightness', 'brightness': 80 if correction['new_value'] == 'brighter' else 30}
-            else:
-                improved_tool_args = {'action': 'color', 'color': correction['new_value']}
-        elif correction['correction_type'] == 'music':
-            improved_force_tool = 'control_music'
-            improved_tool_args = {'action': correction['new_value']}
-        
-        if improved_force_tool:
-            print(f"   [CORRECTION] Forcing tool: {improved_force_tool} with {improved_tool_args}")
-
-    # ===== TOOL SELECTION (Single Path - Always Use Modular Selector) =====
-    if not improved_force_tool:
-        print(f"   [SELECTOR] Running modular confidence-based tool selection")
-
-        # Reuse pre-selection from endpoint if available (avoids running selector twice)
-        if _pre_selection is not None:
-            selection_result = _pre_selection
-            print(f"   [SELECTOR] Reusing pre-selection result")
-        else:
-            recent_history = conversation_messages[-5:] if len(conversation_messages) > 5 else conversation_messages
-            selection_result = TOOL_SELECTOR.select_tool(_intent_text(last_user_message), recent_history)
-
-        # Check if disambiguation is needed
-        if selection_result.needs_disambiguation:
-            print(f"   [SELECTOR] Low confidence - asking user for clarification")
-            # The clarifying question IS Blue's reply this turn — return it in
-            # the standard choices shape so chat_completions can read it like
-            # any other response. (A bare {'response':...} dict here used to
-            # KeyError on response['choices'] and 500 the whole request.)
-            clarify = (selection_result.disambiguation_prompt
-                       or "Could you tell me a bit more about what you'd like?")
-            return {"choices": [{"message": {
-                "role": "assistant",
-                "content": clarify,
-            }}]}
-
-        # Set variables for compatibility with rest of code
-        if selection_result.primary_tool:
-            selected_tool = selection_result.primary_tool
-
-            # Don't overwrite if priority detection (camera) already set a tool
-            if not improved_force_tool:
-                # Set tool name and args from selector
-                improved_force_tool = selected_tool.tool_name
-                improved_tool_args = selected_tool.extracted_params
-
-                # Log selection details
-                print(f"   [SELECTOR] Selected: {improved_force_tool}")
-                print(f"   [SELECTOR] Confidence: {selected_tool.confidence:.2f}")
-                print(f"   [SELECTOR] Priority: {selected_tool.priority}")
-                print(f"   [SELECTOR] Reason: {selected_tool.reason}")
-            else:
-                print(f"   [SELECTOR] Skipping selector - priority tool already set: {improved_force_tool}")
-
-            if selection_result.alternative_tools:
-                alt_names = [t.tool_name for t in selection_result.alternative_tools[:2]]
-                print(f"   [SELECTOR] Alternatives: {', '.join(alt_names)}")
-
-            if selection_result.compound_request:
-                print(f"   [SELECTOR] WARNING: Compound request (multiple tools needed)")
-
-            is_greeting = False
-        else:
-            # No tool needed - conversational response (but only if no priority tool set)
-            if not improved_force_tool:
-                improved_force_tool = None
-                improved_tool_args = None
-                print(f"   [SELECTOR] No tool needed - conversational response")
-            else:
-                print(f"   [SELECTOR] Keeping priority tool: {improved_force_tool}")
-
-            # Detect if it's a greeting/conversational message
-            greeting_patterns = ['hello', 'hi ', 'hey', 'good morning', 'good afternoon', 'good evening',
-                                'how are you', 'how\'s it going', 'what\'s up', 'sup', 'greetings',
-                                'nice to see you', 'good to see you']
-            is_greeting = any(pattern in _detect_low for pattern in greeting_patterns)
-
-    # ===== TOOL NAME NORMALIZATION =====
-    # Safety net: map any legacy/incorrect tool names to correct ones.
-    # This catches mismatches between what detectors return and what
-    # execute_tool / TOOLS array actually support.
-    _TOOL_NAME_MAP = {
-        'capture_camera_image': 'capture_camera',
-        'recognize_face': 'capture_camera',
-        'recognize_place': 'capture_camera',
-        'create_event': 'create_reminder',
-        'list_events': 'get_upcoming_reminders',
-        'set_reminder': 'create_reminder',
-        'list_notes': 'search_notes',
-        'calculate': 'run_javascript',
-        'get_date_time': 'get_local_time',
-        'visual_memory': 'recall_visual_memory',
-        'recall_vision': 'recall_visual_memory',
-    }
-    if improved_force_tool and improved_force_tool in _TOOL_NAME_MAP:
-        old_name = improved_force_tool
-        improved_force_tool = _TOOL_NAME_MAP[improved_force_tool]
-        print(f"   [NORMALIZE] Mapped tool name: {old_name} -> {improved_force_tool}")
-
-    # Chat-only users (Vilda's iPad): the PC webcam (capture_camera) is NEVER her
-    # camera. Her "eyes" are the iPad frame already staged in the vision queue by
-    # /chat/eyes when she taps Look. So never run capture_camera for her — drop
-    # the forced/selected tool and let that queued frame flow to the vision model
-    # below (call_lm_studio injects it). Without this, "Look, Blue!" trips the
-    # camera-intent path, runs the PC webcam, and clears her frame — so Blue
-    # describes whatever is by the PC instead of what the iPad sees.
-    if user_name in _CHAT_ONLY_USERS and improved_force_tool == "capture_camera":
-        print(f"   [KID] capture_camera suppressed for {user_name}; using iPad camera frame")
-        improved_force_tool = None
-        improved_tool_args = None
-
-    # Other off-limits tools (music, reminders) get a gentle decline.
-    if user_name in _CHAT_ONLY_USERS and improved_force_tool in _KID_BLOCKED_TOOLS:
-        print(f"   [KID] Blocked '{improved_force_tool}' for {user_name}")
-        return {"choices": [{"message": {"role": "assistant", "content":
-            "That's not something I can do here — but we can talk about anything "
-            "you like! What would you like to chat about?"}}]}
-
-    # ================================================================================
-    # ZERO-LLM PATH: For simple tools, execute and return a templated response
-    # without any LLM call at all. This is the fastest possible path.
-    # ================================================================================
-    _ZERO_LLM_TOOLS = {
-        'control_music', 'control_lights', 'get_local_time',
-        'set_timer', 'music_visualizer', 'play_music',
-    }
-
-
-    if (improved_force_tool and improved_force_tool in _ZERO_LLM_TOOLS
-            and improved_tool_args is not None and isinstance(improved_tool_args, dict)):
-        print(f"\n[ZERO-LLM] Direct execution (no LLM call): {improved_force_tool} with {improved_tool_args}")
-        tool_result = execute_tool(improved_force_tool, improved_tool_args)
-        print(f"   [OK] {improved_force_tool} completed")
-
-        templated = _tool_pipeline.template_response(improved_force_tool, improved_tool_args, tool_result)
-        if templated:
-            print(f"   [ZERO-LLM] Returning templated response (0 LLM calls)")
-            return {"choices": [{"message": {"role": "assistant", "content": templated}}]}
+    _choice = _chat_choose_tool(
+        conversation_messages, last_user_message, correction=correction,
+        user_name=user_name, pre_selection=_pre_selection)
+    if _choice.reply is not None:
+        return _choice.reply
+    _detect_msg = _choice.detect_msg
+    improved_force_tool = _choice.force_tool
+    improved_tool_args = _choice.tool_args
+    is_greeting = _choice.is_greeting
 
     # ================================================================================
     # FAST EXECUTION: Execute tool directly, then ONE LLM call to format response.
@@ -12239,12 +12318,6 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     if _direct is not None:
         return _direct
 
-    # One-shot flags for the forced-recovery paths below, so a stubborn model
-    # can't ping-pong the loop between a refusal and a forced search forever.
-    _web_refusal_forced = False
-    _leaked_tool_forced = False
-    _phantom_claim_corrected = False
-    _calendar_denial_forced = False
 
     # "Tell me more": ALSO pin the continue-don't-restart instruction right
     # beside the live turn. The same note exists inside the big system

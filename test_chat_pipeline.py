@@ -520,3 +520,38 @@ def test_a_forced_tool_survives_reflex_scope(chat):
     payload = chat.model.main[-1]
     assert _tool_names(payload) == {"send_gmail"}
     assert payload["tool_choice"] == "required"
+
+
+# --------------------------------------------------------------------------
+# Turns that are answered before the model is consulted
+# --------------------------------------------------------------------------
+# These three paths used to be bare `return`s buried in the middle of
+# process_with_tools. They now come back as `_ChatToolChoice.reply` and are
+# unwrapped by the caller, so they are worth pinning: a mistake there would
+# not fail loudly, it would just start calling the model.
+
+def test_a_blocked_tool_gets_a_decline_and_never_reaches_the_house(chat):
+    reply = bt.process_with_tools(
+        [{"role": "user", "content": "play some music"}], user_name="Vilda")
+
+    content = reply["choices"][0]["message"]["content"]
+    assert "not something I can do here" in content
+    assert chat.executed == [], "a blocked tool must not run"
+
+
+def test_a_device_command_is_answered_without_asking_the_model(chat):
+    reply = bt.process_with_tools(
+        [{"role": "user", "content": "turn off the lights"}], user_name="Alex")
+
+    assert any(call["tool"] == "control_lights" for call in chat.executed), \
+        f"the lights tool never ran: {[c['tool'] for c in chat.executed]}"
+    assert chat.model.main == [], "the zero-LLM path must not call the model"
+    assert reply["choices"][0]["message"]["content"]
+
+
+def test_a_bare_greeting_skips_the_pipeline(chat):
+    reply = bt.process_with_tools(
+        [{"role": "user", "content": "hello"}], user_name="Alex")
+
+    assert reply["choices"][0]["message"]["content"]
+    assert chat.executed == [], "a greeting must not touch the house"
