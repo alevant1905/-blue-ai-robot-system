@@ -999,3 +999,60 @@ def test_the_prompt_asks_for_every_field_the_parser_reads(duet_module):
     assert not unasked, (
         "the reflection parser reads fields the prompt never asks for: "
         f"{unasked}")
+
+
+# --------------------------------------------------------------------------
+# How long the next line should be
+# --------------------------------------------------------------------------
+# Another priority chain, and one whose order is the opposite of the job
+# directive's: here the LAST matching test wins, because a student question or
+# a mail reply overrides whatever artifact shape the protocol had settled on.
+
+def _length(duet_module, pressures=None, beats=None, **overrides):
+    kwargs = dict(protocol=False, closing=False, mail=None, student_q_text="")
+    beat_fields = {k: overrides.pop(k) for k in list(overrides)
+                   if k in duet_module._DuetBeats.__dataclass_fields__}
+    kwargs.update(overrides)
+    return duet_module._duet_turn_length_note(
+        pressures if pressures is not None else _flags(duet_module),
+        beats if beats is not None else _beats(duet_module, **beat_fields),
+        **kwargs)
+
+
+def test_an_ordinary_turn_gets_the_plain_length(duet_module):
+    assert "1 to 3 short sentences" in _length(duet_module)
+
+
+def test_an_artifact_pressure_narrows_a_protocol_turn(duet_module):
+    out = _length(duet_module, _flags(duet_module, compiler=True), protocol=True)
+    assert "ARTIFACT_COMPILER" in out
+
+
+def test_a_student_question_overrides_the_artifact_shape(duet_module):
+    """The last test wins here, unlike the job directive's first-match chain."""
+    out = _length(duet_module, _flags(duet_module, compiler=True),
+                  protocol=True, student_q_text="what is a design variable?")
+    assert "answer the student" in out
+    assert "ARTIFACT_COMPILER" not in out
+
+
+def test_a_mail_reply_and_a_closing_each_take_precedence(duet_module):
+    assert "relay the email" in _length(
+        duet_module, _flags(duet_module, compiler=True), protocol=True,
+        mail={"from_name": "someone"})
+    assert "earned position" in _length(
+        duet_module, _flags(duet_module, compiler=True), protocol=True,
+        closing=True)
+
+
+def test_an_execution_lock_asks_for_a_structured_result(duet_module):
+    locked = _length(duet_module,
+                     _flags(duet_module, execution_lock=True,
+                            execution_has_mode=True),
+                     protocol=True)
+    assert "INPUT, PREDICTION, OBSERVATION" in locked
+
+    no_mode = _length(duet_module,
+                      _flags(duet_module, execution_lock=True),
+                      protocol=True)
+    assert "execution-mode state transition" in no_mode

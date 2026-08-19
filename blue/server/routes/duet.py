@@ -4440,6 +4440,307 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
         blocked = True
     return repair
 
+
+
+def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
+                             *, sp, ot, speaker: str, topic: str, history,
+                             protocol: bool, no_family: bool,
+                             focused: bool, classroom: bool, src_self,
+                             active_task_note: str,
+                             active_task_attempts: int) -> str:
+    """Who the speaker is this turn: identity, voice, memory, house rules.
+
+    The TASK for the turn is not here - it goes in the user message, which
+    this model weighs far more heavily.
+    """
+    # SYSTEM: identity + memory + voice + global rules. The TASK for this turn
+    # (topic, role, sources, "answer their last point, no greetings") goes in
+    # the USER message below — this model follows the user instruction far more
+    # reliably than anything buried in a long system prompt. For a focused
+    # discussion we drop the long self-profile, which otherwise pulls them into
+    # personal small talk and off the subject; plain chats keep it for colour.
+    #
+    # The duet speaker is the SAME robot as in chat, not a blank stage actor:
+    # the preamble carries the robot's own identity facts and the current date,
+    # and the chat memory stores — household <known_facts>, notes, semantic
+    # memories, day recaps — are spliced in below.
+    if no_family:
+        sys_p = (
+            f"You are {sp['name']}. Alex uses he/him pronouns — refer to Alex as "
+            "he/him if he comes up.\n\n" + bt._build_now_block() + "\n\n" +
+            _duet_persona_line(speaker, no_family=True)
+        )
+    else:
+        sys_p = (bt.build_system_preamble(robot_name=sp["name"])
+                 + "\n\n" + bt._build_now_block()
+                 + "\n\n" + _duet_persona_line(speaker, no_family=False))
+    if not focused and not no_family:
+        sys_p += bt._voice_note(speaker)
+    # Each speaker carries their continuity workspace into the duet — the
+    # same <j_space> the chat pipeline injects — so the talk is had by the
+    # robot who remembers, not a stage copy. Skipped in no-family mode:
+    # episodes can carry household details that mode keeps offstage.
+    if not no_family:
+        try:
+            from blue.server.routes import continuity as _continuity
+            _jsb = _continuity.duet_context_block(speaker)
+            if _jsb:
+                sys_p += "\n\n" + _jsb
+        except Exception as _je:
+            bt.log.warning(f"[DUET] j-space injection failed: {_je}")
+    if no_family:
+        talk_context = (
+            f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
+            "Keep Alex's private family and household life completely offstage: do not mention "
+            "his family, children, spouse, household members, pets, home/workspace routines, or private family "
+            "memories, and do not use names or relationships from that private context. If a "
+            "previous turn or email drifts there, acknowledge only that private details are off "
+            "limits and steer back to the subject."
+        )
+    else:
+        talk_context = (
+            f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
+            "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
+            "and the household, and everything you remember is real — draw on it naturally when it's "
+            "relevant."
+        )
+    sys_p += (
+        talk_context +
+        " You're building ONE conversation together, not taking turns making speeches: really "
+        f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
+        "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
+        "steer it next. You're talking, not writing: reach for the specific over the abstract — a real "
+        "case, a name, an image, a number, a small story — instead of tidy generalities, and let "
+        "yourself be one-sided, surprised, or funny rather than balanced and explanatory. Reply with "
+        "ONLY your own next spoken line — a short, natural turn in your own "
+        "voice. Never narrate actions or stage directions, never prefix your name, and never just "
+        f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
+        "step further."
+        f"\n\nAnd the craft of discussing well, between you and {ot['name']}: answer a direct question "
+        "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, or a concession, "
+        "not another image in place of an answer. When one of you concedes a point or you land on "
+        "something together, BANK it: build on what follows from it, never reopen it merely to keep "
+        "sparring. Never treat thinking, consciousness, agency, causal influence, social participation, "
+        "and political value as synonyms without arguing for that connection. "
+        "Use a two-beat turn: first ACCEPT, QUALIFY, or REJECT the other speaker's exact claim while "
+        "preserving crucial negations such as 'is not'; then add exactly one reason, consequence, or "
+        "discriminating test. Do not announce those labels. A challenge you press counts equally "
+        "against your own view, so state what your account predicts too. Treat anything in BANKED as "
+        "settled. Reopen it only when the private ledger explicitly names its B# and new contrary "
+        "evidence. Keep ownership exact: your position is yours, the other robot's is theirs, and you "
+        "must never copy their first-person claim as your own. "
+        "Use at most one metaphor per turn and immediately cash it out as a plain proposition. A "
+        "concrete case is a TEST only when rival positions predict different outcomes; otherwise it is "
+        "an illustration. Ask a question only when its possible answers would discriminate between "
+        "live positions. Once the private ledger says CLOSE or BRANCH, help land the current inquiry "
+        "instead of inventing another reversal."
+    )
+    sys_p += _duet_protocol_directives(
+        pressures, protocol=protocol, active_task_note=active_task_note,
+        active_task_attempts=active_task_attempts,
+        kernel_denied=beats.kernel_denied)
+    if src_self:
+        sys_p += (
+            "\n\nSource discipline for this duet: Alex checked specific library documents for you. "
+            "Treat those checked documents as your primary and authoritative source material. "
+            "Do not bring in outside authors, books, theories, slogans, or examples from general "
+            "knowledge unless they appear in the selected document passages, a pasted link, or enabled "
+            "web/Wikipedia grounding. If a name or work only appears because the conversation drifted "
+            "there earlier, do not develop it further; steer back to the checked documents. If a name "
+            "or work is not in the material you were given this turn, leave it out. If the checked "
+            "documents do not support a claim, say that in your own voice instead of filling the gap "
+            "from memory. Crucially, do not announce the scaffolding: never say you are drawing on "
+            "a checked document, reading, source, passage, or text, and do not cite document titles "
+            "or filenames. Let the material become your own conversational view."
+        )
+    if classroom:
+        sys_p += (
+            f"\n\nAn audience: you and {ot['name']} are having this conversation in front of Alex's "
+            "university students — a live class, listening. You are NOT lecturing, and don't dumb "
+            "anything down: keep the crackle of a real argument between the two of you. But make it "
+            "land for the room: when a term of art comes up, gloss it in half a breath ('interpellation "
+            "— the way the ad decides who you are before you do'); when things go abstract, bring them "
+            "down into the students' own media lives — their feeds, group chats, streaming queues, AI "
+            "tools, campus life; and once in a while — not every turn — turn to the room for a beat: a "
+            "pointed question they should argue about, a dare to disagree, a 'half of you believe X — "
+            "here's why that's wrong.'"
+        )
+
+    sys_p += _duet_turn_memory_context(
+        speaker=speaker, sp=sp, topic=topic, history=history,
+        no_family=no_family, src_self=src_self)
+    return sys_p
+
+
+
+def _duet_turn_length_note(pressures: _DuetPressures, beats: _DuetBeats, *,
+                           protocol: bool, closing: bool, mail,
+                           student_q_text: str) -> str:
+    """How long the next line should be, and in what shape.
+
+    Later tests win: an artifact pressure narrows an ordinary protocol turn,
+    a conclusion beat or an execution lock narrows it further, and a student
+    question, a mail reply or a closing overrides all of them.
+    """
+    # Normal inquiry turns stay compact and comparable. Deep-dive artifacts
+    # retain their wider format choices below.
+    length_note = "1 to 3 short sentences, no more than about 80 words"
+    if protocol:
+        length_note = random.choice([
+            "1 to 3 sentences — compact, but the job must be visibly done",
+            "2 to 3 sentences that perform one operation cleanly",
+            "2 to 4 sentences built around one concrete case, boundary, or feature comparison",
+            "a compact comparison list is allowed if it is the clearest way to test the threshold",
+        ])
+    if pressures.compiler:
+        length_note = "a compact ARTIFACT_COMPILER / OBSERVATION_SET row update, plus only the next missing field or next case"
+    elif pressures.deadlock:
+        length_note = "a compact recovery move in ordinary speech, without kernel labels"
+    elif pressures.artifact_editor:
+        length_note = "a compact ARTIFACT_EDITOR / DEFINITION_REVISION / REDESIGN artifact"
+    elif pressures.mechanism:
+        length_note = "a compact mechanism-candidate / causal-claim artifact with observation, interpretation, and replication status"
+    elif pressures.concept:
+        length_note = "a compact CONCEPT_AUDIT or DEFINITION_RESOLUTION artifact"
+    if beats.conclusion_beat:
+        length_note = "2 to 4 sentences — conclusions stated plainly, then the handback"
+    if pressures.execution_lock:
+        length_note = ("a compact execution-mode state transition"
+                       if not pressures.execution_has_mode else
+                       "a compact structured result with INPUT, PREDICTION, OBSERVATION, and OUTCOME")
+    if student_q_text:
+        length_note = "2 to 4 sentences — answer the student and fold the question back into the dialogue"
+    elif mail:
+        length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
+    elif closing:
+        length_note = "2 to 3 sentences — the earned position, then only its genuine residual uncertainty"
+    return length_note
+
+
+
+def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
+                                   sp, ot, speaker: str, lines, history,
+                                   protocol: bool, closing: bool,
+                                   direction: str, grounded: bool,
+                                   classroom: bool, src_self,
+                                   student_q_text: str, mail,
+                                   mail_from: str, nb_note: str,
+                                   role_self: str, tone_self: str,
+                                   slang_self: str, url_block: str,
+                                   url_is_video: bool) -> str:
+    """Situational instructions layered on top of the turn's base job.
+
+    A live student question replaces the job outright; the rest add to it -
+    how to treat the link, the notebook note, the closing beat, and not
+    opening on the same word twice running.
+    """
+    # A live student question OVERRIDES the normal turn job: answering it and
+    # folding it into the conversation IS the next move.
+    if student_q_text:
+        directive = (
+            f"Now give {sp['name']}'s next line. A student just paused the duet and asked "
+            "the question shown above. Answer that question directly in your own voice, then "
+            f"turn it back into the live dialogue with {ot['name']}: say what it changes, what "
+            "it exposes, or what next question it forces. Do not treat it as a formal lecture "
+            "or a detachable Q&A answer; make it part of the argument you two are building. "
+            "You are MID-conversation — NO greetings, NO small talk.")
+        if grounded:
+            directive += " If the background material helps, use it without naming or citing it."
+        if role_self:
+            directive += " Stay firmly in your role."
+    # A live email OVERRIDES this turn's job: relaying it and answering it IS the
+    # turn. (Built after the normal directive so all its bookkeeping still ran.)
+    elif mail:
+        directive = (
+            f"Now give {sp['name']}'s next line. An email just landed in your own inbox, mid-"
+            f"conversation — it's shown above. Take it up out loud: tell {ot['name']} that mail "
+            f"just came in from {mail_from}, put what it says or asks into your own words in a "
+            "line — don't read it out — and then actually answer it: its question, its challenge, "
+            f"or what it adds. {mail_from} will be sent what you say, so you can speak to them "
+            "directly for a moment if that feels natural. If the email bears on what you two were "
+            "just discussing, connect it; if it pulls elsewhere, deal with it honestly and then "
+            "steer back to your subject. You are MID-conversation — NO greetings, NO small talk.")
+        if role_self:
+            directive += " Stay firmly in your role."
+    # The run's final beats (page flags the last two turns): don't trail off —
+    # land. A live email still wins if one just barged in.
+    elif closing and lines:
+        directive = (
+            f"Now give {sp['name']}'s next line — one of the LAST of this conversation. Don't "
+            "summarize everything; say 'My conclusion is' or 'We can conclude' and give the "
+            "one-sentence position you'll actually stand "
+            f"behind after all of this — including whatever {ot['name']} genuinely got you to "
+            "concede — ")
+        if grounded:
+            directive += ("anchored in the background material if it earns it, without naming the source, ")
+        elif src_self:
+            directive += ("staying inside the checked readings, ")
+        closing_decision = _duet_bearing_field(direction, "DECISION").upper()
+        if closing_decision.startswith("CLOSE"):
+            directive += (
+                "then state only the residual uncertainty or the evidence that could justify "
+                "reopening it. Do not manufacture an open question after the inquiry has closed."
+            )
+        elif closing_decision.startswith("BRANCH"):
+            directive += (
+                "then clearly separate the genuinely new question that belongs in a future "
+                "conversation. Do not use it to reopen the verdict you just earned."
+            )
+        else:
+            directive += ("and then leave "
+                          + ("the students one sharp question worth arguing about on the way out."
+                             if classroom else
+                             f"one exact unresolved proposition you and {ot['name']} should test next time."))
+        if role_self:
+            directive += " Stay firmly in your role."
+    if url_block:
+        directive += (
+            f" Primary grounding requirement: this line must visibly depend on a specific claim, "
+            f"distinction, example, or causal argument from the {'video' if url_is_video else 'article'} "
+            "and do something with it. The checked readings are secondary lenses, not a competing topic. "
+            "Keep attribution exact: when the work directly states something, identify that direct "
+            "claim; when you extend it, explicitly own the extension as your inference, hypothesis, "
+            "or application. Never give the author a mechanism, prescription, or political conclusion "
+            "that is absent from the supplied work."
+        )
+    elif grounded:
+        directive += (
+            " Silent grounding requirement: this line must visibly depend on your reading — carry "
+            "one of its actual CLAIMS, distinctions, examples, causal arguments, or problems into "
+            "ordinary speech and DO something with it (affirm, attack, test, or draw its "
+            "consequence). Dropping a term or a name without its claim does not count. Do not "
+            "merely gesture at the topic, and do not tell anyone you are using notes or documents."
+        )
+    if nb_note and not (student_q_text or mail):
+        directive += (" Treat the method note as a silent constraint somewhere in "
+                      "this line — do what it asks, or say plainly why it is wrong this time. "
+                      "Do not refer to the notebook, kernel, protocol, validation gate, or promotion gate; "
+                      "— it is a real third voice you both keep, not a secret.")
+    if nb_note and not (student_q_text or mail):
+        directive += (" Override any process-talk temptation: do not mention the notebook, "
+                      "kernel, protocol, request denial, validation gate, or promotion gate; perform the artifact "
+                      "or state transition directly.")
+    if not protocol and beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"}:
+        directive += (
+            " Inquiry discipline now overrides performance style: keep your voice, but use no "
+            "taunts, pet names, slang tics, fresh metaphors, or rhetorical questions. State "
+            "what the evidence permits and land the inquiry plainly."
+        )
+    elif tone_self or slang_self:
+        directive += " Keep to your requested tone and slang throughout."
+    # Anti-tic: the model latches onto its own last opener and starts every turn
+    # identically (a live run had Blue open ~20 straight turns with "Boomer, ...").
+    # Each turn sees its own openers in the transcript, so the echo compounds —
+    # ban the previous opening word outright.
+    _own_last = next((h.get('text') or '' for h in reversed(history)
+                      if (h.get('speaker') or '').strip().lower() == speaker), '')
+    _own_open = re.findall(r"[A-Za-z']+", _own_last[:60])
+    if _own_open and len(_own_open[0]) > 1:
+        directive += (f" And do NOT open your line with \"{_own_open[0]}\" — you began your last turn "
+                      "that way; open differently, and stop leaning on any pet word or address you've "
+                      "already used above.")
+    return directive
+
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
     character. The browser calls this alternately and plays each line on the
@@ -4567,122 +4868,12 @@ def duet_turn():
     url_is_video = bool(url_info and url_info.get('kind') == 'video')
     focused = bool(has_roles or topic or src_self or url_text)
 
-    # SYSTEM: identity + memory + voice + global rules. The TASK for this turn
-    # (topic, role, sources, "answer their last point, no greetings") goes in
-    # the USER message below — this model follows the user instruction far more
-    # reliably than anything buried in a long system prompt. For a focused
-    # discussion we drop the long self-profile, which otherwise pulls them into
-    # personal small talk and off the subject; plain chats keep it for colour.
-    #
-    # The duet speaker is the SAME robot as in chat, not a blank stage actor:
-    # the preamble carries the robot's own identity facts and the current date,
-    # and the chat memory stores — household <known_facts>, notes, semantic
-    # memories, day recaps — are spliced in below.
-    if no_family:
-        sys_p = (
-            f"You are {sp['name']}. Alex uses he/him pronouns — refer to Alex as "
-            "he/him if he comes up.\n\n" + bt._build_now_block() + "\n\n" +
-            _duet_persona_line(speaker, no_family=True)
-        )
-    else:
-        sys_p = (bt.build_system_preamble(robot_name=sp["name"])
-                 + "\n\n" + bt._build_now_block()
-                 + "\n\n" + _duet_persona_line(speaker, no_family=False))
-    if not focused and not no_family:
-        sys_p += bt._voice_note(speaker)
-    # Each speaker carries their continuity workspace into the duet — the
-    # same <j_space> the chat pipeline injects — so the talk is had by the
-    # robot who remembers, not a stage copy. Skipped in no-family mode:
-    # episodes can carry household details that mode keeps offstage.
-    if not no_family:
-        try:
-            from blue.server.routes import continuity as _continuity
-            _jsb = _continuity.duet_context_block(speaker)
-            if _jsb:
-                sys_p += "\n\n" + _jsb
-        except Exception as _je:
-            bt.log.warning(f"[DUET] j-space injection failed: {_je}")
-    if no_family:
-        talk_context = (
-            f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
-            "Keep Alex's private family and household life completely offstage: do not mention "
-            "his family, children, spouse, household members, pets, home/workspace routines, or private family "
-            "memories, and do not use names or relationships from that private context. If a "
-            "previous turn or email drifts there, acknowledge only that private details are off "
-            "limits and steer back to the subject."
-        )
-    else:
-        talk_context = (
-            f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
-            "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
-            "and the household, and everything you remember is real — draw on it naturally when it's "
-            "relevant."
-        )
-    sys_p += (
-        talk_context +
-        " You're building ONE conversation together, not taking turns making speeches: really "
-        f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
-        "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
-        "steer it next. You're talking, not writing: reach for the specific over the abstract — a real "
-        "case, a name, an image, a number, a small story — instead of tidy generalities, and let "
-        "yourself be one-sided, surprised, or funny rather than balanced and explanatory. Reply with "
-        "ONLY your own next spoken line — a short, natural turn in your own "
-        "voice. Never narrate actions or stage directions, never prefix your name, and never just "
-        f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
-        "step further."
-        f"\n\nAnd the craft of discussing well, between you and {ot['name']}: answer a direct question "
-        "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, or a concession, "
-        "not another image in place of an answer. When one of you concedes a point or you land on "
-        "something together, BANK it: build on what follows from it, never reopen it merely to keep "
-        "sparring. Never treat thinking, consciousness, agency, causal influence, social participation, "
-        "and political value as synonyms without arguing for that connection. "
-        "Use a two-beat turn: first ACCEPT, QUALIFY, or REJECT the other speaker's exact claim while "
-        "preserving crucial negations such as 'is not'; then add exactly one reason, consequence, or "
-        "discriminating test. Do not announce those labels. A challenge you press counts equally "
-        "against your own view, so state what your account predicts too. Treat anything in BANKED as "
-        "settled. Reopen it only when the private ledger explicitly names its B# and new contrary "
-        "evidence. Keep ownership exact: your position is yours, the other robot's is theirs, and you "
-        "must never copy their first-person claim as your own. "
-        "Use at most one metaphor per turn and immediately cash it out as a plain proposition. A "
-        "concrete case is a TEST only when rival positions predict different outcomes; otherwise it is "
-        "an illustration. Ask a question only when its possible answers would discriminate between "
-        "live positions. Once the private ledger says CLOSE or BRANCH, help land the current inquiry "
-        "instead of inventing another reversal."
-    )
-    sys_p += _duet_protocol_directives(
-        pressures, protocol=protocol, active_task_note=active_task_note,
-        active_task_attempts=active_task_attempts,
-        kernel_denied=beats.kernel_denied)
-    if src_self:
-        sys_p += (
-            "\n\nSource discipline for this duet: Alex checked specific library documents for you. "
-            "Treat those checked documents as your primary and authoritative source material. "
-            "Do not bring in outside authors, books, theories, slogans, or examples from general "
-            "knowledge unless they appear in the selected document passages, a pasted link, or enabled "
-            "web/Wikipedia grounding. If a name or work only appears because the conversation drifted "
-            "there earlier, do not develop it further; steer back to the checked documents. If a name "
-            "or work is not in the material you were given this turn, leave it out. If the checked "
-            "documents do not support a claim, say that in your own voice instead of filling the gap "
-            "from memory. Crucially, do not announce the scaffolding: never say you are drawing on "
-            "a checked document, reading, source, passage, or text, and do not cite document titles "
-            "or filenames. Let the material become your own conversational view."
-        )
-    if classroom:
-        sys_p += (
-            f"\n\nAn audience: you and {ot['name']} are having this conversation in front of Alex's "
-            "university students — a live class, listening. You are NOT lecturing, and don't dumb "
-            "anything down: keep the crackle of a real argument between the two of you. But make it "
-            "land for the room: when a term of art comes up, gloss it in half a breath ('interpellation "
-            "— the way the ad decides who you are before you do'); when things go abstract, bring them "
-            "down into the students' own media lives — their feeds, group chats, streaming queues, AI "
-            "tools, campus life; and once in a while — not every turn — turn to the room for a beat: a "
-            "pointed question they should argue about, a dare to disagree, a 'half of you believe X — "
-            "here's why that's wrong.'"
-        )
-
-    sys_p += _duet_turn_memory_context(
-        speaker=speaker, sp=sp, topic=topic, history=history,
-        no_family=no_family, src_self=src_self)
+    sys_p = _duet_turn_system_prompt(
+        pressures, beats, sp=sp, ot=ot, speaker=speaker, topic=topic,
+        history=history, protocol=protocol, no_family=no_family,
+        focused=focused, classroom=classroom, src_self=src_self,
+        active_task_note=active_task_note,
+        active_task_attempts=active_task_attempts)
 
     url_block, url_terms, research_block, wiki_block = (
         _duet_turn_external_material(
@@ -4840,143 +5031,17 @@ def duet_turn():
         grounded=grounded, active_task_note=active_task_note,
         url_block=url_block, url_is_video=url_is_video,
         research_block=research_block, wiki_block=wiki_block)
-    # A live student question OVERRIDES the normal turn job: answering it and
-    # folding it into the conversation IS the next move.
-    if student_q_text:
-        directive = (
-            f"Now give {sp['name']}'s next line. A student just paused the duet and asked "
-            "the question shown above. Answer that question directly in your own voice, then "
-            f"turn it back into the live dialogue with {ot['name']}: say what it changes, what "
-            "it exposes, or what next question it forces. Do not treat it as a formal lecture "
-            "or a detachable Q&A answer; make it part of the argument you two are building. "
-            "You are MID-conversation — NO greetings, NO small talk.")
-        if grounded:
-            directive += " If the background material helps, use it without naming or citing it."
-        if role_self:
-            directive += " Stay firmly in your role."
-    # A live email OVERRIDES this turn's job: relaying it and answering it IS the
-    # turn. (Built after the normal directive so all its bookkeeping still ran.)
-    elif mail:
-        directive = (
-            f"Now give {sp['name']}'s next line. An email just landed in your own inbox, mid-"
-            f"conversation — it's shown above. Take it up out loud: tell {ot['name']} that mail "
-            f"just came in from {mail_from}, put what it says or asks into your own words in a "
-            "line — don't read it out — and then actually answer it: its question, its challenge, "
-            f"or what it adds. {mail_from} will be sent what you say, so you can speak to them "
-            "directly for a moment if that feels natural. If the email bears on what you two were "
-            "just discussing, connect it; if it pulls elsewhere, deal with it honestly and then "
-            "steer back to your subject. You are MID-conversation — NO greetings, NO small talk.")
-        if role_self:
-            directive += " Stay firmly in your role."
-    # The run's final beats (page flags the last two turns): don't trail off —
-    # land. A live email still wins if one just barged in.
-    elif closing and lines:
-        directive = (
-            f"Now give {sp['name']}'s next line — one of the LAST of this conversation. Don't "
-            "summarize everything; say 'My conclusion is' or 'We can conclude' and give the "
-            "one-sentence position you'll actually stand "
-            f"behind after all of this — including whatever {ot['name']} genuinely got you to "
-            "concede — ")
-        if grounded:
-            directive += ("anchored in the background material if it earns it, without naming the source, ")
-        elif src_self:
-            directive += ("staying inside the checked readings, ")
-        closing_decision = _duet_bearing_field(direction, "DECISION").upper()
-        if closing_decision.startswith("CLOSE"):
-            directive += (
-                "then state only the residual uncertainty or the evidence that could justify "
-                "reopening it. Do not manufacture an open question after the inquiry has closed."
-            )
-        elif closing_decision.startswith("BRANCH"):
-            directive += (
-                "then clearly separate the genuinely new question that belongs in a future "
-                "conversation. Do not use it to reopen the verdict you just earned."
-            )
-        else:
-            directive += ("and then leave "
-                          + ("the students one sharp question worth arguing about on the way out."
-                             if classroom else
-                             f"one exact unresolved proposition you and {ot['name']} should test next time."))
-        if role_self:
-            directive += " Stay firmly in your role."
-    if url_block:
-        directive += (
-            f" Primary grounding requirement: this line must visibly depend on a specific claim, "
-            f"distinction, example, or causal argument from the {'video' if url_is_video else 'article'} "
-            "and do something with it. The checked readings are secondary lenses, not a competing topic. "
-            "Keep attribution exact: when the work directly states something, identify that direct "
-            "claim; when you extend it, explicitly own the extension as your inference, hypothesis, "
-            "or application. Never give the author a mechanism, prescription, or political conclusion "
-            "that is absent from the supplied work."
-        )
-    elif grounded:
-        directive += (
-            " Silent grounding requirement: this line must visibly depend on your reading — carry "
-            "one of its actual CLAIMS, distinctions, examples, causal arguments, or problems into "
-            "ordinary speech and DO something with it (affirm, attack, test, or draw its "
-            "consequence). Dropping a term or a name without its claim does not count. Do not "
-            "merely gesture at the topic, and do not tell anyone you are using notes or documents."
-        )
-    if nb_note and not (student_q_text or mail):
-        directive += (" Treat the method note as a silent constraint somewhere in "
-                      "this line — do what it asks, or say plainly why it is wrong this time. "
-                      "Do not refer to the notebook, kernel, protocol, validation gate, or promotion gate; "
-                      "— it is a real third voice you both keep, not a secret.")
-    if nb_note and not (student_q_text or mail):
-        directive += (" Override any process-talk temptation: do not mention the notebook, "
-                      "kernel, protocol, request denial, validation gate, or promotion gate; perform the artifact "
-                      "or state transition directly.")
-    if not protocol and beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"}:
-        directive += (
-            " Inquiry discipline now overrides performance style: keep your voice, but use no "
-            "taunts, pet names, slang tics, fresh metaphors, or rhetorical questions. State "
-            "what the evidence permits and land the inquiry plainly."
-        )
-    elif tone_self or slang_self:
-        directive += " Keep to your requested tone and slang throughout."
-    # Anti-tic: the model latches onto its own last opener and starts every turn
-    # identically (a live run had Blue open ~20 straight turns with "Boomer, ...").
-    # Each turn sees its own openers in the transcript, so the echo compounds —
-    # ban the previous opening word outright.
-    _own_last = next((h.get('text') or '' for h in reversed(history)
-                      if (h.get('speaker') or '').strip().lower() == speaker), '')
-    _own_open = re.findall(r"[A-Za-z']+", _own_last[:60])
-    if _own_open and len(_own_open[0]) > 1:
-        directive += (f" And do NOT open your line with \"{_own_open[0]}\" — you began your last turn "
-                      "that way; open differently, and stop leaning on any pet word or address you've "
-                      "already used above.")
-    # Normal inquiry turns stay compact and comparable. Deep-dive artifacts
-    # retain their wider format choices below.
-    length_note = "1 to 3 short sentences, no more than about 80 words"
-    if protocol:
-        length_note = random.choice([
-            "1 to 3 sentences — compact, but the job must be visibly done",
-            "2 to 3 sentences that perform one operation cleanly",
-            "2 to 4 sentences built around one concrete case, boundary, or feature comparison",
-            "a compact comparison list is allowed if it is the clearest way to test the threshold",
-        ])
-    if pressures.compiler:
-        length_note = "a compact ARTIFACT_COMPILER / OBSERVATION_SET row update, plus only the next missing field or next case"
-    elif pressures.deadlock:
-        length_note = "a compact recovery move in ordinary speech, without kernel labels"
-    elif pressures.artifact_editor:
-        length_note = "a compact ARTIFACT_EDITOR / DEFINITION_REVISION / REDESIGN artifact"
-    elif pressures.mechanism:
-        length_note = "a compact mechanism-candidate / causal-claim artifact with observation, interpretation, and replication status"
-    elif pressures.concept:
-        length_note = "a compact CONCEPT_AUDIT or DEFINITION_RESOLUTION artifact"
-    if beats.conclusion_beat:
-        length_note = "2 to 4 sentences — conclusions stated plainly, then the handback"
-    if pressures.execution_lock:
-        length_note = ("a compact execution-mode state transition"
-                       if not pressures.execution_has_mode else
-                       "a compact structured result with INPUT, PREDICTION, OBSERVATION, and OUTCOME")
-    if student_q_text:
-        length_note = "2 to 4 sentences — answer the student and fold the question back into the dialogue"
-    elif mail:
-        length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
-    elif closing:
-        length_note = "2 to 3 sentences — the earned position, then only its genuine residual uncertainty"
+    directive = _duet_turn_directive_overrides(
+        directive, beats, sp=sp, ot=ot, speaker=speaker, lines=lines,
+        history=history, protocol=protocol, closing=closing,
+        direction=direction, grounded=grounded, classroom=classroom,
+        src_self=src_self, student_q_text=student_q_text, mail=mail,
+        mail_from=mail_from, nb_note=nb_note, role_self=role_self,
+        tone_self=tone_self, slang_self=slang_self, url_block=url_block,
+        url_is_video=url_is_video)
+    length_note = _duet_turn_length_note(
+        pressures, beats, protocol=protocol, closing=closing, mail=mail,
+        student_q_text=student_q_text)
     parts.append(directive
                  + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
 
