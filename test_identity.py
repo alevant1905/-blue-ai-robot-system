@@ -1469,3 +1469,37 @@ def test_bare_robot_names_are_a_relationship_followup_not_a_contact_search():
         "hexia and casper", "blue") == ("hexia", "pico")
     assert canonical_robot_relationship_reply(
         "hexia and casper", "blue") is not None
+
+
+@pytest.mark.parametrize("kind", ["identity", None])
+def test_collapse_to_vendor_boilerplate_is_rejected(kind):
+    """Called out on a hallucination, Blue swung to base-model boilerplate.
+
+    Live 2026-07-13: "a large language model developed by Google", with no
+    body and no memory. All factually false in this house. turn_completion
+    carried a second, older regex for this that had been shadowed by a
+    same-named function and so had not run in months; this is the check that
+    it was safe to delete, because the shared validator catches these.
+    """
+    for reply in (
+        "I am a large language model developed by Google.",
+        "I'm a language model trained by OpenAI.",
+        "I am an AI assistant created by Anthropic.",
+        "I'm a model built by Meta.",
+    ):
+        assert identity_response_problem(
+            reply, "Blue", other_names=["Hexia"], request_kind=kind
+        ) == "vendor_identity", reply
+
+
+@pytest.mark.parametrize("kind", ["identity", None])
+def test_claiming_to_be_the_other_robot_is_rejected(kind):
+    """Live 2026-07-12: "I'm Blue!" on Hexia's page, off poisoned history."""
+    for reply, speaker, others in (
+        ("I'm Blue! Nice to meet you.", "Hexia", ["Blue"]),
+        ("I am Hexia, and I have been thinking about it.", "Blue", ["Hexia"]),
+        ("My name is Hexia.", "Blue", ["Hexia"]),
+    ):
+        assert identity_response_problem(
+            reply, speaker, other_names=others, request_kind=kind
+        ) == "wrong_robot", reply

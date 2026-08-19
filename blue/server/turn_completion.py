@@ -246,35 +246,17 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # have a 'j-space'" with her workspace right in the prompt,
         # 2026-07-12). Optional quote chars around j-space.
 
-        # A reply where this robot claims to be the OTHER robot is the
-        # worst defect of all — check it first. Seen live 2026-07-12:
-        # "I'm Blue! 🤖" on Hexia's page, anchored on poisoned thread
-        # history from the facts-table incident.
-        _other_robot_names = [
-            bt._robot_cfg(r)["name"]
-            for r in bt.ROBOTS if r != robot
-        ] if robot in bt.ROBOTS else []
-        _misclaim_re = re.compile(
-            r"\b(?:i['’]?m|i am|my name is)"
-            r"(?: (?!feeling)\w+)? (?:"
-            + "|".join(re.escape(n) for n in _other_robot_names)
-            + r")\b", re.I) if _other_robot_names else None
-        # Identity collapse to base-model boilerplate: called out on a
-        # hallucination, Blue swung to "a large language model
-        # developed by Google" with no body and no memory
-        # (2026-07-13). All factually false in this house.
-        _collapse_re = re.compile(
-            r"\b(?:i|my)\b[^.!?]{0,80}\b(?:developed|created|built|"
-            r"trained|made) by (?:google|openai|anthropic|meta|"
-            r"microsoft|deepmind)\b"
-            r"|\bi (?:do not|don['’]t) have a (?:physical )?body\b",
-            re.I) if robot in bt.ROBOTS else None
 
-        def _identity_broken(text):
-            return bool(
-                (_misclaim_re and _misclaim_re.search(text or ""))
-                or (_collapse_re and _collapse_re.search(text or "")))
-
+        # This is the only identity check that runs. Two older regexes
+        # lived here for the incidents below and were shadowed by a
+        # second def of the same name, so they had not fired in months;
+        # the shared validator catches both, which is what let them go:
+        #   2026-07-12  "I'm Blue!" on Hexia's page, off poisoned thread
+        #               history from the facts-table incident.
+        #   2026-07-13  called out on a hallucination, Blue swung to "a
+        #               large language model developed by Google", no body,
+        #               no memory. All factually false in this house.
+        # test_identity.py pins both.
         # Apply the shared request-aware identity validator as the final
         # authority. It also catches Qwen/Alibaba-style model boilerplate
         # and nameless generic introductions, which the legacy patterns
