@@ -63,18 +63,46 @@ _REMINDER_DECLINED_RE = re.compile(
 # The event noun is required, so "when is the sun setting" is unaffected, and
 # the "is/are/was" must sit close behind the question word, which keeps
 # "when in class I will ask you to introduce yourself" out.
-_WHEN_IS_EVENT_RE = re.compile(
-    r"\b(?:when|what time)\b[^.?!]{0,12}\b(?:is|are|was|will)\b[^.?!]{0,24}"
-    r"\b(?:meeting|meetings|appointment|appointments|call|class|classes|lecture|"
+_EVENT_NOUN_ALT = (
+    r"meeting|meetings|appointment|appointments|call|class|classes|lecture|"
     r"seminar|lunch|dinner|coffee|event|events|reminder|reminders|party|"
-    r"practice|rehearsal|recital|game|flight|train|deadline)\b",
+    r"practice|rehearsal|recital|game|flight|train|deadline"
+)
+
+# Direct question order: "what time IS the meeting", "when DOES the class
+# start".
+_WHEN_IS_EVENT_RE = re.compile(
+    r"\b(?:when|what time)\b[^.?!]{0,12}\b(?:is|are|was|will|does|do|did)\b"
+    r"[^.?!]{0,24}\b(?:%s)\b" % _EVENT_NOUN_ALT,
+    re.I,
+)
+
+# Embedded question order, where the verb falls AFTER the noun: "do you
+# remember what time the meeting is", "tell me when my class starts". Only
+# the direct order was matched, so an embedded one fell past the guard to the
+# clock, and "do you remember what time the meeting is" was answered with
+# get_local_time — the exact confidently-wrong answer the direct pattern was
+# written to stop.
+# The event must be the SUBJECT, and a determiner is what marks it: "what
+# time THE MEETING is", "when MY CLASS starts". Without that requirement,
+# "when in class i will ask you to introduce yourself" matches on
+# when . in class . will — the very sentence the direct pattern above was
+# written to keep out.
+_WHEN_EVENT_IS_RE = re.compile(
+    r"\b(?:when|what time)\b[^.?!]{0,24}"
+    r"\b(?:the|my|our|your|his|her|their|that|this)\s+(?:\w+\s+){0,1}"
+    r"(?:%s)\b[^.?!]{0,16}"
+    r"\b(?:is|are|was|will|starts?|begins?|ends?|finishes?)\b" % _EVENT_NOUN_ALT,
     re.I,
 )
 
 
 def is_schedule_time_question(msg_lower: str) -> bool:
-    """True for "when is my meeting with X" / "what time is the class"."""
-    return bool(_WHEN_IS_EVENT_RE.search(msg_lower or ""))
+    """True for "when is my meeting with X" / "what time is the class", in
+    either direct or embedded question order."""
+    text = msg_lower or ""
+    return bool(_WHEN_IS_EVENT_RE.search(text)
+                or _WHEN_EVENT_IS_RE.search(text))
 
 
 _TIME_INDICATORS = (

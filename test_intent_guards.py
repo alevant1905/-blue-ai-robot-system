@@ -361,6 +361,15 @@ SCHEDULE_TIME_QUESTIONS = [
     "when is the dentist appointment",
     "what time is the recital",
     "what time is my flight",
+    # Embedded question order — the verb falls after the noun. Only the
+    # direct order was matched, so these fell past the guard and were
+    # answered with the wall clock (2026-08-19).
+    "do you remember what time the meeting is",
+    "tell me when my class starts",
+    "do you know what time my flight is",
+    "what time the recital begins",
+    # Direct order with a do-support verb rather than a copula.
+    "when does the class start",
 ]
 
 CLOCK_QUESTIONS = [
@@ -371,7 +380,9 @@ CLOCK_QUESTIONS = [
 ]
 
 NEITHER = [
-    # "when" followed by a clause, not by "is <event>".
+    # "when" followed by a clause, not by "is <event>". The embedded-order
+    # pattern requires a determiner in front of the event noun for exactly
+    # this reason: "in class" is a prepositional phrase, not a subject.
     "lets practice. when in class i will ask you to introduce yourself.",
     "When we're in class tomorrow blue, I'm gonna ask you to introduce yourself.",
     # No event noun.
