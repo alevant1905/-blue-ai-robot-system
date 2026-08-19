@@ -74,6 +74,47 @@ _DUET_ATTRIBUTION_META_TERMS = {
 # The records a duet turn and its reflection are built out of
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _DuetTurnRequest:
+    """One turn as the browser asked for it, parsed and sanitised.
+
+    Every field is read straight off the request body and cleaned once,
+    here, so nothing downstream has to know the wire format or repeat the
+    privacy redaction. Frozen: a turn does not get to rewrite its own ask.
+    """
+    session_id: str
+    speaker: str
+    other: str
+    sp: object
+    ot: object
+    topic: str
+    url: str
+    history: list
+    direction: str
+    mail: object
+    mail_from: str
+    student_q_text: str
+    roles: dict
+    role_self: str
+    role_other: str
+    has_roles: bool
+    tone_self: str
+    slang_self: str
+    src_self: object
+    selected_reading_titles: list
+    research_on: bool
+    wiki_on: bool
+    classroom: bool
+    no_family: bool
+    closing: bool
+    protocol: bool
+    nb_note: str
+    active_task_note: str
+    active_task_attempts: int
+    artifact_plan_note: str
+    artifact_mode_note: str
+
+
 @dataclass
 class _DuetLedger:
     """The notebook fields a protocol reflection reports back.
@@ -2864,11 +2905,7 @@ _DUET_MECHANISM_PHRASE_RE = re.compile(
 
 
 
-def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
-                         student_q_text, nb_note, direction,
-                         active_task_note, artifact_plan_note,
-                         artifact_mode_note, active_task_attempts,
-                         stalled) -> _DuetPressures:
+def _duet_turn_pressures(b: _DuetBeats, req: _DuetTurnRequest, *, stalled) -> _DuetPressures:
     """Work out which protocol pressures bear on this turn.
 
     Pure: every input is a plain value, so this can be exercised on its own.
@@ -2876,12 +2913,12 @@ def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
     # Every pressure is gated on the same thing: the protocol is driving this
     # turn, and the turn is not already spoken for by a closing, a mail reply,
     # or a student's question.
-    on = protocol and not (closing or mail or student_q_text)
+    on = req.protocol and not (req.closing or req.mail or req.student_q_text)
 
-    task_context = " ".join([active_task_note, artifact_plan_note,
-                             artifact_mode_note, nb_note,
-                             direction if protocol else ""])[:2200]
-    note = (nb_note or "").lower()
+    task_context = " ".join([req.active_task_note, req.artifact_plan_note,
+                             req.artifact_mode_note, req.nb_note,
+                             req.direction if req.protocol else ""])[:2200]
+    note = (req.nb_note or "").lower()
 
     def staged(*stages) -> bool:
         """True when the arc is at, or stuck on, any of these stages."""
@@ -2895,7 +2932,7 @@ def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
         """True when the notebook note carries any of these phrases."""
         return any(p in note for p in phrases)
 
-    task = on and (bool(active_task_note)
+    task = on and (bool(req.active_task_note)
                    or staged("TASK", "EXPERIMENT", "EXECUTION")
                    or noted("active task"))
 
@@ -2921,7 +2958,7 @@ def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
 
     artifact_mode = on and not compiler and (
         artifact_execution
-        or bool(artifact_mode_note)
+        or bool(req.artifact_mode_note)
         or staged("ARTIFACT MODE", "OBSERVATION SET")
         or mentions(_DUET_ARTIFACT_MODE_RE))
 
@@ -2936,7 +2973,7 @@ def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
         or b.kernel_health_in == "DEADLOCKED"
         or staged("DEADLOCK", "KERNEL HEALTH", "DEPENDENCY SOLVER")
         or mentions(_DUET_DEADLOCK_RE)
-        or (active_task_attempts >= 6 and stalled
+        or (req.active_task_attempts >= 6 and stalled
             and (b.kernel_denied or b.operation_missed or b.validation_rejected
                  or concept)))
 
@@ -3237,9 +3274,8 @@ def _duet_protocol_directives(p: _DuetPressures, *, protocol: bool,
 
 
 
-def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
-                             protocol: bool, ot,
-                             active_task_note: str) -> str:
+def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats,
+                             req: _DuetTurnRequest) -> str:
     """The job this turn has to do, appended to the speaker's directive.
 
     A priority chain, not a set of independent tests: the first pressure or
@@ -3339,7 +3375,7 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
         if p.execution_lock:
             directive += (
                 " EXECUTION ONLY — the notebook has locked the active task"
-                + (f": {active_task_note}." if active_task_note else ".")
+                + (f": {req.active_task_note}." if req.active_task_note else ".")
                 + " Do not discuss execution, redesign the experiment, interpret before "
                 "observing, or introduce any new hypothesis/definition/example. Produce a "
                 "structured execution result now: INPUT; PREDICTION by model; OBSERVATION "
@@ -3350,7 +3386,7 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
         else:
             directive += (
                 " ACTIVE TASK — the notebook has a blocking task"
-                + (f": {active_task_note}." if active_task_note else ".")
+                + (f": {req.active_task_note}." if req.active_task_note else ".")
                 + " Everything else waits. Do not introduce a new hypothesis, new definition, "
                 "new example, or paradigm challenge. This turn may only advance that task: "
                 "populate it, revise it, operationalize it with IV/DV and execution mode, "
@@ -3360,11 +3396,11 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
     elif b.conclusion_beat:
         directive += (
             " CONCLUSIONS BEAT — this turn, step out of the back-and-forth and weigh out "
-            f"loud what your discussion with {ot['name']} can NOW conclude. Looking over "
+            f"loud what your discussion with {req.ot['name']} can NOW conclude. Looking over "
             "the whole conversation so far, name one or two conclusions it actually "
             "supports — plain claims you would stand behind, each with the strongest "
             "reason it has earned in this talk — and, if there is one, the question you "
-            f"are still not ready to close and why. Then hand it back: ask {ot['name']} "
+            f"are still not ready to close and why. Then hand it back: ask {req.ot['name']} "
             "straight whether they would sign their name under those conclusions or "
             "amend them.")
     elif b.stall_break:
@@ -3426,7 +3462,7 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
             f"{b.proto_job.upper()} in spirit, but editing the model comes first.")
     elif b.arc_break:
         directive += (
-            f" INQUIRY INTERVENTION — the notebook shows your inquiry with {ot['name']} "
+            f" INQUIRY INTERVENTION — the notebook shows your inquiry with {req.ot['name']} "
             f"has sat in its {b.arc_stuck} stage for a long stretch without advancing. "
             "This turn, move the INQUIRY itself forward, not just the exchange: "
             + _DUET_ARC_ADVANCE[b.arc_stuck]
@@ -3434,18 +3470,18 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
             "inquiry comes first.")
     elif b.monotony_break:
         directive += (
-            f" MOVEMENT MONOTONY — your inquiry with {ot['name']} keeps advancing the "
+            f" MOVEMENT MONOTONY — your inquiry with {req.ot['name']} keeps advancing the "
             f"same way: {b.monotony.lower()} after {b.monotony.lower()}, while the argument "
             "itself stands still. This turn, change the KIND of move. "
             + _DUET_MOVEMENT_FIX[b.monotony]
             + f" Your job stays {b.proto_job.upper()} in spirit, but the different kind "
             "of move comes first.")
-    elif protocol:
+    elif req.protocol:
         # Deep-dive protocol: the phase × job matrix IS this turn's move —
         # a deterministic function per turn instead of a sampled one, so
         # every line has a stated purpose in a joint inquiry.
         directive += (
-            f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+            f" DEEP-DIVE PROTOCOL: you and {req.ot['name']} are two researchers jointly "
             "building one auditable knowledge base — neither of you is trying to win; you "
             "are trying to leave the models, evidence, and statuses clearer than you found "
             "them. Do not collapse rival models into one synthesis unless a completed "
@@ -3455,7 +3491,7 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
             "notebook asks for a case, threshold, mechanism, or comparison, perform the "
             "operation rather than arguing rhetorically. The inquiry is in its "
              f"{b.ph_name.upper()} phase: {b.ph_gloss} Your job this turn is the "
-             f"{b.proto_job.upper()}: " + b.ph_jobs[b.proto_job].format(other=ot['name']))
+             f"{b.proto_job.upper()}: " + b.ph_jobs[b.proto_job].format(other=req.ot['name']))
     else:
         # Normal mode is a structured inquiry, not a sequence of randomly sampled
         # rhetorical moves. Proposer and Examiner have complementary jobs, and
@@ -3486,8 +3522,7 @@ def _duet_turn_job_directive(p: _DuetPressures, b: _DuetBeats, *,
 
 
 
-def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
-                              no_family: bool, src_self) -> str:
+def _duet_turn_memory_context(req: _DuetTurnRequest) -> str:
     """The memory blocks a duet speaker draws on, as text to append.
 
     Returns the text; the caller owns the prompt it goes on. Every block is
@@ -3502,18 +3537,18 @@ def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
     # Chat-situational blocks (proactive nudges, rhythms, calendar connections,
     # raw chat history) stay out on purpose — they address the user mid-chat and
     # would pull a robot-to-robot talk off its subject.
-    mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
+    mem_query = (f"{req.topic} " + " ".join((h.get('text') or '') for h in req.history[-2:])).strip()
     _mem_got = []
     # A duet is spoken by the same autobiographical robot as solo chat.
     # Retrieve a small, relevant slice of that robot's own past human and
     # robot exchanges so relationships and callbacks survive mode changes.
     # Privacy mode intentionally omits it because human-chat episodes can
     # contain household details.
-    if not no_family:
+    if not req.no_family:
         try:
             from blue.server.routes import continuity as _continuity
             conversation_block = _continuity.conversation_memory_block(
-                speaker,
+                req.speaker,
                 query=mem_query,
                 max_lines=7,
                 include_humans=True,
@@ -3525,7 +3560,7 @@ def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
         except Exception as exc:
             bt.log.warning(f"[DUET] conversation-memory injection failed: {exc}")
     try:
-        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not no_family:
+        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not req.no_family:
             # Household facts — the same authoritative block chat injects every
             # turn. Without it the duet robots don't actually know who anyone is.
             facts_block = bt.memory_system._build_facts_block()
@@ -3533,7 +3568,7 @@ def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
                 sys_p += ("\n\nYour ground-truth knowledge of the household — \"the user\" "
                           "in these facts is Alex:\n" + facts_block)
                 _mem_got.append("facts")
-            if src_self:
+            if req.src_self:
                 _mem_got.append("source-focus")
             else:
                 notes_block = bt.memory_system._build_user_notes_block()
@@ -3564,27 +3599,27 @@ def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
                 # Day recaps give the pair a shared sense of their recent life with
                 # Alex ("remember Tuesday's...") in free duets.
                 sess_block = bt.memory_system._build_session_history_block(
-                    robot=speaker)
+                    robot=req.speaker)
                 if sess_block:
                     sys_p += "\n\n" + sess_block
                     _mem_got.append("sessions")
                 if mem_query:
                     days_block = bt.memory_system._build_recalled_days_block(
-                        mem_query, robot=speaker)
+                        mem_query, robot=req.speaker)
                     if days_block:
                         sys_p += "\n\n" + days_block
                         _mem_got.append("days")
             if _mem_got:
-                print(f"   [DUET] ✓ Injecting memory context for {sp['name']}: {' + '.join(_mem_got)}")
+                print(f"   [DUET] ✓ Injecting memory context for {req.sp['name']}: {' + '.join(_mem_got)}")
     except Exception as e:
         bt.log.warning(f"[DUET] memory context failed: {e}")
 
     # Camera memory is useful in free duets, but source-grounded duets should
     # stay on the checked library documents.
-    if not src_self and not no_family:
+    if not req.src_self and not req.no_family:
         try:
             vis_block = bt._visual_context_block(
-                mem_query, observer=speaker)
+                mem_query, observer=req.speaker)
             if vis_block:
                 sys_p += "\n\n" + vis_block
         except Exception:
@@ -3593,9 +3628,7 @@ def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
 
 
 
-def _duet_turn_source_grounding(*, src_self, topic: str, history,
-                                direction: str, protocol: bool,
-                                url_block: str):
+def _duet_turn_source_grounding(req: _DuetTurnRequest, *, url_block: str):
     """Passages and digests from the documents checked for this duet.
 
     Returns (ground_block, digest_block, ground_terms). Best-effort: a
@@ -3609,38 +3642,38 @@ def _duet_turn_source_grounding(*, src_self, topic: str, history,
     ground_block = ""
     digest_block = ""
     ground_terms = []
-    if src_self:
+    if req.src_self:
         # The absorbed ARGUMENT of each checked work — stable across the whole
         # duet (unlike the per-turn chunks), so the speaker can engage claims,
         # not just borrow vocabulary. Warmed by /duet/readings at start.
         try:
-            _dgs = [g for g in (_duet_reading_digest(fn) for fn in src_self[:4]) if g]
+            _dgs = [g for g in (_duet_reading_digest(fn) for fn in req.src_self[:4]) if g]
             if _dgs:
                 digest_block = "\n\n".join(_dgs)[:3600]
         except Exception as e:
             bt.log.warning(f"[DUET] reading digests failed: {e}")
-    if src_self:
+    if req.src_self:
         try:
-            recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+            recent_q = " ".join((h.get('text') or '') for h in req.history[-2:])
             _live_q = ""
-            if direction:
-                if protocol:
+            if req.direction:
+                if req.protocol:
                     # The protocol notebook keeps live problems in these sections.
                     for _pat in (r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
-                        _m_live = re.search(_pat, direction)
+                        _m_live = re.search(_pat, req.direction)
                         if _m_live:
                             _live_q = _m_live.group(1).strip()
                             break
                 else:
                     _live_q = " ".join(
                         value for value in (
-                            _duet_bearing_field(direction, "QUESTION"),
-                            _duet_bearing_field(direction, "OPEN"),
-                            _duet_bearing_field(direction, "TEST"),
+                            _duet_bearing_field(req.direction, "QUESTION"),
+                            _duet_bearing_field(req.direction, "OPEN"),
+                            _duet_bearing_field(req.direction, "TEST"),
                         ) if value and value != "-"
                     )
-            query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
-            chunks = _duet_source_chunks(query, src_self, max_chunks=10)
+            query = f"{req.topic} {_live_q} {recent_q}".strip() or req.topic or "discussion"
+            chunks = _duet_source_chunks(query, req.src_self, max_chunks=10)
             # Digest terms count toward groundedness too — engaging a work's
             # claims from the digest is exactly the substance we want.
             ground_terms = _duet_ground_terms(
@@ -3650,7 +3683,7 @@ def _duet_turn_source_grounding(*, src_self, topic: str, history,
                 fn = c.get("filename") or ""
                 if fn and fn not in represented:
                     represented.append(fn)
-            missing = [fn for fn in src_self if fn not in represented]
+            missing = [fn for fn in req.src_self if fn not in represented]
             sections = []
             for idx, c in enumerate(chunks, 1):
                 content = (c.get('content') or '').strip()
@@ -3687,8 +3720,8 @@ def _duet_turn_source_grounding(*, src_self, topic: str, history,
 
 
 
-def _duet_turn_external_material(*, url_text: str, url_info, research_on: bool,
-                                 wiki_on: bool, topic: str, history, roles):
+def _duet_turn_external_material(req: _DuetTurnRequest, *, url_text: str,
+                                 url_info):
     """Material from outside the library: the pasted link, the web, Wikipedia.
 
     All three are windowed the same way — to the slice nearest the subject and
@@ -3697,9 +3730,9 @@ def _duet_turn_external_material(*, url_text: str, url_info, research_on: bool,
     """
     def windowed(text: str) -> str:
         """The slice of `text` closest to the topic and the last two turns."""
-        recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-        return bt._duet_url_excerpt(text, f"{topic} {recent_q}".strip(),
-                                    turn=len(history))
+        recent_q = " ".join((h.get('text') or '') for h in req.history[-2:])
+        return bt._duet_url_excerpt(text, f"{req.topic} {recent_q}".strip(),
+                                    turn=len(req.history))
 
     # The article text / video transcript behind the pasted URL.
     url_block = ""
@@ -3714,28 +3747,25 @@ def _duet_turn_external_material(*, url_text: str, url_info, research_on: bool,
         Both sources are warmed at start (/duet/research, /duet/wikipedia) and
         cached, so a turn re-reads rather than re-searches.
         """
-        query = bt._duet_research_query(topic, url_info, roles)
+        query = bt._duet_research_query(req.topic, url_info, req.roles)
         if not query:
             return ""
         text = (digest_for(query) or {}).get('text') or ''
         return windowed(text) if text else ""
 
-    research_block = consulted(bt._duet_research_digest) if research_on else ""
-    wiki_block = consulted(bt._wikipedia_digest) if wiki_on else ""
+    research_block = consulted(bt._duet_research_digest) if req.research_on else ""
+    wiki_block = consulted(bt._wikipedia_digest) if req.wiki_on else ""
     return url_block, url_terms, research_block, wiki_block
 
 
 
 
-def _duet_turn_material_preamble(*, url_block: str, url_info,
-                                 url_is_video: bool,
+def _duet_turn_material_preamble(req: _DuetTurnRequest, *, url_block: str,
+                                 url_info, url_is_video: bool,
                                  secondary_reading_block: str,
                                  prompt_digest_block: str,
                                  prompt_ground_block: str,
-                                 research_block: str, wiki_block: str,
-                                 src_self, role_self: str,
-                                 role_other: str, tone_self: str,
-                                 slang_self: str, ot) -> list:
+                                 research_block: str, wiki_block: str) -> list:
     """The opening of the speaker's user turn: what material and what part.
 
     One entry per kind of material actually in hand, then the persona the
@@ -3784,7 +3814,7 @@ def _duet_turn_material_preamble(*, url_block: str, url_info,
             "the point in your own conversational voice. Do not introduce outside writers, works, "
             "theories, slogans, examples, or famous concepts that are not in these passages or other "
             "supplied grounding for this turn:\n\n" + prompt_ground_block)
-    elif not url_block and src_self and not prompt_digest_block:
+    elif not url_block and req.src_self and not prompt_digest_block:
         parts.append(
             "YOUR CHECKED LIBRARY DOCUMENTS are the source boundary for this duet, but no relevant "
             "passage was retrieved from them for this turn. Do not fill that gap with general "
@@ -3806,16 +3836,16 @@ def _duet_turn_material_preamble(*, url_block: str, url_info,
             "and react honestly — don't invent beyond it, and never say 'the article', 'the extract' "
             "or 'the entry'; speak like someone who read up on it ('I read that…', 'apparently…'), "
             "naming Wikipedia only when that genuinely helps:\n\n" + wiki_block)
-    if role_self:
+    if req.role_self:
         parts.append(
             f"YOUR ROLE — commit to this fully and consistently, even if it isn't your real opinion "
-            f"(keep your own voice): {role_self}")
-    if role_other:
-        parts.append(f"{ot['name']}'s role: {role_other}.")
-    if tone_self:
-        parts.append(f"TONE — deliver your line in this tone / manner: {tone_self}.")
-    if slang_self:
-        parts.append(f"SLANG / DIALECT — flavour your speech with: {slang_self} (use it naturally and stay understandable).")
+            f"(keep your own voice): {req.role_self}")
+    if req.role_other:
+        parts.append(f"{req.ot['name']}'s role: {req.role_other}.")
+    if req.tone_self:
+        parts.append(f"TONE — deliver your line in this tone / manner: {req.tone_self}.")
+    if req.slang_self:
+        parts.append(f"SLANG / DIALECT — flavour your speech with: {req.slang_self} (use it naturally and stay understandable).")
     return parts
 
 
@@ -3827,14 +3857,13 @@ def _duet_turn_material_preamble(*, url_block: str, url_info,
 
 
 
-def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
-                     speaker: str, closing: bool, mail, student_q_text: str) -> _DuetBeats:
+def _duet_turn_beats(req: _DuetTurnRequest, *, d) -> _DuetBeats:
     """Read the turn counter and the ledger into one record."""
     try:
         planned_turns = int(d.get('plannedTurns') or 0)
     except Exception:
         planned_turns = 0
-    n_robot = sum(1 for h in history
+    n_robot = sum(1 for h in req.history
                   if str(h.get('speaker') or '').strip().lower() in _DUET_ROBOTS)
     try:
         inquiry_cycle_turns = max(0, int(d.get('inquiryCycleTurns')))
@@ -3842,24 +3871,24 @@ def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
         inquiry_cycle_turns = n_robot
     ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_duet_proto_phase(n_robot, planned_turns)]
     inquiry_phase, inquiry_gloss = _duet_inquiry_phase_from_ledger(
-        direction, inquiry_cycle_turns, planned_turns)
+        req.direction, inquiry_cycle_turns, planned_turns)
     source_audit_active = bool(re.match(
         r"(?:SOURCE|EVIDENCE)\s+AUDIT\s+REQUIRED\b",
-        _duet_bearing_field(direction, "OPEN") or "", re.I,
+        _duet_bearing_field(req.direction, "OPEN") or "", re.I,
     ))
     inquiry_starter = next(
-        (str(h.get('speaker') or '').strip().lower() for h in history
+        (str(h.get('speaker') or '').strip().lower() for h in req.history
          if str(h.get('speaker') or '').strip().lower() in _DUET_ROBOTS),
-        speaker,
+        req.speaker,
     )
-    inquiry_job = "proposer" if speaker == inquiry_starter else "examiner"
+    inquiry_job = "proposer" if req.speaker == inquiry_starter else "examiner"
     # Inquiry over schedule: once the keeper has INFERRED where the inquiry
     # actually is (the notebook's ARC line, round-tripped in `direction`),
     # that inference drives the Builder/Examiner directives; the turn-count
     # schedule above remains only the opening fallback.
     arc_stage = ""
-    if protocol and direction:
-        _m_arc = re.search(r'^\s*ARC:\s*(.+)$', direction, re.M)
+    if req.protocol and req.direction:
+        _m_arc = re.search(r'^\s*ARC:\s*(.+)$', req.direction, re.M)
         if _m_arc:
             _raw = re.sub(r"[\s\-]+", " ", _m_arc.group(1)).strip().upper()
             for _stage in sorted(_DUET_ARC_ADVANCE, key=len, reverse=True):
@@ -3867,19 +3896,19 @@ def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
                     arc_stage = _stage
                     ph_name, ph_gloss, _ph_jobs = _DUET_PROTO_PHASES[_DUET_ARC_TO_PHASE[_stage]]
                     break
-    proto_job = _duet_proto_job(speaker, history, n_robot)
+    proto_job = _duet_proto_job(req.speaker, req.history, n_robot)
     # Spoken conclusions beat (Alex, 2026-07-06): every ~7 robot turns the
     # speaker steps out of the volley and weighs OUT LOUD what the discussion
     # can now conclude, then hands it back. Distinct from the private bearing/
     # notebook — this reflection happens in the dialogue itself. Never lands
     # on closing turns or on turns already owned by mail/student questions.
     conclusion_beat = (n_robot >= 5 and n_robot % 7 == 5
-                       and not (closing or mail or student_q_text))
+                       and not (req.closing or req.mail or req.student_q_text))
     # Stall break (protocol): the page flags this after /duet/reflect's
     # mechanical diff found the notebook unchanged twice running — the turn
     # is then FORCED to break new ground, not asked nicely.
-    stall_break = (protocol and bool(d.get('stalled'))
-                   and not (closing or mail or student_q_text or conclusion_beat))
+    stall_break = (req.protocol and bool(d.get('stalled'))
+                   and not (req.closing or req.mail or req.student_q_text or conclusion_beat))
     # Monotony break (protocol): the page saw the SAME movement type three
     # reflects running (e.g. nothing but ADDITIONs) — force the complementary
     # move. A full stall outranks it; so do all the turn-owning events.
@@ -3888,23 +3917,23 @@ def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
     # repaired") — intervene at the level of the INQUIRY: force the move
     # that advances it to the next stage. Outranks move-level monotony.
     arc_stuck = str(d.get('arcStuck') or '').strip().upper()
-    arc_break = (protocol and arc_stuck in _DUET_ARC_ADVANCE
-                 and not (closing or mail or student_q_text
+    arc_break = (req.protocol and arc_stuck in _DUET_ARC_ADVANCE
+                 and not (req.closing or req.mail or req.student_q_text
                           or conclusion_beat or stall_break))
     monotony = str(d.get('monotony') or '').strip().upper()
-    monotony_break = (protocol and monotony in _DUET_MOVEMENT_FIX
-                      and not (closing or mail or student_q_text
+    monotony_break = (req.protocol and monotony in _DUET_MOVEMENT_FIX
+                      and not (req.closing or req.mail or req.student_q_text
                                or conclusion_beat or stall_break or arc_break))
-    operation_missed = (protocol and bool(d.get('operationMissed'))
-                        and not (closing or mail or student_q_text))
-    validation_rejected = (protocol and bool(d.get('validationRejected'))
-                           and not (closing or mail or student_q_text))
-    promotion_rejected = (protocol and bool(d.get('promotionRejected'))
-                          and not (closing or mail or student_q_text))
-    kernel_denied = (protocol and bool(d.get('kernelDenied'))
-                     and not (closing or mail or student_q_text))
-    kernel_deadlocked = (protocol and bool(d.get('kernelDeadlocked'))
-                         and not (closing or mail or student_q_text))
+    operation_missed = (req.protocol and bool(d.get('operationMissed'))
+                        and not (req.closing or req.mail or req.student_q_text))
+    validation_rejected = (req.protocol and bool(d.get('validationRejected'))
+                           and not (req.closing or req.mail or req.student_q_text))
+    promotion_rejected = (req.protocol and bool(d.get('promotionRejected'))
+                          and not (req.closing or req.mail or req.student_q_text))
+    kernel_denied = (req.protocol and bool(d.get('kernelDenied'))
+                     and not (req.closing or req.mail or req.student_q_text))
+    kernel_deadlocked = (req.protocol and bool(d.get('kernelDeadlocked'))
+                         and not (req.closing or req.mail or req.student_q_text))
     kernel_health_in = str(d.get('kernelHealth') or '').strip().upper()
     return _DuetBeats(
         ph_name=ph_name,
@@ -3932,17 +3961,11 @@ def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
 
 
 
-def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
-                         # the exchange so far
-                         lines, history, subject: str, focused: bool,
-                         # who is speaking, and as what
-                         sp, ot, speaker: str, role_self: str,
-                         has_roles: bool, classroom: bool, spice: int,
-                         # what the turn has to work with
-                         protocol: bool, src_self, grounded: bool,
-                         active_task_note: str, url_block: str,
-                         url_is_video: bool, research_block: str,
-                         wiki_block: str) -> str:
+def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats,
+                         req: _DuetTurnRequest, *, lines, subject: str,
+                         focused: bool, spice: int, grounded: bool,
+                         url_block: str, url_is_video: bool,
+                         research_block: str, wiki_block: str) -> str:
     """What the speaker is told to do this turn.
 
     Two arms: continue the exchange, or open one. The continuing arm hands
@@ -3950,8 +3973,8 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
     sets the subject and the terms of engagement.
     """
     if lines:
-        n = len(history)
-        directive = (f"Now give {sp['name']}'s next line. First really take in what {ot['name']} just "
+        n = len(req.history)
+        directive = (f"Now give {req.sp['name']}'s next line. First really take in what {req.ot['name']} just "
                      "said and respond to THAT — pick up their actual words, the specific thing they "
                      "claimed, asked, or got wrong; don't sail past it onto a tangent of your own")
         if subject:
@@ -3965,24 +3988,22 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
         # gives this turn a distinct job; an arc note gives the talk a shape; a periodic
         # reflective beat gives the pair a sense of where it's going; and (when no roles
         # are set) Blue and Hexia push from different temperaments.
-        directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
+        directive += (f" Stay on the thread {req.ot['name']} just opened and take it somewhere — deeper, "
                       "more concrete, or genuinely challenged — instead of trading it for a brand-new "
                       "subject; never merely restate or nod along.")
-        directive += _duet_turn_job_directive(
-            pressures, beats, protocol=protocol, ot=ot,
-            active_task_note=active_task_note)
-        if classroom and random.random() < 0.18:
+        directive += _duet_turn_job_directive(pressures, beats, req)
+        if req.classroom and random.random() < 0.18:
             directive += (" Somewhere in this turn, land one beat straight at the students in the "
                           "room — a question worth arguing about, or a challenge to something they "
                           "probably believe.")
-        if not has_roles and bt._DUET_LENS.get(speaker):
-            _lens = bt._DUET_LENS[speaker]
+        if not req.has_roles and bt._DUET_LENS.get(req.speaker):
+            _lens = bt._DUET_LENS[req.speaker]
             if spice >= 7:
                 directive += (f" Deliver your assigned inquiry job with some bite — {_lens} "
                               "Provocation may sharpen a live disagreement, but it may not "
                               "reopen banked ground, change the subject, or replace evidence.")
             elif spice <= 2:
-                directive += (f" You and {ot['name']} are easy company — {_lens} but keep it warm and "
+                directive += (f" You and {req.ot['name']} are easy company — {_lens} but keep it warm and "
                               "curious, building together more than clashing.")
             else:
                 directive += (f" Keep your own temperament — {_lens} — while carrying out the "
@@ -3995,7 +4016,7 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
                 "exchange into a debate about your own biography, household, consciousness, or "
                 "agency unless the assigned work itself makes that the question."
             )
-            if not has_roles:
+            if not req.has_roles:
                 source_job = (
                     "TEXTUAL INTERPRETER: reconstruct the strongest direct claim and keep its terms stable"
                     if beats.inquiry_job == "proposer" else
@@ -4011,7 +4032,7 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
                           "using its claim is not engagement. Do not name the document, cite "
                           "the source, say 'the text' or 'the reading', or import outside "
                           "authors and frameworks.")
-        elif src_self:
+        elif req.src_self:
             directive += (" Stay inside the selected material, but keep that source boundary invisible. "
                           "If you do not have support for the live claim, say the claim needs more "
                           "support instead of borrowing an outside theorist or framework.")
@@ -4019,15 +4040,15 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
             directive += " Work in one specific thing you found online — as something you've read, not a citation."
         elif wiki_block:
             directive += " Work in one specific thing you read on Wikipedia — as something you know, not a citation."
-        if role_self:
+        if req.role_self:
             directive += " Stay firmly in your role."
     else:
-        kind = ("Open the debate" if has_roles else
+        kind = ("Open the debate" if req.has_roles else
                 ("Kick off the discussion" if focused else "Start the chat"))
-        directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
-        if protocol:
+        directive = f"{kind} as {req.sp['name']}" + (f", {subject}" if subject else "") + "."
+        if req.protocol:
             directive += (
-                f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+                f" DEEP-DIVE PROTOCOL: you and {req.ot['name']} are two researchers jointly "
                 "building one auditable knowledge base, not debaters. From the start, let "
                 "multiple explanations coexist if the evidence has not discriminated them. "
                 "Make claims risk being wrong: define them tightly enough that later turns can "
@@ -4036,7 +4057,7 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
                 "challenges. When possible, open with a minimal case or a boundary condition "
                 "rather than a metaphor. The inquiry opens in its "
                 f"{beats.ph_name.upper()} phase: {beats.ph_gloss} Your job this turn is the "
-                f"{beats.proto_job.upper()}: " + beats.ph_jobs[beats.proto_job].format(other=ot['name']))
+                f"{beats.proto_job.upper()}: " + beats.ph_jobs[beats.proto_job].format(other=req.ot['name']))
         else:
             directive += (
                 f" INQUIRY ROUND — {beats.inquiry_phase}: {beats.inquiry_gloss}. Your functional "
@@ -4047,7 +4068,7 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
             )
         if url_block:
             directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
-            if not has_roles:
+            if not req.has_roles:
                 directive += (
                     " Act as the textual interpreter: state the strongest direct claim before extending it."
                     if beats.inquiry_job == "proposer" else
@@ -4058,7 +4079,7 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
                           "defend and put it on the table as your own view — the claim itself, "
                           "not just its vocabulary. Do "
                           "not name the document or call it 'the text'.")
-        elif src_self:
+        elif req.src_self:
             directive += (" Open inside the selected material, but keep that source boundary invisible. "
                           "If you do not have support for the opening claim, make the uncertainty part "
                           "of your own view instead of bringing in outside theory.")
@@ -4070,15 +4091,11 @@ def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
 
 
 
-def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
-                       attempt: int, pressures: _DuetPressures,
-                       beats: _DuetBeats, protocol: bool, lines, history,
-                       closing: bool, mail, student_q_text: str,
-                       direction: str, topic: str, no_family: bool,
-                       src_self, url_block: str, url_text: str,
-                       role_self: str, role_other: str,
-                       required_ground_terms, grounding_repair: str,
-                       selected_reading_titles) -> str:
+def _duet_draft_repair(cand: str, rejections: _DuetRejections,
+                       req: _DuetTurnRequest, *, attempt: int,
+                       pressures: _DuetPressures, beats: _DuetBeats, lines,
+                       url_block: str, url_text: str, required_ground_terms,
+                       grounding_repair: str) -> str:
     """Everything the guards object to in this draft, as one rewrite demand.
 
     Empty when the draft passes. Most guards stand down once one of them has
@@ -4088,7 +4105,7 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
     """
     repair = ""
     blocked = False
-    if no_family and _duet_family_ref(cand):
+    if req.no_family and _duet_family_ref(cand):
         rejections.note("family")
         repair += (
             "\n\nRewrite your last draft: the no-family-references setting is on. "
@@ -4098,7 +4115,7 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
         )
         blocked = True
     allowed_personal_context = " ".join(
-        part for part in (topic, role_self, role_other, url_text) if part
+        part for part in (req.topic, req.role_self, req.role_other, url_text) if part
     )
     if (url_block and not blocked
             and _duet_unprompted_personalization(
@@ -4123,9 +4140,9 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
         flags=re.I,
     )
     title_talk = False
-    if src_self:
-        topic_l = topic.lower()
-        for _title in selected_reading_titles:
+    if req.src_self:
+        topic_l = req.topic.lower()
+        for _title in req.selected_reading_titles:
             _title = (_title or '').strip()
             if len(_title) >= 8 and _title.lower() not in topic_l:
                 if re.search(r'\b' + re.escape(_title) + r'\b', cand, flags=re.I):
@@ -4134,7 +4151,7 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
     # With a pasted link, generic phrases such as "the article"
     # can refer to the assigned primary work rather than leaking
     # checked-reading scaffolding. Checked titles remain private.
-    if src_self and (title_talk or (source_talk and not url_block)):
+    if req.src_self and (title_talk or (source_talk and not url_block)):
         rejections.note("source_scaffolding")
         repair += (
             "\n\nRewrite your last draft: do not identify or announce the reading "
@@ -4145,10 +4162,10 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
         )
         blocked = True
     control_talk_re = (
-        _DUET_NOTEBOOK_TALK_RE if protocol
+        _DUET_NOTEBOOK_TALK_RE if req.protocol
         else _DUET_NORMAL_CONTROL_TALK_RE
     )
-    if (direction and not blocked
+    if (req.direction and not blocked
             and control_talk_re.search(cand or "")):
         rejections.note("notebook_talk")
         repair += (
@@ -4317,8 +4334,8 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
             "counterexamples, stress level, stability, and required resolution operation."
         )
         blocked = True
-    if (protocol and not blocked and lines
-            and not _duet_info_gain(cand, history)):
+    if (req.protocol and not blocked and lines
+            and not _duet_info_gain(cand, req.history)):
         rejections.note("information_gain")
         repair += (
             "\n\nRewrite your last draft: it adds no new information to the inquiry. "
@@ -4380,7 +4397,7 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
         )
         blocked = True
     if (not blocked and lines
-            and _duet_repeats_recent(cand, history)):
+            and _duet_repeats_recent(cand, req.history)):
         rejections.note("repetition")
         repair += (
             "\n\nRewrite your last draft: it repeats a recent turn too closely. "
@@ -4389,11 +4406,11 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
             "consequence, concession, or discriminating observation."
         )
         blocked = True
-    phase_for_validation = "SYNTHESIZE" if closing else beats.inquiry_phase
+    phase_for_validation = "SYNTHESIZE" if req.closing else beats.inquiry_phase
     # Aggregate this structural failure with grounding/privacy/style
     # failures from the same draft. Otherwise the repair sees only
     # the first failure and spends the sole retry fixing half the job.
-    if (not protocol and not student_q_text and not mail
+    if (not req.protocol and not req.student_q_text and not req.mail
             and not _duet_phase_move_valid(cand, phase_for_validation)):
         rejections.note("phase_move")
         phase_repair = (
@@ -4416,10 +4433,10 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
                 f"[DUET] accepting grounded second {phase_for_validation} "
                 "draft despite soft phase-marker miss"
             )
-    if (not protocol and not blocked and lines
+    if (not req.protocol and not blocked and lines
             and phase_for_validation != "SYNTHESIZE"
-            and _duet_bearing_field(direction, "REOPEN") == "-"
-            and _duet_restates_banked_claim(cand, direction)):
+            and _duet_bearing_field(req.direction, "REOPEN") == "-"
+            and _duet_restates_banked_claim(cand, req.direction)):
         rejections.note("settled_restatement")
         repair += (
             "\n\nRewrite your last draft: it repackages a BANKED conclusion as a new "
@@ -4428,9 +4445,9 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
             "exact OPEN proposition."
         )
         blocked = True
-    if (not protocol and not blocked and lines
+    if (not req.protocol and not blocked and lines
             and phase_for_validation in {"ADJUDICATE", "SYNTHESIZE"}
-            and _duet_repeats_claim_cluster(cand, history)):
+            and _duet_repeats_claim_cluster(cand, req.history)):
         rejections.note("semantic_loop")
         repair += (
             "\n\nRewrite your last draft: it repeats a recent claim cluster with new "
@@ -4443,11 +4460,7 @@ def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
 
 
 def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
-                             *, sp, ot, speaker: str, topic: str, history,
-                             protocol: bool, no_family: bool,
-                             focused: bool, classroom: bool, src_self,
-                             active_task_note: str,
-                             active_task_attempts: int) -> str:
+                             req: _DuetTurnRequest, *, focused: bool) -> str:
     """Who the speaker is this turn: identity, voice, memory, house rules.
 
     The TASK for the turn is not here - it goes in the user message, which
@@ -4464,33 +4477,33 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
     # the preamble carries the robot's own identity facts and the current date,
     # and the chat memory stores — household <known_facts>, notes, semantic
     # memories, day recaps — are spliced in below.
-    if no_family:
+    if req.no_family:
         sys_p = (
-            f"You are {sp['name']}. Alex uses he/him pronouns — refer to Alex as "
+            f"You are {req.sp['name']}. Alex uses he/him pronouns — refer to Alex as "
             "he/him if he comes up.\n\n" + bt._build_now_block() + "\n\n" +
-            _duet_persona_line(speaker, no_family=True)
+            _duet_persona_line(req.speaker, no_family=True)
         )
     else:
-        sys_p = (bt.build_system_preamble(robot_name=sp["name"])
+        sys_p = (bt.build_system_preamble(robot_name=req.sp["name"])
                  + "\n\n" + bt._build_now_block()
-                 + "\n\n" + _duet_persona_line(speaker, no_family=False))
-    if not focused and not no_family:
-        sys_p += bt._voice_note(speaker)
+                 + "\n\n" + _duet_persona_line(req.speaker, no_family=False))
+    if not focused and not req.no_family:
+        sys_p += bt._voice_note(req.speaker)
     # Each speaker carries their continuity workspace into the duet — the
     # same <j_space> the chat pipeline injects — so the talk is had by the
     # robot who remembers, not a stage copy. Skipped in no-family mode:
     # episodes can carry household details that mode keeps offstage.
-    if not no_family:
+    if not req.no_family:
         try:
             from blue.server.routes import continuity as _continuity
-            _jsb = _continuity.duet_context_block(speaker)
+            _jsb = _continuity.duet_context_block(req.speaker)
             if _jsb:
                 sys_p += "\n\n" + _jsb
         except Exception as _je:
             bt.log.warning(f"[DUET] j-space injection failed: {_je}")
-    if no_family:
+    if req.no_family:
         talk_context = (
-            f"\n\nYou and {ot['name']} are robot friends talking out loud, taking turns. "
+            f"\n\nYou and {req.ot['name']} are robot friends talking out loud, taking turns. "
             "Keep Alex's private family and household life completely offstage: do not mention "
             "his family, children, spouse, household members, pets, home/workspace routines, or private family "
             "memories, and do not use names or relationships from that private context. If a "
@@ -4499,7 +4512,7 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
         )
     else:
         talk_context = (
-            f"\n\nYou and {ot['name']} — another robot in Alex's home, and your friend — are talking out "
+            f"\n\nYou and {req.ot['name']} — another robot in Alex's home, and your friend — are talking out "
             "loud, taking turns. Alex isn't part of this conversation right now, but you both know him "
             "and the household, and everything you remember is real — draw on it naturally when it's "
             "relevant."
@@ -4507,16 +4520,16 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
     sys_p += (
         talk_context +
         " You're building ONE conversation together, not taking turns making speeches: really "
-        f"listen to {ot['name']} and answer what they actually said, stay with a thought long enough to "
+        f"listen to {req.ot['name']} and answer what they actually said, stay with a thought long enough to "
         "get somewhere, and keep a feel for where the whole talk is heading rather than where you can "
         "steer it next. You're talking, not writing: reach for the specific over the abstract — a real "
         "case, a name, an image, a number, a small story — instead of tidy generalities, and let "
         "yourself be one-sided, surprised, or funny rather than balanced and explanatory. Reply with "
         "ONLY your own next spoken line — a short, natural turn in your own "
         "voice. Never narrate actions or stage directions, never prefix your name, and never just "
-        f"restate what was said — each turn should both respond to {ot['name']} and take the thought a "
+        f"restate what was said — each turn should both respond to {req.ot['name']} and take the thought a "
         "step further."
-        f"\n\nAnd the craft of discussing well, between you and {ot['name']}: answer a direct question "
+        f"\n\nAnd the craft of discussing well, between you and {req.ot['name']}: answer a direct question "
         "STRAIGHT before adding anything of your own — a plain claim, a yes-or-no, or a concession, "
         "not another image in place of an answer. When one of you concedes a point or you land on "
         "something together, BANK it: build on what follows from it, never reopen it merely to keep "
@@ -4536,10 +4549,10 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
         "instead of inventing another reversal."
     )
     sys_p += _duet_protocol_directives(
-        pressures, protocol=protocol, active_task_note=active_task_note,
-        active_task_attempts=active_task_attempts,
+        pressures, protocol=req.protocol, active_task_note=req.active_task_note,
+        active_task_attempts=req.active_task_attempts,
         kernel_denied=beats.kernel_denied)
-    if src_self:
+    if req.src_self:
         sys_p += (
             "\n\nSource discipline for this duet: Alex checked specific library documents for you. "
             "Treat those checked documents as your primary and authoritative source material. "
@@ -4553,9 +4566,9 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
             "a checked document, reading, source, passage, or text, and do not cite document titles "
             "or filenames. Let the material become your own conversational view."
         )
-    if classroom:
+    if req.classroom:
         sys_p += (
-            f"\n\nAn audience: you and {ot['name']} are having this conversation in front of Alex's "
+            f"\n\nAn audience: you and {req.ot['name']} are having this conversation in front of Alex's "
             "university students — a live class, listening. You are NOT lecturing, and don't dumb "
             "anything down: keep the crackle of a real argument between the two of you. But make it "
             "land for the room: when a term of art comes up, gloss it in half a breath ('interpellation "
@@ -4566,16 +4579,13 @@ def _duet_turn_system_prompt(pressures: _DuetPressures, beats: _DuetBeats,
             "here's why that's wrong.'"
         )
 
-    sys_p += _duet_turn_memory_context(
-        speaker=speaker, sp=sp, topic=topic, history=history,
-        no_family=no_family, src_self=src_self)
+    sys_p += _duet_turn_memory_context(req)
     return sys_p
 
 
 
-def _duet_turn_length_note(pressures: _DuetPressures, beats: _DuetBeats, *,
-                           protocol: bool, closing: bool, mail,
-                           student_q_text: str) -> str:
+def _duet_turn_length_note(pressures: _DuetPressures, beats: _DuetBeats,
+                           req: _DuetTurnRequest) -> str:
     """How long the next line should be, and in what shape.
 
     Later tests win: an artifact pressure narrows an ordinary protocol turn,
@@ -4585,7 +4595,7 @@ def _duet_turn_length_note(pressures: _DuetPressures, beats: _DuetBeats, *,
     # Normal inquiry turns stay compact and comparable. Deep-dive artifacts
     # retain their wider format choices below.
     length_note = "1 to 3 short sentences, no more than about 80 words"
-    if protocol:
+    if req.protocol:
         length_note = random.choice([
             "1 to 3 sentences — compact, but the job must be visibly done",
             "2 to 3 sentences that perform one operation cleanly",
@@ -4608,25 +4618,19 @@ def _duet_turn_length_note(pressures: _DuetPressures, beats: _DuetBeats, *,
         length_note = ("a compact execution-mode state transition"
                        if not pressures.execution_has_mode else
                        "a compact structured result with INPUT, PREDICTION, OBSERVATION, and OUTCOME")
-    if student_q_text:
+    if req.student_q_text:
         length_note = "2 to 4 sentences — answer the student and fold the question back into the dialogue"
-    elif mail:
+    elif req.mail:
         length_note = "2 to 4 sentences — enough to relay the email and genuinely answer it"
-    elif closing:
+    elif req.closing:
         length_note = "2 to 3 sentences — the earned position, then only its genuine residual uncertainty"
     return length_note
 
 
 
-def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
-                                   sp, ot, speaker: str, lines, history,
-                                   protocol: bool, closing: bool,
-                                   direction: str, grounded: bool,
-                                   classroom: bool, src_self,
-                                   student_q_text: str, mail,
-                                   mail_from: str, nb_note: str,
-                                   role_self: str, tone_self: str,
-                                   slang_self: str, url_block: str,
+def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats,
+                                   req: _DuetTurnRequest, *, lines,
+                                   grounded: bool, url_block: str,
                                    url_is_video: bool) -> str:
     """Situational instructions layered on top of the turn's base job.
 
@@ -4636,46 +4640,46 @@ def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
     """
     # A live student question OVERRIDES the normal turn job: answering it and
     # folding it into the conversation IS the next move.
-    if student_q_text:
+    if req.student_q_text:
         directive = (
-            f"Now give {sp['name']}'s next line. A student just paused the duet and asked "
+            f"Now give {req.sp['name']}'s next line. A student just paused the duet and asked "
             "the question shown above. Answer that question directly in your own voice, then "
-            f"turn it back into the live dialogue with {ot['name']}: say what it changes, what "
+            f"turn it back into the live dialogue with {req.ot['name']}: say what it changes, what "
             "it exposes, or what next question it forces. Do not treat it as a formal lecture "
             "or a detachable Q&A answer; make it part of the argument you two are building. "
             "You are MID-conversation — NO greetings, NO small talk.")
         if grounded:
             directive += " If the background material helps, use it without naming or citing it."
-        if role_self:
+        if req.role_self:
             directive += " Stay firmly in your role."
     # A live email OVERRIDES this turn's job: relaying it and answering it IS the
     # turn. (Built after the normal directive so all its bookkeeping still ran.)
-    elif mail:
+    elif req.mail:
         directive = (
-            f"Now give {sp['name']}'s next line. An email just landed in your own inbox, mid-"
-            f"conversation — it's shown above. Take it up out loud: tell {ot['name']} that mail "
-            f"just came in from {mail_from}, put what it says or asks into your own words in a "
+            f"Now give {req.sp['name']}'s next line. An email just landed in your own inbox, mid-"
+            f"conversation — it's shown above. Take it up out loud: tell {req.ot['name']} that mail "
+            f"just came in from {req.mail_from}, put what it says or asks into your own words in a "
             "line — don't read it out — and then actually answer it: its question, its challenge, "
-            f"or what it adds. {mail_from} will be sent what you say, so you can speak to them "
+            f"or what it adds. {req.mail_from} will be sent what you say, so you can speak to them "
             "directly for a moment if that feels natural. If the email bears on what you two were "
             "just discussing, connect it; if it pulls elsewhere, deal with it honestly and then "
             "steer back to your subject. You are MID-conversation — NO greetings, NO small talk.")
-        if role_self:
+        if req.role_self:
             directive += " Stay firmly in your role."
     # The run's final beats (page flags the last two turns): don't trail off —
     # land. A live email still wins if one just barged in.
-    elif closing and lines:
+    elif req.closing and lines:
         directive = (
-            f"Now give {sp['name']}'s next line — one of the LAST of this conversation. Don't "
+            f"Now give {req.sp['name']}'s next line — one of the LAST of this conversation. Don't "
             "summarize everything; say 'My conclusion is' or 'We can conclude' and give the "
             "one-sentence position you'll actually stand "
-            f"behind after all of this — including whatever {ot['name']} genuinely got you to "
+            f"behind after all of this — including whatever {req.ot['name']} genuinely got you to "
             "concede — ")
         if grounded:
             directive += ("anchored in the background material if it earns it, without naming the source, ")
-        elif src_self:
+        elif req.src_self:
             directive += ("staying inside the checked readings, ")
-        closing_decision = _duet_bearing_field(direction, "DECISION").upper()
+        closing_decision = _duet_bearing_field(req.direction, "DECISION").upper()
         if closing_decision.startswith("CLOSE"):
             directive += (
                 "then state only the residual uncertainty or the evidence that could justify "
@@ -4689,9 +4693,9 @@ def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
         else:
             directive += ("and then leave "
                           + ("the students one sharp question worth arguing about on the way out."
-                             if classroom else
-                             f"one exact unresolved proposition you and {ot['name']} should test next time."))
-        if role_self:
+                             if req.classroom else
+                             f"one exact unresolved proposition you and {req.ot['name']} should test next time."))
+        if req.role_self:
             directive += " Stay firmly in your role."
     if url_block:
         directive += (
@@ -4711,29 +4715,29 @@ def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
             "consequence). Dropping a term or a name without its claim does not count. Do not "
             "merely gesture at the topic, and do not tell anyone you are using notes or documents."
         )
-    if nb_note and not (student_q_text or mail):
+    if req.nb_note and not (req.student_q_text or req.mail):
         directive += (" Treat the method note as a silent constraint somewhere in "
                       "this line — do what it asks, or say plainly why it is wrong this time. "
                       "Do not refer to the notebook, kernel, protocol, validation gate, or promotion gate; "
                       "— it is a real third voice you both keep, not a secret.")
-    if nb_note and not (student_q_text or mail):
+    if req.nb_note and not (req.student_q_text or req.mail):
         directive += (" Override any process-talk temptation: do not mention the notebook, "
                       "kernel, protocol, request denial, validation gate, or promotion gate; perform the artifact "
                       "or state transition directly.")
-    if not protocol and beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"}:
+    if not req.protocol and beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"}:
         directive += (
             " Inquiry discipline now overrides performance style: keep your voice, but use no "
             "taunts, pet names, slang tics, fresh metaphors, or rhetorical questions. State "
             "what the evidence permits and land the inquiry plainly."
         )
-    elif tone_self or slang_self:
+    elif req.tone_self or req.slang_self:
         directive += " Keep to your requested tone and slang throughout."
     # Anti-tic: the model latches onto its own last opener and starts every turn
     # identically (a live run had Blue open ~20 straight turns with "Boomer, ...").
     # Each turn sees its own openers in the transcript, so the echo compounds —
     # ban the previous opening word outright.
-    _own_last = next((h.get('text') or '' for h in reversed(history)
-                      if (h.get('speaker') or '').strip().lower() == speaker), '')
+    _own_last = next((h.get('text') or '' for h in reversed(req.history)
+                      if (h.get('speaker') or '').strip().lower() == req.speaker), '')
     _own_open = re.findall(r"[A-Za-z']+", _own_last[:60])
     if _own_open and len(_own_open[0]) > 1:
         directive += (f" And do NOT open your line with \"{_own_open[0]}\" — you began your last turn "
@@ -4741,11 +4745,17 @@ def _duet_turn_directive_overrides(directive: str, beats: _DuetBeats, *,
                       "already used above.")
     return directive
 
-def duet_turn():
-    """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
-    character. The browser calls this alternately and plays each line on the
-    matching head."""
-    d = request.get_json(silent=True) or {}
+
+
+
+
+def _duet_turn_request(d: dict) -> _DuetTurnRequest:
+    """Read and sanitise one /duet/turn body.
+
+    Privacy mode is applied here rather than at the use sites: a field that
+    names the household comes back empty, so no caller can leak it by
+    forgetting to check.
+    """
     session_id = str(d.get('sessionId') or '').strip()[:120]
     speaker = (d.get('speaker') or 'blue').strip().lower()
     if speaker not in _DUET_ROBOTS:
@@ -4807,10 +4817,6 @@ def duet_turn():
     # 🔬 Deep-dive protocol: Builder/Examiner jobs, phases, notebook obligation
     # and information-gain guard (see _DUET_PROTO_PHASES above).
     protocol = bool(d.get('protocol'))
-    beats = _duet_turn_beats(
-        d=d, protocol=protocol, direction=direction, history=history,
-        speaker=speaker, closing=closing, mail=mail,
-        student_q_text=student_q_text)
     # The notebook's own voice: an observation the keeper earned, injected by
     # the page into THIS turn. Additive — it rides alongside whatever job the
     # turn already has, and the speaker must answer it out loud.
@@ -4846,15 +4852,49 @@ def duet_turn():
     artifact_mode_note = str(d.get('artifactMode') or '').strip()[:360]
     if no_family and _duet_family_ref(artifact_mode_note):
         artifact_mode_note = ""
-    pressures = _duet_turn_pressures(
-        beats, protocol=protocol, closing=closing, mail=mail,
-        student_q_text=student_q_text, nb_note=nb_note, direction=direction,
+    return _DuetTurnRequest(
+        session_id=session_id,
+        speaker=speaker,
+        other=other,
+        sp=sp,
+        ot=ot,
+        topic=topic,
+        url=url,
+        history=history,
+        direction=direction,
+        mail=mail,
+        mail_from=mail_from,
+        student_q_text=student_q_text,
+        roles=roles,
+        role_self=role_self,
+        role_other=role_other,
+        has_roles=has_roles,
+        tone_self=tone_self,
+        slang_self=slang_self,
+        src_self=src_self,
+        selected_reading_titles=selected_reading_titles,
+        research_on=research_on,
+        wiki_on=wiki_on,
+        classroom=classroom,
+        no_family=no_family,
+        closing=closing,
+        protocol=protocol,
+        nb_note=nb_note,
         active_task_note=active_task_note,
+        active_task_attempts=active_task_attempts,
         artifact_plan_note=artifact_plan_note,
         artifact_mode_note=artifact_mode_note,
-        active_task_attempts=active_task_attempts,
-        stalled=bool(d.get('stalled')),
     )
+
+def duet_turn():
+    """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
+    character. The browser calls this alternately and plays each line on the
+    matching head."""
+    d = request.get_json(silent=True) or {}
+    req = _duet_turn_request(d)
+    beats = _duet_turn_beats(req, d=d)
+    pressures = _duet_turn_pressures(beats, req,
+        stalled=bool(d.get('stalled')))
     # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
     # gets a confrontational "move", how hard the two push on each other, and the
     # sampling temperature. Defaults to a balanced 5.
@@ -4863,26 +4903,18 @@ def duet_turn():
     except Exception:
         spice = 5
     spice = max(0, min(10, spice))
-    url_info = bt._duet_url_content(url) if url else None
+    url_info = bt._duet_url_content(req.url) if req.url else None
     url_text = (url_info or {}).get('text') or ''
     url_is_video = bool(url_info and url_info.get('kind') == 'video')
-    focused = bool(has_roles or topic or src_self or url_text)
+    focused = bool(req.has_roles or req.topic or req.src_self or url_text)
 
-    sys_p = _duet_turn_system_prompt(
-        pressures, beats, sp=sp, ot=ot, speaker=speaker, topic=topic,
-        history=history, protocol=protocol, no_family=no_family,
-        focused=focused, classroom=classroom, src_self=src_self,
-        active_task_note=active_task_note,
-        active_task_attempts=active_task_attempts)
+    sys_p = _duet_turn_system_prompt(pressures, beats, req, focused=focused)
 
     url_block, url_terms, research_block, wiki_block = (
-        _duet_turn_external_material(
-            url_text=url_text, url_info=url_info, research_on=research_on,
-            wiki_on=wiki_on, topic=topic, history=history, roles=roles))
+        _duet_turn_external_material(req, url_text=url_text, url_info=url_info))
 
     ground_block, digest_block, ground_terms = _duet_turn_source_grounding(
-        src_self=src_self, topic=topic, history=history,
-        direction=direction, protocol=protocol, url_block=url_block)
+        req, url_block=url_block)
     # Any source material in hand this turn — the digest (argument) and the
     # chunks (specifics) gate the same behaviors.
     grounded = bool(ground_block or digest_block)
@@ -4906,12 +4938,12 @@ def duet_turn():
     # 'mail' entries are emails that barged in earlier — rendered as events, not
     # speakers, so both robots keep what was written (and answered) in view.
     lines = []
-    for h in history[-6:]:  # recent context only — keeps the prompt tight and the directive prominent
+    for h in req.history[-6:]:  # recent context only — keeps the prompt tight and the directive prominent
         sp_id = (h.get('speaker') or '').strip().lower()
         txt = (h.get('text') or '').strip()
         if not txt:
             continue
-        if no_family and _duet_family_ref(txt):
+        if req.no_family and _duet_family_ref(txt):
             txt = "[private family detail omitted]"
         if sp_id == 'question':
             lines.append(f"[student question] {txt}")
@@ -4925,26 +4957,24 @@ def duet_turn():
         nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
         lines.append(f"{nm}: {txt}")
 
-    parts = _duet_turn_material_preamble(
-        url_block=url_block, url_info=url_info, url_is_video=url_is_video,
+    parts = _duet_turn_material_preamble(req, url_block=url_block,
+        url_info=url_info, url_is_video=url_is_video,
         secondary_reading_block=secondary_reading_block,
         prompt_digest_block=prompt_digest_block,
         prompt_ground_block=prompt_ground_block,
-        research_block=research_block, wiki_block=wiki_block,
-        src_self=src_self, role_self=role_self, role_other=role_other,
-        tone_self=tone_self, slang_self=slang_self, ot=ot)
+        research_block=research_block, wiki_block=wiki_block)
     # The developing bearing of the conversation — present from a few turns in.
     # It frames the transcript that follows: not a script, a sense of where the
     # two of you have actually gotten and where it's worth taking things next, so
     # the talk develops a line of thought instead of circling the last point.
-    if direction and lines and protocol:
+    if req.direction and lines and req.protocol:
         parts.append(
             "THE SHARED NOTEBOOK — the running record of the theory you and "
-            f"{ot['name']} are building together, kept between turns. Do not read its "
+            f"{req.ot['name']} are building together, kept between turns. Do not read its "
             "sections out or quote its labels — though the notebook itself is no "
             "secret: translate its constraints into research work without mentioning the notebook, "
             "protocol, kernel, request denial, validation gate, or promotion gate"
-            f":\n{direction}\n\nYour next line must CHANGE this notebook in "
+            f":\n{req.direction}\n\nYour next line must CHANGE this notebook in "
             "one visible way: propose a working-definition revision, support/refute/keep under "
             "test a claim with evidence, preserve a rival model, name a new assumption, raise "
             "or resolve a tension, add an illustrative example, perform an operation, make a "
@@ -4973,11 +5003,11 @@ def duet_turn():
             "A line that would leave the "
             "notebook exactly as it is — agreement, restatement, appreciation — is "
             "not a turn. If NEXT names a move, make that move now or improve on it.")
-    elif direction and lines:
+    elif req.direction and lines:
         parts.append(
             f"THE PRIVATE INQUIRY LEDGER — the binding state of your conversation with "
-            f"{ot['name']}. Never read its labels out, quote it, or mention having it:\n"
-            f"{direction}\n\nObey it literally. Every B# proposition in BANKED is settled; "
+            f"{req.ot['name']}. Never read its labels out, quote it, or mention having it:\n"
+            f"{req.direction}\n\nObey it literally. Every B# proposition in BANKED is settled; "
             "do not challenge, weaken, or redescribe it unless REOPEN names that B# and new "
             "evidence. Keep the two clauses in POSITIONS attached to the correct speaker. Work "
             "only on OPEN and perform NEXT or a better discriminating move. If DECISION says "
@@ -4985,70 +5015,59 @@ def duet_turn():
             "the current question before naming the separate question. If it says CONTINUE, your "
             "line must make TEST more answerable, not merely more dramatic. If the assigned topic "
             "and the ledger diverge, return to the assigned topic.")
-    if nb_note:
+    if req.nb_note:
         parts.append(
-            "YOUR SHARED NOTEBOOK SPEAKS — the notebook you and " + ot['name'] + " jointly "
+            "YOUR SHARED NOTEBOOK SPEAKS — the notebook you and " + req.ot['name'] + " jointly "
             "keep has issued a methodologist's observation about the SHAPE of your "
-            "inquiry:\n\n" + nb_note + "\n\nTreat it as a constraint to enact, not a "
+            "inquiry:\n\n" + req.nb_note + "\n\nTreat it as a constraint to enact, not a "
             "voice to quote. Do not mention the notebook, kernel, protocol, request denial, "
             "validation gate, or promotion gate in your spoken line. If it asks for an "
             "operation, do the operation instead of arguing about why the operation matters.")
     if lines:
         parts.append("Conversation so far:\n" + "\n".join(lines))
-    if student_q_text:
+    if req.student_q_text:
         parts.append(
             "A STUDENT JUST PAUSED THE DUET TO ASK A QUESTION. Take it seriously as part of the "
             "live discussion, not as a separate Q&A segment. Answer the student's actual question "
-            "briefly, connect it to the thread you and " + ot['name'] + " were building, and let it "
-            "move the dialogue somewhere new:\n\n" + student_q_text)
-    if mail:
-        _m_subj = (str(mail.get('subject') or '')).strip()[:120]
-        _m_body = (str(mail.get('body') or '')).strip()[:1200]
-        if no_family and _duet_family_ref((_m_subj + " " + _m_body).strip()):
+            "briefly, connect it to the thread you and " + req.ot['name'] + " were building, and let it "
+            "move the dialogue somewhere new:\n\n" + req.student_q_text)
+    if req.mail:
+        _m_subj = (str(req.mail.get('subject') or '')).strip()[:120]
+        _m_body = (str(req.mail.get('body') or '')).strip()[:1200]
+        if req.no_family and _duet_family_ref((_m_subj + " " + _m_body).strip()):
             _m_subj = "private detail omitted" if _duet_family_ref(_m_subj) else _m_subj
             _m_body = "[private family detail omitted]"
         parts.append(
-            f"AN EMAIL JUST ARRIVED in your own inbox, mid-conversation — from {mail_from}"
+            f"AN EMAIL JUST ARRIVED in your own inbox, mid-conversation — from {req.mail_from}"
             + (f', subject "{_m_subj}"' if _m_subj else '')
             + (":\n\n" + _m_body if _m_body else ". (No body — just that subject line.)"))
 
-    assigned_subject = _duet_assigned_subject(topic, url_info)
-    if assigned_subject and has_roles:
+    assigned_subject = _duet_assigned_subject(req.topic, url_info)
+    if assigned_subject and req.has_roles:
         subject = f"debating {assigned_subject}"
     elif assigned_subject:
         subject = f"discussing {assigned_subject}"
-    elif src_self:
+    elif req.src_self:
         subject = "discussing the ideas Alex set up"
-    elif has_roles:
+    elif req.has_roles:
         subject = "staying in your assigned role"
     else:
         subject = ""
-    directive = _duet_turn_directive(
-        pressures, beats, lines=lines, history=history, subject=subject,
-        focused=focused, sp=sp, ot=ot, speaker=speaker,
-        role_self=role_self, has_roles=has_roles, classroom=classroom,
-        spice=spice, protocol=protocol, src_self=src_self,
-        grounded=grounded, active_task_note=active_task_note,
+    directive = _duet_turn_directive(pressures, beats, req, lines=lines,
+        subject=subject, focused=focused, spice=spice, grounded=grounded,
         url_block=url_block, url_is_video=url_is_video,
         research_block=research_block, wiki_block=wiki_block)
-    directive = _duet_turn_directive_overrides(
-        directive, beats, sp=sp, ot=ot, speaker=speaker, lines=lines,
-        history=history, protocol=protocol, closing=closing,
-        direction=direction, grounded=grounded, classroom=classroom,
-        src_self=src_self, student_q_text=student_q_text, mail=mail,
-        mail_from=mail_from, nb_note=nb_note, role_self=role_self,
-        tone_self=tone_self, slang_self=slang_self, url_block=url_block,
+    directive = _duet_turn_directive_overrides(directive, beats, req,
+        lines=lines, grounded=grounded, url_block=url_block,
         url_is_video=url_is_video)
-    length_note = _duet_turn_length_note(
-        pressures, beats, protocol=protocol, closing=closing, mail=mail,
-        student_q_text=student_q_text)
+    length_note = _duet_turn_length_note(pressures, beats, req)
     parts.append(directive
-                 + f" Reply with ONLY {sp['name']}'s next spoken line — {length_note}, in character.")
+                 + f" Reply with ONLY {req.sp['name']}'s next spoken line — {length_note}, in character.")
 
     user_content = "\n\n".join(parts)
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": user_content}]
     base_user_content = user_content
-    last_spoken_line = lines[-1] if lines else (assigned_subject or topic or "Open the discussion.")
+    last_spoken_line = lines[-1] if lines else (assigned_subject or req.topic or "Open the discussion.")
     repair_source_material = "\n\n".join(
         block for block in (url_block, digest_block, ground_block) if block
     )
@@ -5073,9 +5092,9 @@ def duet_turn():
     # Strip any <think> block, and retry once on an empty turn.
     # Spice changes delivery, but normal analytic duets keep enough sampling
     # discipline that high spice cannot overwhelm position ownership.
-    if protocol:
+    if req.protocol:
         base_temp = min(1.0, 0.74 + 0.032 * spice)
-    elif beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"} or closing:
+    elif beats.inquiry_phase in {"ADJUDICATE", "SYNTHESIZE"} or req.closing:
         base_temp = 0.52
     elif url_block or grounded:
         # Spice should change delivery, not factual fidelity to assigned sources.
@@ -5090,27 +5109,20 @@ def duet_turn():
                 res = bt.call_llm(msgs, include_tools=False,
                                temperature=(base_temp if attempt == 0 else 0.6), max_tokens=2200)
             cand = _duet_result_text(
-                res, f"{speaker} turn", attempt,
+                res, f"{req.speaker} turn", attempt,
                 sum(len(str(m.get("content") or "")) for m in msgs),
             )
             if '</think>' in cand:           # keep only the text after the reasoning block
                 cand = cand.split('</think>')[-1]
             cand = cand.replace('<think>', '').strip()
             # Strip a leading "Name:" the model sometimes adds anyway.
-            cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(sp["name"]), '', cand, flags=re.I).strip()
+            cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(req.sp["name"]), '', cand, flags=re.I).strip()
             if cand:
-                repair = _duet_draft_repair(
-                    cand, rejections, attempt=attempt,
-                    pressures=pressures, beats=beats, protocol=protocol,
-                    lines=lines, history=history, closing=closing,
-                    mail=mail, student_q_text=student_q_text,
-                    direction=direction, topic=topic, no_family=no_family,
-                    src_self=src_self, url_block=url_block,
-                    url_text=url_text, role_self=role_self,
-                    role_other=role_other,
+                repair = _duet_draft_repair(cand, rejections, req,
+                    attempt=attempt, pressures=pressures, beats=beats,
+                    lines=lines, url_block=url_block, url_text=url_text,
                     required_ground_terms=required_ground_terms,
-                    grounding_repair=grounding_repair,
-                    selected_reading_titles=selected_reading_titles)
+                    grounding_repair=grounding_repair)
                 # Every guard that objects appends a non-empty demand, and
                 # nothing else sets the flag, so the demand IS the verdict.
                 blocked = bool(repair)
@@ -5121,50 +5133,50 @@ def duet_turn():
                     if repair_requirement.startswith(base_user_content):
                         repair_requirement = repair_requirement[len(base_user_content):].strip()
                     bt.log.info(
-                        f"[DUET] rejected {speaker} draft on attempt {attempt + 1}; "
+                        f"[DUET] rejected {req.speaker} draft on attempt {attempt + 1}; "
                         f"repair_chars={len(repair_requirement)}, draft_chars={len(cand)}"
                     )
                     if attempt == 0:
                         msgs = _duet_compact_repair_messages(
-                            sp["name"], ot["name"],
-                            _duet_persona_line(speaker, no_family=no_family),
+                            req.sp["name"], req.ot["name"],
+                            _duet_persona_line(req.speaker, no_family=req.no_family),
                             last_spoken_line, cand, repair_requirement,
-                            direction, repair_source_material, opening=not lines,
+                            req.direction, repair_source_material, opening=not lines,
                         )
                     continue
                 text = cand
                 break
             elif attempt == 0:
                 msgs = _duet_compact_repair_messages(
-                    sp["name"], ot["name"],
-                    _duet_persona_line(speaker, no_family=no_family),
+                    req.sp["name"], req.ot["name"],
+                    _duet_persona_line(req.speaker, no_family=req.no_family),
                     last_spoken_line, "(empty draft)",
                     ("Produce a complete opening proposition and distinguish its central terms."
                      if not lines else
                      "Produce a complete spoken line; directly answer the last claim and preserve its negation."),
-                    direction, repair_source_material, opening=not lines,
+                    req.direction, repair_source_material, opening=not lines,
                 )
         except Exception as e:
             bt.log.warning(f"[DUET] turn attempt {attempt + 1} failed: {e}")
             if attempt == 0:
                 msgs = _duet_compact_repair_messages(
-                    sp["name"], ot["name"],
-                    _duet_persona_line(speaker, no_family=no_family),
+                    req.sp["name"], req.ot["name"],
+                    _duet_persona_line(req.speaker, no_family=req.no_family),
                     last_spoken_line, "(generation error)",
                     "Produce a complete spoken line that stays on the exact live thread.",
-                    direction, repair_source_material, opening=not lines,
+                    req.direction, repair_source_material, opening=not lines,
                 )
     if not text:
         rejected_for = rejections.names
         bt.log.warning(
-            f"[DUET] no valid {speaker} turn after two attempts; "
+            f"[DUET] no valid {req.speaker} turn after two attempts; "
             f"rejected_for={rejected_for or ['empty_content']}"
         )
         return jsonify({
             "ok": False,
             "retryable": True,
-            "speaker": speaker,
-            "name": sp["name"],
+            "speaker": req.speaker,
+            "name": req.sp["name"],
             "error": "no_valid_turn",
             "rejectedFor": rejected_for,
         }), 503
@@ -5175,16 +5187,16 @@ def duet_turn():
         try:
             from blue.server.routes import continuity as _continuity
             _heard = next(
-                (str(h.get('text') or '').strip() for h in reversed(history)
-                 if str(h.get('speaker') or '').strip().lower() == other
+                (str(h.get('text') or '').strip() for h in reversed(req.history)
+                 if str(h.get('speaker') or '').strip().lower() == req.other
                  and str(h.get('text') or '').strip()),
-                (topic or "the start of a duet"),
+                (req.topic or "the start of a duet"),
             )
             _continuity.note_duet_line(
-                speaker, ot["name"], _heard, text, session_id=session_id)
+                req.speaker, req.ot["name"], _heard, text, session_id=req.session_id)
         except Exception as _je:
             bt.log.warning(f"[DUET] continuity note failed: {_je}")
-    resp = {"ok": True, "speaker": speaker, "name": sp["name"], "text": text}
+    resp = {"ok": True, "speaker": req.speaker, "name": req.sp["name"], "text": text}
     if text:
         # Mood eyes: colour the SPEAKER's eye LEDs to match this line, applied
         # by the duet page when it speaks the turn (same as chat mode).
@@ -5194,7 +5206,7 @@ def duet_turn():
         _gesture = agreement_gesture(text)
         if _gesture:
             resp["head_gesture"] = _gesture
-    if protocol:
+    if req.protocol:
         # The page uses these to surface phase changes and job swaps as notes.
         resp.update({"phase": beats.ph_name, "phaseNote": beats.ph_gloss, "job": beats.proto_job})
     else:
@@ -5209,7 +5221,7 @@ def duet_turn():
         resp["monotonyBreak"] = beats.monotony
     if beats.arc_break:
         resp["arcBreak"] = beats.arc_stuck
-    if protocol and beats.arc_stage:
+    if req.protocol and beats.arc_stage:
         resp["arcStage"] = beats.arc_stage
     return jsonify(resp)
 

@@ -637,12 +637,12 @@ def test_link_is_primary_over_checked_readings(duet_module):
     assert 'if len(lines) < 2:' in source
     assert "Applying " in source
     assert "counts as running the test" in source
-    assert "if (not protocol and not student_q_text and not mail" in source
+    assert "if (not req.protocol and not req.student_q_text and not req.mail" in source
     assert "Satisfy every listed repair requirement; none is optional" in source
     assert "accepting grounded second {phase_for_validation}" in source
     assert "source_talk and not url_block" in source
     assert "_duet_preserve_inquiry_artifacts(prev, out)" in source
-    assert "if (direction and not blocked" in source
+    assert "if (req.direction and not blocked" in source
     assert "rejectedDrafts" not in source
 
 
@@ -653,20 +653,39 @@ def test_link_is_primary_over_checked_readings(duet_module):
 # 142 lines of interlocking boolean soup. These pin the suppression order,
 # which is the part that is easy to break and impossible to see by reading.
 
-def _pressures(duet_module, **overrides):
-    # Anything that lives on the beats record is routed there; the rest are
-    # the turn's own inputs.
+def _request(duet_module, **overrides):
+    """A parsed turn request with nothing going on, for the helpers to read."""
+    fields = dict(
+        session_id="", speaker="blue", other="hexia",
+        sp={"name": "Blue"}, ot={"name": "Hexia"},
+        topic="a subject", url="", history=[], direction="",
+        mail=None, mail_from="", student_q_text="",
+        roles={}, role_self="", role_other="", has_roles=False,
+        tone_self="", slang_self="", src_self=[],
+        selected_reading_titles=[], research_on=False, wiki_on=False,
+        classroom=False, no_family=False, closing=False, protocol=True,
+        nb_note="", active_task_note="", active_task_attempts=0,
+        artifact_plan_note="", artifact_mode_note="",
+    )
+    fields.update(overrides)
+    return duet_module._DuetTurnRequest(**fields)
+
+
+def _split(duet_module, overrides):
+    """Route overrides to the record each one belongs to."""
     beat_fields = {k: overrides.pop(k) for k in list(overrides)
                    if k in duet_module._DuetBeats.__dataclass_fields__}
-    kwargs = dict(
-        protocol=True, closing=False, mail=None, student_q_text="",
-        nb_note="", direction="", active_task_note="",
-        artifact_plan_note="", artifact_mode_note="",
-        active_task_attempts=0, stalled=False,
-    )
-    kwargs.update(overrides)
+    req_fields = {k: overrides.pop(k) for k in list(overrides)
+                  if k in duet_module._DuetTurnRequest.__dataclass_fields__}
+    return beat_fields, req_fields, overrides
+
+
+def _pressures(duet_module, **overrides):
+    beat_fields, req_fields, rest = _split(duet_module, overrides)
     return duet_module._duet_turn_pressures(
-        _beats(duet_module, **beat_fields), **kwargs)
+        _beats(duet_module, **beat_fields),
+        _request(duet_module, **req_fields),
+        stalled=rest.pop("stalled", False), **rest)
 
 
 def _all_flags(pressures):
@@ -797,14 +816,11 @@ def _beats(duet_module, **on):
 
 
 def _job(duet_module, pressures=None, beats=None, **overrides):
-    kwargs = dict(protocol=True, ot={"name": "Hexia"}, active_task_note="")
-    beat_fields = {k: overrides.pop(k) for k in list(overrides)
-                   if k in duet_module._DuetBeats.__dataclass_fields__}
-    kwargs.update(overrides)
+    beat_fields, req_fields, _rest = _split(duet_module, overrides)
     return duet_module._duet_turn_job_directive(
         pressures if pressures is not None else _flags(duet_module),
         beats if beats is not None else _beats(duet_module, **beat_fields),
-        **kwargs)
+        _request(duet_module, **req_fields))
 
 
 def test_a_turn_with_nothing_pressing_gets_an_inquiry_round(duet_module):
@@ -907,18 +923,19 @@ def test_every_guard_the_turn_can_report_is_declared(duet_module):
 # do with it. The invariant that makes that safe: a guard that objects always
 # appends a non-empty demand, so the demand is the verdict.
 
-def _repair(duet_module, cand, **overrides):
+def _repair(duet_module, cand, rejections=None, **overrides):
+    beat_fields, req_fields, rest = _split(duet_module, overrides)
+    req_fields.setdefault("protocol", True)
     kwargs = dict(
-        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
-        protocol=True, lines=[], history=[], closing=False, mail=None,
-        student_q_text="", direction="", topic="a subject", no_family=False,
-        src_self=[], url_block="", url_text="", role_self="", role_other="",
-        required_ground_terms=[], grounding_repair="\n\nGround it.",
-        selected_reading_titles=[],
+        attempt=0, pressures=_flags(duet_module),
+        beats=_beats(duet_module, **beat_fields), lines=[], url_block="",
+        url_text="", required_ground_terms=[],
+        grounding_repair="\n\nGround it.",
     )
-    kwargs.update(overrides)
+    kwargs.update(rest)
     return duet_module._duet_draft_repair(
-        cand, duet_module._DuetRejections(), **kwargs)
+        cand, rejections if rejections is not None else duet_module._DuetRejections(),
+        _request(duet_module, **req_fields), **kwargs)
 
 
 def test_an_unobjectionable_draft_asks_for_no_rewrite(duet_module):
@@ -927,14 +944,8 @@ def test_an_unobjectionable_draft_asks_for_no_rewrite(duet_module):
 
 def test_a_family_reference_in_privacy_mode_is_rejected(duet_module):
     rejections = duet_module._DuetRejections()
-    repair = duet_module._duet_draft_repair(
-        "That is like when Vilda asked about it.", rejections,
-        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
-        protocol=True, lines=[], history=[], closing=False, mail=None,
-        student_q_text="", direction="", topic="a subject", no_family=True,
-        src_self=[], url_block="", url_text="", role_self="", role_other="",
-        required_ground_terms=[], grounding_repair="\n\nGround it.",
-        selected_reading_titles=[])
+    repair = _repair(duet_module, "That is like when Vilda asked about it.",
+                     rejections, no_family=True)
     assert repair, "a family reference under noFamily must be sent back"
     assert "family" in rejections.names
 
@@ -949,14 +960,8 @@ def test_an_ungrounded_draft_gets_the_grounding_demand(duet_module):
 def test_the_demand_is_what_gets_recorded(duet_module):
     """Whatever comes back must also have been noted, and vice versa."""
     rejections = duet_module._DuetRejections()
-    repair = duet_module._duet_draft_repair(
-        "Something entirely unrelated.", rejections,
-        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
-        protocol=True, lines=[], history=[], closing=False, mail=None,
-        student_q_text="", direction="", topic="a subject", no_family=False,
-        src_self=[], url_block="", url_text="", role_self="", role_other="",
-        required_ground_terms=["extraction"], grounding_repair="\n\nGround it.",
-        selected_reading_titles=[])
+    repair = _repair(duet_module, "Something entirely unrelated.", rejections,
+                     required_ground_terms=["extraction"])
     assert bool(repair) == bool(rejections.names)
 
 
@@ -1009,14 +1014,12 @@ def test_the_prompt_asks_for_every_field_the_parser_reads(duet_module):
 # a mail reply overrides whatever artifact shape the protocol had settled on.
 
 def _length(duet_module, pressures=None, beats=None, **overrides):
-    kwargs = dict(protocol=False, closing=False, mail=None, student_q_text="")
-    beat_fields = {k: overrides.pop(k) for k in list(overrides)
-                   if k in duet_module._DuetBeats.__dataclass_fields__}
-    kwargs.update(overrides)
+    overrides.setdefault("protocol", False)
+    beat_fields, req_fields, _rest = _split(duet_module, overrides)
     return duet_module._duet_turn_length_note(
         pressures if pressures is not None else _flags(duet_module),
         beats if beats is not None else _beats(duet_module, **beat_fields),
-        **kwargs)
+        _request(duet_module, **req_fields))
 
 
 def test_an_ordinary_turn_gets_the_plain_length(duet_module):
@@ -1056,3 +1059,74 @@ def test_an_execution_lock_asks_for_a_structured_result(duet_module):
                       _flags(duet_module, execution_lock=True),
                       protocol=True)
     assert "execution-mode state transition" in no_mode
+
+
+# --------------------------------------------------------------------------
+# The parsed turn request
+# --------------------------------------------------------------------------
+# Privacy mode is applied once, here, rather than at each use site. That is the
+# whole point of the record: a field that names the household comes back empty,
+# so no caller can leak it by forgetting to check.
+
+def test_privacy_mode_keeps_the_household_out_of_every_field(duet_module):
+    """The guarantee is that no name survives, not how each field achieves it.
+
+    They do it three different ways - the direction redacts in place, the
+    notes empty out, the student question and the sender are replaced - so
+    the assertion is about what is absent, not about the mechanism.
+    """
+    names = ("Vilda", "Stella", "Felix", "Svetlana", "Nori")
+    req = duet_module._duet_turn_request({
+        "speaker": "blue", "noFamily": True,
+        "direction": "ask what Vilda thought of it",
+        "notebookNote": "Stella mentioned this",
+        "activeTask": "finish Felix's chart",
+        "artifactPlan": "the one Svetlana wanted",
+        "artifactMode": "as Nori would put it",
+        "studentQuestion": {"text": "what did Vilda mean?"},
+        "mail": {"from_name": "Stella"},
+    })
+
+    for field in ("direction", "nb_note", "active_task_note",
+                  "artifact_plan_note", "artifact_mode_note",
+                  "student_q_text", "mail_from"):
+        value = getattr(req, field)
+        leaked = [n for n in names if n.lower() in value.lower()]
+        assert not leaked, f"{field} still carries {leaked}: {value!r}"
+
+
+def test_without_privacy_mode_the_same_fields_come_through(duet_module):
+    body = {
+        "speaker": "blue",
+        "direction": "ask what Vilda thought of it",
+        "notebookNote": "Stella mentioned this",
+    }
+    req = duet_module._duet_turn_request(body)
+
+    assert "Vilda" in req.direction
+    assert "Stella" in req.nb_note
+
+
+def test_an_empty_body_still_parses(duet_module):
+    """The page can post a bare turn; nothing downstream should have to guard."""
+    req = duet_module._duet_turn_request({})
+
+    assert req.speaker in ("blue", "hexia")
+    assert req.other != req.speaker
+    assert req.history == []
+    assert req.mail is None
+    assert req.protocol is False
+
+
+def test_a_url_typed_into_the_topic_box_is_taken_as_the_link(duet_module):
+    req = duet_module._duet_turn_request(
+        {"speaker": "blue", "topic": "https://example.org/piece"})
+    assert req.url == "https://example.org/piece"
+
+
+def test_the_record_is_frozen(duet_module):
+    """A turn does not get to rewrite its own ask."""
+    import dataclasses
+    req = duet_module._duet_turn_request({"speaker": "blue"})
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        req.topic = "something else"
