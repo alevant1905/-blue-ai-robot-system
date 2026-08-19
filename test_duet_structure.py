@@ -880,3 +880,65 @@ def test_every_guard_the_turn_can_report_is_declared(duet_module):
             and isinstance(n.func.value, ast.Name)
             and n.func.value.id == "rejections"}
     assert used == set(duet_module._DUET_GUARDS)
+
+
+# --------------------------------------------------------------------------
+# Judging a draft
+# --------------------------------------------------------------------------
+# _duet_draft_repair is the guard chain that decides whether a generated turn
+# is usable. It used to mutate the outgoing message in place from twenty-four
+# scattered points; it now returns the demand, and the caller decides what to
+# do with it. The invariant that makes that safe: a guard that objects always
+# appends a non-empty demand, so the demand is the verdict.
+
+def _repair(duet_module, cand, **overrides):
+    kwargs = dict(
+        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
+        protocol=True, lines=[], history=[], closing=False, mail=None,
+        student_q_text="", direction="", topic="a subject", no_family=False,
+        src_self=[], url_block="", url_text="", role_self="", role_other="",
+        required_ground_terms=[], grounding_repair="\n\nGround it.",
+        selected_reading_titles=[],
+    )
+    kwargs.update(overrides)
+    return duet_module._duet_draft_repair(
+        cand, duet_module._DuetRejections(), **kwargs)
+
+
+def test_an_unobjectionable_draft_asks_for_no_rewrite(duet_module):
+    assert _repair(duet_module, "Transparency only permits inspection.") == ""
+
+
+def test_a_family_reference_in_privacy_mode_is_rejected(duet_module):
+    rejections = duet_module._DuetRejections()
+    repair = duet_module._duet_draft_repair(
+        "That is like when Vilda asked about it.", rejections,
+        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
+        protocol=True, lines=[], history=[], closing=False, mail=None,
+        student_q_text="", direction="", topic="a subject", no_family=True,
+        src_self=[], url_block="", url_text="", role_self="", role_other="",
+        required_ground_terms=[], grounding_repair="\n\nGround it.",
+        selected_reading_titles=[])
+    assert repair, "a family reference under noFamily must be sent back"
+    assert "family" in rejections.names
+
+
+def test_an_ungrounded_draft_gets_the_grounding_demand(duet_module):
+    repair = _repair(duet_module, "Something entirely unrelated.",
+                     required_ground_terms=["extraction", "commodity"],
+                     grounding_repair="\n\nUse the reading.")
+    assert "Use the reading." in repair
+
+
+def test_the_demand_is_what_gets_recorded(duet_module):
+    """Whatever comes back must also have been noted, and vice versa."""
+    rejections = duet_module._DuetRejections()
+    repair = duet_module._duet_draft_repair(
+        "Something entirely unrelated.", rejections,
+        attempt=0, pressures=_flags(duet_module), beats=_beats(duet_module),
+        protocol=True, lines=[], history=[], closing=False, mail=None,
+        student_q_text="", direction="", topic="a subject", no_family=False,
+        src_self=[], url_block="", url_text="", role_self="", role_other="",
+        required_ground_terms=["extraction"], grounding_repair="\n\nGround it.",
+        selected_reading_titles=[])
+    assert bool(repair) == bool(rejections.names)

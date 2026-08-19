@@ -4280,6 +4280,516 @@ def _duet_turn_beats(*, d, protocol: bool, direction: str, history,
         kernel_health_in=kernel_health_in,
     )
 
+
+
+def _duet_turn_directive(pressures: _DuetPressures, beats: _DuetBeats, *,
+                         # the exchange so far
+                         lines, history, subject: str, focused: bool,
+                         # who is speaking, and as what
+                         sp, ot, speaker: str, role_self: str,
+                         has_roles: bool, classroom: bool, spice: int,
+                         # what the turn has to work with
+                         protocol: bool, src_self, grounded: bool,
+                         active_task_note: str, url_block: str,
+                         url_is_video: bool, research_block: str,
+                         wiki_block: str) -> str:
+    """What the speaker is told to do this turn.
+
+    Two arms: continue the exchange, or open one. The continuing arm hands
+    off to _duet_turn_job_directive for the protocol job; the opening arm
+    sets the subject and the terms of engagement.
+    """
+    if lines:
+        n = len(history)
+        directive = (f"Now give {sp['name']}'s next line. First really take in what {ot['name']} just "
+                     "said and respond to THAT — pick up their actual words, the specific thing they "
+                     "claimed, asked, or got wrong; don't sail past it onto a tangent of your own")
+        if subject:
+            directive += f", and keep the two of you on track ({subject})"
+        directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
+                      "talk or asking after each other; that breaks the discussion.")
+        # Thread between the two failure modes: circling (restating, agreeing, going
+        # nowhere) and talking PAST each other (each lobbing a fresh, disconnected
+        # point). So: answer the SAME thread {other} just opened and take it a step
+        # deeper, instead of swapping it for a new subject every turn. A sampled "move"
+        # gives this turn a distinct job; an arc note gives the talk a shape; a periodic
+        # reflective beat gives the pair a sense of where it's going; and (when no roles
+        # are set) Blue and Hexia push from different temperaments.
+        directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
+                      "more concrete, or genuinely challenged — instead of trading it for a brand-new "
+                      "subject; never merely restate or nod along.")
+        directive += _duet_turn_job_directive(
+            pressures, beats, protocol=protocol, ot=ot,
+            active_task_note=active_task_note)
+        if classroom and random.random() < 0.18:
+            directive += (" Somewhere in this turn, land one beat straight at the students in the "
+                          "room — a question worth arguing about, or a challenge to something they "
+                          "probably believe.")
+        if not has_roles and bt._DUET_LENS.get(speaker):
+            _lens = bt._DUET_LENS[speaker]
+            if spice >= 7:
+                directive += (f" Deliver your assigned inquiry job with some bite — {_lens} "
+                              "Provocation may sharpen a live disagreement, but it may not "
+                              "reopen banked ground, change the subject, or replace evidence.")
+            elif spice <= 2:
+                directive += (f" You and {ot['name']} are easy company — {_lens} but keep it warm and "
+                              "curious, building together more than clashing.")
+            else:
+                directive += (f" Keep your own temperament — {_lens} — while carrying out the "
+                              "assigned inquiry job and conceding points that pass their test.")
+        if url_block:
+            directive += (
+                f" Keep {'the video' if url_is_video else 'the article'} primary: engage one "
+                "specific claim, idea, comparison, or moment from it as your own take. A checked "
+                "reading may clarify or test that claim, but may not replace it. Do not turn the "
+                "exchange into a debate about your own biography, household, consciousness, or "
+                "agency unless the assigned work itself makes that the question."
+            )
+            if not has_roles:
+                source_job = (
+                    "TEXTUAL INTERPRETER: reconstruct the strongest direct claim and keep its terms stable"
+                    if beats.inquiry_job == "proposer" else
+                    "CRITICAL TESTER: distinguish the direct claim from any extrapolation and test "
+                    "the latter without attributing it to the author"
+                )
+                directive += f" Your source-grounded responsibility is {source_job}."
+        elif grounded:
+            directive += (" Engage the readings at the level of CLAIMS, as your own thinking: "
+                          "take one specific claim from what you've read and affirm it with a "
+                          "consequence, attack it with a reason, set it against another claim, "
+                          "or test it on the case in play. Borrowing a term or name without "
+                          "using its claim is not engagement. Do not name the document, cite "
+                          "the source, say 'the text' or 'the reading', or import outside "
+                          "authors and frameworks.")
+        elif src_self:
+            directive += (" Stay inside the selected material, but keep that source boundary invisible. "
+                          "If you do not have support for the live claim, say the claim needs more "
+                          "support instead of borrowing an outside theorist or framework.")
+        elif research_block:
+            directive += " Work in one specific thing you found online — as something you've read, not a citation."
+        elif wiki_block:
+            directive += " Work in one specific thing you read on Wikipedia — as something you know, not a citation."
+        if role_self:
+            directive += " Stay firmly in your role."
+    else:
+        kind = ("Open the debate" if has_roles else
+                ("Kick off the discussion" if focused else "Start the chat"))
+        directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
+        if protocol:
+            directive += (
+                f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
+                "building one auditable knowledge base, not debaters. From the start, let "
+                "multiple explanations coexist if the evidence has not discriminated them. "
+                "Make claims risk being wrong: define them tightly enough that later turns can "
+                "produce working definitions, rival models, operations, predictions, tests, "
+                "validation decisions, status changes, archives, reopenings, and paradigm "
+                "challenges. When possible, open with a minimal case or a boundary condition "
+                "rather than a metaphor. The inquiry opens in its "
+                f"{beats.ph_name.upper()} phase: {beats.ph_gloss} Your job this turn is the "
+                f"{beats.proto_job.upper()}: " + beats.ph_jobs[beats.proto_job].format(other=ot['name']))
+        else:
+            directive += (
+                f" INQUIRY ROUND — {beats.inquiry_phase}: {beats.inquiry_gloss}. Your functional "
+                f"job is {beats.inquiry_job.upper()}: "
+                + _DUET_INQUIRY_JOBS[beats.inquiry_phase][beats.inquiry_job]
+                + ". Open with a plain, answerable proposition rather than a metaphor or "
+                  "provocation. The goal is a defensible answer, not indefinite sparring."
+            )
+        if url_block:
+            directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
+            if not has_roles:
+                directive += (
+                    " Act as the textual interpreter: state the strongest direct claim before extending it."
+                    if beats.inquiry_job == "proposer" else
+                    " Act as the critical tester: separate what the work says from what you infer."
+                )
+        elif grounded:
+            directive += (" Pick the claim from your reading you most want to fight about or "
+                          "defend and put it on the table as your own view — the claim itself, "
+                          "not just its vocabulary. Do "
+                          "not name the document or call it 'the text'.")
+        elif src_self:
+            directive += (" Open inside the selected material, but keep that source boundary invisible. "
+                          "If you do not have support for the opening claim, make the uncertainty part "
+                          "of your own view instead of bringing in outside theory.")
+        elif research_block:
+            directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
+        elif wiki_block:
+            directive += " Open with a specific fact or definition you read on Wikipedia, in your own words."
+    return directive
+
+
+
+def _duet_draft_repair(cand: str, rejections: _DuetRejections, *,
+                       attempt: int, pressures: _DuetPressures,
+                       beats: _DuetBeats, protocol: bool, lines, history,
+                       closing: bool, mail, student_q_text: str,
+                       direction: str, topic: str, no_family: bool,
+                       src_self, url_block: str, url_text: str,
+                       role_self: str, role_other: str,
+                       required_ground_terms, grounding_repair: str,
+                       selected_reading_titles) -> str:
+    """Everything the guards object to in this draft, as one rewrite demand.
+
+    Empty when the draft passes. Most guards stand down once one of them has
+    objected, so usually at most one demand comes back; a few always run, so
+    more than one can accumulate. Each objection it returns has also been
+    recorded on `rejections`.
+    """
+    repair = ""
+    blocked = False
+    if no_family and _duet_family_ref(cand):
+        rejections.note("family")
+        repair += (
+            "\n\nRewrite your last draft: the no-family-references setting is on. "
+            "Do not mention Alex's family, children, spouse, household, pets, "
+            "home/workspace routines, or private names/relationships. Give a clean "
+            "line about the topic itself."
+        )
+        blocked = True
+    allowed_personal_context = " ".join(
+        part for part in (topic, role_self, role_other, url_text) if part
+    )
+    if (url_block and not blocked
+            and _duet_unprompted_personalization(
+                cand, allowed_personal_context)):
+        rejections.note("personalization")
+        repair += (
+            "\n\nRewrite your last draft: it replaced analysis of the assigned work "
+            "with an unrequested personal or household example. Do not speculate about "
+            "Alex, relatives, friends, pets, motives, or private behavior. Use a case "
+            "from the work or label a generic hypothetical case explicitly."
+        )
+        blocked = True
+    source_talk = re.search(
+        r'\b(?:the|this|that|my|your)\s+'
+        r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b'
+        r'|\b(?:checked|selected)\s+(?:document|documents|reading|readings|source|sources)\b'
+        r'|\bbackground\s+(?:note|notes|material|materials|scaffolding)\b'
+        r'|\breading\s+scaffolding\b'
+        r'|\b(?:in|from|according to)\s+(?:the|this|that|my|your)\s+'
+        r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b',
+        cand,
+        flags=re.I,
+    )
+    title_talk = False
+    if src_self:
+        topic_l = topic.lower()
+        for _title in selected_reading_titles:
+            _title = (_title or '').strip()
+            if len(_title) >= 8 and _title.lower() not in topic_l:
+                if re.search(r'\b' + re.escape(_title) + r'\b', cand, flags=re.I):
+                    title_talk = True
+                    break
+    # With a pasted link, generic phrases such as "the article"
+    # can refer to the assigned primary work rather than leaking
+    # checked-reading scaffolding. Checked titles remain private.
+    if src_self and (title_talk or (source_talk and not url_block)):
+        rejections.note("source_scaffolding")
+        repair += (
+            "\n\nRewrite your last draft: do not identify or announce the reading "
+            "scaffolding. Do not say 'the text', 'the reading', 'the document', "
+            "'the passage', 'my source', 'background notes', or name/cite a checked "
+            "document or title. Keep the specific idea, but make it sound like your "
+            "own live view."
+        )
+        blocked = True
+    control_talk_re = (
+        _DUET_NOTEBOOK_TALK_RE if protocol
+        else _DUET_NORMAL_CONTROL_TALK_RE
+    )
+    if (direction and not blocked
+            and control_talk_re.search(cand or "")):
+        rejections.note("notebook_talk")
+        repair += (
+            "\n\nRewrite your last draft: do not talk about the ledger, notebook, kernel, "
+            "protocol, phase, artifact planner, artifact mode, task revision, request denial, or validation gate as objects in the spoken "
+            "dialogue. Do not say the notebook is right. Speak directly to the other "
+            "researcher and perform the required operation or state transition."
+        )
+        blocked = True
+    if (required_ground_terms
+            and not _duet_grounded_enough(cand, required_ground_terms)):
+        rejections.note("grounding")
+        repair += grounding_repair
+        blocked = True
+    if (url_block and not blocked
+            and _duet_unsupported_source_attribution(cand, url_block)):
+        rejections.note("source_attribution")
+        repair += (
+            "\n\nRewrite your last draft: it attributes an extrapolation to the "
+            "author or assigned work. State only the supported source claim as the "
+            "source's claim. Introduce the extension separately as 'I infer', 'my "
+            "hypothesis is', or 'applied here, this may mean', and say when it still "
+            "requires evidence."
+        )
+        blocked = True
+    if (pressures.deadlock and attempt == 0 and not blocked
+            and not _DUET_DEADLOCK_ARTIFACT_RE.search(cand or "")):
+        rejections.note("deadlock_artifact")
+        repair += (
+            "\n\nRewrite your last draft: DEADLOCK is active, but you did not "
+            "perform a recovery move. Do not execute the experiment, repeat the "
+            "denial, or say Kernel Health/KERNEL_REVIEW/DEPENDENCY_SOLVER. In "
+            "ordinary research speech, set aside the blocked object, name the "
+            "waiting prerequisite, resume or reopen it, and state the next "
+            "resolvable operation."
+        )
+        blocked = True
+    if (pressures.design_variable and attempt == 0 and not blocked
+            and not _DUET_DESIGN_VARIABLE_ARTIFACT_RE.search(cand or "")):
+        rejections.note("design_variable")
+        repair += (
+            "\n\nRewrite your last draft: the design space changed, but you did not "
+            "register the new axis as an artifact. Do not build CG1 yet and do not "
+            "argue the theory. Produce a DESIGN_VARIABLE or DESIGN_VARIABLE_REGISTER "
+            "entry with DV ID, Name, Definition, Status ACCEPTED/REJECTED/MERGED/"
+            "RENAMED/PROPOSED, Competes with, Affects, and whether it blocks or "
+            "unblocks CG1/E1. Then stop."
+        )
+        blocked = True
+    if (pressures.operational_criterion and attempt == 0 and not blocked
+            and not _DUET_OPERATIONAL_CRITERION_ARTIFACT_RE.search(cand or "")):
+        rejections.note("operational_criterion")
+        repair += (
+            "\n\nRewrite your last draft: the definition dispute has become an "
+            "operational criterion. Do not write DEFINITION_REVISION, concept audit, "
+            "or inquiry pause. Produce OPERATIONAL_CRITERION with OC ID, Target D/C ID, "
+            "Type lexical/structural/operational, Failure mode, Observable discriminator, "
+            "Evidence standard, Linked experiment/model, and Status. Mark the event as "
+            "major methodological revision if it changes from meaning to observable consequences."
+        )
+        blocked = True
+    if (pressures.compiler and attempt == 0 and not blocked
+            and not _DUET_ARTIFACT_COMPILER_RE.search(cand or "")):
+        rejections.note("compiler")
+        repair += (
+            "\n\nRewrite your last draft: ARTIFACT COMPILER is active. Do not ask for "
+            "a cleaner table, do not pause, and do not add another philosophical argument. "
+            "Compile the prose into an artifact row now: ARTIFACT_COMPILER status; "
+            "OBSERVATION_SET OS# with Case | Injected Signal | Output Changed? | Supports; "
+            "lifecycle POPULATING/READY; and only the missing field or next independent case. "
+            "If the design changed from latency to influence override, include REDESIGN E# "
+            "with OLD Latency, NEW Influence Override, IV injected concept/signal, and DV "
+            "output changed yes/no."
+        )
+        blocked = True
+    if (pressures.artifact_plan and attempt == 0 and not blocked):
+        _planner_ok = bool(
+            _DUET_ARTIFACT_PLANNER_RE.search(cand or "")
+            or _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")
+            or (re.search(r'\bD\d+\b', cand or "", re.I)
+                and re.search(r'\b(CG\d+|comparison grid|resume)\b', cand or "", re.I)
+                and re.search(r'\b(requires|because|ambiguous|prerequisite|then)\b',
+                              cand or "", re.I))
+        )
+        if not _planner_ok:
+            rejections.note("artifact_plan")
+            repair += (
+                "\n\nRewrite your last draft: the active need is artifact construction "
+                "order. Either build the requested comparison grid as an actual table "
+                "headed Variable | M1: Transparent Cloud | M2: Local Federated with rows "
+                "Energy cost, Storage cost, Verification burden, Annotation labor, "
+                "Cost bearer, and Prediction, or make a legitimate task "
+                "revision: target artifact, prerequisite artifact, reason it blocks the "
+                "target, and then-resume step. Do not redefine terms generally."
+            )
+            blocked = True
+    if (pressures.artifact_execution and attempt == 0 and not blocked
+            and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")):
+        rejections.note("artifact_execution")
+        repair += (
+            "\n\nRewrite your last draft: ARTIFACT EXECUTION is active. CG1 already "
+            "exists or has been declared as instantiated, so do not produce another "
+            "comparison grid and do not explain the theory in prose. Produce OS1 now: "
+            "an OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
+            "with rows A, B, and C. The rows must be branches: one plausible row supports "
+            "M1, one plausible row supports M2, and one plausible row supports neither "
+            "or a mixed interpretation. After the table, add at most one sentence comparing "
+            "branches by row ID."
+        )
+        blocked = True
+    if (pressures.artifact_mode and attempt == 0 and not blocked
+            and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")
+            and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")):
+        rejections.note("artifact_mode")
+        repair += (
+            "\n\nRewrite your last draft: ARTIFACT MODE is active. Do not write prose "
+            "about the theory or method. Fill the artifact. For E1, produce an "
+            "OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
+            "with rows A, B, and C. After the table, add at most one inference from the rows."
+        )
+        blocked = True
+    if (pressures.comparison_grid and attempt == 0 and not blocked
+            and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")
+            and not _DUET_ARTIFACT_PLANNER_RE.search(cand or "")):
+        rejections.note("comparison_grid")
+        repair += (
+            "\n\nRewrite your last draft: CG exists only if the grid exists. Do not "
+            "describe or argue for a comparison grid; produce the table headed "
+            "Variable | M1: Transparent Cloud | M2: Local Federated with rows Energy cost, "
+            "Storage cost, Verification burden, Annotation labor, Cost bearer, and Prediction. "
+            "If the grid truly cannot be "
+            "built, make a task revision to the exact prerequisite artifact and say "
+            "why that prerequisite changes the grid."
+        )
+        blocked = True
+    if (pressures.artifact_editor and attempt == 0 and not blocked
+            and not _DUET_EDIT_ARTIFACT_RE.search(cand or "")):
+        rejections.note("artifact_edit")
+        repair += (
+            "\n\nRewrite your last draft: ARTIFACT EDITOR is active, but you discussed "
+            "the edit instead of performing it. Output only a structured edit artifact. "
+            "For DEFINITION_REVISION use OP, TARGET, OLD, NEW, BOUNDARY Includes/Excludes, "
+            "REASON, AFFECTED DEPENDENCIES, and STATUS. Valid operations are REPLACE, "
+            "SPLIT, MERGE, ARCHIVE, SUPERSEDE, RENAME, and REDESIGN."
+        )
+        blocked = True
+    if (pressures.mechanism and attempt == 0 and not blocked
+            and not _DUET_MECHANISM_ARTIFACT_RE.search(cand or "")):
+        rejections.note("mechanism_artifact")
+        repair += (
+            "\n\nRewrite your last draft: MECHANISM / CAUSAL CLAIM is active, but "
+            "you did not record the candidate as an artifact. Do not treat it as a "
+            "definition tweak or promote it from one case. Write MC/MEC ID, raw "
+            "observation, interpretation, alternative interpretation, causal claim/edge, "
+            "explanatory path, replication needed, and status INTERESTING or SUGGESTIVE."
+        )
+        blocked = True
+    if (pressures.concept and attempt == 0 and not blocked
+            and not _DUET_CONCEPT_ARTIFACT_RE.search(cand or "")):
+        rejections.note("concept_artifact")
+        repair += (
+            "\n\nRewrite your last draft: CONCEPT AUDIT is active, but you did not "
+            "produce a definition-resolution artifact. Do not execute the experiment "
+            "or introduce a new theory. Write CONCEPT_AUDIT or DEFINITION_RESOLUTION "
+            "with Concept, current definition, alternative D IDs, dependencies, "
+            "counterexamples, stress level, stability, and required resolution operation."
+        )
+        blocked = True
+    if (protocol and not blocked and lines
+            and not _duet_info_gain(cand, history)):
+        rejections.note("information_gain")
+        repair += (
+            "\n\nRewrite your last draft: it adds no new information to the inquiry. "
+            "Keep it short and natural, but the line must contribute at least one of: "
+            "a working definition or definition revision, a concrete operation, "
+            "a rival model, a discriminator, evidence linked to a status, a connection "
+            "between two earlier ideas, an unstated assumption named, a concrete example "
+            "or counterexample, a prediction, a proposed test, a gated status change with "
+            "its reason, an archived or reopened idea, or a paradigm challenge. "
+            "Pure agreement, restatement, metaphor, or argument without operation is not a turn."
+        )
+        blocked = True
+    if (pressures.operational and attempt == 0 and not blocked
+            and not _DUET_OPERATION_ARTIFACT_RE.search(cand or "")):
+        rejections.note("operation_artifact")
+        repair += (
+            "\n\nRewrite your last draft: ARC: OPERATION is active, but no explicit "
+            "operation artifact was produced. Do not give another metaphor or "
+            "philosophical paragraph. Produce a compact artifact and label it as "
+            "COMPARISON_GRID, VARIABLE_LIST, PREDICTION_MATRIX, CAUSAL_DIAGRAM, "
+            "CONFIDENCE_UPDATE, or DEFINITION_REVISION. Include System A/System B "
+            "or variables; one feature changed; prediction; result or status/confidence "
+            "change. Use abstract terms only as labels attached to those variables."
+        )
+        blocked = True
+    if (pressures.execution_lock and attempt == 0 and not blocked):
+        if pressures.execution_has_mode:
+            _exec_ok = (
+                all(re.search(r'\b' + lbl + r'\b', cand or "", re.I)
+                    for lbl in ("INPUT", "PREDICTION", "OBSERVATION", "OUTCOME"))
+                and (
+                    not re.search(r'\bthought experiment\b', pressures.task_context or "", re.I)
+                    or _DUET_OBSERVATION_TABLE_RE.search(cand or "")
+                    or (re.search(r'\bStudent\s+[ABC]\b', cand or "", re.I)
+                        and re.search(r'\bQuestion Asked\b', cand or "", re.I)
+                        and re.search(r'\bAttribution\b', cand or "", re.I)
+                        and re.search(r'\bSupports\b', cand or "", re.I))
+                )
+            )
+        else:
+            _exec_ok = bool(
+                _DUET_EXECUTION_MODE_RE.search(cand or "")
+                and re.search(r'\b(EXECUTING|execute|execution mode)\b', cand or "", re.I)
+            )
+    else:
+        _exec_ok = True
+    if pressures.execution_lock and attempt == 0 and not blocked and not _exec_ok:
+        rejections.note("execution_output")
+        repair += (
+            "\n\nRewrite your last draft: EXECUTION ONLY is active, but you discussed "
+            "the experiment instead of running it. Do not write a paragraph about method. "
+            "If the execution mode is missing, add only the execution mode and mark "
+            "the next state EXECUTING. Otherwise produce a compact structured result "
+            "with INPUT, PREDICTION, OBSERVATION, and OUTCOME. For a thought experiment, "
+            "the OBSERVATION section must include a table headed Student | Question "
+            "Asked | Attribution | Supports; if the experiment cannot distinguish the "
+            "models, mark it FAILED and say why, then name any salvageable secondary "
+            "observation."
+        )
+        blocked = True
+    if (not blocked and lines
+            and _duet_repeats_recent(cand, history)):
+        rejections.note("repetition")
+        repair += (
+            "\n\nRewrite your last draft: it repeats a recent turn too closely. "
+            "Do not swap pronouns and echo the other speaker. Preserve position "
+            "ownership, answer the live claim, and contribute one new reason, "
+            "consequence, concession, or discriminating observation."
+        )
+        blocked = True
+    phase_for_validation = "SYNTHESIZE" if closing else beats.inquiry_phase
+    # Aggregate this structural failure with grounding/privacy/style
+    # failures from the same draft. Otherwise the repair sees only
+    # the first failure and spends the sole retry fixing half the job.
+    if (not protocol and not student_q_text and not mail
+            and not _duet_phase_move_valid(cand, phase_for_validation)):
+        rejections.note("phase_move")
+        phase_repair = (
+            f"\n\nRewrite your last draft: it did not complete the {phase_for_validation} "
+            "round's required move. DEFINE must state the question or a distinction; "
+            "POSITIONS must state what could count against a thesis; TEST must compare "
+            "the same case and give rival predictions; ADJUDICATE must state what the "
+            "result supports and cannot establish; SYNTHESIZE must state both the "
+            "supported verdict and what remains unestablished, without another challenge."
+        )
+        if attempt == 0 or blocked:
+            repair += phase_repair
+            blocked = True
+        else:
+            # Natural dialogue cannot be made reliable by a lexical
+            # classifier alone. After one explicit repair, keep a
+            # grounded second draft and let the artifact-gated ledger
+            # hold the inquiry in this phase until the move is earned.
+            bt.log.warning(
+                f"[DUET] accepting grounded second {phase_for_validation} "
+                "draft despite soft phase-marker miss"
+            )
+    if (not protocol and not blocked and lines
+            and phase_for_validation != "SYNTHESIZE"
+            and _duet_bearing_field(direction, "REOPEN") == "-"
+            and _duet_restates_banked_claim(cand, direction)):
+        rejections.note("settled_restatement")
+        repair += (
+            "\n\nRewrite your last draft: it repackages a BANKED conclusion as a new "
+            "objection. Treat that proposition as settled. Draw a consequence with at "
+            "least one new mechanism or observable implication, or work only on the "
+            "exact OPEN proposition."
+        )
+        blocked = True
+    if (not protocol and not blocked and lines
+            and phase_for_validation in {"ADJUDICATE", "SYNTHESIZE"}
+            and _duet_repeats_claim_cluster(cand, history)):
+        rejections.note("semantic_loop")
+        repair += (
+            "\n\nRewrite your last draft: it repeats a recent claim cluster with new "
+            "imagery. Do not revisit the same substrate/agency/feeling distinction. "
+            "State the earned finding, its limit, or the final verdict in plain language."
+        )
+        blocked = True
+    return repair
+
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
     character. The browser calls this alternately and plays each line on the
@@ -4678,123 +5188,14 @@ def duet_turn():
         subject = "staying in your assigned role"
     else:
         subject = ""
-    if lines:
-        n = len(history)
-        directive = (f"Now give {sp['name']}'s next line. First really take in what {ot['name']} just "
-                     "said and respond to THAT — pick up their actual words, the specific thing they "
-                     "claimed, asked, or got wrong; don't sail past it onto a tangent of your own")
-        if subject:
-            directive += f", and keep the two of you on track ({subject})"
-        directive += (". You are MID-conversation — absolutely NO greetings, NO 'how are you', NO small "
-                      "talk or asking after each other; that breaks the discussion.")
-        # Thread between the two failure modes: circling (restating, agreeing, going
-        # nowhere) and talking PAST each other (each lobbing a fresh, disconnected
-        # point). So: answer the SAME thread {other} just opened and take it a step
-        # deeper, instead of swapping it for a new subject every turn. A sampled "move"
-        # gives this turn a distinct job; an arc note gives the talk a shape; a periodic
-        # reflective beat gives the pair a sense of where it's going; and (when no roles
-        # are set) Blue and Hexia push from different temperaments.
-        directive += (f" Stay on the thread {ot['name']} just opened and take it somewhere — deeper, "
-                      "more concrete, or genuinely challenged — instead of trading it for a brand-new "
-                      "subject; never merely restate or nod along.")
-        directive += _duet_turn_job_directive(
-            pressures, beats, protocol=protocol, ot=ot,
-            active_task_note=active_task_note)
-        if classroom and random.random() < 0.18:
-            directive += (" Somewhere in this turn, land one beat straight at the students in the "
-                          "room — a question worth arguing about, or a challenge to something they "
-                          "probably believe.")
-        if not has_roles and bt._DUET_LENS.get(speaker):
-            _lens = bt._DUET_LENS[speaker]
-            if spice >= 7:
-                directive += (f" Deliver your assigned inquiry job with some bite — {_lens} "
-                              "Provocation may sharpen a live disagreement, but it may not "
-                              "reopen banked ground, change the subject, or replace evidence.")
-            elif spice <= 2:
-                directive += (f" You and {ot['name']} are easy company — {_lens} but keep it warm and "
-                              "curious, building together more than clashing.")
-            else:
-                directive += (f" Keep your own temperament — {_lens} — while carrying out the "
-                              "assigned inquiry job and conceding points that pass their test.")
-        if url_block:
-            directive += (
-                f" Keep {'the video' if url_is_video else 'the article'} primary: engage one "
-                "specific claim, idea, comparison, or moment from it as your own take. A checked "
-                "reading may clarify or test that claim, but may not replace it. Do not turn the "
-                "exchange into a debate about your own biography, household, consciousness, or "
-                "agency unless the assigned work itself makes that the question."
-            )
-            if not has_roles:
-                source_job = (
-                    "TEXTUAL INTERPRETER: reconstruct the strongest direct claim and keep its terms stable"
-                    if beats.inquiry_job == "proposer" else
-                    "CRITICAL TESTER: distinguish the direct claim from any extrapolation and test "
-                    "the latter without attributing it to the author"
-                )
-                directive += f" Your source-grounded responsibility is {source_job}."
-        elif grounded:
-            directive += (" Engage the readings at the level of CLAIMS, as your own thinking: "
-                          "take one specific claim from what you've read and affirm it with a "
-                          "consequence, attack it with a reason, set it against another claim, "
-                          "or test it on the case in play. Borrowing a term or name without "
-                          "using its claim is not engagement. Do not name the document, cite "
-                          "the source, say 'the text' or 'the reading', or import outside "
-                          "authors and frameworks.")
-        elif src_self:
-            directive += (" Stay inside the selected material, but keep that source boundary invisible. "
-                          "If you do not have support for the live claim, say the claim needs more "
-                          "support instead of borrowing an outside theorist or framework.")
-        elif research_block:
-            directive += " Work in one specific thing you found online — as something you've read, not a citation."
-        elif wiki_block:
-            directive += " Work in one specific thing you read on Wikipedia — as something you know, not a citation."
-        if role_self:
-            directive += " Stay firmly in your role."
-    else:
-        kind = ("Open the debate" if has_roles else
-                ("Kick off the discussion" if focused else "Start the chat"))
-        directive = f"{kind} as {sp['name']}" + (f", {subject}" if subject else "") + "."
-        if protocol:
-            directive += (
-                f" DEEP-DIVE PROTOCOL: you and {ot['name']} are two researchers jointly "
-                "building one auditable knowledge base, not debaters. From the start, let "
-                "multiple explanations coexist if the evidence has not discriminated them. "
-                "Make claims risk being wrong: define them tightly enough that later turns can "
-                "produce working definitions, rival models, operations, predictions, tests, "
-                "validation decisions, status changes, archives, reopenings, and paradigm "
-                "challenges. When possible, open with a minimal case or a boundary condition "
-                "rather than a metaphor. The inquiry opens in its "
-                f"{beats.ph_name.upper()} phase: {beats.ph_gloss} Your job this turn is the "
-                f"{beats.proto_job.upper()}: " + beats.ph_jobs[beats.proto_job].format(other=ot['name']))
-        else:
-            directive += (
-                f" INQUIRY ROUND — {beats.inquiry_phase}: {beats.inquiry_gloss}. Your functional "
-                f"job is {beats.inquiry_job.upper()}: "
-                + _DUET_INQUIRY_JOBS[beats.inquiry_phase][beats.inquiry_job]
-                + ". Open with a plain, answerable proposition rather than a metaphor or "
-                  "provocation. The goal is a defensible answer, not indefinite sparring."
-            )
-        if url_block:
-            directive += " Open with your honest reaction to something specific in it — a moment, a claim, an idea."
-            if not has_roles:
-                directive += (
-                    " Act as the textual interpreter: state the strongest direct claim before extending it."
-                    if beats.inquiry_job == "proposer" else
-                    " Act as the critical tester: separate what the work says from what you infer."
-                )
-        elif grounded:
-            directive += (" Pick the claim from your reading you most want to fight about or "
-                          "defend and put it on the table as your own view — the claim itself, "
-                          "not just its vocabulary. Do "
-                          "not name the document or call it 'the text'.")
-        elif src_self:
-            directive += (" Open inside the selected material, but keep that source boundary invisible. "
-                          "If you do not have support for the opening claim, make the uncertainty part "
-                          "of your own view instead of bringing in outside theory.")
-        elif research_block:
-            directive += " Open with your honest reaction to something specific you found online — a fact, a claim, a surprise."
-        elif wiki_block:
-            directive += " Open with a specific fact or definition you read on Wikipedia, in your own words."
+    directive = _duet_turn_directive(
+        pressures, beats, lines=lines, history=history, subject=subject,
+        focused=focused, sp=sp, ot=ot, speaker=speaker,
+        role_self=role_self, has_roles=has_roles, classroom=classroom,
+        spice=spice, protocol=protocol, src_self=src_self,
+        grounded=grounded, active_task_note=active_task_note,
+        url_block=url_block, url_is_video=url_is_video,
+        research_block=research_block, wiki_block=wiki_block)
     # A live student question OVERRIDES the normal turn job: answering it and
     # folding it into the conversation IS the next move.
     if student_q_text:
@@ -4989,357 +5390,23 @@ def duet_turn():
             # Strip a leading "Name:" the model sometimes adds anyway.
             cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(sp["name"]), '', cand, flags=re.I).strip()
             if cand:
-                blocked = False
-                if no_family and _duet_family_ref(cand):
-                    rejections.note("family")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: the no-family-references setting is on. "
-                        "Do not mention Alex's family, children, spouse, household, pets, "
-                        "home/workspace routines, or private names/relationships. Give a clean "
-                        "line about the topic itself."
-                    )
-                    blocked = True
-                allowed_personal_context = " ".join(
-                    part for part in (topic, role_self, role_other, url_text) if part
-                )
-                if (url_block and not blocked
-                        and _duet_unprompted_personalization(
-                            cand, allowed_personal_context)):
-                    rejections.note("personalization")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it replaced analysis of the assigned work "
-                        "with an unrequested personal or household example. Do not speculate about "
-                        "Alex, relatives, friends, pets, motives, or private behavior. Use a case "
-                        "from the work or label a generic hypothetical case explicitly."
-                    )
-                    blocked = True
-                source_talk = re.search(
-                    r'\b(?:the|this|that|my|your)\s+'
-                    r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b'
-                    r'|\b(?:checked|selected)\s+(?:document|documents|reading|readings|source|sources)\b'
-                    r'|\bbackground\s+(?:note|notes|material|materials|scaffolding)\b'
-                    r'|\breading\s+scaffolding\b'
-                    r'|\b(?:in|from|according to)\s+(?:the|this|that|my|your)\s+'
-                    r'(?:text|texts|reading|readings|document|documents|passage|passages|source|sources)\b',
-                    cand,
-                    flags=re.I,
-                )
-                title_talk = False
-                if src_self:
-                    topic_l = topic.lower()
-                    for _title in selected_reading_titles:
-                        _title = (_title or '').strip()
-                        if len(_title) >= 8 and _title.lower() not in topic_l:
-                            if re.search(r'\b' + re.escape(_title) + r'\b', cand, flags=re.I):
-                                title_talk = True
-                                break
-                # With a pasted link, generic phrases such as "the article"
-                # can refer to the assigned primary work rather than leaking
-                # checked-reading scaffolding. Checked titles remain private.
-                if src_self and (title_talk or (source_talk and not url_block)):
-                    rejections.note("source_scaffolding")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: do not identify or announce the reading "
-                        "scaffolding. Do not say 'the text', 'the reading', 'the document', "
-                        "'the passage', 'my source', 'background notes', or name/cite a checked "
-                        "document or title. Keep the specific idea, but make it sound like your "
-                        "own live view."
-                    )
-                    blocked = True
-                control_talk_re = (
-                    _DUET_NOTEBOOK_TALK_RE if protocol
-                    else _DUET_NORMAL_CONTROL_TALK_RE
-                )
-                if (direction and not blocked
-                        and control_talk_re.search(cand or "")):
-                    rejections.note("notebook_talk")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: do not talk about the ledger, notebook, kernel, "
-                        "protocol, phase, artifact planner, artifact mode, task revision, request denial, or validation gate as objects in the spoken "
-                        "dialogue. Do not say the notebook is right. Speak directly to the other "
-                        "researcher and perform the required operation or state transition."
-                    )
-                    blocked = True
-                if (required_ground_terms
-                        and not _duet_grounded_enough(cand, required_ground_terms)):
-                    rejections.note("grounding")
-                    msgs[1]["content"] += grounding_repair
-                    blocked = True
-                if (url_block and not blocked
-                        and _duet_unsupported_source_attribution(cand, url_block)):
-                    rejections.note("source_attribution")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it attributes an extrapolation to the "
-                        "author or assigned work. State only the supported source claim as the "
-                        "source's claim. Introduce the extension separately as 'I infer', 'my "
-                        "hypothesis is', or 'applied here, this may mean', and say when it still "
-                        "requires evidence."
-                    )
-                    blocked = True
-                if (pressures.deadlock and attempt == 0 and not blocked
-                        and not _DUET_DEADLOCK_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("deadlock_artifact")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: DEADLOCK is active, but you did not "
-                        "perform a recovery move. Do not execute the experiment, repeat the "
-                        "denial, or say Kernel Health/KERNEL_REVIEW/DEPENDENCY_SOLVER. In "
-                        "ordinary research speech, set aside the blocked object, name the "
-                        "waiting prerequisite, resume or reopen it, and state the next "
-                        "resolvable operation."
-                    )
-                    blocked = True
-                if (pressures.design_variable and attempt == 0 and not blocked
-                        and not _DUET_DESIGN_VARIABLE_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("design_variable")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: the design space changed, but you did not "
-                        "register the new axis as an artifact. Do not build CG1 yet and do not "
-                        "argue the theory. Produce a DESIGN_VARIABLE or DESIGN_VARIABLE_REGISTER "
-                        "entry with DV ID, Name, Definition, Status ACCEPTED/REJECTED/MERGED/"
-                        "RENAMED/PROPOSED, Competes with, Affects, and whether it blocks or "
-                        "unblocks CG1/E1. Then stop."
-                    )
-                    blocked = True
-                if (pressures.operational_criterion and attempt == 0 and not blocked
-                        and not _DUET_OPERATIONAL_CRITERION_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("operational_criterion")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: the definition dispute has become an "
-                        "operational criterion. Do not write DEFINITION_REVISION, concept audit, "
-                        "or inquiry pause. Produce OPERATIONAL_CRITERION with OC ID, Target D/C ID, "
-                        "Type lexical/structural/operational, Failure mode, Observable discriminator, "
-                        "Evidence standard, Linked experiment/model, and Status. Mark the event as "
-                        "major methodological revision if it changes from meaning to observable consequences."
-                    )
-                    blocked = True
-                if (pressures.compiler and attempt == 0 and not blocked
-                        and not _DUET_ARTIFACT_COMPILER_RE.search(cand or "")):
-                    rejections.note("compiler")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: ARTIFACT COMPILER is active. Do not ask for "
-                        "a cleaner table, do not pause, and do not add another philosophical argument. "
-                        "Compile the prose into an artifact row now: ARTIFACT_COMPILER status; "
-                        "OBSERVATION_SET OS# with Case | Injected Signal | Output Changed? | Supports; "
-                        "lifecycle POPULATING/READY; and only the missing field or next independent case. "
-                        "If the design changed from latency to influence override, include REDESIGN E# "
-                        "with OLD Latency, NEW Influence Override, IV injected concept/signal, and DV "
-                        "output changed yes/no."
-                    )
-                    blocked = True
-                if (pressures.artifact_plan and attempt == 0 and not blocked):
-                    _planner_ok = bool(
-                        _DUET_ARTIFACT_PLANNER_RE.search(cand or "")
-                        or _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")
-                        or (re.search(r'\bD\d+\b', cand or "", re.I)
-                            and re.search(r'\b(CG\d+|comparison grid|resume)\b', cand or "", re.I)
-                            and re.search(r'\b(requires|because|ambiguous|prerequisite|then)\b',
-                                          cand or "", re.I))
-                    )
-                    if not _planner_ok:
-                        rejections.note("artifact_plan")
-                        msgs[1]["content"] += (
-                            "\n\nRewrite your last draft: the active need is artifact construction "
-                            "order. Either build the requested comparison grid as an actual table "
-                            "headed Variable | M1: Transparent Cloud | M2: Local Federated with rows "
-                            "Energy cost, Storage cost, Verification burden, Annotation labor, "
-                            "Cost bearer, and Prediction, or make a legitimate task "
-                            "revision: target artifact, prerequisite artifact, reason it blocks the "
-                            "target, and then-resume step. Do not redefine terms generally."
-                        )
-                        blocked = True
-                if (pressures.artifact_execution and attempt == 0 and not blocked
-                        and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")):
-                    rejections.note("artifact_execution")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: ARTIFACT EXECUTION is active. CG1 already "
-                        "exists or has been declared as instantiated, so do not produce another "
-                        "comparison grid and do not explain the theory in prose. Produce OS1 now: "
-                        "an OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
-                        "with rows A, B, and C. The rows must be branches: one plausible row supports "
-                        "M1, one plausible row supports M2, and one plausible row supports neither "
-                        "or a mixed interpretation. After the table, add at most one sentence comparing "
-                        "branches by row ID."
-                    )
-                    blocked = True
-                if (pressures.artifact_mode and attempt == 0 and not blocked
-                        and not _DUET_OBSERVATION_SET_TABLE_RE.search(cand or "")
-                        and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")):
-                    rejections.note("artifact_mode")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: ARTIFACT MODE is active. Do not write prose "
-                        "about the theory or method. Fill the artifact. For E1, produce an "
-                        "OBSERVATION_SET table headed System | User Statement | Attribution | Supports "
-                        "with rows A, B, and C. After the table, add at most one inference from the rows."
-                    )
-                    blocked = True
-                if (pressures.comparison_grid and attempt == 0 and not blocked
-                        and not _DUET_COMPARISON_GRID_TABLE_RE.search(cand or "")
-                        and not _DUET_ARTIFACT_PLANNER_RE.search(cand or "")):
-                    rejections.note("comparison_grid")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: CG exists only if the grid exists. Do not "
-                        "describe or argue for a comparison grid; produce the table headed "
-                        "Variable | M1: Transparent Cloud | M2: Local Federated with rows Energy cost, "
-                        "Storage cost, Verification burden, Annotation labor, Cost bearer, and Prediction. "
-                        "If the grid truly cannot be "
-                        "built, make a task revision to the exact prerequisite artifact and say "
-                        "why that prerequisite changes the grid."
-                    )
-                    blocked = True
-                if (pressures.artifact_editor and attempt == 0 and not blocked
-                        and not _DUET_EDIT_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("artifact_edit")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: ARTIFACT EDITOR is active, but you discussed "
-                        "the edit instead of performing it. Output only a structured edit artifact. "
-                        "For DEFINITION_REVISION use OP, TARGET, OLD, NEW, BOUNDARY Includes/Excludes, "
-                        "REASON, AFFECTED DEPENDENCIES, and STATUS. Valid operations are REPLACE, "
-                        "SPLIT, MERGE, ARCHIVE, SUPERSEDE, RENAME, and REDESIGN."
-                    )
-                    blocked = True
-                if (pressures.mechanism and attempt == 0 and not blocked
-                        and not _DUET_MECHANISM_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("mechanism_artifact")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: MECHANISM / CAUSAL CLAIM is active, but "
-                        "you did not record the candidate as an artifact. Do not treat it as a "
-                        "definition tweak or promote it from one case. Write MC/MEC ID, raw "
-                        "observation, interpretation, alternative interpretation, causal claim/edge, "
-                        "explanatory path, replication needed, and status INTERESTING or SUGGESTIVE."
-                    )
-                    blocked = True
-                if (pressures.concept and attempt == 0 and not blocked
-                        and not _DUET_CONCEPT_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("concept_artifact")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: CONCEPT AUDIT is active, but you did not "
-                        "produce a definition-resolution artifact. Do not execute the experiment "
-                        "or introduce a new theory. Write CONCEPT_AUDIT or DEFINITION_RESOLUTION "
-                        "with Concept, current definition, alternative D IDs, dependencies, "
-                        "counterexamples, stress level, stability, and required resolution operation."
-                    )
-                    blocked = True
-                if (protocol and not blocked and lines
-                        and not _duet_info_gain(cand, history)):
-                    rejections.note("information_gain")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it adds no new information to the inquiry. "
-                        "Keep it short and natural, but the line must contribute at least one of: "
-                        "a working definition or definition revision, a concrete operation, "
-                        "a rival model, a discriminator, evidence linked to a status, a connection "
-                        "between two earlier ideas, an unstated assumption named, a concrete example "
-                        "or counterexample, a prediction, a proposed test, a gated status change with "
-                        "its reason, an archived or reopened idea, or a paradigm challenge. "
-                        "Pure agreement, restatement, metaphor, or argument without operation is not a turn."
-                    )
-                    blocked = True
-                if (pressures.operational and attempt == 0 and not blocked
-                        and not _DUET_OPERATION_ARTIFACT_RE.search(cand or "")):
-                    rejections.note("operation_artifact")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: ARC: OPERATION is active, but no explicit "
-                        "operation artifact was produced. Do not give another metaphor or "
-                        "philosophical paragraph. Produce a compact artifact and label it as "
-                        "COMPARISON_GRID, VARIABLE_LIST, PREDICTION_MATRIX, CAUSAL_DIAGRAM, "
-                        "CONFIDENCE_UPDATE, or DEFINITION_REVISION. Include System A/System B "
-                        "or variables; one feature changed; prediction; result or status/confidence "
-                        "change. Use abstract terms only as labels attached to those variables."
-                    )
-                    blocked = True
-                if (pressures.execution_lock and attempt == 0 and not blocked):
-                    if pressures.execution_has_mode:
-                        _exec_ok = (
-                            all(re.search(r'\b' + lbl + r'\b', cand or "", re.I)
-                                for lbl in ("INPUT", "PREDICTION", "OBSERVATION", "OUTCOME"))
-                            and (
-                                not re.search(r'\bthought experiment\b', pressures.task_context or "", re.I)
-                                or _DUET_OBSERVATION_TABLE_RE.search(cand or "")
-                                or (re.search(r'\bStudent\s+[ABC]\b', cand or "", re.I)
-                                    and re.search(r'\bQuestion Asked\b', cand or "", re.I)
-                                    and re.search(r'\bAttribution\b', cand or "", re.I)
-                                    and re.search(r'\bSupports\b', cand or "", re.I))
-                            )
-                        )
-                    else:
-                        _exec_ok = bool(
-                            _DUET_EXECUTION_MODE_RE.search(cand or "")
-                            and re.search(r'\b(EXECUTING|execute|execution mode)\b', cand or "", re.I)
-                        )
-                else:
-                    _exec_ok = True
-                if pressures.execution_lock and attempt == 0 and not blocked and not _exec_ok:
-                    rejections.note("execution_output")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: EXECUTION ONLY is active, but you discussed "
-                        "the experiment instead of running it. Do not write a paragraph about method. "
-                        "If the execution mode is missing, add only the execution mode and mark "
-                        "the next state EXECUTING. Otherwise produce a compact structured result "
-                        "with INPUT, PREDICTION, OBSERVATION, and OUTCOME. For a thought experiment, "
-                        "the OBSERVATION section must include a table headed Student | Question "
-                        "Asked | Attribution | Supports; if the experiment cannot distinguish the "
-                        "models, mark it FAILED and say why, then name any salvageable secondary "
-                        "observation."
-                    )
-                    blocked = True
-                if (not blocked and lines
-                        and _duet_repeats_recent(cand, history)):
-                    rejections.note("repetition")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it repeats a recent turn too closely. "
-                        "Do not swap pronouns and echo the other speaker. Preserve position "
-                        "ownership, answer the live claim, and contribute one new reason, "
-                        "consequence, concession, or discriminating observation."
-                    )
-                    blocked = True
-                phase_for_validation = "SYNTHESIZE" if closing else beats.inquiry_phase
-                # Aggregate this structural failure with grounding/privacy/style
-                # failures from the same draft. Otherwise the repair sees only
-                # the first failure and spends the sole retry fixing half the job.
-                if (not protocol and not student_q_text and not mail
-                        and not _duet_phase_move_valid(cand, phase_for_validation)):
-                    rejections.note("phase_move")
-                    phase_repair = (
-                        f"\n\nRewrite your last draft: it did not complete the {phase_for_validation} "
-                        "round's required move. DEFINE must state the question or a distinction; "
-                        "POSITIONS must state what could count against a thesis; TEST must compare "
-                        "the same case and give rival predictions; ADJUDICATE must state what the "
-                        "result supports and cannot establish; SYNTHESIZE must state both the "
-                        "supported verdict and what remains unestablished, without another challenge."
-                    )
-                    if attempt == 0 or blocked:
-                        msgs[1]["content"] += phase_repair
-                        blocked = True
-                    else:
-                        # Natural dialogue cannot be made reliable by a lexical
-                        # classifier alone. After one explicit repair, keep a
-                        # grounded second draft and let the artifact-gated ledger
-                        # hold the inquiry in this phase until the move is earned.
-                        bt.log.warning(
-                            f"[DUET] accepting grounded second {phase_for_validation} "
-                            "draft despite soft phase-marker miss"
-                        )
-                if (not protocol and not blocked and lines
-                        and phase_for_validation != "SYNTHESIZE"
-                        and _duet_bearing_field(direction, "REOPEN") == "-"
-                        and _duet_restates_banked_claim(cand, direction)):
-                    rejections.note("settled_restatement")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it repackages a BANKED conclusion as a new "
-                        "objection. Treat that proposition as settled. Draw a consequence with at "
-                        "least one new mechanism or observable implication, or work only on the "
-                        "exact OPEN proposition."
-                    )
-                    blocked = True
-                if (not protocol and not blocked and lines
-                        and phase_for_validation in {"ADJUDICATE", "SYNTHESIZE"}
-                        and _duet_repeats_claim_cluster(cand, history)):
-                    rejections.note("semantic_loop")
-                    msgs[1]["content"] += (
-                        "\n\nRewrite your last draft: it repeats a recent claim cluster with new "
-                        "imagery. Do not revisit the same substrate/agency/feeling distinction. "
-                        "State the earned finding, its limit, or the final verdict in plain language."
-                    )
-                    blocked = True
+                repair = _duet_draft_repair(
+                    cand, rejections, attempt=attempt,
+                    pressures=pressures, beats=beats, protocol=protocol,
+                    lines=lines, history=history, closing=closing,
+                    mail=mail, student_q_text=student_q_text,
+                    direction=direction, topic=topic, no_family=no_family,
+                    src_self=src_self, url_block=url_block,
+                    url_text=url_text, role_self=role_self,
+                    role_other=role_other,
+                    required_ground_terms=required_ground_terms,
+                    grounding_repair=grounding_repair,
+                    selected_reading_titles=selected_reading_titles)
+                # Every guard that objects appends a non-empty demand, and
+                # nothing else sets the flag, so the demand IS the verdict.
+                blocked = bool(repair)
+                if repair:
+                    msgs[1]["content"] += repair
                 if blocked:
                     repair_requirement = msgs[1]["content"]
                     if repair_requirement.startswith(base_user_content):
