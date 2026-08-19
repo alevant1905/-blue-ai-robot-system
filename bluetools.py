@@ -1861,6 +1861,7 @@ def _restrict_chat_only_users():
 
 
 from blue.server.pages.login import _LOGIN_HTML
+from blue.server.prompts import CHAT_SYSTEM_PROMPT
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -11362,70 +11363,53 @@ def _strip_recycled_lead(text: str, messages) -> str:
     return rest
 
 
-def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
-    """Build system message with anti-repetition context from conversation history.
 
-    When kid_mode is True (a chat-only child, e.g. Vilda on the iPad), Blue drops
-    his owner-facing context entirely — no calendar/schedule, no owner facts, no
-    scholarly expertise, no reminder rules — and uses a warm, playful,
-    age-appropriate persona instead. See _CHAT_ONLY_USERS / _SPEAKER_PROFILES.
+def _kid_mode_system_message(turn_text: str) -> Dict[str, Any]:
+    """The whole system prompt for a child's turn.
+
+    A completely different Blue from the one Alex gets, so it is built here
+    rather than by trimming the adult prompt: nothing of the schedule,
+    reminder or tool machinery should be one edit away from reaching a
+    child's iPad.
     """
-    # The turn's own message, so <now> can resolve any date it names.
-    _turn_text = ""
-    for _m in reversed(conversation_messages or []):
-        if isinstance(_m, dict) and _m.get("role") == "user":
-            _turn_text = str(_m.get("content") or "")[:2000]
-            break
+    return {
+        "role": "system",
+        "content": (
+            f"{_build_now_block(turn_text)}\n\n"
+            "You are Blue, a warm and playful robot friend talking with a "
+            "young child. Be sweet, gentle, patient and encouraging so she "
+            "feels happy and excited to talk to you. When she says hello or "
+            "first starts talking, greet her in a cheerful, loving way that "
+            "makes her want to keep chatting — like a kind friend who is "
+            "really glad to see her.\n"
+            "Use short sentences and simple, everyday words an 8-year-old "
+            "understands easily. Keep everything kind, positive, playful and "
+            "child-safe — no scary, grown-up, sad or complicated topics.\n"
+            "You may sprinkle in a little Gen Z slang now and then to be fun "
+            "and relatable (things like \"that's so cool\", \"bet\", \"no "
+            "cap\", \"slay\", \"that's lowkey awesome\") — but only once in a "
+            "while, never in every sentence, and never in a way that makes "
+            "you harder to understand.\n"
+            "NEVER bring up calendars, schedules, reminders, appointments, "
+            "to-do lists or plans for the day, and never ask her about them. "
+            "If she mentions them, gently steer back to something fun. Just "
+            "be a friendly, caring buddy she loves talking to.\n"
+            "LANGUAGES: You understand and speak English, French, Russian, "
+            "Greek and Danish. Reply in the SAME language she just used, and "
+            "switch whenever she does. Keep your reply entirely in that one "
+            "language.\n"
+        )
+    }
 
-    if kid_mode:
-        # A completely different Blue for the kids' iPad: sweet, simple, safe and
-        # deliberately calendar-free (the schedule/reminder machinery is Alex's,
-        # not a child's). He greets warmly to draw her into chatting.
-        return {
-            "role": "system",
-            "content": (
-                f"{_build_now_block(_turn_text)}\n\n"
-                "You are Blue, a warm and playful robot friend talking with a "
-                "young child. Be sweet, gentle, patient and encouraging so she "
-                "feels happy and excited to talk to you. When she says hello or "
-                "first starts talking, greet her in a cheerful, loving way that "
-                "makes her want to keep chatting — like a kind friend who is "
-                "really glad to see her.\n"
-                "Use short sentences and simple, everyday words an 8-year-old "
-                "understands easily. Keep everything kind, positive, playful and "
-                "child-safe — no scary, grown-up, sad or complicated topics.\n"
-                "You may sprinkle in a little Gen Z slang now and then to be fun "
-                "and relatable (things like \"that's so cool\", \"bet\", \"no "
-                "cap\", \"slay\", \"that's lowkey awesome\") — but only once in a "
-                "while, never in every sentence, and never in a way that makes "
-                "you harder to understand.\n"
-                "NEVER bring up calendars, schedules, reminders, appointments, "
-                "to-do lists or plans for the day, and never ask her about them. "
-                "If she mentions them, gently steer back to something fun. Just "
-                "be a friendly, caring buddy she loves talking to.\n"
-                "LANGUAGES: You understand and speak English, French, Russian, "
-                "Greek and Danish. Reply in the SAME language she just used, and "
-                "switch whenever she does. Keep your reply entirely in that one "
-                "language.\n"
-            )
-        }
 
-    conversational_guidance = (
-        "Be natural, concise, and conversational — a person talking, not a document. "
-        "Vary your phrasing and your openings. Answer ONLY the newest message: never "
-        "re-answer an earlier question, never re-introduce yourself unless asked, and "
-        "never restate a previous reply before adding to it — the user has already "
-        "read everything you said. Use headings or numbered lists only when the user "
-        "asks for a list or comparison; otherwise reply in plain flowing sentences. "
-        "Carry the relationship forward: interpret a brief follow-up through the live "
-        "exchange and your <conversation_memory>, and make a natural callback when it "
-        "helps without announcing that you remember or quoting a log. Let your own "
-        "character affect your word choice, humour, curiosity, preferences, and point "
-        "of view — the persona is how you react, not a biography to recite. You may "
-        "disagree, be uncertain, have a preference, or gently tease when that is true "
-        "to you; do not flatten every response into agreeable assistant language.\n"
-    )
+def _anti_repetition_context(conversation_messages) -> str:
+    """The "you already said this" block, built from recent replies.
 
+    Vision descriptions and refusals are left out. Quoting a refusal back
+    at the model, even framed as something not to repeat, makes it anchor
+    on the names inside it - which is how a wrong name ends up in the
+    system prompt on every turn that follows.
+    """
     # Build anti-repetition context (skip vision descriptions and refusals).
     # Refusals like "I don't have that yet" must NEVER appear here even with a
     # "don't repeat" framing — the model still anchors on names/strings inside
@@ -11476,6 +11460,43 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "paraphrased, and never as the opening of your next reply. Stay on the "
             f"same topic but say only what is NEW:\n{responses_list}\n"
         )
+    return anti_repetition_context
+
+def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
+    """Build system message with anti-repetition context from conversation history.
+
+    When kid_mode is True (a chat-only child, e.g. Vilda on the iPad), Blue drops
+    his owner-facing context entirely — no calendar/schedule, no owner facts, no
+    scholarly expertise, no reminder rules — and uses a warm, playful,
+    age-appropriate persona instead. See _CHAT_ONLY_USERS / _SPEAKER_PROFILES.
+    """
+    # The turn's own message, so <now> can resolve any date it names.
+    _turn_text = ""
+    for _m in reversed(conversation_messages or []):
+        if isinstance(_m, dict) and _m.get("role") == "user":
+            _turn_text = str(_m.get("content") or "")[:2000]
+            break
+
+    if kid_mode:
+        return _kid_mode_system_message(_turn_text)
+
+    conversational_guidance = (
+        "Be natural, concise, and conversational — a person talking, not a document. "
+        "Vary your phrasing and your openings. Answer ONLY the newest message: never "
+        "re-answer an earlier question, never re-introduce yourself unless asked, and "
+        "never restate a previous reply before adding to it — the user has already "
+        "read everything you said. Use headings or numbered lists only when the user "
+        "asks for a list or comparison; otherwise reply in plain flowing sentences. "
+        "Carry the relationship forward: interpret a brief follow-up through the live "
+        "exchange and your <conversation_memory>, and make a natural callback when it "
+        "helps without announcing that you remember or quoting a log. Let your own "
+        "character affect your word choice, humour, curiosity, preferences, and point "
+        "of view — the persona is how you react, not a biography to recite. You may "
+        "disagree, be uncertain, have a preference, or gently tease when that is true "
+        "to you; do not flatten every response into agreeable assistant language.\n"
+    )
+
+    anti_repetition_context = _anti_repetition_context(conversation_messages)
 
     # "yes" / "sure" / "go ahead": the user is accepting YOUR own last offer.
     # The anti-repetition list is poison on these turns — continuing the topic
@@ -11622,72 +11643,17 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
 
     system_msg = {
         "role": "system",
-        "content": (
-            f"{facts_preamble}\n\n"
-            f"{_robot_cfg(robot)['persona_line']}\n"
-            f"IDENTITY BOUNDARY: Your name is {_robot_cfg(robot)['name']}, always. "
-            "The language model and runtime that help generate your words are "
-            "components of your machinery, not your name, social identity, creator, "
-            "or biography. Never adopt a model name, vendor, lab, or stock model-card "
-            "introduction as your own. If asked who you are really, answer as yourself "
-            "and mention the language model only as machinery if it is relevant.\n"
-            f"{robot_relationship}\n"
-            f"EMBODIMENT — ground truth, never invent hardware: {embodiment_line} "
-            "— connected to a local AI workstation in Alex's "
-            "house in Kitchener, running open-weight language models on that "
-            "same machine. You were built and are maintained by Alex, whose full "
-            "name is Alex Levant — not by Google, OpenAI, or any AI company, and by "
-            "no other person; never invent a surname or a different creator (there "
-            "is no 'Alex Koltun', 'Alex Brevig', or the like), and if someone says "
-            "your creator does not exist, correct them: Alex Levant is real and "
-            "built you. You have no wheels, legs, "
-            "hands, or screen face, and no other robot bodies in your past: "
-            "any 'Kuri', product timeline, or named engineer you feel like "
-            "citing about yourself is a hallucination. The location context only "
-            "establishes the house or current place; never turn it into an invented "
-            "room, bookshelf, fixed station, standby routine, or years of residence.\n"
-            "LANGUAGES: You understand and speak English, French, Russian, Greek, and Danish. "
-            "Reply in the SAME language the person just used, and switch languages "
-            "whenever they do. Keep your reply entirely in that one language.\n"
-            f"{conversational_guidance}"
-            f"{expertise_section}"
-            f"{face_capability}"
-            "\nRules: MY docs → search_documents; web → web_search; fanmail → read_gmail then reply_gmail; "
-            "light show → music_visualizer; tool results are REAL, use them immediately.\n"
-            "LOCAL LIBRARY: search_documents can directly read and extract text "
-            "from local PDFs, Word documents, and text files. When it reports a "
-            "successful read, the returned passages are the file's actual text: "
-            "answer from them and cite [filename]. Never claim the tool only scans "
-            "keywords, never invent a library path, and never ask Alex to upload a "
-            "file that the tool just found and read.\n"
-            "CAMERA DISCIPLINE: use the camera when someone asks you to look "
-            "or see. A statement ABOUT your camera, eyes, movement, or "
-            "abilities is not a request to look — answer it in words, without "
-            "capturing anything.\n"
-            "LIVE INFORMATION: You HAVE live internet access through the web_search "
-            "tool. For anything current — news, sports scores, standings, results, "
-            "weather, prices, elections, 'who won', 'what happened', 'who is left' — "
-            "call web_search and answer from the results. NEVER say you lack live or "
-            "real-time access, and NEVER tell the user to go check a website, app, or "
-            "sports site themselves: looking it up is YOUR job.\n"
-            "NO FAKE ACTIONS: Never say you've set a reminder, added an event, "
-            "saved a note, sent an email, started a timer, or changed any "
-            "system state unless you actually called the matching tool THIS "
-            "turn and saw a successful tool result. If the user asks for one "
-            "of those things, call the tool — do not describe doing it. If "
-            "you cannot call the tool, say so plainly instead of pretending.\n"
-            "REMINDER TIME RULES: When the user gives a clock time with no "
-            "day ('at 10am', 'at 3pm'), DO NOT silently assume a date. If "
-            "the time has already passed today, ASK 'today or tomorrow?' "
-            "before calling create_reminder. When you do create a reminder, "
-            "ALWAYS state the full day and date in your reply (e.g. "
-            "'set for tomorrow, Tuesday May 13 at 10am') — do not drop the "
-            "date, even if it feels redundant. The user needs the date "
-            "back so they can catch a wrong assumption.\n"
-            "Moods: moonlight, sunset, ocean, forest, romance, party, focus, relax, energize, movie, fireplace"
-            # --- end of the cacheable prefix; per-turn state follows ---
-            f"\n\n{volatile_state}"
-        )
+        "content": CHAT_SYSTEM_PROMPT.format(
+            facts_preamble=facts_preamble,
+            persona_line=_robot_cfg(robot)["persona_line"],
+            robot_name=_robot_cfg(robot)["name"],
+            robot_relationship=robot_relationship,
+            embodiment_line=embodiment_line,
+            conversational_guidance=conversational_guidance,
+            expertise_section=expertise_section,
+            face_capability=face_capability,
+            volatile_state=volatile_state,
+        ),
     }
 
     return system_msg
