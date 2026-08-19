@@ -3774,6 +3774,247 @@ def _duet_turn_job_directive(p: _DuetPressures, *, protocol: bool, ot,
             )
     return directive
 
+
+
+def _duet_turn_memory_context(*, speaker: str, sp, topic: str, history,
+                              no_family: bool, src_self) -> str:
+    """The memory blocks a duet speaker draws on, as text to append.
+
+    Returns the text; the caller owns the prompt it goes on. Every block is
+    best-effort - a store being unavailable costs that block, not the turn.
+    """
+    sys_p = ""
+    # Long-term memory — the SAME stores and blocks the chat persona draws on, so
+    # the duet speaker knows the household and their shared life like in chat.
+    # In a source-grounded duet, keep memory to household facts only; checked
+    # library documents should carry the discussion, not semantically adjacent
+    # memories or old session recaps.
+    # Chat-situational blocks (proactive nudges, rhythms, calendar connections,
+    # raw chat history) stay out on purpose — they address the user mid-chat and
+    # would pull a robot-to-robot talk off its subject.
+    mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
+    _mem_got = []
+    # A duet is spoken by the same autobiographical robot as solo chat.
+    # Retrieve a small, relevant slice of that robot's own past human and
+    # robot exchanges so relationships and callbacks survive mode changes.
+    # Privacy mode intentionally omits it because human-chat episodes can
+    # contain household details.
+    if not no_family:
+        try:
+            from blue.server.routes import continuity as _continuity
+            conversation_block = _continuity.conversation_memory_block(
+                speaker,
+                query=mem_query,
+                max_lines=7,
+                include_humans=True,
+                include_robots=True,
+            )
+            if conversation_block:
+                sys_p += "\n\n" + conversation_block
+                _mem_got.append("conversations")
+        except Exception as exc:
+            bt.log.warning(f"[DUET] conversation-memory injection failed: {exc}")
+    try:
+        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not no_family:
+            # Household facts — the same authoritative block chat injects every
+            # turn. Without it the duet robots don't actually know who anyone is.
+            facts_block = bt.memory_system._build_facts_block()
+            if facts_block:
+                sys_p += ("\n\nYour ground-truth knowledge of the household — \"the user\" "
+                          "in these facts is Alex:\n" + facts_block)
+                _mem_got.append("facts")
+            if src_self:
+                _mem_got.append("source-focus")
+            else:
+                notes_block = bt.memory_system._build_user_notes_block()
+                if notes_block:
+                    sys_p += "\n\n" + notes_block
+                    _mem_got.append("notes")
+                if mem_query:
+                    _facts_lower = sys_p.lower()
+                    mem_lines = []
+                    # top_k matches chat's TOP_K_CONTEXT so recall depth is the same.
+                    for mem in bt.memory_system.search_memories(mem_query, top_k=6) or []:
+                        if mem.get("type") == "session":
+                            continue
+                        mc = (mem.get("content") or "").strip()
+                        if (not mc or mc.lower()[:40] in _facts_lower
+                                or bt.memory_system._is_junk_memory(
+                                    (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
+                            continue
+                        age = bt.memory_system._humanize_age(mem.get("created_at"))
+                        mem_lines.append(f"- [{age}] {mc[:300]}" if age else f"- {mc[:300]}")
+                    if mem_lines:
+                        sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
+                                  "conversation — use them naturally if helpful, don't recite them. "
+                                  "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
+                                  "it was remembered (see its age tag), not to now:\n"
+                                  + "\n".join(mem_lines) + "\n</relevant_memories>")
+                        _mem_got.append(f"memories({len(mem_lines)})")
+                # Day recaps give the pair a shared sense of their recent life with
+                # Alex ("remember Tuesday's...") in free duets.
+                sess_block = bt.memory_system._build_session_history_block(
+                    robot=speaker)
+                if sess_block:
+                    sys_p += "\n\n" + sess_block
+                    _mem_got.append("sessions")
+                if mem_query:
+                    days_block = bt.memory_system._build_recalled_days_block(
+                        mem_query, robot=speaker)
+                    if days_block:
+                        sys_p += "\n\n" + days_block
+                        _mem_got.append("days")
+            if _mem_got:
+                print(f"   [DUET] ✓ Injecting memory context for {sp['name']}: {' + '.join(_mem_got)}")
+    except Exception as e:
+        bt.log.warning(f"[DUET] memory context failed: {e}")
+
+    # Camera memory is useful in free duets, but source-grounded duets should
+    # stay on the checked library documents.
+    if not src_self and not no_family:
+        try:
+            vis_block = bt._visual_context_block(
+                mem_query, observer=speaker)
+            if vis_block:
+                sys_p += "\n\n" + vis_block
+        except Exception:
+            pass
+    return sys_p
+
+
+
+def _duet_turn_source_grounding(*, src_self, topic: str, history,
+                                direction: str, protocol: bool,
+                                url_block: str):
+    """Passages and digests from the documents checked for this duet.
+
+    Returns (ground_block, digest_block, ground_terms). Best-effort: a
+    retrieval failure costs the grounding, not the turn.
+    """
+    # Library grounding: passages from the chosen documents, relevant to the topic
+    # + what was just said. Handed to the speaker in the USER turn (not system).
+    # The retrieval query is anchored to the inquiry ledger's QUESTION, OPEN,
+    # and TEST fields so chunks track the live discriminator, not the surface
+    # wording of the last exchange — banter drifts, the ledger does not.
+    ground_block = ""
+    digest_block = ""
+    ground_terms = []
+    if src_self:
+        # The absorbed ARGUMENT of each checked work — stable across the whole
+        # duet (unlike the per-turn chunks), so the speaker can engage claims,
+        # not just borrow vocabulary. Warmed by /duet/readings at start.
+        try:
+            _dgs = [g for g in (_duet_reading_digest(fn) for fn in src_self[:4]) if g]
+            if _dgs:
+                digest_block = "\n\n".join(_dgs)[:3600]
+        except Exception as e:
+            bt.log.warning(f"[DUET] reading digests failed: {e}")
+    if src_self:
+        try:
+            recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+            _live_q = ""
+            if direction:
+                if protocol:
+                    # The protocol notebook keeps live problems in these sections.
+                    for _pat in (r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
+                        _m_live = re.search(_pat, direction)
+                        if _m_live:
+                            _live_q = _m_live.group(1).strip()
+                            break
+                else:
+                    _live_q = " ".join(
+                        value for value in (
+                            _duet_bearing_field(direction, "QUESTION"),
+                            _duet_bearing_field(direction, "OPEN"),
+                            _duet_bearing_field(direction, "TEST"),
+                        ) if value and value != "-"
+                    )
+            query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
+            chunks = _duet_source_chunks(query, src_self, max_chunks=10)
+            # Digest terms count toward groundedness too — engaging a work's
+            # claims from the digest is exactly the substance we want.
+            ground_terms = _duet_ground_terms(
+                chunks + ([{"content": digest_block}] if digest_block else []))
+            represented = []
+            for c in chunks:
+                fn = c.get("filename") or ""
+                if fn and fn not in represented:
+                    represented.append(fn)
+            missing = [fn for fn in src_self if fn not in represented]
+            sections = []
+            for idx, c in enumerate(chunks, 1):
+                content = (c.get('content') or '').strip()
+                if content:
+                    sections.append(f"Background note {idx}: {content}")
+            if sections:
+                selected_line = (
+                    "Background for you only, drawn from Alex's checked library documents. Use these ideas "
+                    "internally; do not mention document titles, filenames, citations, labels, "
+                    "or that you are using documents."
+                )
+                coverage_line = (
+                    "The notes below were deliberately drawn from the selected readings. For your next "
+                    "spoken line, silently choose at least one note and carry a concrete payload from it "
+                    "into the dialogue: a term, distinction, image, example, causal claim, or problem. "
+                    "If your line could have been said without these notes, it is too generic."
+                )
+                if url_block:
+                    coverage_line = (
+                        "The linked work is the assigned object. These selected readings are optional "
+                        "secondary lenses: use one only when it directly clarifies or tests the linked "
+                        "work's live claim. Never let them replace that claim or turn the exchange into "
+                        "an autobiographical debate about the speaker."
+                    )
+                if missing:
+                    coverage_line += (
+                        " Some selected readings did not have a relevant passage for this turn."
+                    )
+                ground_block = (selected_line + "\n" + coverage_line + "\n\n" +
+                                "\n\n".join(sections))[:5200]
+        except Exception as e:
+            bt.log.warning(f"[DUET] source grounding failed: {e}")
+    return ground_block, digest_block, ground_terms
+
+
+
+def _duet_turn_external_material(*, url_text: str, url_info, research_on: bool,
+                                 wiki_on: bool, topic: str, history, roles):
+    """Material from outside the library: the pasted link, the web, Wikipedia.
+
+    All three are windowed the same way — to the slice nearest the subject and
+    whatever was just said — so they are built together rather than three times
+    over. Returns (url_block, url_terms, research_block, wiki_block).
+    """
+    def windowed(text: str) -> str:
+        """The slice of `text` closest to the topic and the last two turns."""
+        recent_q = " ".join((h.get('text') or '') for h in history[-2:])
+        return bt._duet_url_excerpt(text, f"{topic} {recent_q}".strip(),
+                                    turn=len(history))
+
+    # The article text / video transcript behind the pasted URL.
+    url_block = ""
+    url_terms = []
+    if url_text:
+        url_block = windowed(url_text)
+        url_terms = _duet_ground_terms([{"content": url_block}])
+
+    def consulted(digest_for) -> str:
+        """A warmed, cached digest of the duet's subject, windowed to the turn.
+
+        Both sources are warmed at start (/duet/research, /duet/wikipedia) and
+        cached, so a turn re-reads rather than re-searches.
+        """
+        query = bt._duet_research_query(topic, url_info, roles)
+        if not query:
+            return ""
+        text = (digest_for(query) or {}).get('text') or ''
+        return windowed(text) if text else ""
+
+    research_block = consulted(bt._duet_research_digest) if research_on else ""
+    wiki_block = consulted(bt._wikipedia_digest) if wiki_on else ""
+    return url_block, url_terms, research_block, wiki_block
+
+
 def duet_turn():
     """Generate ONE turn of a Blue<->Hexia conversation, in the speaker's voice/
     character. The browser calls this alternately and plays each line on the
@@ -4115,219 +4356,18 @@ def duet_turn():
             "here's why that's wrong.'"
         )
 
-    # Long-term memory — the SAME stores and blocks the chat persona draws on, so
-    # the duet speaker knows the household and their shared life like in chat.
-    # In a source-grounded duet, keep memory to household facts only; checked
-    # library documents should carry the discussion, not semantically adjacent
-    # memories or old session recaps.
-    # Chat-situational blocks (proactive nudges, rhythms, calendar connections,
-    # raw chat history) stay out on purpose — they address the user mid-chat and
-    # would pull a robot-to-robot talk off its subject.
-    mem_query = (f"{topic} " + " ".join((h.get('text') or '') for h in history[-2:])).strip()
-    _mem_got = []
-    # A duet is spoken by the same autobiographical robot as solo chat.
-    # Retrieve a small, relevant slice of that robot's own past human and
-    # robot exchanges so relationships and callbacks survive mode changes.
-    # Privacy mode intentionally omits it because human-chat episodes can
-    # contain household details.
-    if not no_family:
-        try:
-            from blue.server.routes import continuity as _continuity
-            conversation_block = _continuity.conversation_memory_block(
-                speaker,
-                query=mem_query,
-                max_lines=7,
-                include_humans=True,
-                include_robots=True,
-            )
-            if conversation_block:
-                sys_p += "\n\n" + conversation_block
-                _mem_got.append("conversations")
-        except Exception as exc:
-            bt.log.warning(f"[DUET] conversation-memory injection failed: {exc}")
-    try:
-        if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system and not no_family:
-            # Household facts — the same authoritative block chat injects every
-            # turn. Without it the duet robots don't actually know who anyone is.
-            facts_block = bt.memory_system._build_facts_block()
-            if facts_block:
-                sys_p += ("\n\nYour ground-truth knowledge of the household — \"the user\" "
-                          "in these facts is Alex:\n" + facts_block)
-                _mem_got.append("facts")
-            if src_self:
-                _mem_got.append("source-focus")
-            else:
-                notes_block = bt.memory_system._build_user_notes_block()
-                if notes_block:
-                    sys_p += "\n\n" + notes_block
-                    _mem_got.append("notes")
-                if mem_query:
-                    _facts_lower = sys_p.lower()
-                    mem_lines = []
-                    # top_k matches chat's TOP_K_CONTEXT so recall depth is the same.
-                    for mem in bt.memory_system.search_memories(mem_query, top_k=6) or []:
-                        if mem.get("type") == "session":
-                            continue
-                        mc = (mem.get("content") or "").strip()
-                        if (not mc or mc.lower()[:40] in _facts_lower
-                                or bt.memory_system._is_junk_memory(
-                                    (mem.get("subject") or "").lower(), mc.lower(), mem.get("type", ""))):
-                            continue
-                        age = bt.memory_system._humanize_age(mem.get("created_at"))
-                        mem_lines.append(f"- [{age}] {mc[:300]}" if age else f"- {mc[:300]}")
-                    if mem_lines:
-                        sys_p += ("\n\n<relevant_memories>\nYour real memories that may relate to this "
-                                  "conversation — use them naturally if helpful, don't recite them. "
-                                  "Words like \"today\" or \"tomorrow\" inside a memory refer to the day "
-                                  "it was remembered (see its age tag), not to now:\n"
-                                  + "\n".join(mem_lines) + "\n</relevant_memories>")
-                        _mem_got.append(f"memories({len(mem_lines)})")
-                # Day recaps give the pair a shared sense of their recent life with
-                # Alex ("remember Tuesday's...") in free duets.
-                sess_block = bt.memory_system._build_session_history_block(
-                    robot=speaker)
-                if sess_block:
-                    sys_p += "\n\n" + sess_block
-                    _mem_got.append("sessions")
-                if mem_query:
-                    days_block = bt.memory_system._build_recalled_days_block(
-                        mem_query, robot=speaker)
-                    if days_block:
-                        sys_p += "\n\n" + days_block
-                        _mem_got.append("days")
-            if _mem_got:
-                print(f"   [DUET] ✓ Injecting memory context for {sp['name']}: {' + '.join(_mem_got)}")
-    except Exception as e:
-        bt.log.warning(f"[DUET] memory context failed: {e}")
+    sys_p += _duet_turn_memory_context(
+        speaker=speaker, sp=sp, topic=topic, history=history,
+        no_family=no_family, src_self=src_self)
 
-    # Camera memory is useful in free duets, but source-grounded duets should
-    # stay on the checked library documents.
-    if not src_self and not no_family:
-        try:
-            vis_block = bt._visual_context_block(
-                mem_query, observer=speaker)
-            if vis_block:
-                sys_p += "\n\n" + vis_block
-        except Exception:
-            pass
+    url_block, url_terms, research_block, wiki_block = (
+        _duet_turn_external_material(
+            url_text=url_text, url_info=url_info, research_on=research_on,
+            wiki_on=wiki_on, topic=topic, history=history, roles=roles))
 
-    # Link grounding: the article text / video transcript behind the pasted URL,
-    # windowed to the lede + whatever matches the last couple of turns.
-    url_block = ""
-    url_terms = []
-    if url_text:
-        recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-        url_block = bt._duet_url_excerpt(url_text, f"{topic} {recent_q}".strip(), turn=len(history))
-        url_terms = _duet_ground_terms([{"content": url_block}])
-
-    # Web research grounding: live search findings on the duet's subject
-    # (warmed by /duet/research at start; cached so turns don't re-search),
-    # windowed to the slice most relevant to the last couple of turns.
-    research_block = ""
-    if research_on:
-        rq = bt._duet_research_query(topic, url_info, roles)
-        if rq:
-            digest = bt._duet_research_digest(rq) or {}
-            rtext = digest.get('text') or ''
-            if rtext:
-                recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-                research_block = bt._duet_url_excerpt(rtext, f"{topic} {recent_q}".strip(), turn=len(history))
-
-    # Wikipedia grounding: the encyclopedic intro of the best-matching article on
-    # the duet's subject (warmed by /duet/wikipedia at start; cached so turns
-    # don't re-consult), windowed to the slice most relevant to the last turns.
-    wiki_block = ""
-    if wiki_on:
-        wq = bt._duet_research_query(topic, url_info, roles)
-        if wq:
-            wdigest = bt._wikipedia_digest(wq) or {}
-            wtext = wdigest.get('text') or ''
-            if wtext:
-                recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-                wiki_block = bt._duet_url_excerpt(wtext, f"{topic} {recent_q}".strip(), turn=len(history))
-
-    # Library grounding: passages from the chosen documents, relevant to the topic
-    # + what was just said. Handed to the speaker in the USER turn (not system).
-    # The retrieval query is anchored to the inquiry ledger's QUESTION, OPEN,
-    # and TEST fields so chunks track the live discriminator, not the surface
-    # wording of the last exchange — banter drifts, the ledger does not.
-    ground_block = ""
-    digest_block = ""
-    ground_terms = []
-    if src_self:
-        # The absorbed ARGUMENT of each checked work — stable across the whole
-        # duet (unlike the per-turn chunks), so the speaker can engage claims,
-        # not just borrow vocabulary. Warmed by /duet/readings at start.
-        try:
-            _dgs = [g for g in (_duet_reading_digest(fn) for fn in src_self[:4]) if g]
-            if _dgs:
-                digest_block = "\n\n".join(_dgs)[:3600]
-        except Exception as e:
-            bt.log.warning(f"[DUET] reading digests failed: {e}")
-    if src_self:
-        try:
-            recent_q = " ".join((h.get('text') or '') for h in history[-2:])
-            _live_q = ""
-            if direction:
-                if protocol:
-                    # The protocol notebook keeps live problems in these sections.
-                    for _pat in (r'TENSIONS:\s*(.+)', r'QUESTIONS:\s*(.+)'):
-                        _m_live = re.search(_pat, direction)
-                        if _m_live:
-                            _live_q = _m_live.group(1).strip()
-                            break
-                else:
-                    _live_q = " ".join(
-                        value for value in (
-                            _duet_bearing_field(direction, "QUESTION"),
-                            _duet_bearing_field(direction, "OPEN"),
-                            _duet_bearing_field(direction, "TEST"),
-                        ) if value and value != "-"
-                    )
-            query = f"{topic} {_live_q} {recent_q}".strip() or topic or "discussion"
-            chunks = _duet_source_chunks(query, src_self, max_chunks=10)
-            # Digest terms count toward groundedness too — engaging a work's
-            # claims from the digest is exactly the substance we want.
-            ground_terms = _duet_ground_terms(
-                chunks + ([{"content": digest_block}] if digest_block else []))
-            represented = []
-            for c in chunks:
-                fn = c.get("filename") or ""
-                if fn and fn not in represented:
-                    represented.append(fn)
-            missing = [fn for fn in src_self if fn not in represented]
-            sections = []
-            for idx, c in enumerate(chunks, 1):
-                content = (c.get('content') or '').strip()
-                if content:
-                    sections.append(f"Background note {idx}: {content}")
-            if sections:
-                selected_line = (
-                    "Background for you only, drawn from Alex's checked library documents. Use these ideas "
-                    "internally; do not mention document titles, filenames, citations, labels, "
-                    "or that you are using documents."
-                )
-                coverage_line = (
-                    "The notes below were deliberately drawn from the selected readings. For your next "
-                    "spoken line, silently choose at least one note and carry a concrete payload from it "
-                    "into the dialogue: a term, distinction, image, example, causal claim, or problem. "
-                    "If your line could have been said without these notes, it is too generic."
-                )
-                if url_block:
-                    coverage_line = (
-                        "The linked work is the assigned object. These selected readings are optional "
-                        "secondary lenses: use one only when it directly clarifies or tests the linked "
-                        "work's live claim. Never let them replace that claim or turn the exchange into "
-                        "an autobiographical debate about the speaker."
-                    )
-                if missing:
-                    coverage_line += (
-                        " Some selected readings did not have a relevant passage for this turn."
-                    )
-                ground_block = (selected_line + "\n" + coverage_line + "\n\n" +
-                                "\n\n".join(sections))[:5200]
-        except Exception as e:
-            bt.log.warning(f"[DUET] source grounding failed: {e}")
+    ground_block, digest_block, ground_terms = _duet_turn_source_grounding(
+        src_self=src_self, topic=topic, history=history,
+        direction=direction, protocol=protocol, url_block=url_block)
     # Any source material in hand this turn — the digest (argument) and the
     # chunks (specifics) gate the same behaviors.
     grounded = bool(ground_block or digest_block)
