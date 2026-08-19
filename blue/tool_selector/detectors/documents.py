@@ -4,6 +4,7 @@ import os
 import re
 import json
 from collections import Counter
+from functools import lru_cache
 from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
@@ -71,6 +72,23 @@ _APOSTROPHE_SUFFIX_RE = re.compile(r"'(?:s|ve|re|ll|d|m)\b")
 def _normalise_query_text(msg_lower: str) -> str:
     """Expand contractions so their stems can't masquerade as library terms."""
     return _APOSTROPHE_SUFFIX_RE.sub(" ", _CONTRACTION_RE.sub(" not", msg_lower))
+
+
+@lru_cache(maxsize=512)
+def _phrase_boundary_re(phrase: str) -> "re.Pattern":
+    """Match a folder name as whole words, never as a substring.
+
+    A plain `phrase in message` test made every short folder a trap: the "Marx"
+    folder matched inside "Marxism", "Marxist" and "post-Marxist", and any
+    four-letter folder Alex adds later ("Rain", "Play", "Note") would match
+    inside ordinary words and fast-execute a document search at 0.90.
+
+    Lookarounds rather than \\b so a folder ending in punctuation still works;
+    \\b after a non-word character demands a word character next, which would
+    never match. Folder names go through re.escape, so a name containing a
+    regex metacharacter is matched literally.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)")
 
 
 # Two title words scattered across a sentence are a coincidence; a title is a
@@ -328,9 +346,11 @@ class DocumentsDetector(BaseDetector):
         cls._refresh_library()
         if not cls._lib_tokens_by_doc:
             return None
-        # A named folder ("my Alex Levant folder", "the AI folder").
-        for ph in cls._lib_phrases:
-            if ph and ph in msg_lower:
+        # A named folder ("my Alex Levant folder", "the AI folder"), matched as
+        # whole words. Longest first, so the most specific folder wins and the
+        # reason string does not depend on set iteration order.
+        for ph in sorted(cls._lib_phrases or (), key=lambda p: (-len(p), p)):
+            if ph and _phrase_boundary_re(ph).search(msg_lower):
                 return f"names library folder '{ph}'"
         qwords = {w for w in re.split(r"[^a-z0-9]+", _normalise_query_text(msg_lower))
                   if len(w) >= 4 and w not in _GENERIC_TERMS}

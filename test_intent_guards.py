@@ -694,3 +694,62 @@ def test_a_document_frame_outranks_the_activity_statement(library, message):
 ])
 def test_naming_the_library_outright_still_searches(library, message):
     assert library._library_match(message) is not None
+
+
+# A folder name is matched as whole words. It used to be a plain substring
+# test, which made every short folder a trap: "Marx" matched inside "Marxism"
+# and "post-Marxist", and any four-letter folder added later would match
+# inside ordinary words and fast-execute a search at 0.90.
+
+@pytest.mark.parametrize("message", [
+    "tell me about marxism",
+    "he is a marxist",
+    "marxian economics",
+    "what about post-marxist thought",
+])
+def test_a_folder_name_does_not_match_inside_a_longer_word(library, message):
+    assert library._library_match(message) is None
+
+
+@pytest.mark.parametrize("message", [
+    "what is marx's argument",
+    "the marx-engels reader",
+    "(marx)",
+    "marx, engels and the rest",
+    "read marx.",
+])
+def test_a_folder_name_beside_punctuation_still_matches(library, message):
+    """Word boundaries must not cost the ordinary ways a name gets written."""
+    assert library._library_match(message) is not None
+
+
+def test_a_short_folder_name_cannot_match_inside_an_ordinary_word(
+        library, monkeypatch):
+    """The hazard this change exists to remove, on folders Alex could add."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+
+    monkeypatch.setattr(DocumentsDetector, "_lib_phrases", {"rain", "arts"})
+    assert library._library_match("we should train the model") is None
+    assert library._library_match("that was a smart move") is None
+    # ...but naming the folder still works.
+    assert library._library_match("open the rain folder") is not None
+
+
+def test_the_longest_matching_folder_wins(library, monkeypatch):
+    """Set iteration order must not decide which folder is reported."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+
+    monkeypatch.setattr(DocumentsDetector, "_lib_phrases",
+                        {"activity", "activity theory"})
+    assert library._library_match("the activity theory folder") == \
+        "names library folder 'activity theory'"
+
+
+def test_a_folder_name_with_a_regex_character_is_matched_literally(
+        library, monkeypatch):
+    """Folder names are user input; one containing '+' must not blow up."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+
+    monkeypatch.setattr(DocumentsDetector, "_lib_phrases", {"c++ notes"})
+    assert library._library_match("open my c++ notes") is not None
+    assert library._library_match("open my cnotes") is None
