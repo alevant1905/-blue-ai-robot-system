@@ -656,7 +656,9 @@ def library(monkeypatch):
                         {"dh201", "cmds4740", "alex levant", "marx"})
     monkeypatch.setattr(DocumentsDetector, "_lib_tokens_by_doc",
                         [{"dh201", "workshop"}, {"marx", "capital"}])
-    monkeypatch.setattr(DocumentsDetector, "_lib_rare_tokens", {"ilyenkov"})
+    # "marx" is rare in the real library too — the Marx folder holds one file.
+    monkeypatch.setattr(DocumentsDetector, "_lib_rare_tokens",
+                        {"ilyenkov", "marx"})
     return DocumentsDetector
 
 
@@ -697,18 +699,23 @@ def test_naming_the_library_outright_still_searches(library, message):
 
 
 # A folder name is matched as whole words. It used to be a plain substring
-# test, which made every short folder a trap: "Marx" matched inside "Marxism"
-# and "post-Marxist", and any four-letter folder added later would match
-# inside ordinary words and fast-execute a search at 0.90.
+# test, which made every short folder a trap: any four-letter folder added
+# later would match inside ordinary words and fast-execute a search at 0.90.
+#
+# Derived forms of a name are handled deliberately, by stemming, rather than
+# by accident of substring: "Marxism" reaches the Marx folder because "marx"
+# is a token this library really has, not because the letters happen to line
+# up. That distinction is the point of the two groups below.
 
 @pytest.mark.parametrize("message", [
     "tell me about marxism",
     "he is a marxist",
+    "marxists disagree about that",
     "marxian economics",
     "what about post-marxist thought",
 ])
-def test_a_folder_name_does_not_match_inside_a_longer_word(library, message):
-    assert library._library_match(message) is None
+def test_a_derived_form_of_a_library_name_still_finds_it(library, message):
+    assert library._library_match(message) is not None
 
 
 @pytest.mark.parametrize("message", [
@@ -753,3 +760,58 @@ def test_a_folder_name_with_a_regex_character_is_matched_literally(
     monkeypatch.setattr(DocumentsDetector, "_lib_phrases", {"c++ notes"})
     assert library._library_match("open my c++ notes") is not None
     assert library._library_match("open my cnotes") is None
+
+
+# The stemmer on its own. The suffix list is not the safety story — the
+# "stem must already be a token in this library" condition is. Without it,
+# every sentence ending a word the right way would be handed a library term.
+
+def _stems(word, library):
+    from blue.tool_selector.detectors.documents import _library_stems
+    return _library_stems(word, set(library))
+
+
+LIBRARY = {"marx", "nietzsche", "deleuze", "ilyenkov", "noble"}
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("marxism", {"marx"}),
+    ("marxisms", {"marx"}),
+    ("marxist", {"marx"}),
+    ("marxists", {"marx"}),
+    ("marxian", {"marx"}),
+    ("marxians", {"marx"}),
+    ("ilyenkovian", {"ilyenkov"}),
+    # voice transcription drops the possessive apostrophe
+    ("nobles", {"noble"}),
+    # a name ending in -e loses it before the suffix goes on
+    ("nietzschean", {"nietzsche"}),
+    ("deleuzian", {"deleuze"}),
+])
+def test_a_derived_form_resolves_to_the_name(word, expected):
+    assert _stems(word, LIBRARY) == expected
+
+
+@pytest.mark.parametrize("word", [
+    "tourism",      # "tour" is not in this library
+    "artist",       # "art" is not, and is under the length floor anyway
+    "scientists",
+    "americans",
+    "activism",
+    "specialist",
+    "journalists",
+    "definite",
+    "opposite",
+])
+def test_a_stem_the_library_does_not_have_is_never_invented(word):
+    assert _stems(word, LIBRARY) == set()
+
+
+def test_a_stem_shorter_than_four_characters_is_refused():
+    """Otherwise "arts" would reach an "Art" folder, and "ists" an "Ist"."""
+    assert _stems("arts", {"art"}) == set()
+    assert _stems("isms", {"ism"}) == set()
+
+
+def test_a_word_that_is_already_the_name_is_left_alone():
+    assert _stems("marx", LIBRARY) == set()

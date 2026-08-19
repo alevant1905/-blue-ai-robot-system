@@ -74,6 +74,34 @@ def _normalise_query_text(msg_lower: str) -> str:
     return _APOSTROPHE_SUFFIX_RE.sub(" ", _CONTRACTION_RE.sub(" not", msg_lower))
 
 
+# A name's derived forms still point at the name: "Marxism", "Marxist" and
+# "Marxian" all mean the Marx folder. Voice transcription also drops possessive
+# apostrophes, so "Noble's" arrives as "nobles".
+#
+# The stem is kept ONLY when it is already a token in this library. That guard,
+# not the suffix list, is what makes this safe: blind stemming would hand a
+# library term to any sentence that happened to end a word the right way.
+_DERIVED_SUFFIXES = ("s", "ism", "isms", "ist", "ists",
+                     "ian", "ians", "an", "ans", "ite", "ites")
+
+
+def _library_stems(word: str, library_tokens) -> set:
+    """Stems of `word` that really occur in this library."""
+    found = set()
+    for suffix in _DERIVED_SUFFIXES:
+        if not word.endswith(suffix):
+            continue
+        stem = word[:-len(suffix)]
+        if len(stem) < 4:
+            continue
+        # "Nietzschean" -> "nietzsche", "Deleuzian" -> "deleuze": a name ending
+        # in -e loses it before the suffix goes on, so try putting it back.
+        for candidate in (stem, stem + "e"):
+            if candidate in library_tokens:
+                found.add(candidate)
+    return found
+
+
 @lru_cache(maxsize=512)
 def _phrase_boundary_re(phrase: str) -> "re.Pattern":
     """Match a folder name as whole words, never as a substring.
@@ -354,14 +382,12 @@ class DocumentsDetector(BaseDetector):
                 return f"names library folder '{ph}'"
         qwords = {w for w in re.split(r"[^a-z0-9]+", _normalise_query_text(msg_lower))
                   if len(w) >= 4 and w not in _GENERIC_TERMS}
-        # Voice transcription commonly drops possessive apostrophes ("Noble's"
-        # becomes "nobles"). Add the singular form only when it names a token
-        # that really occurs in this library, avoiding broad stemming.
+        # Add the stem of a derived form ("Marxism" -> "marx", "nobles" ->
+        # "noble") when the stem really occurs in this library. See
+        # _library_stems for why that condition is the whole safety story.
         library_tokens = set().union(*cls._lib_tokens_by_doc)
-        qwords.update(
-            w[:-1] for w in tuple(qwords)
-            if len(w) >= 6 and w.endswith('s') and w[:-1] in library_tokens
-        )
+        for w in tuple(qwords):
+            qwords |= _library_stems(w, library_tokens)
         if not qwords:
             return None
         # A distinctive single term (author surname / unusual title word).
