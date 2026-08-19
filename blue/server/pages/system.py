@@ -1,0 +1,117 @@
+"""The home page.
+
+Data, like every other page here: a Jinja template, rendered by
+blue/server/routes/system.py. Must not import bluetools.
+"""
+
+INDEX_HTML = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Blue AI Robot System</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
+            <link rel="stylesheet" href="/assets/blue.css">
+            <script src="/assets/blue.js" defer></script>
+            <style>
+                :root {
+                    --cream: #faf8f4; --paper: #ffffff; --ink: #1a2e1a; --forest: #4a6b4a;
+                    --sage: #8fae8f; --slate: #64748b; --blue: #3b82f6; --gold: #d4af37;
+                    --line: rgba(143,174,143,0.32); --shadow: 0 8px 24px rgba(26,46,26,0.06);
+                }
+                * { box-sizing: border-box; }
+                body {
+                    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    background: var(--cream); color: var(--ink); margin: 0;
+                    min-height: 100vh; padding: 56px 20px; line-height: 1.55;
+                }
+                .hub { max-width: 940px; margin: 0 auto; }
+                .hero { text-align: center; margin-bottom: 30px; }
+                .wordmark { display: inline-flex; align-items: center; gap: 14px; }
+                .wordmark .mark { width: 46px; height: 46px; }
+                .wordmark .name { font-family: 'Playfair Display', Georgia, serif; font-weight: 700;
+                    font-size: 2.6em; letter-spacing: -0.015em; line-height: 1; text-align: left; }
+                .wordmark .sys { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 0.30em;
+                    letter-spacing: 0.34em; text-transform: uppercase; color: var(--slate); font-weight: 500; margin-top: 7px; }
+                .tagline { color: var(--slate); font-size: 1.06em; margin: 16px auto 0; max-width: 560px; }
+                .status { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 22px; }
+                .chip { display: inline-flex; align-items: center; gap: 8px; background: var(--paper);
+                    border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px;
+                    font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); }
+                .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sage); }
+                .chip.on .dot { background: #3f9d52; }
+                .chip b { color: var(--ink); font-weight: 600; }
+                .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 18px; margin-top: 34px; }
+                .tile { display: block; text-decoration: none; color: inherit; background: var(--paper);
+                    border: 1px solid var(--line); border-radius: 14px; padding: 22px;
+                    box-shadow: var(--shadow); transition: transform .15s ease, box-shadow .15s ease, border-color .15s; }
+                .tile:hover { transform: translateY(-3px); border-color: var(--sage); box-shadow: 0 14px 32px rgba(26,46,26,0.12); }
+                .tile .ticon { width: 42px; height: 42px; border-radius: 11px; background: #eef2ec; color: var(--forest);
+                    display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
+                .tile .ticon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7;
+                    stroke-linecap: round; stroke-linejoin: round; }
+                .tile h2 { font-family: 'Playfair Display', Georgia, serif; font-size: 1.2em; font-weight: 600; margin: 0 0 5px; }
+                .tile p { margin: 0; color: var(--slate); font-size: 0.9em; }
+                .tile .arrow { margin-top: 12px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest); }
+                .foot { text-align: center; color: var(--slate); font-family: 'IBM Plex Mono', monospace;
+                    font-size: 0.72em; margin-top: 34px; letter-spacing: 0.04em; }
+                .about { max-width: 760px; margin: 34px auto 0; background: var(--paper); border: 1px solid var(--line);
+                    border-radius: 14px; padding: 24px 28px; box-shadow: var(--shadow); text-align: left; }
+                .about h2 { font-family: 'Playfair Display', Georgia, serif; font-size: 1.25em; font-weight: 600; margin: 0 0 12px; }
+                .about p { margin: 0 0 12px; color: #2e3f2e; }
+                .about p:last-child { margin-bottom: 0; }
+                .about p.lead { color: var(--slate); font-size: 1.05em; }
+                .about b { color: var(--ink); font-weight: 600; }
+            </style>
+        </head>
+        <body>
+            <div class="hub">
+                <div class="hero">
+                    <div class="wordmark">
+                        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
+                            <circle cx="24" cy="24" r="20" style="fill:none;stroke:var(--forest);stroke-width:2"/>
+                            <circle cx="24" cy="24" r="6" style="fill:var(--blue)"/>
+                            <circle cx="44" cy="24" r="3.5" style="fill:var(--gold)"/>
+                        </svg>
+                        <span class="name">Blue<span class="sys">AI Robot System</span></span>
+                    </div>
+                    <p class="tagline">Blue, Hexia &amp; Casper — your local, private AI companions. Chat one-to-one, call on all three in Panel Mode, or put them on stage together.</p>
+                    <div class="status">
+                        <span class="chip on"><span class="dot"></span>Service <b>Running</b></span>
+                        <span class="chip"><span class="dot"></span>Music <b>{{ music_status }}</b></span>
+                        <span class="chip"><span class="dot"></span>Visualizer <b>{{ visualizer_status }}</b></span>
+                        <span class="chip"><span class="dot"></span>Hue Lights <b>{{ hue_status }}</b></span>
+                        <span class="chip"><span class="dot"></span>Documents <b>{{ doc_count }}</b></span>
+                        <span class="chip"><span class="dot"></span>Moods <b>{{ mood_count }}</b></span>
+                    </div>
+                </div>
+                <section class="about">
+                    <h2>What this is</h2>
+                    <p class="lead">Three AI robot companions &mdash; <b>Blue</b>, <b>Hexia</b>, and <b>Casper</b> &mdash; that run entirely on this computer. Nothing leaves the house: the language model, their memory, and your documents all stay local.</p>
+                    <p><b>Talk to any of them.</b> Blue is calm and thoughtful; Hexia is his playful, witty friend; Casper is the compact Picoh newcomer. Chat by text or voice and share photos or files. They share what they know about the household and document library, but each has its own personality, voice, conversation history, continuity, and physical head.</p>
+                    <p><b>Bring everyone into one room.</b> In <b>Panel Mode</b>, call Blue, Hexia, or Casper by name and the named robot acknowledges you before answering; all three hear the same live conversation. In <b>Duet</b>, Blue and Hexia investigate a subject together. In <b>Comedic Banter</b>, all three build a comedy riff.</p>
+                    <p><b>Everything else</b> is on the tiles below: calibrating each robot's head, connecting the Ohbot boards, the document library they read and search, the calendar and reminders, contacts, and the people and places they recognise.</p>
+                </section>
+                <div class="tiles">
+                    <a class="tile" href="/chat"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Blue</h2><p>Talk with Blue and share photos or files.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/continuity/blue"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/><path d="M12 7v5l3 2"/></svg></div><h2>Continuity</h2><p>Open Blue's live J-space; Hexia and Casper have their own continuity pages too.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Hexia</h2><p>Talk with Hexia, Blue's playful friend.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/casper"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg></div><h2>Chat with Casper</h2><p>Talk with Casper, the compact Picoh newcomer.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/panel"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="7" r="2.5"/><circle cx="12" cy="5" r="2.5"/><circle cx="19" cy="7" r="2.5"/><path d="M2 14c0-2 1.5-3.5 3-3.5S8 12 8 14m1-1c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5m1 1c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5M5 17h14"/></svg></div><h2>Panel Mode</h2><p>Speak with all three; call a name to choose who answers while everyone hears the room.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/duet"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-3 4-3 6H10c0-2-3-3-3-6z"/><path d="M9 20h6"/></svg></div><h2>Let them talk</h2><p>Blue &amp; Hexia converse — set a topic, a link to discuss, roles, and sources.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/banter"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="8" r="3"/><circle cx="18" cy="8" r="3"/><circle cx="12" cy="16" r="3"/><path d="M8.5 9.5 10 13m5.5-3.5L14 13M9 7h6"/></svg></div><h2>Comedic Banter</h2><p>Give all three robots a topic and let them build a comedy riff together.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/calendar"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h2>Calendar</h2><p>Reminders and events, one-off or recurring.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/contacts"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg></div><h2>Contacts</h2><p>The shared address book for email.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/visual"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div><h2>Visual Memory</h2><p>People, places, and things they recognize.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/documents"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h2>Documents</h2><p>The library all three robots read and search.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/perspective"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h2>Perspective</h2><p>How Blue understands you — and himself.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/heads"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM2 9h2M2 15h2M20 9h2M20 15h2M9 2v2M15 2v2M9 20v2M15 20v2"/></svg></div><h2>Robot heads</h2><p>Connect and assign the Ohbot and Picoh boards.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/head"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg></div><h2>Tune Blue's head</h2><p>Calibrate Blue's motion, expressions and lip-sync.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/head/hexia"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg></div><h2>Tune Hexia's head</h2><p>Calibrate Hexia's motion, expressions and lip-sync.</p><div class="arrow">Open &rarr;</div></a>
+                    <a class="tile" href="/head/casper"><div class="ticon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg></div><h2>Tune Casper's head</h2><p>Calibrate Casper's motion, eye shapes, base light and lip-sync.</p><div class="arrow">Open &rarr;</div></a>
+                </div>
+                <div class="foot">Running locally &middot; 100% on your own hardware</div>
+            </div>
+        </body>
+        </html>
+        """

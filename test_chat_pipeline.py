@@ -650,3 +650,36 @@ def test_an_attached_image_takes_the_non_camera_path(monkeypatch, tmp_path):
     bt._chat_inject_vision(messages)
 
     assert "image_url" in [p.get("type") for p in messages[-1]["content"]]
+
+
+# --------------------------------------------------------------------------
+# The home page
+# --------------------------------------------------------------------------
+# Its 13KB of HTML moved to blue/server/pages/system.py and became a Jinja
+# template. Nothing exercised "/" before, so a broken placeholder or an
+# unbalanced tag would have reached the browser rather than the suite.
+
+def test_the_home_page_renders(chat):
+    response = chat.client.get("/")
+
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert body.lstrip().startswith("<!DOCTYPE html>")
+    assert "Blue AI Robot System" in body
+
+
+def test_the_home_page_leaves_no_placeholder_unfilled(chat):
+    """A renamed template variable renders empty rather than failing."""
+    body = chat.client.get("/").get_data(as_text=True)
+
+    assert "{{" not in body and "}}" not in body
+    for label in ("Music", "Documents", "Hue Lights"):
+        assert label in body, f"the {label} status chip vanished"
+
+
+def test_the_home_page_reports_the_document_count(chat, monkeypatch):
+    monkeypatch.setattr(bt, "load_document_index",
+                        lambda: {"documents": [{"filename": f"{i}.pdf"}
+                                               for i in range(7)]})
+    body = chat.client.get("/").get_data(as_text=True)
+    assert "Documents <b>7</b>" in body, "the document chip did not get the count"
