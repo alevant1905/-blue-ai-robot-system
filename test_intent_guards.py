@@ -630,3 +630,67 @@ def test_a_wh_complement_keeps_a_frame_a_question(selector):
     "do you remember what time the meeting is"."""
     assert chosen(selector, "can you remember what we decided") != 'remember_fact'
     assert chosen(selector, "can you remind me of those ideas?") is None
+
+
+# --------------------------------------------------------------------------
+# The library detector vs. statements of activity
+# --------------------------------------------------------------------------
+# A third failure, 2026-08-12. A test had just been written using "I'm working
+# on DH201 right now" as its example of an ordinary conversational turn. Two
+# hours later a DH201 folder was uploaded to the library, and from that moment
+# the folder-name match fired on that sentence at 0.90 confidence, which is
+# high enough to fast-execute: Blue answered a passing remark with a document
+# search and never saw the turn himself. Nothing in the code had changed.
+#
+# The library is real, mutable, untracked data, so these tests pin a fixed one
+# rather than depending on whatever is on disk today.
+
+@pytest.fixture
+def library(monkeypatch):
+    """A known library, with the disk read disabled outright."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+
+    monkeypatch.setattr(DocumentsDetector, "_refresh_library",
+                        classmethod(lambda cls: None))
+    monkeypatch.setattr(DocumentsDetector, "_lib_phrases",
+                        {"dh201", "cmds4740", "alex levant", "marx"})
+    monkeypatch.setattr(DocumentsDetector, "_lib_tokens_by_doc",
+                        [{"dh201", "workshop"}, {"marx", "capital"}])
+    monkeypatch.setattr(DocumentsDetector, "_lib_rare_tokens", {"ilyenkov"})
+    return DocumentsDetector
+
+
+@pytest.mark.parametrize("message", [
+    "i'm working on dh201 right now.",
+    "i am working on dh201 today",
+    "i'm currently working on cmds4740",
+    "i've been working on marx all week",
+    "i'll be working on dh201 tomorrow",
+    "i'm busy with dh201 at the moment",
+    "i'm teaching dh201 this term",
+    "i'm grading cmds4740 tonight",
+])
+def test_saying_what_you_are_busy_with_is_not_a_library_query(library, message):
+    assert library._library_match(message) is None
+
+
+@pytest.mark.parametrize("message", [
+    "i'm working on the dh201 syllabus",
+    "i'm working on the marx chapter",
+    "i'm teaching dh201 — what are the readings",
+])
+def test_a_document_frame_outranks_the_activity_statement(library, message):
+    """Naming a document inside the same sentence is still a real request."""
+    assert library._library_match(message) is not None
+
+
+@pytest.mark.parametrize("message", [
+    "dh201",
+    "tell me about dh201",
+    "open the dh201 folder",
+    "what's in cmds4740",
+    "summarize the dh201 workshop pdf",
+    "what does ilyenkov argue about the ideal",
+])
+def test_naming_the_library_outright_still_searches(library, message):
+    assert library._library_match(message) is not None

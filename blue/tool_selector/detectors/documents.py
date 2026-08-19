@@ -124,6 +124,20 @@ _EXTERNAL_PLACE_RE = re.compile(
     re.I,
 )
 
+# Telling Blue what you are busy with. A course code or an author's name in
+# such a sentence is context for the conversation, not a query: "I'm working
+# on DH201 right now", "I'm teaching CMDS4740 this term", "I've been working
+# on Marx all week". Anchored on the first person so that a real request
+# ("open the DH201 folder") is untouched.
+_ACTIVITY_STATEMENT_RE = re.compile(
+    r"\bi(?:'m|\s+am)\b[^.!?]{0,20}\b(?:working|busy)\s+(?:on|with)\b"
+    r"|\bi(?:'ve|\s+have|\s+had)\s+been\s+working\s+(?:on|with)\b"
+    r"|\bi(?:'ll|\s+will)\s+be\s+working\s+(?:on|with)\b"
+    r"|\bi(?:'m|\s+am)\s+(?:currently\s+|now\s+|still\s+|just\s+)?"
+    r"(?:teaching|taking|prepping|preparing|grading|marking)\b",
+    re.I,
+)
+
 _NAMING_STATEMENT_RE = re.compile(
     r"\bmy (?:first |last |full |middle )?name is\b"
     r"|\byour (?:first |last |full )?name is\b"
@@ -290,6 +304,15 @@ class DocumentsDetector(BaseDetector):
         # Interacting with a person who happens to be an author is not a
         # library query — unless the message also frames a document.
         if (_PERSON_INTERACTION_RE.search(msg_lower)
+                and not _DOCUMENT_FRAME_RE.search(msg_lower)):
+            return None
+        # Saying what you are busy with is not a request to open the folder.
+        # "I'm working on DH201 right now" started fast-executing a document
+        # search at 0.90 the hour a DH201 folder appeared in the library, so a
+        # passing remark got a file dump back instead of a reply. A document
+        # frame still outranks this: "I'm working on the DH201 syllabus"
+        # searches exactly as before.
+        if (_ACTIVITY_STATEMENT_RE.search(msg_lower)
                 and not _DOCUMENT_FRAME_RE.search(msg_lower)):
             return None
         cls._refresh_library()
