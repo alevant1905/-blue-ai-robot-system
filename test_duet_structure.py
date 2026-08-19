@@ -641,16 +641,19 @@ def test_link_is_primary_over_checked_readings(duet_module):
 # which is the part that is easy to break and impossible to see by reading.
 
 def _pressures(duet_module, **overrides):
+    # Anything that lives on the beats record is routed there; the rest are
+    # the turn's own inputs.
+    beat_fields = {k: overrides.pop(k) for k in list(overrides)
+                   if k in duet_module._DuetBeats.__dataclass_fields__}
     kwargs = dict(
         protocol=True, closing=False, mail=None, student_q_text="",
-        arc_stage="", arc_stuck="", nb_note="", direction="",
-        active_task_note="", artifact_plan_note="", artifact_mode_note="",
-        active_task_attempts=0, stalled=False, kernel_deadlocked=False,
-        kernel_health_in="", kernel_denied=False, operation_missed=False,
-        validation_rejected=False, promotion_rejected=False,
+        nb_note="", direction="", active_task_note="",
+        artifact_plan_note="", artifact_mode_note="",
+        active_task_attempts=0, stalled=False,
     )
     kwargs.update(overrides)
-    return duet_module._duet_turn_pressures(**kwargs)
+    return duet_module._duet_turn_pressures(
+        _beats(duet_module, **beat_fields), **kwargs)
 
 
 def _all_flags(pressures):

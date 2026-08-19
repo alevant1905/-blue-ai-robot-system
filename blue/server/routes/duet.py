@@ -3264,13 +3264,11 @@ _DUET_MECHANISM_PHRASE_RE = re.compile(
 
 
 
-def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
-                         arc_stage, arc_stuck, nb_note, direction,
+def _duet_turn_pressures(b: _DuetBeats, *, protocol, closing, mail,
+                         student_q_text, nb_note, direction,
                          active_task_note, artifact_plan_note,
-                         artifact_mode_note, active_task_attempts, stalled,
-                         kernel_deadlocked, kernel_health_in, kernel_denied,
-                         operation_missed, validation_rejected,
-                         promotion_rejected) -> _DuetPressures:
+                         artifact_mode_note, active_task_attempts,
+                         stalled) -> _DuetPressures:
     """Work out which protocol pressures bear on this turn.
 
     Pure: every input is a plain value, so this can be exercised on its own.
@@ -3287,7 +3285,7 @@ def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
 
     def staged(*stages) -> bool:
         """True when the arc is at, or stuck on, any of these stages."""
-        return arc_stage in stages or arc_stuck in stages
+        return b.arc_stage in stages or b.arc_stuck in stages
 
     def mentions(pattern) -> bool:
         """True when the pooled task context names what `pattern` matches."""
@@ -3334,12 +3332,12 @@ def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
         or mentions(_DUET_CONCEPT_INSTABILITY_RE))
 
     deadlock = on and not compiler and (
-        kernel_deadlocked
-        or kernel_health_in == "DEADLOCKED"
+        b.kernel_deadlocked
+        or b.kernel_health_in == "DEADLOCKED"
         or staged("DEADLOCK", "KERNEL HEALTH", "DEPENDENCY SOLVER")
         or mentions(_DUET_DEADLOCK_RE)
         or (active_task_attempts >= 6 and stalled
-            and (kernel_denied or operation_missed or validation_rejected
+            and (b.kernel_denied or b.operation_missed or b.validation_rejected
                  or concept)))
 
     # Mechanism and editor work both stand down while any structural pressure
@@ -3365,7 +3363,7 @@ def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
         or artifact_editor
     ) and (staged("EXECUTION") or mentions(_DUET_EXECUTION_LOCK_RE))
 
-    operational = on and not compiler and (operation_missed or staged("OPERATION"))
+    operational = on and not compiler and (b.operation_missed or staged("OPERATION"))
 
     artifact = on and not compiler and staged("ARTIFACT", "DEPENDENCY")
 
@@ -3373,7 +3371,7 @@ def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
                        or noted("rival framework", "rival explanation"))
 
     validation = on and not compiler and (
-        validation_rejected or promotion_rejected or kernel_denied
+        b.validation_rejected or b.promotion_rejected or b.kernel_denied
         or staged("VALIDATION", "PROMOTION")
         or noted("validation gate rejected", "promotion gate rejected",
                  "status remain"))
@@ -4948,19 +4946,13 @@ def duet_turn():
     if no_family and _duet_family_ref(artifact_mode_note):
         artifact_mode_note = ""
     pressures = _duet_turn_pressures(
-        protocol=protocol, closing=closing, mail=mail,
-        student_q_text=student_q_text, arc_stage=beats.arc_stage,
-        arc_stuck=beats.arc_stuck, nb_note=nb_note, direction=direction,
+        beats, protocol=protocol, closing=closing, mail=mail,
+        student_q_text=student_q_text, nb_note=nb_note, direction=direction,
         active_task_note=active_task_note,
         artifact_plan_note=artifact_plan_note,
         artifact_mode_note=artifact_mode_note,
         active_task_attempts=active_task_attempts,
         stalled=bool(d.get('stalled')),
-        kernel_deadlocked=beats.kernel_deadlocked,
-        kernel_health_in=beats.kernel_health_in, kernel_denied=beats.kernel_denied,
-        operation_missed=beats.operation_missed,
-        validation_rejected=beats.validation_rejected,
-        promotion_rejected=beats.promotion_rejected,
     )
     # Spice 0 (calm/agreeable) → 10 (provocative/sparring): sets how often a turn
     # gets a confrontational "move", how hard the two push on each other, and the
