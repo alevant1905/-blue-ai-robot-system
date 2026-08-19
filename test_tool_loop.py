@@ -246,3 +246,73 @@ def test_the_forced_retry_is_skipped_when_the_selector_supplied_nothing(loop):
 
     assert loop.executed == [], "a person was remembered with no name"
     assert content_of(result)
+
+
+# --------------------------------------------------------------------------
+# Claiming to have done something
+# --------------------------------------------------------------------------
+# The worst failure this loop has: the model says "sent" without ever calling
+# a tool. What happens next turns entirely on whether the user asked for the
+# action, and the two branches must not be swapped - one performs a real
+# action in a real house, the other must never perform anything.
+#
+# These call the guard chain directly. Driven through the whole pipeline the
+# selector answers these turns before the chain is ever reached, so the branch
+# that matters would go untested.
+
+def _judge(said, asked, *, repairs=None, iteration=1, force_tool=None):
+    from blue.server import tool_pipeline
+
+    response = {"choices": [{"message": {"role": "assistant", "content": said}}]}
+    messages = [{"role": "user", "content": asked}]
+    retry, pending = tool_pipeline._judge_untooled_reply(
+        response, response["choices"][0]["message"],
+        repairs if repairs is not None else tool_pipeline._ReplyRepairs(),
+        iteration=iteration, force_tool=force_tool,
+        conversation_messages=messages, improved_force_tool=None,
+        improved_tool_args=None, _detect_msg=asked,
+        last_user_message=asked, user_name="Alex")
+    return retry, pending, response, messages
+
+
+def test_a_claimed_action_the_user_asked_for_is_forced_on_the_next_pass():
+    """The claim becomes a real call next iteration.
+
+    That carry is exactly what a dropped `pending_force_tool` breaks, and it
+    breaks silently: the reply still reads as though the mail went.
+    """
+    retry, pending, _resp, messages = _judge(
+        "Sent! I've emailed the reading list to the class.",
+        "email the reading list to the class")
+
+    assert retry is True
+    assert pending == "send_gmail", "the claimed tool was not carried over"
+    assert "didn't actually call any tool" in json.dumps(messages)
+
+
+def test_a_claimed_action_nobody_asked_for_is_regenerated_not_forced():
+    """2026-07-09: "I sent the introduction email to the class", unprompted."""
+    retry, pending, _resp, messages = _judge(
+        "By the way, I sent the introduction email to the class.",
+        "what's the weather doing?")
+
+    assert retry is True
+    assert pending is None, "an unrequested action was queued for execution"
+    assert "did not ask for any such action" in json.dumps(messages)
+
+
+def test_an_insisted_claim_nobody_asked_for_is_scrubbed_not_performed():
+    """Second offence: the loop stops arguing and removes the claim."""
+    from blue.server import tool_pipeline
+
+    repairs = tool_pipeline._ReplyRepairs()
+    repairs.phantom_claim = True           # it already tried once this turn
+
+    retry, pending, response, _messages = _judge(
+        "By the way, I sent the introduction email to the class.",
+        "what's the weather doing?", repairs=repairs)
+
+    assert retry is False, "the loop kept arguing instead of taking the reply"
+    assert pending is None
+    assert "sent the introduction email" not in content_of(response).lower(), \
+        "the claim survived into the reply"

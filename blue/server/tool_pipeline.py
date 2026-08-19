@@ -414,6 +414,282 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
     return None, pending_force_tool
 
 
+
+
+class _ReplyRepairs:
+    """One-shot corrections for a reply that arrived without a tool call.
+
+    Each fires at most once a turn. Without that a stubborn model and the
+    loop ping-pong: it refuses, the loop forces a search, it refuses again.
+    """
+    __slots__ = ("web_refusal", "leaked_tool", "phantom_claim",
+                 "calendar_denial")
+
+    def __init__(self):
+        self.web_refusal = False
+        self.leaked_tool = False
+        self.phantom_claim = False
+        self.calendar_denial = False
+
+
+def _judge_untooled_reply(response, assistant_message, repairs, *,
+                          iteration, force_tool, conversation_messages,
+                          improved_force_tool, improved_tool_args,
+                          _detect_msg, last_user_message, user_name):
+    """Decide what to do with a reply the model gave without calling a tool.
+
+    Returns (retry, pending_force_tool). retry True means go round again,
+    forcing that tool if one is named. False means the reply is the answer.
+
+    `conversation_messages` and `repairs` are appended to and set in place,
+    and `response` may be edited before it is accepted.
+    """
+    pending = None
+    content = assistant_message.get("content", "")
+
+    # Check if model should have used a tool but didn't
+    if iteration == 1 and improved_force_tool:
+        correct_tool = improved_force_tool
+        print(f"   [ERROR] Model answered without using {correct_tool} tool!")
+
+        # Use selector's extracted params if available, otherwise let LLM retry
+        tool_args = improved_tool_args if improved_tool_args is not None else {}
+        # ...but never run a tool with nothing to act on. The old
+        # `is not None` test was always true, so a detector that
+        # returned extracted_params={} (remember_person does) ran
+        # the tool with {} — "[OK] Remembered person:" with a blank
+        # name, writing an empty row (live 2026-08-13). If the
+        # schema needs arguments the selector could not supply,
+        # let the model's own answer stand.
+        missing = _missing_required_args(correct_tool, tool_args)
+        if missing:
+            print(f"   [SKIP] not direct-executing {correct_tool} — "
+                  f"no {', '.join(missing)} was extracted")
+        else:
+            print(f"   [RETRY] Direct-executing {correct_tool} with extracted params")
+            tool_result = bt.execute_tool(correct_tool, tool_args)
+            conversation_messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "forced", "type": "function",
+                               "function": {"name": correct_tool, "arguments": json.dumps(tool_args)}}]
+            })
+            conversation_messages.append({
+                "role": "tool",
+                "tool_call_id": "forced",
+                "name": correct_tool,
+                "content": tool_result
+            })
+            return True, pending
+
+    # The model wrote a tool call as visible TEXT instead of calling it
+    # (the "<tool_call>...</tool_call> reached the user as words" bug).
+    # Parse it and run it for real; the next iteration composes the
+    # answer from the actual result.
+    _leaked = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
+    if _leaked and _leaked[0] in {
+            t.get("function", {}).get("name") for t in bt.TOOLS}:
+        repairs.leaked_tool = True
+        _lk_name, _lk_args = _leaked
+        print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
+        tool_result = bt.execute_tool(_lk_name, _lk_args)
+        conversation_messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "leaked", "type": "function",
+                            "function": {"name": _lk_name, "arguments": json.dumps(_lk_args)}}]
+        })
+        conversation_messages.append({"role": "tool", "tool_call_id": "leaked",
+                                      "name": _lk_name, "content": tool_result})
+        return True, pending
+
+    # The model claimed it has no live/real-time access, or told the
+    # user to go check a website — but web_search exists precisely for
+    # this. Run the search it dodged and make it answer from results.
+    _memory_recall_turn = (
+        bt.identity_request_kind(_detect_msg) in {
+            "shared_recall", "self_memory", "evolution", "origin",
+        }
+        or bool(re.search(
+            r"\b(?:remember|recall|what did you do|how was your day)\b",
+            _detect_msg,
+            re.I,
+        ))
+    )
+    if (bt.detect_web_refusal(content) and not repairs.web_refusal
+            and not _memory_recall_turn):
+        repairs.web_refusal = True
+        print("   [WARN] model claimed no live access — forcing web_search")
+        _q = _detect_msg.strip()[:160]
+        # A bare follow-up ("tell me the latest") carries no subject —
+        # borrow it from the previous user turn.
+        if len(re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
+            _prev_users = [m.get("content", "") for m in conversation_messages
+                           if m.get("role") == "user" and isinstance(m.get("content"), str)]
+            if len(_prev_users) >= 2:
+                _q = f"{_prev_users[-2].strip()[:120]} {_q}".strip()
+        search_result = bt.execute_tool("web_search", {"query": _q})
+        conversation_messages.append({
+            "role": "assistant",
+            "content": "Let me actually look that up.",
+            "tool_calls": [{"id": "forced", "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": _q})}}]
+        })
+        conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
+        conversation_messages.append({
+            "role": "user",
+            "content": ("[Those are LIVE web results you just fetched yourself. Answer "
+                        "the question directly from them. Do NOT say you lack live or "
+                        "real-time access, and do NOT tell the user to check a website.]")
+        })
+        return True, pending
+
+    # The model disowned the calendar it actually maintains ("I don't
+    # have a persistent calendar", "read-only access", "add it manually
+    # in your calendar app"). Load the REAL calendar and make him answer
+    # from it — and, if Alex asked for a change, edit it with his tools.
+    if (bt.ENHANCED_TOOLS_AVAILABLE and not repairs.calendar_denial
+            and bt.detect_calendar_denial(content)
+            and bt._CALENDAR_TOPIC_RE.search(last_user_message or "")):
+        repairs.calendar_denial = True
+        print("   [WARN] model disowned the calendar — loading the real one")
+        _cal_user = user_name or "Alex"
+        _cal_args = {"user_name": _cal_user, "hours_ahead": 24 * 365}
+        cal_result = bt.execute_tool("get_upcoming_reminders", _cal_args)
+        conversation_messages.append({
+            "role": "assistant",
+            "content": "Let me check the calendar I keep for you.",
+            "tool_calls": [{"id": "calforce", "type": "function",
+                            "function": {"name": "get_upcoming_reminders",
+                                         "arguments": json.dumps(_cal_args)}}]
+        })
+        conversation_messages.append({"role": "tool", "tool_call_id": "calforce",
+                                      "name": "get_upcoming_reminders", "content": cal_result})
+        conversation_messages.append({
+            "role": "user",
+            "content": (
+                "[Those are the entries from Alex's ACTUAL household calendar, which "
+                "you DO maintain. You are NOT read-only and this is NOT an external "
+                "app — you can add, reschedule, and cancel events yourself with your "
+                "reminder tools. Answer from these entries. If Alex asked you to "
+                "change one (for example, end a class/course on a date), call "
+                "reschedule_reminder now with that event's title_query and the new "
+                "fields (until=<date> to end a repeat). Never say you don't have a "
+                "calendar, that it's read-only, or that Alex must do it manually.]"
+            ),
+        })
+        pending = "reschedule_reminder" if bt._user_asked_calendar_edit(last_user_message) else None
+        return True, pending
+
+    # Check if model is hallucinating search results
+    if bt.detect_hallucinated_search(content):
+        print("   [WARN]  AI IS HALLUCINATING - forcing search")
+        search_query = last_user_message.replace("search for", "").strip()[:100]
+        search_result = bt.execute_tool("web_search", {"query": search_query})
+        conversation_messages.append({
+            "role": "assistant",
+            "content": "Let me search for that.",
+            "tool_calls": [{"id": "forced", "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": search_query})}}]
+        })
+        conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
+        return True, pending
+
+    # Check if model is claiming to have performed an action it
+    # didn't actually call a tool for ("I sent the email", "I turned
+    # off the lights", etc.). Stops the worst class of confabulation:
+    # user thinks an email was sent when nothing happened.
+    hallucinated_tool = bt.detect_hallucinated_action(content)
+    # A completed email_snapshot earlier in this turn makes later
+    # "sent the photo" / "took a picture" wording TRUE — bt.re-forcing
+    # send_gmail would mail a duplicate without the photo.
+    if hallucinated_tool in ("email_snapshot", "send_gmail",
+                             "reply_gmail", "capture_camera") and any(
+            m.get("role") == "tool" and m.get("name") == "email_snapshot"
+            for m in conversation_messages):
+        hallucinated_tool = None
+    if hallucinated_tool and not force_tool:
+        # The force-retry below turns the claim into a REAL action —
+        # only right when the user actually asked for one. A claim
+        # nobody asked for ("I sent the introduction email to the
+        # class", 2026-07-09) must be regenerated, and if the model
+        # insists, scrubbed — NEVER executed.
+        if not bt._user_requested_action(hallucinated_tool, last_user_message):
+            if repairs.phantom_claim:
+                print(f"   [WARN] AI still claiming {hallucinated_tool} nobody asked for — scrubbing the claim")
+                cleaned = bt._scrub_action_claim_sentences(content, hallucinated_tool)
+                response["choices"][0]["message"]["content"] = cleaned
+                if bt._last_vision_image_paths and cleaned:
+                    bt._save_visual_observation(cleaned, observer=bt._ACTIVE_CHAT_ROBOT)
+                return False, None
+            repairs.phantom_claim = True
+            print(f"   [WARN] AI claimed {hallucinated_tool} nobody asked for — regenerating, NOT executing")
+            conversation_messages.append({
+                "role": "user",
+                "content": (
+                    "[Correction: you claimed you performed an action, but the "
+                    "user did not ask for any such action and no tool was called. "
+                    "Nothing was sent or done. Do NOT perform, offer, or claim any "
+                    "action. Just answer the user's actual question directly: "
+                    f"\"{(last_user_message or '').strip()[:300]}\"]"
+                ),
+            })
+            return True, pending
+        print(f"   [WARN] AI claimed to {hallucinated_tool} but no tool called — forcing retry")
+        # Replace the lying response with a marker that tells the
+        # next iteration "you said you did this, now actually do it"
+        # via a forced tool call. The carryover variable survives the
+        # loop's `force_tool = None` reset AND the no-tools cap.
+        conversation_messages.append({
+            "role": "user",
+            "content": (
+                f"Wait — you said you performed that action, but you "
+                f"didn't actually call any tool. Use the {hallucinated_tool} "
+                f"tool now to actually do it. Get the recipient, subject, "
+                f"and body from the recent conversation."
+            ),
+        })
+        pending = hallucinated_tool
+        return True, pending
+
+    # Detect if model is denying tool capabilities after tools succeeded
+    if iteration > 1:
+        content_lower = content.lower()
+        denial_phrases = [
+            "can't access", "cannot access", "don't have access",
+            "unable to access", "can't browse", "cannot browse",
+        ]
+        is_denial = any(phrase in content_lower for phrase in denial_phrases)
+
+        if is_denial:
+            print(f"   [FIX] Model denying tool capabilities - forcing acknowledgment")
+            # Find the most recent tool result
+            last_tool_result = None
+            last_tool_name = None
+            for msg in reversed(conversation_messages):
+                if msg.get("role") == "tool":
+                    last_tool_result = msg.get("content", "")
+                    last_tool_name = msg.get("name", "")
+                    break
+
+            if last_tool_result and last_tool_name:
+                conversation_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"The {last_tool_name} tool already completed successfully. "
+                        f"Results: {last_tool_result[:500]}\n\n"
+                        f"Use these results to answer. Do not say you can't access anything."
+                    )
+                })
+                print(f"   [RETRY] Added correction for {last_tool_name}")
+                return True, pending
+
+    # Auto-save visual observation if this response was about an image
+    content = assistant_message.get("content", "")
+    if bt._last_vision_image_paths and content:
+        bt._save_visual_observation(content, observer=bt._ACTIVE_CHAT_ROBOT)
+
+    print("[OK] Response complete (no tool calls)")
+    return False, None
+
 def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                   improved_force_tool, improved_tool_args, is_greeting,
                   last_user_message, max_iterations, on_token, user_name,
@@ -429,384 +705,149 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
     """
     iteration = 0
     _conversational_turn = False
-    _web_refusal_forced = False
-    _leaked_tool_forced = False
-    _phantom_claim_corrected = False
-    _calendar_denial_forced = False
+    repairs = _ReplyRepairs()
     while iteration < max_iterations:
-            iteration += 1
-            print(f"\n[ITER] Iteration {iteration}")
+        iteration += 1
+        print(f"\n[ITER] Iteration {iteration}")
 
-            force_tool = None
+        force_tool = None
 
-            # ITERATION 1: Force correct tool based on clear intent
-            if iteration == 1:
-                if improved_force_tool:
-                    force_tool = improved_force_tool
-                    print(f"   [FORCE] Using tool from priority detection: {force_tool}")
-                elif is_greeting:
-                    print("   [SKIP] Greeting detected - no tool needed")
-                    force_tool = None
-                else:
-                    print("   [ALLOW] No clear tool intent - letting model decide")
-                    # Let it decide from the reflex set rather than all 53
-                    # schemas: they render after the system message and so are
-                    # re-prefilled every turn (~2.4s). A tool outside the set
-                    # that the model wanted is recovered by the hallucinated
-                    # action check below, which forces it on a retry.
-                    _conversational_turn = True
+        # ITERATION 1: Force correct tool based on clear intent
+        if iteration == 1:
+            if improved_force_tool:
+                force_tool = improved_force_tool
+                print(f"   [FORCE] Using tool from priority detection: {force_tool}")
+            elif is_greeting:
+                print("   [SKIP] Greeting detected - no tool needed")
+                force_tool = None
+            else:
+                print("   [ALLOW] No clear tool intent - letting model decide")
+                # Let it decide from the reflex set rather than all 53
+                # schemas: they render after the system message and so are
+                # re-prefilled every turn (~2.4s). A tool outside the set
+                # that the model wanted is recovered by the hallucinated
+                # action check below, which forces it on a retry.
+                _conversational_turn = True
 
-            # Carry over a force_tool set by the previous iteration's hallucination
-            # detector — this MUST run with tools enabled, otherwise the retry is
-            # pointless. Bypasses the no-tools cap below.
-            if pending_force_tool:
-                force_tool = pending_force_tool
-                pending_force_tool = None
-                print(f"   [HALLUCINATION-RETRY] Forcing {force_tool} with tools enabled")
-            # After iteration 1, force text-only responses (no tools) to avoid
-            # extra LLM round-trips — UNLESS we'bt.re retrying a hallucinated action,
-            # in which case the whole point is to actually call the tool.
-            elif iteration >= 2:
-                print(f"   [LIMIT] Iteration {iteration} - forcing response without tools")
-                conversation_messages.append({
-                    "role": "user",
-                    "content": "[Respond now using the tool results above. No more tool calls.]"
-                })
-                response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
-                                          on_token=on_token)
-                if not response:
-                    return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
-                return response
-
-            _include_tools = not (_identity_kind and not force_tool)
-            if not _include_tools and iteration == 1:
-                print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
-            response = bt.call_lm_studio(
-                conversation_messages,
-                include_tools=_include_tools,
-                force_tool=force_tool,
-                iteration=iteration,
-                on_token=on_token,
-                tool_scope=("reflex" if _conversational_turn and not force_tool
-                            else "full"),
-            )
-
+        # Carry over a force_tool set by the previous iteration's hallucination
+        # detector — this MUST run with tools enabled, otherwise the retry is
+        # pointless. Bypasses the no-tools cap below.
+        if pending_force_tool:
+            force_tool = pending_force_tool
+            pending_force_tool = None
+            print(f"   [HALLUCINATION-RETRY] Forcing {force_tool} with tools enabled")
+        # After iteration 1, force text-only responses (no tools) to avoid
+        # extra LLM round-trips — UNLESS we'bt.re retrying a hallucinated action,
+        # in which case the whole point is to actually call the tool.
+        elif iteration >= 2:
+            print(f"   [LIMIT] Iteration {iteration} - forcing response without tools")
+            conversation_messages.append({
+                "role": "user",
+                "content": "[Respond now using the tool results above. No more tool calls.]"
+            })
+            response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
+                                      on_token=on_token)
             if not response:
                 return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
+            return response
 
-            # A malformed reply must degrade, not raise. LM Studio can answer with
-            # {"error": ...} or an empty choices list — an unloaded model, a
-            # context overflow that survived the retrim, a template rejection. The
-            # bare subscript here turned all of those into an IndexError that
-            # escaped to a 500, which is precisely the path that makes Ohbot say
-            # "I'm having trouble connecting" instead of anything useful.
-            assistant_message = None
-            if isinstance(response, dict):
-                choices = response.get("choices")
-                if isinstance(choices, list) and choices:
-                    first = choices[0]
-                    if isinstance(first, dict) and isinstance(first.get("message"), dict):
-                        assistant_message = first["message"]
-            if assistant_message is None:
-                bt.log.error(f"[LLM] Unusable response shape: {str(response)[:300]}")
-                return {"choices": [{"message": {
-                    "role": "assistant",
-                    "content": "Sorry — my language model returned something I "
-                               "couldn't read. Could you say that again?",
-                }}]}
-            tool_calls = assistant_message.get("tool_calls", [])
+        _include_tools = not (_identity_kind and not force_tool)
+        if not _include_tools and iteration == 1:
+            print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
+        response = bt.call_lm_studio(
+            conversation_messages,
+            include_tools=_include_tools,
+            force_tool=force_tool,
+            iteration=iteration,
+            on_token=on_token,
+            tool_scope=("reflex" if _conversational_turn and not force_tool
+                        else "full"),
+        )
 
-            if not tool_calls:
-                content = assistant_message.get("content", "")
+        if not response:
+            return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
 
-                # Check if model should have used a tool but didn't
-                if iteration == 1 and improved_force_tool:
-                    correct_tool = improved_force_tool
-                    print(f"   [ERROR] Model answered without using {correct_tool} tool!")
+        # A malformed reply must degrade, not raise. LM Studio can answer with
+        # {"error": ...} or an empty choices list — an unloaded model, a
+        # context overflow that survived the retrim, a template rejection. The
+        # bare subscript here turned all of those into an IndexError that
+        # escaped to a 500, which is precisely the path that makes Ohbot say
+        # "I'm having trouble connecting" instead of anything useful.
+        assistant_message = None
+        if isinstance(response, dict):
+            choices = response.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict) and isinstance(first.get("message"), dict):
+                    assistant_message = first["message"]
+        if assistant_message is None:
+            bt.log.error(f"[LLM] Unusable response shape: {str(response)[:300]}")
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": "Sorry — my language model returned something I "
+                           "couldn't read. Could you say that again?",
+            }}]}
+        tool_calls = assistant_message.get("tool_calls", [])
 
-                    # Use selector's extracted params if available, otherwise let LLM retry
-                    tool_args = improved_tool_args if improved_tool_args is not None else {}
-                    # ...but never run a tool with nothing to act on. The old
-                    # `is not None` test was always true, so a detector that
-                    # returned extracted_params={} (remember_person does) ran
-                    # the tool with {} — "[OK] Remembered person:" with a blank
-                    # name, writing an empty row (live 2026-08-13). If the
-                    # schema needs arguments the selector could not supply,
-                    # let the model's own answer stand.
-                    missing = _missing_required_args(correct_tool, tool_args)
-                    if missing:
-                        print(f"   [SKIP] not direct-executing {correct_tool} — "
-                              f"no {', '.join(missing)} was extracted")
-                    else:
-                        print(f"   [RETRY] Direct-executing {correct_tool} with extracted params")
-                        tool_result = bt.execute_tool(correct_tool, tool_args)
-                        conversation_messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [{"id": "forced", "type": "function",
-                                           "function": {"name": correct_tool, "arguments": json.dumps(tool_args)}}]
-                        })
-                        conversation_messages.append({
-                            "role": "tool",
-                            "tool_call_id": "forced",
-                            "name": correct_tool,
-                            "content": tool_result
-                        })
-                        continue
+        if not tool_calls:
+            retry, pending_force_tool = _judge_untooled_reply(
+                response, assistant_message, repairs,
+                iteration=iteration, force_tool=force_tool,
+                conversation_messages=conversation_messages,
+                improved_force_tool=improved_force_tool,
+                improved_tool_args=improved_tool_args,
+                _detect_msg=_detect_msg,
+                last_user_message=last_user_message,
+                user_name=user_name)
+            if retry:
+                continue
+            return response
 
-                # The model wrote a tool call as visible TEXT instead of calling it
-                # (the "<tool_call>...</tool_call> reached the user as words" bug).
-                # Parse it and run it for real; the next iteration composes the
-                # answer from the actual result.
-                _leaked = None if _leaked_tool_forced else bt.parse_leaked_tool_call(content)
-                if _leaked and _leaked[0] in {
-                        t.get("function", {}).get("name") for t in bt.TOOLS}:
-                    _leaked_tool_forced = True
-                    _lk_name, _lk_args = _leaked
-                    print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
-                    tool_result = bt.execute_tool(_lk_name, _lk_args)
-                    conversation_messages.append({
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{"id": "leaked", "type": "function",
-                                        "function": {"name": _lk_name, "arguments": json.dumps(_lk_args)}}]
-                    })
-                    conversation_messages.append({"role": "tool", "tool_call_id": "leaked",
-                                                  "name": _lk_name, "content": tool_result})
-                    continue
+        print(f"[TOOL] Model requested {len(tool_calls)} tool call(s)")
 
-                # The model claimed it has no live/real-time access, or told the
-                # user to go check a website — but web_search exists precisely for
-                # this. Run the search it dodged and make it answer from results.
-                _memory_recall_turn = (
-                    bt.identity_request_kind(_detect_msg) in {
-                        "shared_recall", "self_memory", "evolution", "origin",
-                    }
-                    or bool(re.search(
-                        r"\b(?:remember|recall|what did you do|how was your day)\b",
-                        _detect_msg,
-                        re.I,
-                    ))
-                )
-                if (bt.detect_web_refusal(content) and not _web_refusal_forced
-                        and not _memory_recall_turn):
-                    _web_refusal_forced = True
-                    print("   [WARN] model claimed no live access — forcing web_search")
-                    _q = _detect_msg.strip()[:160]
-                    # A bare follow-up ("tell me the latest") carries no subject —
-                    # borrow it from the previous user turn.
-                    if len(re.findall(r"[a-z0-9]{3,}", _q.lower())) < 3:
-                        _prev_users = [m.get("content", "") for m in conversation_messages
-                                       if m.get("role") == "user" and isinstance(m.get("content"), str)]
-                        if len(_prev_users) >= 2:
-                            _q = f"{_prev_users[-2].strip()[:120]} {_q}".strip()
-                    search_result = bt.execute_tool("web_search", {"query": _q})
-                    conversation_messages.append({
-                        "role": "assistant",
-                        "content": "Let me actually look that up.",
-                        "tool_calls": [{"id": "forced", "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": _q})}}]
-                    })
-                    conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
-                    conversation_messages.append({
-                        "role": "user",
-                        "content": ("[Those are LIVE web results you just fetched yourself. Answer "
-                                    "the question directly from them. Do NOT say you lack live or "
-                                    "real-time access, and do NOT tell the user to check a website.]")
-                    })
-                    continue
+        # Check if model is using tools when it shouldn't
+        if is_greeting and not force_tool:
+            print(f"   [WARN] Model called tool for greeting/casual chat - this is unnecessary!")
+            # Let it proceed but warn in logs
 
-                # The model disowned the calendar it actually maintains ("I don't
-                # have a persistent calendar", "read-only access", "add it manually
-                # in your calendar app"). Load the REAL calendar and make him answer
-                # from it — and, if Alex asked for a change, edit it with his tools.
-                if (bt.ENHANCED_TOOLS_AVAILABLE and not _calendar_denial_forced
-                        and bt.detect_calendar_denial(content)
-                        and bt._CALENDAR_TOPIC_RE.search(last_user_message or "")):
-                    _calendar_denial_forced = True
-                    print("   [WARN] model disowned the calendar — loading the real one")
-                    _cal_user = user_name or "Alex"
-                    _cal_args = {"user_name": _cal_user, "hours_ahead": 24 * 365}
-                    cal_result = bt.execute_tool("get_upcoming_reminders", _cal_args)
-                    conversation_messages.append({
-                        "role": "assistant",
-                        "content": "Let me check the calendar I keep for you.",
-                        "tool_calls": [{"id": "calforce", "type": "function",
-                                        "function": {"name": "get_upcoming_reminders",
-                                                     "arguments": json.dumps(_cal_args)}}]
-                    })
-                    conversation_messages.append({"role": "tool", "tool_call_id": "calforce",
-                                                  "name": "get_upcoming_reminders", "content": cal_result})
-                    conversation_messages.append({
-                        "role": "user",
-                        "content": (
-                            "[Those are the entries from Alex's ACTUAL household calendar, which "
-                            "you DO maintain. You are NOT read-only and this is NOT an external "
-                            "app — you can add, reschedule, and cancel events yourself with your "
-                            "reminder tools. Answer from these entries. If Alex asked you to "
-                            "change one (for example, end a class/course on a date), call "
-                            "reschedule_reminder now with that event's title_query and the new "
-                            "fields (until=<date> to end a repeat). Never say you don't have a "
-                            "calendar, that it's read-only, or that Alex must do it manually.]"
-                        ),
-                    })
-                    pending_force_tool = "reschedule_reminder" if bt._user_asked_calendar_edit(last_user_message) else None
-                    continue
+        conversation_messages.append(assistant_message)
 
-                # Check if model is hallucinating search results
-                if bt.detect_hallucinated_search(content):
-                    print("   [WARN]  AI IS HALLUCINATING - forcing search")
-                    search_query = last_user_message.replace("search for", "").strip()[:100]
-                    search_result = bt.execute_tool("web_search", {"query": search_query})
-                    conversation_messages.append({
-                        "role": "assistant",
-                        "content": "Let me search for that.",
-                        "tool_calls": [{"id": "forced", "type": "function", "function": {"name": "web_search", "arguments": json.dumps({"query": search_query})}}]
-                    })
-                    conversation_messages.append({"role": "tool", "tool_call_id": "forced", "name": "web_search", "content": search_result})
-                    continue
+        for tool_call in tool_calls:
+            function_name = tool_call["function"]["name"]
+            function_args = json.loads(tool_call["function"]["arguments"])
+            tool_result = bt.execute_tool(function_name, function_args)
+            conversation_messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "name": function_name,
+                "content": tool_result
+            })
 
-                # Check if model is claiming to have performed an action it
-                # didn't actually call a tool for ("I sent the email", "I turned
-                # off the lights", etc.). Stops the worst class of confabulation:
-                # user thinks an email was sent when nothing happened.
-                hallucinated_tool = bt.detect_hallucinated_action(content)
-                # A completed email_snapshot earlier in this turn makes later
-                # "sent the photo" / "took a picture" wording TRUE — bt.re-forcing
-                # send_gmail would mail a duplicate without the photo.
-                if hallucinated_tool in ("email_snapshot", "send_gmail",
-                                         "reply_gmail", "capture_camera") and any(
-                        m.get("role") == "tool" and m.get("name") == "email_snapshot"
-                        for m in conversation_messages):
-                    hallucinated_tool = None
-                if hallucinated_tool and not force_tool:
-                    # The force-retry below turns the claim into a REAL action —
-                    # only right when the user actually asked for one. A claim
-                    # nobody asked for ("I sent the introduction email to the
-                    # class", 2026-07-09) must be regenerated, and if the model
-                    # insists, scrubbed — NEVER executed.
-                    if not bt._user_requested_action(hallucinated_tool, last_user_message):
-                        if _phantom_claim_corrected:
-                            print(f"   [WARN] AI still claiming {hallucinated_tool} nobody asked for — scrubbing the claim")
-                            cleaned = bt._scrub_action_claim_sentences(content, hallucinated_tool)
-                            response["choices"][0]["message"]["content"] = cleaned
-                            if bt._last_vision_image_paths and cleaned:
-                                bt._save_visual_observation(cleaned, observer=bt._ACTIVE_CHAT_ROBOT)
-                            return response
-                        _phantom_claim_corrected = True
-                        print(f"   [WARN] AI claimed {hallucinated_tool} nobody asked for — regenerating, NOT executing")
-                        conversation_messages.append({
-                            "role": "user",
-                            "content": (
-                                "[Correction: you claimed you performed an action, but the "
-                                "user did not ask for any such action and no tool was called. "
-                                "Nothing was sent or done. Do NOT perform, offer, or claim any "
-                                "action. Just answer the user's actual question directly: "
-                                f"\"{(last_user_message or '').strip()[:300]}\"]"
-                            ),
-                        })
-                        continue
-                    print(f"   [WARN] AI claimed to {hallucinated_tool} but no tool called — forcing retry")
-                    # Replace the lying response with a marker that tells the
-                    # next iteration "you said you did this, now actually do it"
-                    # via a forced tool call. The carryover variable survives the
-                    # loop's `force_tool = None` reset AND the no-tools cap.
-                    conversation_messages.append({
-                        "role": "user",
-                        "content": (
-                            f"Wait — you said you performed that action, but you "
-                            f"didn't actually call any tool. Use the {hallucinated_tool} "
-                            f"tool now to actually do it. Get the recipient, subject, "
-                            f"and body from the recent conversation."
-                        ),
-                    })
-                    pending_force_tool = hallucinated_tool
-                    continue
+            # Gmail operation reminders (prevents confusing read/reply/send)
+            _gmail_reminders = {
+                "read_gmail": "[You just READ emails. Summarize what you found. Don't say you replied or sent.]",
+                "reply_gmail": "[You just REPLIED to emails. Confirm what you did.]",
+                "send_gmail": "[You just SENT an email. Confirm what you did.]",
+            }
+            if function_name in _gmail_reminders:
+                try:
+                    result_data = json.loads(tool_result)
+                    if result_data.get("success"):
+                        reminder = _gmail_reminders[function_name]
+                        # Fanmail: add personalized reply hint
+                        if function_name == "read_gmail" and "fanmail" in str(function_args).lower() and result_data.get("emails"):
+                            reminder += " Compose a personalized reply referencing specific details from their message."
+                        conversation_messages.append({"role": "user", "content": reminder})
+                except Exception:
+                    pass
 
-                # Detect if model is denying tool capabilities after tools succeeded
-                if iteration > 1:
-                    content_lower = content.lower()
-                    denial_phrases = [
-                        "can't access", "cannot access", "don't have access",
-                        "unable to access", "can't browse", "cannot browse",
-                    ]
-                    is_denial = any(phrase in content_lower for phrase in denial_phrases)
+        if iteration == 1:
+            conversation_messages.append({
+                "role": "user",
+                "content": "[Answer the user naturally using the tool results above. Do not call more tools.]"
+            })
 
-                    if is_denial:
-                        print(f"   [FIX] Model denying tool capabilities - forcing acknowledgment")
-                        # Find the most recent tool result
-                        last_tool_result = None
-                        last_tool_name = None
-                        for msg in reversed(conversation_messages):
-                            if msg.get("role") == "tool":
-                                last_tool_result = msg.get("content", "")
-                                last_tool_name = msg.get("name", "")
-                                break
-
-                        if last_tool_result and last_tool_name:
-                            conversation_messages.append({
-                                "role": "user",
-                                "content": (
-                                    f"The {last_tool_name} tool already completed successfully. "
-                                    f"Results: {last_tool_result[:500]}\n\n"
-                                    f"Use these results to answer. Do not say you can't access anything."
-                                )
-                            })
-                            print(f"   [RETRY] Added correction for {last_tool_name}")
-                            continue
-
-                # Auto-save visual observation if this response was about an image
-                content = assistant_message.get("content", "")
-                if bt._last_vision_image_paths and content:
-                    bt._save_visual_observation(content, observer=bt._ACTIVE_CHAT_ROBOT)
-
-                print("[OK] Response complete (no tool calls)")
-                return response
-
-            print(f"[TOOL] Model requested {len(tool_calls)} tool call(s)")
-
-            # Check if model is using tools when it shouldn't
-            if is_greeting and not force_tool:
-                print(f"   [WARN] Model called tool for greeting/casual chat - this is unnecessary!")
-                # Let it proceed but warn in logs
-
-            conversation_messages.append(assistant_message)
-
-            for tool_call in tool_calls:
-                function_name = tool_call["function"]["name"]
-                function_args = json.loads(tool_call["function"]["arguments"])
-                tool_result = bt.execute_tool(function_name, function_args)
-                conversation_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": function_name,
-                    "content": tool_result
-                })
-
-                # Gmail operation reminders (prevents confusing read/reply/send)
-                _gmail_reminders = {
-                    "read_gmail": "[You just READ emails. Summarize what you found. Don't say you replied or sent.]",
-                    "reply_gmail": "[You just REPLIED to emails. Confirm what you did.]",
-                    "send_gmail": "[You just SENT an email. Confirm what you did.]",
-                }
-                if function_name in _gmail_reminders:
-                    try:
-                        result_data = json.loads(tool_result)
-                        if result_data.get("success"):
-                            reminder = _gmail_reminders[function_name]
-                            # Fanmail: add personalized reply hint
-                            if function_name == "read_gmail" and "fanmail" in str(function_args).lower() and result_data.get("emails"):
-                                reminder += " Compose a personalized reply referencing specific details from their message."
-                            conversation_messages.append({"role": "user", "content": reminder})
-                    except Exception:
-                        pass
-
-            if iteration == 1:
-                conversation_messages.append({
-                    "role": "user",
-                    "content": "[Answer the user naturally using the tool results above. Do not call more tools.]"
-                })
-
-            # CRITICAL FIX: After executing all tools, loop back to get the model's response to the tool results
-            # Without this continue, the code falls through to the error return statement below
-            continue
+        # CRITICAL FIX: After executing all tools, loop back to get the model's response to the tool results
+        # Without this continue, the code falls through to the error return statement below
+        continue
     return None
