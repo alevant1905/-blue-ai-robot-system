@@ -761,21 +761,34 @@ def _flags(duet_module, **on):
     return duet_module._DuetPressures(task_context="", **fields)
 
 
-def _job(duet_module, pressures=None, **overrides):
+def _beats(duet_module, **on):
+    """A beats record at the opening phase, with nothing else going on."""
     ph_name, ph_gloss, ph_jobs = duet_module._DUET_PROTO_PHASES[0]
     phase = sorted(duet_module._DUET_INQUIRY_JOBS)[0]
-    kwargs = dict(
-        protocol=True, ot={"name": "Hexia"}, proto_job="builder",
+    fields = dict(
         ph_name=ph_name, ph_gloss=ph_gloss, ph_jobs=ph_jobs,
+        proto_job="builder",
         inquiry_phase=phase, inquiry_gloss="define the terms",
         inquiry_job=sorted(duet_module._DUET_INQUIRY_JOBS[phase])[0],
-        source_audit_active=False, active_task_note="", arc_stuck="",
+        source_audit_active=False, arc_stage="", arc_stuck="",
         arc_break=False, monotony="", monotony_break=False,
         stall_break=False, conclusion_beat=False, operation_missed=False,
+        validation_rejected=False, promotion_rejected=False,
+        kernel_denied=False, kernel_deadlocked=False, kernel_health_in="",
     )
+    fields.update(on)
+    return duet_module._DuetBeats(**fields)
+
+
+def _job(duet_module, pressures=None, beats=None, **overrides):
+    kwargs = dict(protocol=True, ot={"name": "Hexia"}, active_task_note="")
+    beat_fields = {k: overrides.pop(k) for k in list(overrides)
+                   if k in duet_module._DuetBeats.__dataclass_fields__}
     kwargs.update(overrides)
     return duet_module._duet_turn_job_directive(
-        pressures if pressures is not None else _flags(duet_module), **kwargs)
+        pressures if pressures is not None else _flags(duet_module),
+        beats if beats is not None else _beats(duet_module, **beat_fields),
+        **kwargs)
 
 
 def test_a_turn_with_nothing_pressing_gets_an_inquiry_round(duet_module):
