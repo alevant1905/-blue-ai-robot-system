@@ -86,8 +86,21 @@ def test_link_title_replaces_generic_topic_placeholder(duet_module):
     ) == "Does embodiment distinguish humans from AI?"
 
 
+def _duet_source(duet_module):
+    """duet.py plus the module its prompt text lives in.
+
+    The reflection prompts moved to blue/server/prompts.py. These assertions
+    are about the text the duet actually sends, so they follow it there —
+    including the negative ones, which must hold across both files.
+    """
+    prompts = duet_module.os.path.join(
+        duet_module.os.path.dirname(duet_module.__file__), "..", "prompts.py")
+    return (open(duet_module.__file__, encoding="utf-8").read()
+            + open(prompts, encoding="utf-8").read())
+
+
 def test_generic_hidden_assumption_fallback_is_gone(duet_module):
-    source = open(duet_module.__file__, encoding="utf-8").read()
+    source = _duet_source(duet_module)
     assert "I think the stronger move is to make the hidden assumption explicit" not in source
     assert '"retryable": True' in source
 
@@ -616,7 +629,7 @@ def test_browser_bounds_open_runs_and_only_rolls_distinct_branches(duet_module):
 
 
 def test_link_is_primary_over_checked_readings(duet_module):
-    source = open(duet_module.__file__, encoding="utf-8").read()
+    source = _duet_source(duet_module)
     assert "OPTIONAL SECONDARY LENSES FROM THE CHECKED READINGS" in source
     assert "Primary grounding requirement" in source
     assert "Drift away from the assigned subject is not a branch" in source
@@ -945,3 +958,44 @@ def test_the_demand_is_what_gets_recorded(duet_module):
         required_ground_terms=["extraction"], grounding_repair="\n\nGround it.",
         selected_reading_titles=[])
     assert bool(repair) == bool(rejections.names)
+
+
+# --------------------------------------------------------------------------
+# The prompt and the parser that reads it back
+# --------------------------------------------------------------------------
+# The reflection asks for a ledger; _duet_reflect_read_ledger parses the reply
+# for those field names. They used to sit in the same file, so drift between
+# them was at least visible. The prompt text now lives in
+# blue/server/prompts.py, so this holds the two in step instead: every label
+# the parser looks for has to be a label the prompt actually asks for.
+
+def _labels_the_parser_reads(duet_module):
+    import ast
+    import re
+
+    tree = ast.parse(open(duet_module.__file__, encoding="utf-8").read())
+    fn = [n for n in ast.walk(tree)
+          if isinstance(n, ast.FunctionDef)
+          and n.name == "_duet_reflect_read_ledger"][0]
+    labels = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found = re.match(r"\^\\s\*([A-Z][A-Z\[\]_ ]*?):", node.value)
+            if found:
+                # "ARTIFACT[_ ]COMPILER" accepts either separator
+                labels.add(found.group(1).replace("[_ ]", " ").strip())
+    return labels
+
+
+def test_the_prompt_asks_for_every_field_the_parser_reads(duet_module):
+    prompts = duet_module.os.path.join(
+        duet_module.os.path.dirname(duet_module.__file__), "..", "prompts.py")
+    text = open(prompts, encoding="utf-8").read()
+
+    labels = _labels_the_parser_reads(duet_module)
+    assert len(labels) > 15, f"the label scan found almost nothing: {labels}"
+
+    unasked = sorted(l for l in labels if l not in text)
+    assert not unasked, (
+        "the reflection parser reads fields the prompt never asks for: "
+        f"{unasked}")
