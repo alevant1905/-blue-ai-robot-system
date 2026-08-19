@@ -34,7 +34,8 @@ me you it please new old here there thing things stuff topic content help know n
 # are Title_Case, so EVERY word qualified: Making_Our_World-…_In_Context yielded
 # "making" and "context", AI_Industry_vs… yielded "industry". Ordinary sentences
 # then scored a document search at 0.90 — "My first name is Alex" on "first",
-# "explain to my grandmother who has never…" on "three".
+# "explain to my grandmother who has never…" on "three", and "the analysts
+# disagree" on "disagree", out of When_Models_Disagree…Transcriptio.txt.
 #
 # Only genuine title/author words should survive. Keep this list to words that
 # are ordinary English AND plausible in an academic title; author surnames must
@@ -59,6 +60,7 @@ written history historical modern contemporary future past present system
 systems process processes development developing education feedback thoughts
 thought toward towards press master costs fight creative acting archive
 movements resistance reproduction realism recorded producing untitled thesis
+disagree
 """.split())
 
 # Contractions break at the apostrophe when the query is tokenised, and the

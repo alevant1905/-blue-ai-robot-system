@@ -815,3 +815,41 @@ def test_a_stem_shorter_than_four_characters_is_refused():
 
 def test_a_word_that_is_already_the_name_is_left_alone():
     assert _stems("marx", LIBRARY) == set()
+
+
+# Filenames are Title_Case, so every word in one looks "distinctive" unless it
+# is named as ordinary English. "When_Models_Disagree...Transcriptio.txt" made
+# "disagree" a rare token, and "the analysts disagree" scored a document search
+# at 0.90 on it. This drives the real indexing over a controlled index file
+# rather than trusting the live library.
+
+def test_a_common_title_word_never_becomes_a_single_term_trigger(
+        tmp_path, monkeypatch):
+    import json
+    from blue.tool_selector.detectors.documents import DocumentsDetector as D
+
+    index = tmp_path / "document_index.json"
+    index.write_text(json.dumps({"documents": [
+        {"filename": "When_Models_Disagree...Transcriptio.txt",
+         "folder": "Mark Humphries Substack"},
+    ]}), encoding="utf-8")
+
+    # Everything _refresh_library writes to must be restored afterwards, or the
+    # rest of the suite inherits this one-document library.
+    monkeypatch.setattr(D, "_index_path", classmethod(lambda cls: str(index)))
+    monkeypatch.setattr(D, "_lib_tokens_by_doc", None)
+    monkeypatch.setattr(D, "_lib_rare_tokens", None)
+    monkeypatch.setattr(D, "_lib_phrases", None)
+    monkeypatch.setattr(D, "_lib_mtime", -1.0)
+    D._refresh_library()
+
+    assert "disagree" not in D._lib_rare_tokens
+    assert "humphries" in D._lib_rare_tokens, "a real name is still distinctive"
+    assert D._library_match("the analysts disagree") is None
+    assert D._library_match("we disagree about that") is None
+
+    # The document itself must be no harder to find.
+    assert D._library_match("what does humphries say") is not None
+    assert D._library_match("the mark humphries substack") is not None
+    # Still reachable on two shared title words, which "disagree" can join.
+    assert D._library_match("when models disagree") is not None
