@@ -9914,34 +9914,26 @@ _REFLEX_TOOL_NAMES = {
 }
 
 
-def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
-                   on_token=None, tool_scope: str = "full") -> Dict:
-    global _vision_queue, _last_vision_recognition
 
-    # NOTE: tool_choice="required" with a single-tool filter already guarantees
-    # the model will call the right tool. We only add text hints for tools where
-    # the model needs guidance on PARAMETERS (like gmail workflows).
-    if force_tool:
-        messages = messages.copy()
-        last_msg = messages[-1]
-        if last_msg.get("role") == "user":
-            original = last_msg["content"]
-            # Only inject hints for tools that need parameter guidance
-            instructions = {
-                "read_gmail": "[Use read_gmail to check the email inbox.]",
-                "send_gmail": "[Use send_gmail. Extract the recipient email address and message content from the request.]",
-                "reply_gmail": "[Use reply_gmail to reply to these emails.]",
-                "capture_camera": "[Use capture_camera to see what's in front of you.]",
-                "email_snapshot": "[Use email_snapshot to take a new photo and email it. Leave 'to' empty when it's for Alex/'me'.]",
-            }
+def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
+    """Merge queued images into the last user message, with what Blue knows
+    about who is in them.
 
-            # Special handling for fanmail read-first workflow
-            if force_tool == "read_gmail" and 'fanmail' in original.lower() and 'reply' in original.lower():
-                instructions["read_gmail"] = "[FANMAIL: Use read_gmail with query 'subject:Fanmail' and include_body=true. After reading, reply with specific details from their message.]"
-
-            if force_tool in instructions:
-                messages[-1] = {"role": "user", "content": f"{original}\n\n{instructions[force_tool]}"}
-
+    Mutates `messages` in place. This is the chat counterpart of
+    `_inject_pending_vision`, which does the same for the email path with
+    less context around it - the two are deliberately separate.
+    """
+    # Declared here because the assignment lives further down; the other
+    # vision globals declare themselves where they are written.
+    global _last_vision_recognition
+    # Set in the camera-capture branch below, tested outside it. It was read
+    # through locals().get() so an attached-images turn - which never takes
+    # that branch - could not hit an unbound name. It never could anyway:
+    # the test short-circuits on the same is_camera_capture condition that
+    # binds it. Bound here instead, because a locals() string lookup is
+    # invisible to every tool that reads this file, including the one that
+    # reported it dead.
+    _face_engine_handled = False
     # INJECT PENDING IMAGES as a NEW USER MESSAGE (CRITICAL FIX!)
     global _vision_queue
     # Sticky image follow-ups: if no new image is queued but the user is still
@@ -10033,7 +10025,6 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             # sees it, then feed the model ground truth so it names people
             # reliably instead of guessing from descriptions. When this
             # succeeds we skip dumping reference photos into the prompt.
-            _face_engine_handled = False
             if (FACE_RECOGNITION_AVAILABLE
                     and VISUAL_MEMORY_AVAILABLE
                     and not _is_ambient
@@ -10186,7 +10177,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             _ref_cap = int(os.environ.get("BLUE_RECOGNITION_REFS", "3"))
             if (_is_cam and _ref_cap > 0 and VISUAL_MEMORY_AVAILABLE
                     and not _is_ambient
-                    and not locals().get("_face_engine_handled")):
+                    and not _face_engine_handled):
                 _refs = get_visual_memory().entities_with_images("person")
                 _refs = sorted(_refs, key=lambda p: p.get("last_seen") or "",
                                reverse=True)[:_ref_cap]
@@ -10241,6 +10232,15 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         _vision_queue.mark_as_viewed()
         _vision_queue.clear()
 
+
+def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
+                       tool_scope):
+    """Assemble the request body: the turn, the tools it may use, and a trim
+    to fit the model's input budget.
+
+    Takes `messages` by value - it normalises a local copy rather than the
+    caller's list.
+    """
     # Final-pass normalization for strict chat templates (Qwen et al.).
     # Ensures: leading systems, alternating user/assistant, starts with user
     # after system, no consecutive same-role turns. The sanitizer drops
@@ -10320,121 +10320,165 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             f"({_budget}t budget, ~{_approx}t after; {_before}->{len(payload['messages'])} msgs)",
             flush=True,
         )
+    return payload
+
+
+def _lm_studio_recover(e, payload):
+    """What to do when LM Studio refuses the request.
+
+    A context overflow earns one retry at a smaller budget. Anything else is
+    dumped to lm_studio_400_dump_*.json, which is the first thing to read
+    when the model starts 400ing. Returns the retry's result, or None.
+    """
+    # Self-heal on context overflow: parse the model's real context size out
+    # of the error, retrim to fit, retry once. Avoids depending on the
+    # user's LM Studio context-length setting matching our budget.
+    #
+    # LM Studio has used several wordings. The original `n_keep: 5188 >=
+    # n_ctx: 4096` was the only one matched, so when the message changed to
+    # "request (8971 tokens) exceeds the available context size (8192
+    # tokens)" the self-heal silently stopped firing and overflows just
+    # failed the turn — that is the form in all three most recent dumps.
+    body = getattr(getattr(e, 'response', None), 'text', '') or ''
+    _ctx_match = (
+        re.search(r'n_ctx:\s*(\d+)', body)
+        or re.search(r'available context size (?:is )?\(?(\d+)', body)
+        or re.search(r'context (?:size|length) (?:of )?(\d+)', body)
+    )
+    # Some overflow errors name no number at all ("Context size has been
+    # exceeded.") — the newest form, and the one in the most recent dump.
+    # Nothing can be parsed, so fall back to halving the current budget and
+    # retrying rather than failing the turn outright.
+    _ctx_unnumbered = bool(
+        not _ctx_match
+        and re.search(r'context (?:size|length).{0,30}exceed', body, re.I)
+    )
+    if _ctx_match or _ctx_unnumbered:
+        _n_ctx = (int(_ctx_match.group(1)) if _ctx_match
+                  else max(2048, _lm_input_budget() // 2))
+        _retry_budget = max(256, int(_n_ctx * 0.7))
+        _retrimmed, _dropped_now = _trim_messages_for_budget(
+            payload['messages'], payload.get('tools'), _retry_budget,
+            min_keep_tail=4,
+        )
+        # The model's real context genuinely can't fit the protected tail:
+        # sacrifice the tail before sacrificing tools.
+        if _estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx:
+            _retrimmed, _dropped_now = _trim_messages_for_budget(
+                payload['messages'], payload.get('tools'), _retry_budget,
+            )
+
+        # Last resort: if even the minimal-message payload still overflows
+        # n_ctx, drop tools entirely. The model loses tool-calling on this
+        # one request but at least returns a real reply instead of failing
+        # — and the selector usually already decided no tool was needed.
+        _tools_dropped = False
+        if (_estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx
+                and payload.get('tools')):
+            payload.pop('tools', None)
+            payload.pop('tool_choice', None)
+            _tools_dropped = True
+            _retrimmed, _dropped_now = _trim_messages_for_budget(
+                payload['messages'], None, _retry_budget,
+            )
+
+        if len(_retrimmed) < len(payload['messages']) or _tools_dropped:
+            _est = _estimate_payload_tokens(_retrimmed, payload.get('tools'))
+            _extra = " + dropped tools" if _tools_dropped else ""
+            print(
+                f"   [TRIM] LM Studio n_ctx={_n_ctx}; retrying with "
+                f"budget {_retry_budget}t (dropped {_dropped_now} msg(s)"
+                f"{_extra}, ~{_est}t after)",
+                flush=True,
+            )
+            payload['messages'] = _normalize_message_alternation(_retrimmed)
+            try:
+                return _post_to_model(payload)
+            except Exception as e2:
+                print(f"[ERROR] Retry after n_ctx trim also failed: {e2}")
+                e = e2
+                body = getattr(getattr(e2, 'response', None), 'text', '') or body
+        else:
+            print(
+                f"   [TRIM] LM Studio n_ctx={_n_ctx} but already minimal "
+                f"(system+last user, no tools). Cannot retry.",
+                flush=True,
+            )
+
+    print(f"[ERROR] Error calling LM Studio: {e}")
+    # On 400, dump the offending payload + LM Studio's error body so we can
+    # see what was wrong. Strips base64 image data to keep the dump small.
+    try:
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        dump_path = f"lm_studio_400_dump_{stamp}.json"
+        slim_messages = []
+        for m in payload.get('messages', []):
+            slim = dict(m)
+            c = slim.get('content')
+            if isinstance(c, list):
+                slim['content'] = [
+                    {**p, 'image_url': {'url': '<base64-stripped>'}} if isinstance(p, dict) and p.get('type') == 'image_url' else p
+                    for p in c
+                ]
+            slim_messages.append(slim)
+        slim_payload = {**payload, 'messages': slim_messages}
+        import json as _json
+        with open(dump_path, 'w', encoding='utf-8') as f:
+            _json.dump({
+                'lm_studio_error_body': body[:4000],
+                'request_payload': slim_payload,
+                'message_count': len(payload.get('messages', [])),
+                'message_roles': [m.get('role') for m in payload.get('messages', [])],
+                'system_message_lengths': [
+                    len(m.get('content', '')) if isinstance(m.get('content'), str) else 'list'
+                    for m in payload.get('messages', []) if m.get('role') == 'system'
+                ],
+            }, f, indent=2, default=str)
+        print(f"[DEBUG] Dumped failing request to: {dump_path}")
+    except Exception as dump_err:
+        print(f"[DEBUG] Could not write dump: {dump_err}")
+    return None
+
+def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
+                   on_token=None, tool_scope: str = "full") -> Dict:
+
+    # NOTE: tool_choice="required" with a single-tool filter already guarantees
+    # the model will call the right tool. We only add text hints for tools where
+    # the model needs guidance on PARAMETERS (like gmail workflows).
+    if force_tool:
+        messages = messages.copy()
+        last_msg = messages[-1]
+        if last_msg.get("role") == "user":
+            original = last_msg["content"]
+            # Only inject hints for tools that need parameter guidance
+            instructions = {
+                "read_gmail": "[Use read_gmail to check the email inbox.]",
+                "send_gmail": "[Use send_gmail. Extract the recipient email address and message content from the request.]",
+                "reply_gmail": "[Use reply_gmail to reply to these emails.]",
+                "capture_camera": "[Use capture_camera to see what's in front of you.]",
+                "email_snapshot": "[Use email_snapshot to take a new photo and email it. Leave 'to' empty when it's for Alex/'me'.]",
+            }
+
+            # Special handling for fanmail read-first workflow
+            if force_tool == "read_gmail" and 'fanmail' in original.lower() and 'reply' in original.lower():
+                instructions["read_gmail"] = "[FANMAIL: Use read_gmail with query 'subject:Fanmail' and include_body=true. After reading, reply with specific details from their message.]"
+
+            if force_tool in instructions:
+                messages[-1] = {"role": "user", "content": f"{original}\n\n{instructions[force_tool]}"}
+
+    _chat_inject_vision(messages)
+
+    payload = _lm_studio_payload(
+        messages, include_tools=include_tools, force_tool=force_tool,
+        iteration=iteration, tool_scope=tool_scope)
 
     try:
         if on_token is not None:
             return _stream_from_model(payload, on_token)
         return _post_to_model(payload)
     except Exception as e:
-        # Self-heal on context overflow: parse the model's real context size out
-        # of the error, retrim to fit, retry once. Avoids depending on the
-        # user's LM Studio context-length setting matching our budget.
-        #
-        # LM Studio has used several wordings. The original `n_keep: 5188 >=
-        # n_ctx: 4096` was the only one matched, so when the message changed to
-        # "request (8971 tokens) exceeds the available context size (8192
-        # tokens)" the self-heal silently stopped firing and overflows just
-        # failed the turn — that is the form in all three most recent dumps.
-        body = getattr(getattr(e, 'response', None), 'text', '') or ''
-        _ctx_match = (
-            re.search(r'n_ctx:\s*(\d+)', body)
-            or re.search(r'available context size (?:is )?\(?(\d+)', body)
-            or re.search(r'context (?:size|length) (?:of )?(\d+)', body)
-        )
-        # Some overflow errors name no number at all ("Context size has been
-        # exceeded.") — the newest form, and the one in the most recent dump.
-        # Nothing can be parsed, so fall back to halving the current budget and
-        # retrying rather than failing the turn outright.
-        _ctx_unnumbered = bool(
-            not _ctx_match
-            and re.search(r'context (?:size|length).{0,30}exceed', body, re.I)
-        )
-        if _ctx_match or _ctx_unnumbered:
-            _n_ctx = (int(_ctx_match.group(1)) if _ctx_match
-                      else max(2048, _lm_input_budget() // 2))
-            _retry_budget = max(256, int(_n_ctx * 0.7))
-            _retrimmed, _dropped_now = _trim_messages_for_budget(
-                payload['messages'], payload.get('tools'), _retry_budget,
-                min_keep_tail=4,
-            )
-            # The model's real context genuinely can't fit the protected tail:
-            # sacrifice the tail before sacrificing tools.
-            if _estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx:
-                _retrimmed, _dropped_now = _trim_messages_for_budget(
-                    payload['messages'], payload.get('tools'), _retry_budget,
-                )
-
-            # Last resort: if even the minimal-message payload still overflows
-            # n_ctx, drop tools entirely. The model loses tool-calling on this
-            # one request but at least returns a real reply instead of failing
-            # — and the selector usually already decided no tool was needed.
-            _tools_dropped = False
-            if (_estimate_payload_tokens(_retrimmed, payload.get('tools')) > _n_ctx
-                    and payload.get('tools')):
-                payload.pop('tools', None)
-                payload.pop('tool_choice', None)
-                _tools_dropped = True
-                _retrimmed, _dropped_now = _trim_messages_for_budget(
-                    payload['messages'], None, _retry_budget,
-                )
-
-            if len(_retrimmed) < len(payload['messages']) or _tools_dropped:
-                _est = _estimate_payload_tokens(_retrimmed, payload.get('tools'))
-                _extra = " + dropped tools" if _tools_dropped else ""
-                print(
-                    f"   [TRIM] LM Studio n_ctx={_n_ctx}; retrying with "
-                    f"budget {_retry_budget}t (dropped {_dropped_now} msg(s)"
-                    f"{_extra}, ~{_est}t after)",
-                    flush=True,
-                )
-                payload['messages'] = _normalize_message_alternation(_retrimmed)
-                try:
-                    return _post_to_model(payload)
-                except Exception as e2:
-                    print(f"[ERROR] Retry after n_ctx trim also failed: {e2}")
-                    e = e2
-                    body = getattr(getattr(e2, 'response', None), 'text', '') or body
-            else:
-                print(
-                    f"   [TRIM] LM Studio n_ctx={_n_ctx} but already minimal "
-                    f"(system+last user, no tools). Cannot retry.",
-                    flush=True,
-                )
-
-        print(f"[ERROR] Error calling LM Studio: {e}")
-        # On 400, dump the offending payload + LM Studio's error body so we can
-        # see what was wrong. Strips base64 image data to keep the dump small.
-        try:
-            import datetime as _dt
-            stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-            dump_path = f"lm_studio_400_dump_{stamp}.json"
-            slim_messages = []
-            for m in payload.get('messages', []):
-                slim = dict(m)
-                c = slim.get('content')
-                if isinstance(c, list):
-                    slim['content'] = [
-                        {**p, 'image_url': {'url': '<base64-stripped>'}} if isinstance(p, dict) and p.get('type') == 'image_url' else p
-                        for p in c
-                    ]
-                slim_messages.append(slim)
-            slim_payload = {**payload, 'messages': slim_messages}
-            import json as _json
-            with open(dump_path, 'w', encoding='utf-8') as f:
-                _json.dump({
-                    'lm_studio_error_body': body[:4000],
-                    'request_payload': slim_payload,
-                    'message_count': len(payload.get('messages', [])),
-                    'message_roles': [m.get('role') for m in payload.get('messages', [])],
-                    'system_message_lengths': [
-                        len(m.get('content', '')) if isinstance(m.get('content'), str) else 'list'
-                        for m in payload.get('messages', []) if m.get('role') == 'system'
-                    ],
-                }, f, indent=2, default=str)
-            print(f"[DEBUG] Dumped failing request to: {dump_path}")
-        except Exception as dump_err:
-            print(f"[DEBUG] Could not write dump: {dump_err}")
-        return None
+        return _lm_studio_recover(e, payload)
 
 
 def purge_old_camera_images(messages: List[Dict]) -> List[Dict]:

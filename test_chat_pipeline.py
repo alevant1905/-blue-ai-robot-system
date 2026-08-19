@@ -16,6 +16,8 @@ its single HTTP seam, and every persistence path is redirected — no email is
 sent, no head moves, and the real memory database is never written to.
 """
 
+import base64
+import datetime
 import json
 import types
 
@@ -555,3 +557,96 @@ def test_a_bare_greeting_skips_the_pipeline(chat):
 
     assert reply["choices"][0]["message"]["content"]
     assert chat.executed == [], "a greeting must not touch the house"
+
+
+# --------------------------------------------------------------------------
+# Queued images reaching the model
+# --------------------------------------------------------------------------
+# _chat_inject_vision is 297 lines that nothing in this suite reached until
+# now: it was inline in call_lm_studio, below the seam where the model is
+# stubbed. These do not pin its face-recognition prose - that is the model's
+# job - only that a queued image actually arrives in the user message, because
+# when this path fails Blue describes a photo he was never shown.
+
+def _one_pixel_png(path):
+    path.write_bytes(base64.b64decode(
+        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+        b"z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+    return path
+
+
+@pytest.fixture
+def queued_camera_image(monkeypatch, tmp_path):
+    """One camera capture waiting to be shown, and no lingering global state."""
+    image = _one_pixel_png(tmp_path / "camera_NEW_probe.png")
+    queue = bt.VisionImageQueue()
+    queue.pending_images = [bt.ImageInfo(
+        filename=image.name, filepath=str(image), hash="deadbeef",
+        is_camera_capture=True,
+        added_at=datetime.datetime.now().isoformat(), is_ambient=False)]
+    monkeypatch.setattr(bt, "_vision_queue", queue)
+    # every global this path writes, so the run leaves nothing behind
+    monkeypatch.setattr(bt, "_recent_image_paths", [], raising=False)
+    monkeypatch.setattr(bt, "_recent_image_at", 0.0, raising=False)
+    monkeypatch.setattr(bt, "_last_vision_image_paths", [], raising=False)
+    monkeypatch.setattr(bt, "_last_vision_recognition", {}, raising=False)
+    return queue
+
+
+def test_a_queued_image_is_merged_into_the_last_user_message(
+        queued_camera_image):
+    messages = [{"role": "system", "content": "you are blue"},
+                {"role": "user", "content": "what do you see?"}]
+
+    bt._chat_inject_vision(messages)
+
+    content = messages[-1]["content"]
+    assert isinstance(content, list), "the user turn must become multipart"
+    assert "image_url" in [part.get("type") for part in content], \
+        "no image part reached the model"
+    assert messages[0]["content"] == "you are blue", "system turn untouched"
+
+
+def test_a_shown_image_is_cleared_and_remembered(queued_camera_image):
+    bt._chat_inject_vision([{"role": "user", "content": "what is this?"}])
+
+    assert queued_camera_image.pending_images == [], "queue must be drained"
+    assert bt._last_vision_image_paths, "what was shown must be recorded"
+    # ...and armed for "what colour is it?" without a re-upload.
+    assert bt._recent_image_paths
+
+
+def test_nothing_queued_leaves_the_conversation_alone(monkeypatch):
+    queue = bt.VisionImageQueue()
+    queue.pending_images = []
+    monkeypatch.setattr(bt, "_vision_queue", queue)
+    monkeypatch.setattr(bt, "_recent_image_paths", [], raising=False)
+
+    messages = [{"role": "user", "content": "hello"}]
+    bt._chat_inject_vision(messages)
+
+    assert messages == [{"role": "user", "content": "hello"}]
+
+
+def test_an_attached_image_takes_the_non_camera_path(monkeypatch, tmp_path):
+    """The path where the camera-capture branch never runs.
+
+    Nothing in the suite covered attached images as opposed to camera frames,
+    and they take a visibly different route through the injector.
+    """
+    image = _one_pixel_png(tmp_path / "attached.png")
+    queue = bt.VisionImageQueue()
+    queue.pending_images = [bt.ImageInfo(
+        filename=image.name, filepath=str(image), hash="cafe",
+        is_camera_capture=False,          # <- attached, not a camera frame
+        added_at=datetime.datetime.now().isoformat(), is_ambient=False)]
+    monkeypatch.setattr(bt, "_vision_queue", queue)
+    monkeypatch.setattr(bt, "_recent_image_paths", [], raising=False)
+    monkeypatch.setattr(bt, "_recent_image_at", 0.0, raising=False)
+    monkeypatch.setattr(bt, "_last_vision_image_paths", [], raising=False)
+    monkeypatch.setattr(bt, "_last_vision_recognition", {}, raising=False)
+
+    messages = [{"role": "user", "content": "what is in this picture?"}]
+    bt._chat_inject_vision(messages)
+
+    assert "image_url" in [p.get("type") for p in messages[-1]["content"]]
