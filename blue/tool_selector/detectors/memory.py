@@ -18,23 +18,12 @@ from typing import Dict, List, Optional
 
 from ..constants import ToolPriority
 from ..models import ToolIntent
-from ..utils import has_any_word
+from ..utils import has_any_word, is_recall_question
 from .base import BaseDetector
 
 
 class MemoryDetector(BaseDetector):
     """Detects an instruction to durably record a household fact."""
-
-    # Asking what Blue knows. Checked before anything else — these contain
-    # the same verbs as a store instruction and must never write.
-    RECALL_FRAMES = [
-        'what do you remember', 'what you remember', 'what do you recall',
-        'do you remember', 'did you remember', 'can you remember',
-        'do you recall', 'what do you know', 'what else do you know',
-        'tell me what', 'how much do you remember',
-        'anything you remember', 'anything else you remember',
-        'remind me', 'what have you got', 'what did i tell you',
-    ]
 
     # Unambiguous instructions to fix the durable record. These are the
     # phrasings that used to produce "I have updated my records" with no
@@ -79,7 +68,7 @@ class MemoryDetector(BaseDetector):
     def _detect_store_intent(self, msg_lower: str) -> Optional[ToolIntent]:
         # A question about what Blue knows is never a write, no matter which
         # storage verbs it happens to contain.
-        if any(frame in msg_lower for frame in self.RECALL_FRAMES):
+        if is_recall_question(msg_lower):
             return None
 
         has_dont_forget = any(p in msg_lower for p in self.DONT_FORGET)

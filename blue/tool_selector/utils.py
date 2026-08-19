@@ -296,3 +296,42 @@ def split_compound_request(message: str) -> List[str]:
 
     # No compound pattern found
     return [message]
+
+
+# Asking Blue what he already knows. Shared by every detector that owns both
+# a read tool and a WRITE tool for the same subject, because the two are
+# separated by sentence frame, not by keyword: "remember" appears in
+# "remember that Athena is eleven" and in "what do you remember about our
+# family" alike. Two detectors got this wrong in the same week —
+# ContactsDetector sent "do you remember Stella's email" to add_contact, and
+# the free-text extractor filed "tell me what you remember about our family"
+# as an instruction, storing "about our family" as a user note. Keep the
+# frames here rather than per-detector so they cannot drift apart.
+_RECALL_FRAMES = (
+    'what do you remember', 'what you remember', 'what do you recall',
+    'do you remember', 'did you remember', 'can you remember',
+    'do you recall', 'what do you know', 'what else do you know',
+    'tell me what', 'how much do you remember',
+    'anything you remember', 'anything else you remember',
+    'remind me', 'what have you got', 'what did i tell you',
+)
+
+# A message that hands over an actual value is a write even when it is
+# phrased as a question ("can you remember her email is stella@…?").
+_LITERAL_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.]{2,}')
+_LITERAL_PHONE_RE = re.compile(r'\d[\d\s().-]{6,}\d')
+
+
+def supplies_a_literal_value(text: str) -> bool:
+    """True if the message contains an email address or phone number."""
+    return bool(_LITERAL_EMAIL_RE.search(text or "")
+                or _LITERAL_PHONE_RE.search(text or ""))
+
+
+def is_recall_question(msg_lower: str) -> bool:
+    """True if the message asks what Blue knows rather than telling him.
+
+    Callers that own a write tool should check this FIRST and decline, so a
+    question can never be answered by modifying the record it asked about.
+    """
+    return any(frame in (msg_lower or "") for frame in _RECALL_FRAMES)

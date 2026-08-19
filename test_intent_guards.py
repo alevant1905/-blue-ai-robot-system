@@ -462,3 +462,72 @@ def test_person_context_words_match_whole_words_only():
     for msg in ("look at the chair", "i'll be back shortly",
                 "clean the surface of the table"):
         assert VisionDetector()._detect_remember_person_intent(msg, {}) is None
+
+
+# ---------------------------------------------------------------------------
+# Asking the address book a question must not rewrite it (2026-08-19)
+#
+# ContactsDetector treated a bare "remember" plus "email" as a save, so
+# "do you remember Stella's email" — a lookup — selected add_contact. Same
+# shape as the calendar bug above: a question answered by a write.
+# ---------------------------------------------------------------------------
+
+from blue.tool_selector.detectors.simple_detectors import ContactsDetector
+from blue.tool_selector.utils import is_recall_question, supplies_a_literal_value
+
+
+def contacts_tool(msg):
+    intents = ContactsDetector().detect(msg, msg.lower(), {})
+    return intents[0].tool_name if intents else None
+
+
+CONTACT_QUESTIONS = [
+    "do you remember Stella's email",
+    "do you remember Felix's phone number",
+    "can you remember Stella's email address",
+    "what do you know about Felix's number",
+    "tell me what you remember about Stella's email",
+]
+
+
+@pytest.mark.parametrize("msg", CONTACT_QUESTIONS)
+def test_asking_for_a_saved_detail_never_writes_a_contact(msg):
+    assert contacts_tool(msg) != 'add_contact', \
+        f"a lookup was answered by writing to the address book: {msg!r}"
+
+
+@pytest.mark.parametrize("msg", CONTACT_QUESTIONS)
+def test_asking_for_a_saved_detail_looks_it_up(msg):
+    """Declining to write is only half of it — the read tool must still fire."""
+    assert contacts_tool(msg) in (None, 'find_contact')
+
+
+SAVE_REQUESTS = [
+    "save his email",
+    "add Felix to my contacts",
+    "remember his email is levant@rogers.com",
+    "add a contact for Sofie",
+    "save her number",
+]
+
+
+@pytest.mark.parametrize("msg", SAVE_REQUESTS)
+def test_real_save_requests_still_add_a_contact(msg):
+    assert contacts_tool(msg) == 'add_contact'
+
+
+def test_a_question_that_hands_over_an_address_is_still_a_save():
+    """The recall guard must not swallow a message that supplies the value:
+    "can you remember X is Y?" is a save wearing a question mark."""
+    assert contacts_tool(
+        "can you remember her email is stella.andonoff@gmail.com"
+    ) == 'add_contact'
+
+
+def test_the_recall_frames_are_shared_not_copied():
+    """Two detectors own both a read and a write tool for the same subject.
+    Keeping one list is what stops them drifting apart again."""
+    assert is_recall_question("do you remember stella's email")
+    assert not is_recall_question("remember that athena is eleven")
+    assert supplies_a_literal_value("her email is stella@example.com")
+    assert not supplies_a_literal_value("do you remember her email")

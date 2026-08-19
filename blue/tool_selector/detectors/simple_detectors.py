@@ -10,6 +10,7 @@ from .calendar import (
     is_reminder_declined, is_reminder_recall_request, is_schedule_time_question,
 )
 from ..models import ToolIntent
+from ..utils import is_recall_question, supplies_a_literal_value
 from ..constants import ToolPriority
 
 
@@ -51,6 +52,13 @@ class ContactsDetector(BaseDetector):
             or ('remember' in msg_lower and any(w in msg_lower
                 for w in ('email', 'phone number', "'s number")))
         )
+        # "do you remember Stella's email" satisfies the `remember` + `email`
+        # clause above, and used to select add_contact — a question about the
+        # address book answered by writing to it. Asking never writes, unless
+        # the message hands over an actual address or number, which makes it
+        # a save however it is phrased ("can you remember her email is X?").
+        if saving and is_recall_question(msg_lower) and not supplies_a_literal_value(message):
+            saving = False
         if saving:
             return intent('add_contact', 'add contact request')
 
