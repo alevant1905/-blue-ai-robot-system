@@ -129,21 +129,40 @@ _flat_denial_re = re.compile(
             r"a persistent (?:inner )?workspace)", re.I)
 
 
-def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages, robot, user_messages, user_name) -> Dict[str, Any]:
-    """Check, correct, deliver and record the reply. Mutates `response`."""
-    try:
-        final_content = response["choices"][0]["message"].get("content", "")
-    except (KeyError, IndexError, TypeError):
-        bt.log.error(f"[RESPONSE] Malformed response from process_with_tools: "
-                  f"{str(response)[:200]}")
-        final_content = (
-            (isinstance(response, dict) and response.get("response"))
-            or "Sorry, something went wrong on my end — could you say that again?"
-        )
-        response = {"choices": [{"message": {
-            "role": "assistant", "content": final_content,
-        }}]}
 
+
+def _parrot_norm(s):
+    """Text reduced to comparable words, for the repetition checks."""
+    return re.sub(r'\W+', ' ', (s or '').lower()).strip()
+
+
+def _verbatim_fraction(reply_text, source_norm, min_sents):
+    """How much of a reply's substance is lifted word for word.
+
+    Only long sentences count, and only once there are `min_sents` of them:
+    a short reply that happens to share a phrase is not a recitation.
+    """
+    if not source_norm:
+        return 0.0
+    sentences = re.split(r'(?<=[.!?])\s+', reply_text or '')
+    long_sents = [s for s in sentences if len(_parrot_norm(s)) >= 40]
+    if len(long_sents) < min_sents:
+        return 0.0
+    hits = sum(1 for s in long_sents if _parrot_norm(s) in source_norm)
+    return hits / len(long_sents)
+
+def _run_reply_guards(final_content, response, *, messages, robot,
+                      last_user_msg, user_messages, user_name,
+                      _grounded_reply):
+    """Check the finished reply and correct it where it went wrong.
+
+    Parroting, recycled openings, identity drift, misstated ages, a dropped
+    household member, a denied recollection the journal actually holds.
+
+    Returns the text to use. `response` is updated in place as it goes, so
+    a failure part-way through leaves the corrections already made rather
+    than losing the reply.
+    """
     # Anti-parrot net: if the model replayed its previous reply verbatim
     # before answering (the classroom-introduction bug), cut the replay.
     try:
@@ -160,15 +179,6 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
             final_content = _derecycled
             response["choices"][0]["message"]["content"] = final_content
 
-        # Pure replay: the model answered the NEW question with an
-        # exact copy of its previous reply and nothing else (seen
-        # live 2026-07-10: "who is the you that is present?" got the
-        # "are you alive?" answer back word for word). The prefix
-        # strip above deliberately leaves these alone — stripping
-        # would leave nothing — so regenerate once with an explicit
-        # correction; keep the replay if the retry fails.
-        def _parrot_norm(s):
-            return re.sub(r'\W+', ' ', (s or '').lower()).strip()
         # Compare against the last several assistant turns, not just
         # the previous one: seen live 2026-07-10, a mis-heard question
         # got a word-for-word replay of the reply from TWO turns back.
@@ -206,17 +216,6 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
                 _t = _t.split("</think>")[-1].strip()
             return _t
 
-        # Fraction of the reply's long sentences that appear verbatim
-        # in a source text (normalized).
-        def _verbatim_fraction(reply_text, source_norm, min_sents):
-            if not source_norm:
-                return 0.0
-            sentences = re.split(r'(?<=[.!?])\s+', reply_text or '')
-            long_sents = [s for s in sentences if len(_parrot_norm(s)) >= 40]
-            if len(long_sents) < min_sents:
-                return 0.0
-            hits = sum(1 for s in long_sents if _parrot_norm(s) in source_norm)
-            return hits / len(long_sents)
 
         # Identity questions pull the injected self-profile out
         # near-verbatim, and each recitation differs slightly from the
@@ -398,6 +397,27 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         response["choices"][0]["message"]["content"] = final_content
     except Exception as e:
         bt.log.warning(f"[ANTI-PARROT] check failed: {e}")
+    return final_content
+
+def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages, robot, user_messages, user_name) -> Dict[str, Any]:
+    """Check, correct, deliver and record the reply. Mutates `response`."""
+    try:
+        final_content = response["choices"][0]["message"].get("content", "")
+    except (KeyError, IndexError, TypeError):
+        bt.log.error(f"[RESPONSE] Malformed response from process_with_tools: "
+                  f"{str(response)[:200]}")
+        final_content = (
+            (isinstance(response, dict) and response.get("response"))
+            or "Sorry, something went wrong on my end — could you say that again?"
+        )
+        response = {"choices": [{"message": {
+            "role": "assistant", "content": final_content,
+        }}]}
+
+    final_content = _run_reply_guards(
+        final_content, response, messages=messages, robot=robot,
+        last_user_msg=last_user_msg, user_messages=user_messages,
+        user_name=user_name, _grounded_reply=_grounded_reply)
 
     # Strip the closing offer and the emoji. Done here rather than by
     # instruction because the persona has asked for concise replies all

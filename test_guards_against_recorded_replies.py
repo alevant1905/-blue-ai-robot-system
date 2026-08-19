@@ -156,3 +156,66 @@ def test_the_guards_are_measured_against_the_whole_record(tmp_path):
              + len(VOICE_DENIALS))
     assert total >= 10, "the recorded-failure sample has shrunk"
     assert len(LEGITIMATE) >= 5, "the false-positive rail has shrunk"
+
+
+# --------------------------------------------------------------------------
+# The measurement the repetition guards rest on
+# --------------------------------------------------------------------------
+# _verbatim_fraction decides whether a reply is reciting rather than
+# answering. It was nested inside the guard runner, closing over nothing, so
+# nothing could reach it. Its thresholds are the whole behaviour: too low and
+# ordinary agreement gets regenerated, too high and the model quotes the
+# profile back at Alex.
+
+def _norm(text):
+    from blue.server.turn_completion import _parrot_norm
+    return _parrot_norm(text)
+
+
+def _fraction(reply, source, min_sents=2):
+    from blue.server.turn_completion import _verbatim_fraction
+    return _verbatim_fraction(reply, _norm(source), min_sents)
+
+
+LONG_A = ("Transparency only permits inspection, it does not redistribute "
+          "the power to act on what is seen.")
+LONG_B = ("Extraction changes character when a participant can refuse "
+          "collection and still take part in the activity.")
+
+
+def test_normalisation_ignores_punctuation_and_case():
+    assert _norm("Hello, WORLD!  ") == "hello world"
+    assert _norm(None) == ""
+    assert _norm("a---b") == "a b"
+
+
+def test_a_reply_lifted_word_for_word_scores_one():
+    assert _fraction(f"{LONG_A} {LONG_B}", f"{LONG_A} {LONG_B}") == 1.0
+
+
+def test_a_reply_that_shares_nothing_scores_zero():
+    assert _fraction(f"{LONG_A} {LONG_B}", "Something else entirely.") == 0.0
+
+
+def test_half_lifted_scores_half():
+    assert _fraction(f"{LONG_A} {LONG_B}", LONG_A) == 0.5
+
+
+def test_a_short_reply_is_never_counted_as_recitation():
+    """Below min_sents the answer is 0.0 whatever it says.
+
+    Otherwise a one-line agreement that echoes a phrase would be treated as
+    reciting and regenerated.
+    """
+    assert _fraction(LONG_A, LONG_A, min_sents=2) == 0.0
+    assert _fraction(LONG_A, LONG_A, min_sents=1) == 1.0
+
+
+def test_short_sentences_do_not_count_toward_the_fraction():
+    """Only sentences of real substance are weighed."""
+    assert _fraction(f"Yes. I agree. Quite. {LONG_A} {LONG_B}",
+                     f"{LONG_A} {LONG_B}") == 1.0
+
+
+def test_an_empty_source_scores_zero():
+    assert _fraction(f"{LONG_A} {LONG_B}", "") == 0.0
