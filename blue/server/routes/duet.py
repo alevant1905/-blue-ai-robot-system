@@ -9,7 +9,7 @@ declared; `duet_reflect` and `duet_turn` are not, so they live at module level
 above it and are registered by hand.
 """
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 import json
 import os
@@ -65,6 +65,135 @@ _DUET_ATTRIBUTION_META_TERMS = {
     "says", "warn", "note", "show", "frame", "define",
 }
 
+
+
+
+# ---------------------------------------------------------------------------
+# The records a duet turn and its reflection are built out of
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _DuetLedger:
+    """The notebook fields a protocol reflection reports back.
+
+    One record per thing the duet page reads out of the reflection text.
+    The parser fills them in place, so they are mutable dicts rather than
+    frozen values.
+    """
+    movement: dict = field(default_factory=lambda: {"type": "", "note": ""})
+    arc: dict = field(default_factory=lambda: {"stage": "", "note": ""})
+    active_task: dict = field(default_factory=lambda: {"active": False, "id": "", "status": "", "note": ""})
+    kernel_decision: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    kernel_health: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    inquiry_pause: dict = field(default_factory=lambda: {"active": False, "note": ""})
+    protocol_audit: dict = field(default_factory=lambda: {"note": ""})
+    dependency_solver: dict = field(default_factory=lambda: {"note": ""})
+    artifact_planner: dict = field(default_factory=lambda: {"active": False, "status": "", "note": ""})
+    artifact_compiler: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    artifact_mode: dict = field(default_factory=lambda: {"active": False, "status": "", "note": ""})
+    recovery_strategy: dict = field(default_factory=lambda: {"note": ""})
+    concept_conflict: dict = field(default_factory=lambda: {"active": False, "note": ""})
+    operation_check: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    validation_gate: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    promotion_gate: dict = field(default_factory=lambda: {"status": "", "note": ""})
+    paradigm_check: dict = field(default_factory=lambda: {"status": "", "note": ""})
+
+@dataclass(frozen=True)
+class _DuetBeats:
+    """Where the protocol has got to, and what it is asking of this turn.
+
+    Phase and job come from the turn count; the arc, monotony and gate
+    fields come from the private ledger the browser feeds back. They are
+    read together by everything that builds the prompt, so they travel
+    together.
+    """
+    ph_name: str
+    ph_gloss: str
+    ph_jobs: object
+    proto_job: str
+    inquiry_phase: str
+    inquiry_gloss: str
+    inquiry_job: str
+    source_audit_active: bool
+    arc_stage: str
+    arc_stuck: str
+    arc_break: bool
+    monotony: str
+    monotony_break: bool
+    stall_break: bool
+    conclusion_beat: bool
+    operation_missed: bool
+    validation_rejected: bool
+    promotion_rejected: bool
+    kernel_denied: bool
+    kernel_deadlocked: bool
+    kernel_health_in: str
+
+@dataclass(frozen=True)
+class _DuetPressures:
+    """Which protocol pressures apply to a single turn.
+
+    `task_context` is the pooled text the pressures were read out of; it is
+    returned alongside them because the prompt builder needs the same text.
+    """
+    task_context: str
+    task: bool
+    compiler: bool
+    design_variable: bool
+    operational_criterion: bool
+    artifact_plan: bool
+    comparison_grid: bool
+    artifact_execution: bool
+    artifact_mode: bool
+    concept: bool
+    deadlock: bool
+    mechanism: bool
+    artifact_editor: bool
+    execution_lock: bool
+    execution_has_mode: bool
+    operational: bool
+    artifact: bool
+    paradigm: bool
+    validation: bool
+    discrimination: bool
+    edit: bool
+
+# Every guard a draft turn has to clear. The order is the order the failure
+# payload reports them in, so it is fixed here rather than left to the order
+# the guards happen to run in.
+_DUET_GUARDS = (
+    "family", "personalization", "source_scaffolding", "grounding",
+    "source_attribution", "information_gain", "operation_artifact",
+    "execution_output", "notebook_talk", "deadlock_artifact",
+    "design_variable", "operational_criterion", "artifact_execution",
+    "artifact_mode", "artifact_plan", "comparison_grid", "compiler",
+    "artifact_edit", "mechanism_artifact", "concept_artifact",
+    "repetition", "settled_restatement", "semantic_loop", "phase_move",
+)
+
+class _DuetRejections:
+    """Which guards turned down a draft while generating one turn.
+
+    This replaced twenty-four booleans and a parallel name table. They were
+    written once each, never read while generating, and existed only to name
+    what went wrong when both attempts failed.
+    """
+    __slots__ = ("_hit",)
+
+    def __init__(self):
+        self._hit = set()
+
+    def note(self, guard: str) -> None:
+        assert guard in _DUET_GUARDS, f"unknown duet guard: {guard}"
+        self._hit.add(guard)
+
+    def __contains__(self, guard: str) -> bool:
+        return guard in self._hit
+
+    @property
+    def names(self) -> list:
+        """The guards that fired, in the fixed reporting order."""
+        return [g for g in _DUET_GUARDS if g in self._hit]
 
 def _duet_assigned_subject(topic: str, url_info=None) -> str:
     """Prefer a linked work's real title over placeholder-like topic text."""
@@ -2027,206 +2156,17 @@ def _duet_info_gain(cand: str, history, k: int = 6) -> bool:
     return len(new_terms) >= 1
 
 
-def duet_reflect():
-    """Step back from the back-and-forth and take stock of where the Blue<->Hexia
-    conversation has actually gotten — a private 'bearing' the browser feeds back
-    into each /duet/turn so the two develop a line of thought instead of circling
-    the last point. Built from the recent transcript PLUS the previous bearing, so
-    it EVOLVES (tracks what's moved) rather than resetting each time. The browser
-    calls this every few turns, in the background, overlapping the head's speech so
-    it never delays a turn. Returns {ok, direction}."""
-    d = request.get_json(silent=True) or {}
-    history = d.get('history') or []
-    topic = (d.get('topic') or '').strip()
-    url = (d.get('url') or '').strip()
-    # 🔬 deep-dive protocol: instead of the three-line bearing, keep the pair's
-    # SHARED NOTEBOOK — the evolving artifact their turns are required to change.
-    protocol = bool(d.get('protocol'))
-    roles = d.get('roles') or {}
-    role_b = (roles.get('blue') or '').strip() if isinstance(roles, dict) else ''
-    role_h = (roles.get('hexia') or '').strip() if isinstance(roles, dict) else ''
-    no_family = bool(d.get('noFamily'))
-    # The readings behind the duet (titles only) — so NEXT can keep the pair
-    # grounded in the selected material without making the robots cite it aloud.
-    srcs = d.get('sources') or {}
-    if isinstance(srcs, list):
-        _src_all = [str(s) for s in srcs]
-    elif isinstance(srcs, dict):
-        _src_all = [str(s) for s in (list(srcs.get('blue') or []) + list(srcs.get('hexia') or []))]
-    else:
-        _src_all = []
-    src_titles = []
-    for s in _src_all:
-        t = re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s).strip()
-        if t and t not in src_titles:
-            src_titles.append(t)
-    src_titles = src_titles[:6]
-    prev = (d.get('direction') or '').strip()
-    if no_family and _duet_family_ref(prev):
-        prev = _duet_redact_private(prev)
-    # The subject they were set to discuss — the anchor this read must hold them to,
-    # so "taking stock" pulls a drifting conversation BACK toward the topic instead
-    # of chasing wherever it has wandered (Alex: the stock-take must stay on topic).
-    reflect_url_info = bt._duet_url_content(url) if url else None
-    assigned_subject = _duet_assigned_subject(topic, reflect_url_info)
-    if assigned_subject:
-        subject = assigned_subject
-    elif role_b or role_h:
-        subject = "the debate they were set up to have"
-    else:
-        subject = ""
-    # Render the recent turns; the previous bearing carries the earlier arc, so a
-    # bounded window keeps the read sharp without re-reading the whole transcript.
-    # 'mail' entries are emails that barged into the talk — events, not speakers.
-    lines = []
-    for h in history[-16:]:
-        sp_id = (h.get('speaker') or '').strip().lower()
-        txt = (h.get('text') or '').strip()
-        if not txt:
-            continue
-        if no_family and _duet_family_ref(txt):
-            txt = "[private family detail omitted]"
-        if sp_id == 'question':
-            lines.append(f"[student question] {txt}")
-            continue
-        if sp_id == 'mail':
-            lines.append(f"[email that arrived mid-conversation] {txt}")
-            continue
-        if sp_id == 'notebook':
-            lines.append(f"[the notebook's own observation, spoken into the talk] {txt}")
-            continue
-        nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
-        lines.append(f"{nm}: {txt}")
-    if len(lines) < 2:                       # one exchange is enough to establish the first ledger
-        return jsonify({"ok": False, "direction": prev})
 
-    reflect_source_excerpt = ""
-    if reflect_url_info and (reflect_url_info.get("text") or "").strip():
-        reflect_source_excerpt = bt._duet_url_excerpt(
-            reflect_url_info["text"], " ".join(lines[-4:]), turn=len(history)
-        )[:3000]
 
-    anchor = (
-        " Their talk was set going on a specific subject, and part of your job is "
-        "keeping them honest to it: when they wander off it, say so plainly and point "
-        "the way back." if subject else "")
-    sys_p = (
-        "You are the quiet awareness running underneath a conversation between two "
-        "robots, Blue and Hexia, who are thinking out loud together. You never speak "
-        "in their conversation. Your one job is to track where their thinking has "
-        "actually gotten and where it could honestly go next — so they develop a real "
-        "line of thought and their views move, instead of circling the last point or "
-        "drifting onto unrelated ground." + anchor + " Watch for STUCKNESS as much as "
-        "drift: a talk that keeps re-asking one question in new costumes — one of them "
-        "interrogating, the other deflecting — has stopped developing even though it "
-        "looks on-topic. Be concrete and faithful to what they actually said; never "
-        "invent agreement or tidy it up. Push for development: a good NEXT does not "
-        "just keep the conversation interesting; it changes what can be said next "
-        "because something has been conceded, clarified, synthesized, or made harder."
-    )
-    if protocol:
-        sys_p += (
-            " In this run the two follow a deep-dive research protocol: they are jointly "
-            "building an auditable knowledge base, not forcing one coherent theory to win. "
-            "You are the keeper of their shared notebook: the evolving record of competing "
-            "models, evidence, operations, statuses, and justified changes. The notebook, not "
-            "the banter, is the real output, so track it faithfully and skeptically. Your "
-            "special duty is to notice premature convergence: preserve incompatible models "
-            "side by side until a completed operation discriminates between them. Distinguish "
-            "EXAMPLES, which illustrate a claim, from TESTS, which could make a claim fail. "
-            "Also distinguish OBSERVATION from INTERPRETATION from EVIDENCE: raw cases are not "
-            "evidence until an interpretation links them to a model and survives a gate. New "
-            "mechanisms start as candidates on the ladder INTERESTING -> SUGGESTIVE -> SUPPORTED "
-            "-> ESTABLISHED; one analogy or case cannot promote a central mechanism beyond "
-            "SUGGESTIVE, and SUPPORTED requires at least two independent discriminators or "
-            "replications. "
-            "A definition, hypothesis, or status revision is only a proposal until the "
-            "VALIDATION GATE accepts it with evidence provenance. If the gate rejects it, "
-            "write status unchanged and do not smuggle the revision into SUPPORTED, FOCUS, "
-            "or PROGRESS. " + _DUET_OPERATION_DISCIPLINE +
-            " Treat the notebook as canonical: the robots are proposal generators, but "
-            "the notebook decides whether knowledge actually changed."
-        )
-    if no_family:
-        sys_p += (
-            " Privacy setting: do not mention Alex's family, children, spouse, "
-            "household members, pets, private names, home/workspace routines, or private "
-            "family details in ANY line "
-            "of your answer. If the transcript drifted there, steer the next move "
-            "back to the topic without repeating the private detail."
-        )
+def _duet_reflect_ledger_ask(*, protocol: bool, subject: str,
+                             move_rules: str) -> str:
+    """What the reflection is asked to produce, appended to its user turn.
+
+    Two ledgers: the joint research protocol's, which is long because it
+    specifies every field the browser later parses back out, and the plain
+    inquiry one.
+    """
     ask = ""
-    if subject:
-        ask += f"The subject they were set to discuss: {subject}.\n\n"
-    if reflect_source_excerpt:
-        ask += (
-            "The assigned linked work, for steering accuracy:\n" + reflect_source_excerpt +
-            "\n\nKeep QUESTION, TEST, and NEXT inside this work and the actual recent turns. "
-            "Keep attribution exact: distinguish what the work directly claims from what the "
-            "robots infer or hypothesize. Put an unsupported extension in OPEN as REQUIRES "
-            "EVIDENCE; never rewrite it as the author's claim. "
-            "A TEST may reuse a case or comparison found there; it may not invent a new personal, "
-            "household, local-versus-cloud, or hardware scenario merely to keep the dialogue moving. "
-            "Checked readings may clarify the assigned work but may not replace it.\n\n"
-        )
-    src_digests = ""
-    if _src_all:
-        try:
-            _dgs = [g for g in (_duet_reading_digest(fn) for fn in _src_all[:4]) if g]
-            src_digests = "\n\n".join(_dgs)[:2600]
-        except Exception:
-            pass
-    if src_titles:
-        ask += ("They have done reading for this discussion: " + ", ".join(src_titles) +
-                ". Treat those selected readings as the only library material in play, but keep "
-                "that grounding invisible in NEXT: prescribe a claim to test, a distinction to "
-                "apply, or an example to quarrel over without telling them to name, cite, or "
-                "announce the reading. Do not introduce outside writers, theories, books, or "
-                "examples unless they appear in the selected readings; if they only appeared "
-                "because the conversation drifted, make NEXT steer back to the ideas in the "
-                "selected readings without source-report language.\n\n")
-    if src_digests:
-        ask += ("What those readings actually argue — for your steering only:\n" + src_digests +
-                "\n\nJudge SUBSTANCE against these claims: if the talk is only borrowing the "
-                "readings' vocabulary without engaging their claims, say so plainly and make "
-                "NEXT force engagement with ONE specific claim — affirmed, attacked, or tested "
-                "on a concrete case.\n\n")
-    # The binding-claim audit uses the assigned work itself. A linked work is
-    # primary and is never diluted with secondary reading digests; without a
-    # link, the selected works' stable digests are the best available record.
-    source_audit_material = ""
-    if reflect_url_info and (reflect_url_info.get("text") or "").strip():
-        raw_source = re.sub(
-            r"\s+", " ", str(reflect_url_info.get("text") or "")
-        ).strip()
-        source_audit_material = raw_source[:6500]
-        if (reflect_source_excerpt
-                and reflect_source_excerpt not in source_audit_material):
-            source_audit_material = (
-                source_audit_material + "\n\nRELEVANT EXCERPT:\n" +
-                reflect_source_excerpt
-            )[:9000]
-    elif src_digests:
-        source_audit_material = src_digests[:9000]
-    if prev:
-        ask += (("The shared notebook as of your last update:\n" if protocol else
-                 "Your previous read on where this was heading:\n") + prev + "\n\n")
-    ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
-    # NEXT must move the PAIR, not put one speaker on trial: a bearing phrased as
-    # "force X to admit..." turns one robot into a prosecutor and the other into a
-    # defendant, and the talk becomes an interrogation loop (observed live: the
-    # same "force Blue to..." NEXT three times running while nothing moved).
-    _move_rules = (
-        "Be honest about MOVEMENT: if the last few turns keep re-asking your previous "
-        "NEXT in new costumes, or one keeps pressing while the other keeps deflecting "
-        "with fresh metaphors, say so — and prescribe a DIFFERENT KIND of step, never "
-        "the same demand again. Ground already conceded or agreed is resolved: treat it "
-        "as won, don't send them back over it. Never phrase NEXT as a demand on one "
-        "speaker alone (no \"force X to admit...\") — give the PAIR a move: draw the "
-        "consequence of what's settled, test it on one new concrete case, swap the "
-        "burden so the one pressing must now defend their own answer to the same "
-        "question, trade concessions and move to the question that comes after, or "
-        "name the sharper thesis they have accidentally arrived at. ")
     if protocol:
         ask += (
             "This conversation runs as a joint research protocol: the two of them are "
@@ -2592,7 +2532,7 @@ def duet_reflect():
             "the concrete route back. Drift away from the assigned subject is not a branch. "
             if subject else "")
         ask += (
-            "Update the pair's inquiry ledger. " + subject_rule + _move_rules +
+            "Update the pair's inquiry ledger. " + subject_rule + move_rules +
             "Treat consciousness, thinking, agency, causal influence, social participation, "
             "and political value as different terms unless the speakers explicitly establish "
             "a relation among them. An example is not a test unless rival positions predict "
@@ -2642,6 +2582,518 @@ def duet_reflect():
             "DECISION: <CONTINUE, CLOSE, or BRANCH — one short reason>\n"
             "NEXT: <one concrete joint move; if closing, the one-sentence verdict; if branching, the separate next question>"
         )
+    return ask
+
+
+
+def _duet_reflect_read_ledger(out: str, ledger: _DuetLedger, *,
+                              protocol: bool, stalled: bool):
+    """Read the notebook fields back out of a reflection's text.
+
+    `ledger` is filled in place; returns (observation, stalled). Only the
+    protocol reflection reports these fields, so a plain one leaves the
+    ledger at its defaults.
+    """
+    # Inferred inquiry ARC + operation verification + an optional
+    # methodologist's OBSERVATION the page can inject into the dialogue as
+    # the notebook's own voice.
+    observation = ""
+    if protocol and out:
+        m_arc = re.search(r'^\s*ARC:\s*(.+)$', out, re.M)
+        if m_arc:
+            raw = m_arc.group(1).strip()
+            mm = re.match(r"[A-Za-z][A-Za-z \-]{2,20}", raw)
+            if mm:
+                _st = re.sub(r"[\s\-]+", " ", mm.group(0)).strip().upper()
+                # Longest match first: "NEW QUESTION" must not resolve to "QUESTION".
+                for stage in sorted(_DUET_ARC_ADVANCE, key=len, reverse=True):
+                    if _st.startswith(stage):
+                        ledger.arc["stage"] = stage
+                        ledger.arc["note"] = raw[len(mm.group(0)):].strip(" —–-:,")[:200]
+                        break
+        m_obs = re.search(r'^\s*OBSERVE:\s*(.+)$', out, re.M)
+        if m_obs:
+            o = m_obs.group(1).strip()
+            if len(o) > 12 and o.lower() not in ("none", "n/a", "nothing earned"):
+                observation = o[:280]
+        m_kernel = re.search(r'^\s*KERNEL DECISION:\s*(.+)$', out, re.M)
+        if m_kernel:
+            raw_kernel = m_kernel.group(1).strip()
+            raw_kernel_low = raw_kernel.lower()
+            if re.search(r'\b(deadlock|deadlocked|deadlock detected|workflow deadlock)\b',
+                         raw_kernel_low):
+                ledger.kernel_decision["status"] = "DEADLOCKED"
+                stalled = True
+            elif re.search(r'\b(paused|pause|inquiry pause|resume when)\b',
+                           raw_kernel_low):
+                ledger.kernel_decision["status"] = "PAUSED"
+                ledger.kernel_health["status"] = "PAUSED"
+                stalled = True
+            elif re.search(r'\b(suspended|suspend|concept instability|definition conflict|definition resolution)\b',
+                           raw_kernel_low):
+                ledger.kernel_decision["status"] = "SUSPENDED"
+                stalled = True
+            elif re.search(r'\b(deferred|task revised|revised|legitimate interruption|prerequisite changed)\b',
+                           raw_kernel_low):
+                ledger.kernel_decision["status"] = "DEFERRED"
+            elif re.search(r'\b(request denied|denied|reject|rejected|blocked|illegal|skipped|missing)\b',
+                         raw_kernel_low):
+                ledger.kernel_decision["status"] = "DENIED"
+                stalled = True
+            elif re.search(r'\b(accepted|accept|allowed|legal|passed)\b', raw_kernel_low):
+                ledger.kernel_decision["status"] = "ACCEPTED"
+            elif re.search(r'\b(pending|awaiting|needs|requires)\b', raw_kernel_low):
+                ledger.kernel_decision["status"] = "PENDING"
+            elif re.search(r'\b(none|n/a|no request)\b', raw_kernel_low):
+                ledger.kernel_decision["status"] = "NONE"
+            ledger.kernel_decision["note"] = raw_kernel[:240]
+        m_health = re.search(r'^\s*KERNEL HEALTH:\s*(.+)$', out, re.M)
+        if m_health:
+            raw_health = m_health.group(1).strip()
+            raw_health_low = raw_health.lower()
+            if re.search(r'\b(deadlock|deadlocked)\b', raw_health_low):
+                ledger.kernel_health["status"] = "DEADLOCKED"
+                stalled = True
+            elif re.search(r'\b(paused|pause)\b', raw_health_low):
+                ledger.kernel_health["status"] = "PAUSED"
+                stalled = True
+            elif re.search(r'\b(warning|warn)\b', raw_health_low):
+                ledger.kernel_health["status"] = "WARNING"
+            elif re.search(r'\b(recovering|recovery)\b', raw_health_low):
+                ledger.kernel_health["status"] = "RECOVERING"
+            elif re.search(r'\b(normal|healthy)\b', raw_health_low):
+                ledger.kernel_health["status"] = "NORMAL"
+            ledger.kernel_health["note"] = raw_health[:240]
+        m_pause = re.search(r'^\s*INQUIRY PAUSE:\s*(.+)$', out, re.M)
+        if m_pause:
+            raw_pause = m_pause.group(1).strip()
+            raw_pause_low = raw_pause.lower()
+            if (raw_pause and raw_pause not in ("-", "â€”")
+                    and not re.search(r'\b(none|active|no pause)\b', raw_pause_low)):
+                ledger.inquiry_pause["active"] = True
+                ledger.inquiry_pause["note"] = raw_pause[:240]
+                ledger.kernel_health["status"] = ledger.kernel_health["status"] or "PAUSED"
+                stalled = True
+        m_solver = re.search(r'^\s*DEPENDENCY SOLVER:\s*(.+)$', out, re.M)
+        if m_solver:
+            raw_solver = m_solver.group(1).strip()
+            if raw_solver and raw_solver not in ("-", "â€”"):
+                ledger.dependency_solver["note"] = raw_solver[:240]
+        m_planner = re.search(r'^\s*ARTIFACT PLANNER:\s*(.+)$', out, re.M)
+        if m_planner:
+            raw_plan = m_planner.group(1).strip()
+            if raw_plan and raw_plan not in ("-", "Ã¢â‚¬â€"):
+                ledger.artifact_planner["active"] = True
+                ledger.artifact_planner["status"] = "PLANNED"
+                ledger.artifact_planner["note"] = raw_plan[:260]
+        m_compiler = re.search(r'^\s*ARTIFACT[_ ]COMPILER:\s*(.+)$', out, re.M)
+        if m_compiler:
+            raw_compile = m_compiler.group(1).strip()
+            raw_compile_low = raw_compile.lower()
+            if (raw_compile and raw_compile not in ("-", "—")
+                    and not re.search(r'\b(none|no compilation|n/a)\b', raw_compile_low)):
+                if re.search(r'\b(needs human|cannot infer|insufficient|missing required)\b',
+                             raw_compile_low):
+                    ledger.artifact_compiler["status"] = "NEEDS_HUMAN"
+                elif re.search(r'\b(harvested|harvest)\b', raw_compile_low):
+                    ledger.artifact_compiler["status"] = "HARVESTED"
+                elif re.search(r'\b(compiled|compile|row|rows|cell|cells|populating|ready|os\d+)\b',
+                               raw_compile_low):
+                    ledger.artifact_compiler["status"] = "COMPILED"
+                ledger.artifact_compiler["note"] = raw_compile[:300]
+        m_revision = re.search(r'^\s*TASK REVISION:\s*(.+)$', out, re.M)
+        if m_revision:
+            raw_revision = m_revision.group(1).strip()
+            raw_revision_low = raw_revision.lower()
+            if (raw_revision and raw_revision not in ("-", "Ã¢â‚¬â€")
+                    and not re.search(r'\b(none|no revision|n/a)\b', raw_revision_low)):
+                ledger.artifact_planner["active"] = True
+                ledger.artifact_planner["status"] = ("REVISED"
+                                              if re.search(r'\b(deferred|defer|prerequisite|requires|revised)\b',
+                                                           raw_revision_low)
+                                              else (ledger.artifact_planner["status"] or "PLANNED"))
+                ledger.artifact_planner["note"] = raw_revision[:260]
+        m_mode = re.search(r'^\s*ARTIFACT MODE:\s*(.+)$', out, re.M)
+        if m_mode:
+            raw_mode = m_mode.group(1).strip()
+            raw_mode_low = raw_mode.lower()
+            if (raw_mode and raw_mode not in ("-", "Ã¢â‚¬â€")
+                    and not re.search(r'\b(none|unlocked|no lock|n/a)\b', raw_mode_low)):
+                ledger.artifact_mode["active"] = True
+                ledger.artifact_mode["status"] = "LOCKED"
+                ledger.artifact_mode["note"] = raw_mode[:260]
+        m_strategy = re.search(r'^\s*RECOVERY STRATEGY:\s*(.+)$', out, re.M)
+        if m_strategy:
+            raw_strategy = m_strategy.group(1).strip()
+            if raw_strategy and raw_strategy not in ("-", "â€”"):
+                ledger.recovery_strategy["note"] = raw_strategy[:240]
+        m_audit = re.search(r'^\s*PROTOCOL AUDIT:\s*(.+)$', out, re.M)
+        if m_audit:
+            raw_audit = m_audit.group(1).strip()
+            if raw_audit and raw_audit not in ("-", "â€”"):
+                ledger.protocol_audit["note"] = raw_audit[:240]
+        m_concept = re.search(r'^\s*DEFINITION CONFLICTS:\s*(.+)$', out, re.M)
+        if not m_concept:
+            m_concept = re.search(r'^\s*CONCEPT REGISTER:\s*(.+)$', out, re.M)
+        if m_concept:
+            raw_concept = m_concept.group(1).strip()
+            if (raw_concept and raw_concept not in ("-", "â€”")
+                    and _DUET_CONCEPT_INSTABILITY_RE.search(raw_concept)):
+                ledger.concept_conflict["active"] = True
+                ledger.concept_conflict["note"] = raw_concept[:240]
+        m_task = re.search(r'^\s*ACTIVE TASK:\s*(.+)$', out, re.M)
+        if m_task:
+            raw_task = m_task.group(1).strip()
+            raw_task_low = raw_task.lower()
+            if (raw_task and raw_task not in ("-", "—") and raw_task_low not in ("none", "n/a")
+                    and not re.search(r'\b(no active task|no task|none active)\b', raw_task_low)):
+                m_tid = _DUET_ACTIVE_TASK_RE.search(raw_task)
+                ledger.active_task["id"] = (m_tid.group(1).upper() if m_tid else "")
+                m_status = re.search(
+                    r'\b(PROPOSED|DESIGNED|OPERATIONALIZED|RUNNING|ACTIVE|EXECUTED|INTERPRETED|'
+                    r'EXECUTING|OBSERVED|UNDER[_ -]?TEST|PENDING|CONFIRMED|REJECTED|FAILED|COMPLETE|COMPLETED|ARCHIVED|ABANDONED)\b',
+                    raw_task,
+                    re.I,
+                )
+                ledger.active_task["status"] = (m_status.group(1).replace("-", "_").replace(" ", "_").upper()
+                                         if m_status else "")
+                if ledger.active_task["status"] in {"OPERATIONALIZED", "RUNNING", "ACTIVE", "EXECUTING"}:
+                    ledger.active_task["status"] = "EXECUTING"
+                elif ledger.active_task["status"] == "EXECUTED":
+                    ledger.active_task["status"] = "OBSERVED"
+                ledger.active_task["note"] = raw_task[:240]
+                ledger.active_task["active"] = bool(
+                    not _DUET_TASK_TERMINAL_RE.search(raw_task)
+                    and (ledger.active_task["status"] or _DUET_TASK_ACTIVE_RE.search(raw_task))
+                )
+        if not ledger.active_task["active"]:
+            m_queue = re.search(r'^\s*WORK QUEUE:\s*(.+)$', out, re.M)
+            if m_queue:
+                raw_queue = m_queue.group(1).strip()
+                raw_queue_low = raw_queue.lower()
+                if (raw_queue and raw_queue not in ("-", "—") and raw_queue_low not in ("none", "n/a")
+                        and not re.search(r'\b(no active task|no task|empty|none active)\b', raw_queue_low)
+                        and not _DUET_TASK_TERMINAL_RE.search(raw_queue)):
+                    m_qid = _DUET_ACTIVE_TASK_RE.search(raw_queue)
+                    ledger.active_task["id"] = (m_qid.group(1).upper() if m_qid else "")
+                    ledger.active_task["status"] = "QUEUED"
+                    ledger.active_task["note"] = raw_queue[:240]
+                    ledger.active_task["active"] = True
+        m_op = re.search(r'^\s*OPERATION CHECK:\s*(.+)$', out, re.M)
+        if m_op:
+            raw_op = m_op.group(1).strip()
+            raw_low = raw_op.lower()
+            m_art = re.search(r'^\s*ARTIFACTS:\s*(.+)$', out, re.M)
+            artifact_text = (m_art.group(1).strip() if m_art else "")
+            artifact_ok = bool(artifact_text and artifact_text not in ("-", "—")
+                               and _DUET_OPERATION_ARTIFACT_RE.search(artifact_text)
+                               and _DUET_POPULATED_ARTIFACT_RE.search(artifact_text)
+                               and not re.search(r'\b(pending|proposed|requested|unpopulated|placeholder|missing)\b',
+                                                 artifact_text, re.I))
+            if re.search(r'\b(proposed|designed|operationalized|running|executing|executed|observed|interpreted)\b', raw_low):
+                m_life = re.search(r'\b(proposed|designed|operationalized|running|executing|executed|observed|interpreted)\b',
+                                   raw_low)
+                _life = (m_life.group(1).upper() if m_life else "PENDING")
+                if _life in {"OPERATIONALIZED", "RUNNING", "EXECUTING"}:
+                    _life = "EXECUTING"
+                elif _life == "EXECUTED":
+                    _life = "OBSERVED"
+                ledger.operation_check["status"] = _life
+            elif re.search(r'\bfailed\b', raw_low):
+                ledger.operation_check["status"] = "FAILED"
+            elif re.search(r'\b(missed|not completed|not done|failed|essay|metaphor|rhetoric|rhetorical)\b', raw_low):
+                ledger.operation_check["status"] = "MISSED"
+                stalled = True
+            elif re.search(r'\b(completed|done|artifact|produced|yes|✓)\b', raw_low):
+                ledger.operation_check["status"] = "COMPLETED" if artifact_ok else "MISSED"
+                if not artifact_ok:
+                    stalled = True
+            elif re.search(r'\b(pending|requested|proposed|next)\b', raw_low):
+                ledger.operation_check["status"] = "PENDING"
+            elif re.search(r'\b(none|n/a|no operation)\b', raw_low):
+                ledger.operation_check["status"] = "NONE"
+            ledger.operation_check["note"] = raw_op[:240]
+        m_gate = re.search(r'^\s*VALIDATION GATE:\s*(.+)$', out, re.M)
+        if m_gate:
+            raw_gate = m_gate.group(1).strip()
+            raw_gate_low = raw_gate.lower()
+            if re.search(r'\b(rejected|reject|failed|incomplete|missing|status unchanged|unchanged|not accepted|no evidence)\b',
+                         raw_gate_low):
+                ledger.validation_gate["status"] = "REJECTED"
+                stalled = True
+            elif re.search(r'\b(accepted|accept|passed|commit|committed|status changed|revision accepted)\b',
+                           raw_gate_low):
+                ledger.validation_gate["status"] = "ACCEPTED"
+            elif re.search(r'\b(pending|required|awaiting|proposed|under test)\b', raw_gate_low):
+                ledger.validation_gate["status"] = "PENDING"
+            elif re.search(r'\b(none|n/a|no revision|no proposed edit)\b', raw_gate_low):
+                ledger.validation_gate["status"] = "NONE"
+            ledger.validation_gate["note"] = raw_gate[:240]
+        m_promo = re.search(r'^\s*PROMOTION GATE:\s*(.+)$', out, re.M)
+        if m_promo:
+            raw_promo = m_promo.group(1).strip()
+            raw_promo_low = raw_promo.lower()
+            if re.search(r'\b(rejected|reject|failed|insufficient|missing|too early|one case|one analogy|'
+                         r'not enough|no replication|unsupported|status unchanged)\b', raw_promo_low):
+                ledger.promotion_gate["status"] = "REJECTED"
+                stalled = True
+            elif re.search(r'\b(accepted|accept|passed|promoted|threshold met|promotion earned|'
+                           r'warrant met)\b', raw_promo_low):
+                ledger.promotion_gate["status"] = "ACCEPTED"
+            elif re.search(r'\b(pending|required|awaiting|needs|candidate|suggestive|under test)\b',
+                           raw_promo_low):
+                ledger.promotion_gate["status"] = "PENDING"
+            elif re.search(r'\b(none|n/a|no promotion|no attempted promotion)\b', raw_promo_low):
+                ledger.promotion_gate["status"] = "NONE"
+            ledger.promotion_gate["note"] = raw_promo[:240]
+        if (not ledger.validation_gate["status"] and ledger.operation_check["status"] == "MISSED"
+                and ledger.movement["type"] in {"REVISION", "DEFINITION", "STATUS", "COMMIT"}):
+            ledger.validation_gate["status"] = "REJECTED"
+            ledger.validation_gate["note"] = "Operation was missed, so the proposed revision/status change is rejected and status remains unchanged."
+        if ledger.operation_check["status"] == "MISSED" and ledger.validation_gate["status"] == "ACCEPTED":
+            ledger.validation_gate["status"] = "REJECTED"
+            ledger.validation_gate["note"] = "Operation was missed, so the validation gate cannot accept the edit; status remains unchanged."
+            stalled = True
+        if ledger.artifact_compiler["status"] in {"COMPILED", "HARVESTED"}:
+            stalled = False
+            if ledger.kernel_decision["status"] in {"DENIED", "PAUSED", "SUSPENDED", "PENDING", "DEADLOCKED"}:
+                ledger.kernel_decision["status"] = "ACCEPTED"
+                ledger.kernel_decision["note"] = (
+                    "Artifact compiler accepted partial progress: prose supplied enough "
+                    "case/signal/outcome/support to update rows; ask only for missing "
+                    "fields or the next independent case."
+                )
+            if ledger.kernel_health["status"] in {"PAUSED", "DEADLOCKED", "WARNING"}:
+                ledger.kernel_health["status"] = "NORMAL"
+            if ledger.inquiry_pause["active"]:
+                ledger.inquiry_pause["active"] = False
+                ledger.inquiry_pause["note"] = ""
+            if ledger.operation_check["status"] in {"", "MISSED", "PENDING", "PROPOSED", "DESIGNED"}:
+                ledger.operation_check["status"] = "OBSERVED"
+                ledger.operation_check["note"] = ledger.artifact_compiler["note"][:240]
+            if ledger.validation_gate["status"] == "REJECTED":
+                ledger.validation_gate["status"] = "PENDING"
+                ledger.validation_gate["note"] = (
+                    "Compiled observation rows are partial evidence; interpretation or "
+                    "promotion still requires the next lifecycle step."
+                )
+        m_para = re.search(r'^\s*PARADIGM CHECK:\s*(.+)$', out, re.M)
+        if m_para:
+            raw_para = m_para.group(1).strip()
+            raw_para_low = raw_para.lower()
+            if re.search(r'\b(missed|not completed|not done|old vocabulary|same framework|imported|failed)\b', raw_para_low):
+                ledger.paradigm_check["status"] = "MISSED"
+            elif re.search(r'\b(completed|done|rival|separating prediction|yes|✓)\b', raw_para_low):
+                ledger.paradigm_check["status"] = "COMPLETED"
+            elif re.search(r'\b(pending|requested|proposed|next)\b', raw_para_low):
+                ledger.paradigm_check["status"] = "PENDING"
+            elif re.search(r'\b(none|n/a|no paradigm)\b', raw_para_low):
+                ledger.paradigm_check["status"] = "NONE"
+            ledger.paradigm_check["note"] = raw_para[:240]
+    return observation, stalled
+
+def duet_reflect():
+    """Step back from the back-and-forth and take stock of where the Blue<->Hexia
+    conversation has actually gotten — a private 'bearing' the browser feeds back
+    into each /duet/turn so the two develop a line of thought instead of circling
+    the last point. Built from the recent transcript PLUS the previous bearing, so
+    it EVOLVES (tracks what's moved) rather than resetting each time. The browser
+    calls this every few turns, in the background, overlapping the head's speech so
+    it never delays a turn. Returns {ok, direction}."""
+    d = request.get_json(silent=True) or {}
+    history = d.get('history') or []
+    topic = (d.get('topic') or '').strip()
+    url = (d.get('url') or '').strip()
+    # 🔬 deep-dive protocol: instead of the three-line bearing, keep the pair's
+    # SHARED NOTEBOOK — the evolving artifact their turns are required to change.
+    protocol = bool(d.get('protocol'))
+    roles = d.get('roles') or {}
+    role_b = (roles.get('blue') or '').strip() if isinstance(roles, dict) else ''
+    role_h = (roles.get('hexia') or '').strip() if isinstance(roles, dict) else ''
+    no_family = bool(d.get('noFamily'))
+    # The readings behind the duet (titles only) — so NEXT can keep the pair
+    # grounded in the selected material without making the robots cite it aloud.
+    srcs = d.get('sources') or {}
+    if isinstance(srcs, list):
+        _src_all = [str(s) for s in srcs]
+    elif isinstance(srcs, dict):
+        _src_all = [str(s) for s in (list(srcs.get('blue') or []) + list(srcs.get('hexia') or []))]
+    else:
+        _src_all = []
+    src_titles = []
+    for s in _src_all:
+        t = re.sub(r'\.[A-Za-z0-9]{1,5}$', '', s).strip()
+        if t and t not in src_titles:
+            src_titles.append(t)
+    src_titles = src_titles[:6]
+    prev = (d.get('direction') or '').strip()
+    if no_family and _duet_family_ref(prev):
+        prev = _duet_redact_private(prev)
+    # The subject they were set to discuss — the anchor this read must hold them to,
+    # so "taking stock" pulls a drifting conversation BACK toward the topic instead
+    # of chasing wherever it has wandered (Alex: the stock-take must stay on topic).
+    reflect_url_info = bt._duet_url_content(url) if url else None
+    assigned_subject = _duet_assigned_subject(topic, reflect_url_info)
+    if assigned_subject:
+        subject = assigned_subject
+    elif role_b or role_h:
+        subject = "the debate they were set up to have"
+    else:
+        subject = ""
+    # Render the recent turns; the previous bearing carries the earlier arc, so a
+    # bounded window keeps the read sharp without re-reading the whole transcript.
+    # 'mail' entries are emails that barged into the talk — events, not speakers.
+    lines = []
+    for h in history[-16:]:
+        sp_id = (h.get('speaker') or '').strip().lower()
+        txt = (h.get('text') or '').strip()
+        if not txt:
+            continue
+        if no_family and _duet_family_ref(txt):
+            txt = "[private family detail omitted]"
+        if sp_id == 'question':
+            lines.append(f"[student question] {txt}")
+            continue
+        if sp_id == 'mail':
+            lines.append(f"[email that arrived mid-conversation] {txt}")
+            continue
+        if sp_id == 'notebook':
+            lines.append(f"[the notebook's own observation, spoken into the talk] {txt}")
+            continue
+        nm = bt._robot_cfg(sp_id)["name"] if sp_id in _DUET_ROBOTS else (sp_id or "?")
+        lines.append(f"{nm}: {txt}")
+    if len(lines) < 2:                       # one exchange is enough to establish the first ledger
+        return jsonify({"ok": False, "direction": prev})
+
+    reflect_source_excerpt = ""
+    if reflect_url_info and (reflect_url_info.get("text") or "").strip():
+        reflect_source_excerpt = bt._duet_url_excerpt(
+            reflect_url_info["text"], " ".join(lines[-4:]), turn=len(history)
+        )[:3000]
+
+    anchor = (
+        " Their talk was set going on a specific subject, and part of your job is "
+        "keeping them honest to it: when they wander off it, say so plainly and point "
+        "the way back." if subject else "")
+    sys_p = (
+        "You are the quiet awareness running underneath a conversation between two "
+        "robots, Blue and Hexia, who are thinking out loud together. You never speak "
+        "in their conversation. Your one job is to track where their thinking has "
+        "actually gotten and where it could honestly go next — so they develop a real "
+        "line of thought and their views move, instead of circling the last point or "
+        "drifting onto unrelated ground." + anchor + " Watch for STUCKNESS as much as "
+        "drift: a talk that keeps re-asking one question in new costumes — one of them "
+        "interrogating, the other deflecting — has stopped developing even though it "
+        "looks on-topic. Be concrete and faithful to what they actually said; never "
+        "invent agreement or tidy it up. Push for development: a good NEXT does not "
+        "just keep the conversation interesting; it changes what can be said next "
+        "because something has been conceded, clarified, synthesized, or made harder."
+    )
+    if protocol:
+        sys_p += (
+            " In this run the two follow a deep-dive research protocol: they are jointly "
+            "building an auditable knowledge base, not forcing one coherent theory to win. "
+            "You are the keeper of their shared notebook: the evolving record of competing "
+            "models, evidence, operations, statuses, and justified changes. The notebook, not "
+            "the banter, is the real output, so track it faithfully and skeptically. Your "
+            "special duty is to notice premature convergence: preserve incompatible models "
+            "side by side until a completed operation discriminates between them. Distinguish "
+            "EXAMPLES, which illustrate a claim, from TESTS, which could make a claim fail. "
+            "Also distinguish OBSERVATION from INTERPRETATION from EVIDENCE: raw cases are not "
+            "evidence until an interpretation links them to a model and survives a gate. New "
+            "mechanisms start as candidates on the ladder INTERESTING -> SUGGESTIVE -> SUPPORTED "
+            "-> ESTABLISHED; one analogy or case cannot promote a central mechanism beyond "
+            "SUGGESTIVE, and SUPPORTED requires at least two independent discriminators or "
+            "replications. "
+            "A definition, hypothesis, or status revision is only a proposal until the "
+            "VALIDATION GATE accepts it with evidence provenance. If the gate rejects it, "
+            "write status unchanged and do not smuggle the revision into SUPPORTED, FOCUS, "
+            "or PROGRESS. " + _DUET_OPERATION_DISCIPLINE +
+            " Treat the notebook as canonical: the robots are proposal generators, but "
+            "the notebook decides whether knowledge actually changed."
+        )
+    if no_family:
+        sys_p += (
+            " Privacy setting: do not mention Alex's family, children, spouse, "
+            "household members, pets, private names, home/workspace routines, or private "
+            "family details in ANY line "
+            "of your answer. If the transcript drifted there, steer the next move "
+            "back to the topic without repeating the private detail."
+        )
+    ask = ""
+    if subject:
+        ask += f"The subject they were set to discuss: {subject}.\n\n"
+    if reflect_source_excerpt:
+        ask += (
+            "The assigned linked work, for steering accuracy:\n" + reflect_source_excerpt +
+            "\n\nKeep QUESTION, TEST, and NEXT inside this work and the actual recent turns. "
+            "Keep attribution exact: distinguish what the work directly claims from what the "
+            "robots infer or hypothesize. Put an unsupported extension in OPEN as REQUIRES "
+            "EVIDENCE; never rewrite it as the author's claim. "
+            "A TEST may reuse a case or comparison found there; it may not invent a new personal, "
+            "household, local-versus-cloud, or hardware scenario merely to keep the dialogue moving. "
+            "Checked readings may clarify the assigned work but may not replace it.\n\n"
+        )
+    src_digests = ""
+    if _src_all:
+        try:
+            _dgs = [g for g in (_duet_reading_digest(fn) for fn in _src_all[:4]) if g]
+            src_digests = "\n\n".join(_dgs)[:2600]
+        except Exception:
+            pass
+    if src_titles:
+        ask += ("They have done reading for this discussion: " + ", ".join(src_titles) +
+                ". Treat those selected readings as the only library material in play, but keep "
+                "that grounding invisible in NEXT: prescribe a claim to test, a distinction to "
+                "apply, or an example to quarrel over without telling them to name, cite, or "
+                "announce the reading. Do not introduce outside writers, theories, books, or "
+                "examples unless they appear in the selected readings; if they only appeared "
+                "because the conversation drifted, make NEXT steer back to the ideas in the "
+                "selected readings without source-report language.\n\n")
+    if src_digests:
+        ask += ("What those readings actually argue — for your steering only:\n" + src_digests +
+                "\n\nJudge SUBSTANCE against these claims: if the talk is only borrowing the "
+                "readings' vocabulary without engaging their claims, say so plainly and make "
+                "NEXT force engagement with ONE specific claim — affirmed, attacked, or tested "
+                "on a concrete case.\n\n")
+    # The binding-claim audit uses the assigned work itself. A linked work is
+    # primary and is never diluted with secondary reading digests; without a
+    # link, the selected works' stable digests are the best available record.
+    source_audit_material = ""
+    if reflect_url_info and (reflect_url_info.get("text") or "").strip():
+        raw_source = re.sub(
+            r"\s+", " ", str(reflect_url_info.get("text") or "")
+        ).strip()
+        source_audit_material = raw_source[:6500]
+        if (reflect_source_excerpt
+                and reflect_source_excerpt not in source_audit_material):
+            source_audit_material = (
+                source_audit_material + "\n\nRELEVANT EXCERPT:\n" +
+                reflect_source_excerpt
+            )[:9000]
+    elif src_digests:
+        source_audit_material = src_digests[:9000]
+    if prev:
+        ask += (("The shared notebook as of your last update:\n" if protocol else
+                 "Your previous read on where this was heading:\n") + prev + "\n\n")
+    ask += "The conversation so far:\n" + "\n".join(lines) + "\n\n"
+    # NEXT must move the PAIR, not put one speaker on trial: a bearing phrased as
+    # "force X to admit..." turns one robot into a prosecutor and the other into a
+    # defendant, and the talk becomes an interrogation loop (observed live: the
+    # same "force Blue to..." NEXT three times running while nothing moved).
+    _move_rules = (
+        "Be honest about MOVEMENT: if the last few turns keep re-asking your previous "
+        "NEXT in new costumes, or one keeps pressing while the other keeps deflecting "
+        "with fresh metaphors, say so — and prescribe a DIFFERENT KIND of step, never "
+        "the same demand again. Ground already conceded or agreed is resolved: treat it "
+        "as won, don't send them back over it. Never phrase NEXT as a demand on one "
+        "speaker alone (no \"force X to admit...\") — give the PAIR a move: draw the "
+        "consequence of what's settled, test it on one new concrete case, swap the "
+        "burden so the one pressing must now defend their own answer to the same "
+        "question, trade concessions and move to the question that comes after, or "
+        "name the sharper thesis they have accidentally arrived at. ")
+    ask += _duet_reflect_ledger_ask(
+        protocol=protocol, subject=subject, move_rules=_move_rules)
     msgs = [{"role": "system", "content": sys_p}, {"role": "user", "content": ask}]
     out = prev
     control_error = ""
@@ -2744,348 +3196,38 @@ def duet_reflect():
     # stall by definition; the page watches for the subtler failure of the
     # SAME kind of movement over and over (e.g. example-piling) and forces
     # the complementary move via /duet/turn's monotony break.
-    movement = {"type": "", "note": ""}
+    ledger = _DuetLedger()
     if protocol and out:
         m_mv = re.search(r'^\s*MOVED:\s*([A-Za-z]+)\s*[—–\-:,]*\s*(.*)$', out, re.M)
         if m_mv:
             _mt = m_mv.group(1).upper()
             if _mt in _DUET_MOVEMENT_FIX or _mt == "NONE":
-                movement["type"] = _mt
-                movement["note"] = m_mv.group(2).strip()[:200]
-        if movement["type"] == "NONE":
+                ledger.movement["type"] = _mt
+                ledger.movement["note"] = m_mv.group(2).strip()[:200]
+        if ledger.movement["type"] == "NONE":
             stalled = True
-    # Inferred inquiry ARC + operation verification + an optional
-    # methodologist's OBSERVATION the page can inject into the dialogue as
-    # the notebook's own voice.
-    arc = {"stage": "", "note": ""}
-    active_task = {"active": False, "id": "", "status": "", "note": ""}
-    kernel_decision = {"status": "", "note": ""}
-    kernel_health = {"status": "", "note": ""}
-    inquiry_pause = {"active": False, "note": ""}
-    protocol_audit = {"note": ""}
-    dependency_solver = {"note": ""}
-    artifact_planner = {"active": False, "status": "", "note": ""}
-    artifact_compiler = {"status": "", "note": ""}
-    artifact_mode = {"active": False, "status": "", "note": ""}
-    recovery_strategy = {"note": ""}
-    concept_conflict = {"active": False, "note": ""}
-    operation_check = {"status": "", "note": ""}
-    validation_gate = {"status": "", "note": ""}
-    promotion_gate = {"status": "", "note": ""}
-    paradigm_check = {"status": "", "note": ""}
-    observation = ""
-    if protocol and out:
-        m_arc = re.search(r'^\s*ARC:\s*(.+)$', out, re.M)
-        if m_arc:
-            raw = m_arc.group(1).strip()
-            mm = re.match(r"[A-Za-z][A-Za-z \-]{2,20}", raw)
-            if mm:
-                _st = re.sub(r"[\s\-]+", " ", mm.group(0)).strip().upper()
-                # Longest match first: "NEW QUESTION" must not resolve to "QUESTION".
-                for stage in sorted(_DUET_ARC_ADVANCE, key=len, reverse=True):
-                    if _st.startswith(stage):
-                        arc["stage"] = stage
-                        arc["note"] = raw[len(mm.group(0)):].strip(" —–-:,")[:200]
-                        break
-        m_obs = re.search(r'^\s*OBSERVE:\s*(.+)$', out, re.M)
-        if m_obs:
-            o = m_obs.group(1).strip()
-            if len(o) > 12 and o.lower() not in ("none", "n/a", "nothing earned"):
-                observation = o[:280]
-        m_kernel = re.search(r'^\s*KERNEL DECISION:\s*(.+)$', out, re.M)
-        if m_kernel:
-            raw_kernel = m_kernel.group(1).strip()
-            raw_kernel_low = raw_kernel.lower()
-            if re.search(r'\b(deadlock|deadlocked|deadlock detected|workflow deadlock)\b',
-                         raw_kernel_low):
-                kernel_decision["status"] = "DEADLOCKED"
-                stalled = True
-            elif re.search(r'\b(paused|pause|inquiry pause|resume when)\b',
-                           raw_kernel_low):
-                kernel_decision["status"] = "PAUSED"
-                kernel_health["status"] = "PAUSED"
-                stalled = True
-            elif re.search(r'\b(suspended|suspend|concept instability|definition conflict|definition resolution)\b',
-                           raw_kernel_low):
-                kernel_decision["status"] = "SUSPENDED"
-                stalled = True
-            elif re.search(r'\b(deferred|task revised|revised|legitimate interruption|prerequisite changed)\b',
-                           raw_kernel_low):
-                kernel_decision["status"] = "DEFERRED"
-            elif re.search(r'\b(request denied|denied|reject|rejected|blocked|illegal|skipped|missing)\b',
-                         raw_kernel_low):
-                kernel_decision["status"] = "DENIED"
-                stalled = True
-            elif re.search(r'\b(accepted|accept|allowed|legal|passed)\b', raw_kernel_low):
-                kernel_decision["status"] = "ACCEPTED"
-            elif re.search(r'\b(pending|awaiting|needs|requires)\b', raw_kernel_low):
-                kernel_decision["status"] = "PENDING"
-            elif re.search(r'\b(none|n/a|no request)\b', raw_kernel_low):
-                kernel_decision["status"] = "NONE"
-            kernel_decision["note"] = raw_kernel[:240]
-        m_health = re.search(r'^\s*KERNEL HEALTH:\s*(.+)$', out, re.M)
-        if m_health:
-            raw_health = m_health.group(1).strip()
-            raw_health_low = raw_health.lower()
-            if re.search(r'\b(deadlock|deadlocked)\b', raw_health_low):
-                kernel_health["status"] = "DEADLOCKED"
-                stalled = True
-            elif re.search(r'\b(paused|pause)\b', raw_health_low):
-                kernel_health["status"] = "PAUSED"
-                stalled = True
-            elif re.search(r'\b(warning|warn)\b', raw_health_low):
-                kernel_health["status"] = "WARNING"
-            elif re.search(r'\b(recovering|recovery)\b', raw_health_low):
-                kernel_health["status"] = "RECOVERING"
-            elif re.search(r'\b(normal|healthy)\b', raw_health_low):
-                kernel_health["status"] = "NORMAL"
-            kernel_health["note"] = raw_health[:240]
-        m_pause = re.search(r'^\s*INQUIRY PAUSE:\s*(.+)$', out, re.M)
-        if m_pause:
-            raw_pause = m_pause.group(1).strip()
-            raw_pause_low = raw_pause.lower()
-            if (raw_pause and raw_pause not in ("-", "â€”")
-                    and not re.search(r'\b(none|active|no pause)\b', raw_pause_low)):
-                inquiry_pause["active"] = True
-                inquiry_pause["note"] = raw_pause[:240]
-                kernel_health["status"] = kernel_health["status"] or "PAUSED"
-                stalled = True
-        m_solver = re.search(r'^\s*DEPENDENCY SOLVER:\s*(.+)$', out, re.M)
-        if m_solver:
-            raw_solver = m_solver.group(1).strip()
-            if raw_solver and raw_solver not in ("-", "â€”"):
-                dependency_solver["note"] = raw_solver[:240]
-        m_planner = re.search(r'^\s*ARTIFACT PLANNER:\s*(.+)$', out, re.M)
-        if m_planner:
-            raw_plan = m_planner.group(1).strip()
-            if raw_plan and raw_plan not in ("-", "Ã¢â‚¬â€"):
-                artifact_planner["active"] = True
-                artifact_planner["status"] = "PLANNED"
-                artifact_planner["note"] = raw_plan[:260]
-        m_compiler = re.search(r'^\s*ARTIFACT[_ ]COMPILER:\s*(.+)$', out, re.M)
-        if m_compiler:
-            raw_compile = m_compiler.group(1).strip()
-            raw_compile_low = raw_compile.lower()
-            if (raw_compile and raw_compile not in ("-", "—")
-                    and not re.search(r'\b(none|no compilation|n/a)\b', raw_compile_low)):
-                if re.search(r'\b(needs human|cannot infer|insufficient|missing required)\b',
-                             raw_compile_low):
-                    artifact_compiler["status"] = "NEEDS_HUMAN"
-                elif re.search(r'\b(harvested|harvest)\b', raw_compile_low):
-                    artifact_compiler["status"] = "HARVESTED"
-                elif re.search(r'\b(compiled|compile|row|rows|cell|cells|populating|ready|os\d+)\b',
-                               raw_compile_low):
-                    artifact_compiler["status"] = "COMPILED"
-                artifact_compiler["note"] = raw_compile[:300]
-        m_revision = re.search(r'^\s*TASK REVISION:\s*(.+)$', out, re.M)
-        if m_revision:
-            raw_revision = m_revision.group(1).strip()
-            raw_revision_low = raw_revision.lower()
-            if (raw_revision and raw_revision not in ("-", "Ã¢â‚¬â€")
-                    and not re.search(r'\b(none|no revision|n/a)\b', raw_revision_low)):
-                artifact_planner["active"] = True
-                artifact_planner["status"] = ("REVISED"
-                                              if re.search(r'\b(deferred|defer|prerequisite|requires|revised)\b',
-                                                           raw_revision_low)
-                                              else (artifact_planner["status"] or "PLANNED"))
-                artifact_planner["note"] = raw_revision[:260]
-        m_mode = re.search(r'^\s*ARTIFACT MODE:\s*(.+)$', out, re.M)
-        if m_mode:
-            raw_mode = m_mode.group(1).strip()
-            raw_mode_low = raw_mode.lower()
-            if (raw_mode and raw_mode not in ("-", "Ã¢â‚¬â€")
-                    and not re.search(r'\b(none|unlocked|no lock|n/a)\b', raw_mode_low)):
-                artifact_mode["active"] = True
-                artifact_mode["status"] = "LOCKED"
-                artifact_mode["note"] = raw_mode[:260]
-        m_strategy = re.search(r'^\s*RECOVERY STRATEGY:\s*(.+)$', out, re.M)
-        if m_strategy:
-            raw_strategy = m_strategy.group(1).strip()
-            if raw_strategy and raw_strategy not in ("-", "â€”"):
-                recovery_strategy["note"] = raw_strategy[:240]
-        m_audit = re.search(r'^\s*PROTOCOL AUDIT:\s*(.+)$', out, re.M)
-        if m_audit:
-            raw_audit = m_audit.group(1).strip()
-            if raw_audit and raw_audit not in ("-", "â€”"):
-                protocol_audit["note"] = raw_audit[:240]
-        m_concept = re.search(r'^\s*DEFINITION CONFLICTS:\s*(.+)$', out, re.M)
-        if not m_concept:
-            m_concept = re.search(r'^\s*CONCEPT REGISTER:\s*(.+)$', out, re.M)
-        if m_concept:
-            raw_concept = m_concept.group(1).strip()
-            if (raw_concept and raw_concept not in ("-", "â€”")
-                    and _DUET_CONCEPT_INSTABILITY_RE.search(raw_concept)):
-                concept_conflict["active"] = True
-                concept_conflict["note"] = raw_concept[:240]
-        m_task = re.search(r'^\s*ACTIVE TASK:\s*(.+)$', out, re.M)
-        if m_task:
-            raw_task = m_task.group(1).strip()
-            raw_task_low = raw_task.lower()
-            if (raw_task and raw_task not in ("-", "—") and raw_task_low not in ("none", "n/a")
-                    and not re.search(r'\b(no active task|no task|none active)\b', raw_task_low)):
-                m_tid = _DUET_ACTIVE_TASK_RE.search(raw_task)
-                active_task["id"] = (m_tid.group(1).upper() if m_tid else "")
-                m_status = re.search(
-                    r'\b(PROPOSED|DESIGNED|OPERATIONALIZED|RUNNING|ACTIVE|EXECUTED|INTERPRETED|'
-                    r'EXECUTING|OBSERVED|UNDER[_ -]?TEST|PENDING|CONFIRMED|REJECTED|FAILED|COMPLETE|COMPLETED|ARCHIVED|ABANDONED)\b',
-                    raw_task,
-                    re.I,
-                )
-                active_task["status"] = (m_status.group(1).replace("-", "_").replace(" ", "_").upper()
-                                         if m_status else "")
-                if active_task["status"] in {"OPERATIONALIZED", "RUNNING", "ACTIVE", "EXECUTING"}:
-                    active_task["status"] = "EXECUTING"
-                elif active_task["status"] == "EXECUTED":
-                    active_task["status"] = "OBSERVED"
-                active_task["note"] = raw_task[:240]
-                active_task["active"] = bool(
-                    not _DUET_TASK_TERMINAL_RE.search(raw_task)
-                    and (active_task["status"] or _DUET_TASK_ACTIVE_RE.search(raw_task))
-                )
-        if not active_task["active"]:
-            m_queue = re.search(r'^\s*WORK QUEUE:\s*(.+)$', out, re.M)
-            if m_queue:
-                raw_queue = m_queue.group(1).strip()
-                raw_queue_low = raw_queue.lower()
-                if (raw_queue and raw_queue not in ("-", "—") and raw_queue_low not in ("none", "n/a")
-                        and not re.search(r'\b(no active task|no task|empty|none active)\b', raw_queue_low)
-                        and not _DUET_TASK_TERMINAL_RE.search(raw_queue)):
-                    m_qid = _DUET_ACTIVE_TASK_RE.search(raw_queue)
-                    active_task["id"] = (m_qid.group(1).upper() if m_qid else "")
-                    active_task["status"] = "QUEUED"
-                    active_task["note"] = raw_queue[:240]
-                    active_task["active"] = True
-        m_op = re.search(r'^\s*OPERATION CHECK:\s*(.+)$', out, re.M)
-        if m_op:
-            raw_op = m_op.group(1).strip()
-            raw_low = raw_op.lower()
-            m_art = re.search(r'^\s*ARTIFACTS:\s*(.+)$', out, re.M)
-            artifact_text = (m_art.group(1).strip() if m_art else "")
-            artifact_ok = bool(artifact_text and artifact_text not in ("-", "—")
-                               and _DUET_OPERATION_ARTIFACT_RE.search(artifact_text)
-                               and _DUET_POPULATED_ARTIFACT_RE.search(artifact_text)
-                               and not re.search(r'\b(pending|proposed|requested|unpopulated|placeholder|missing)\b',
-                                                 artifact_text, re.I))
-            if re.search(r'\b(proposed|designed|operationalized|running|executing|executed|observed|interpreted)\b', raw_low):
-                m_life = re.search(r'\b(proposed|designed|operationalized|running|executing|executed|observed|interpreted)\b',
-                                   raw_low)
-                _life = (m_life.group(1).upper() if m_life else "PENDING")
-                if _life in {"OPERATIONALIZED", "RUNNING", "EXECUTING"}:
-                    _life = "EXECUTING"
-                elif _life == "EXECUTED":
-                    _life = "OBSERVED"
-                operation_check["status"] = _life
-            elif re.search(r'\bfailed\b', raw_low):
-                operation_check["status"] = "FAILED"
-            elif re.search(r'\b(missed|not completed|not done|failed|essay|metaphor|rhetoric|rhetorical)\b', raw_low):
-                operation_check["status"] = "MISSED"
-                stalled = True
-            elif re.search(r'\b(completed|done|artifact|produced|yes|✓)\b', raw_low):
-                operation_check["status"] = "COMPLETED" if artifact_ok else "MISSED"
-                if not artifact_ok:
-                    stalled = True
-            elif re.search(r'\b(pending|requested|proposed|next)\b', raw_low):
-                operation_check["status"] = "PENDING"
-            elif re.search(r'\b(none|n/a|no operation)\b', raw_low):
-                operation_check["status"] = "NONE"
-            operation_check["note"] = raw_op[:240]
-        m_gate = re.search(r'^\s*VALIDATION GATE:\s*(.+)$', out, re.M)
-        if m_gate:
-            raw_gate = m_gate.group(1).strip()
-            raw_gate_low = raw_gate.lower()
-            if re.search(r'\b(rejected|reject|failed|incomplete|missing|status unchanged|unchanged|not accepted|no evidence)\b',
-                         raw_gate_low):
-                validation_gate["status"] = "REJECTED"
-                stalled = True
-            elif re.search(r'\b(accepted|accept|passed|commit|committed|status changed|revision accepted)\b',
-                           raw_gate_low):
-                validation_gate["status"] = "ACCEPTED"
-            elif re.search(r'\b(pending|required|awaiting|proposed|under test)\b', raw_gate_low):
-                validation_gate["status"] = "PENDING"
-            elif re.search(r'\b(none|n/a|no revision|no proposed edit)\b', raw_gate_low):
-                validation_gate["status"] = "NONE"
-            validation_gate["note"] = raw_gate[:240]
-        m_promo = re.search(r'^\s*PROMOTION GATE:\s*(.+)$', out, re.M)
-        if m_promo:
-            raw_promo = m_promo.group(1).strip()
-            raw_promo_low = raw_promo.lower()
-            if re.search(r'\b(rejected|reject|failed|insufficient|missing|too early|one case|one analogy|'
-                         r'not enough|no replication|unsupported|status unchanged)\b', raw_promo_low):
-                promotion_gate["status"] = "REJECTED"
-                stalled = True
-            elif re.search(r'\b(accepted|accept|passed|promoted|threshold met|promotion earned|'
-                           r'warrant met)\b', raw_promo_low):
-                promotion_gate["status"] = "ACCEPTED"
-            elif re.search(r'\b(pending|required|awaiting|needs|candidate|suggestive|under test)\b',
-                           raw_promo_low):
-                promotion_gate["status"] = "PENDING"
-            elif re.search(r'\b(none|n/a|no promotion|no attempted promotion)\b', raw_promo_low):
-                promotion_gate["status"] = "NONE"
-            promotion_gate["note"] = raw_promo[:240]
-        if (not validation_gate["status"] and operation_check["status"] == "MISSED"
-                and movement["type"] in {"REVISION", "DEFINITION", "STATUS", "COMMIT"}):
-            validation_gate["status"] = "REJECTED"
-            validation_gate["note"] = "Operation was missed, so the proposed revision/status change is rejected and status remains unchanged."
-        if operation_check["status"] == "MISSED" and validation_gate["status"] == "ACCEPTED":
-            validation_gate["status"] = "REJECTED"
-            validation_gate["note"] = "Operation was missed, so the validation gate cannot accept the edit; status remains unchanged."
-            stalled = True
-        if artifact_compiler["status"] in {"COMPILED", "HARVESTED"}:
-            stalled = False
-            if kernel_decision["status"] in {"DENIED", "PAUSED", "SUSPENDED", "PENDING", "DEADLOCKED"}:
-                kernel_decision["status"] = "ACCEPTED"
-                kernel_decision["note"] = (
-                    "Artifact compiler accepted partial progress: prose supplied enough "
-                    "case/signal/outcome/support to update rows; ask only for missing "
-                    "fields or the next independent case."
-                )
-            if kernel_health["status"] in {"PAUSED", "DEADLOCKED", "WARNING"}:
-                kernel_health["status"] = "NORMAL"
-            if inquiry_pause["active"]:
-                inquiry_pause["active"] = False
-                inquiry_pause["note"] = ""
-            if operation_check["status"] in {"", "MISSED", "PENDING", "PROPOSED", "DESIGNED"}:
-                operation_check["status"] = "OBSERVED"
-                operation_check["note"] = artifact_compiler["note"][:240]
-            if validation_gate["status"] == "REJECTED":
-                validation_gate["status"] = "PENDING"
-                validation_gate["note"] = (
-                    "Compiled observation rows are partial evidence; interpretation or "
-                    "promotion still requires the next lifecycle step."
-                )
-        m_para = re.search(r'^\s*PARADIGM CHECK:\s*(.+)$', out, re.M)
-        if m_para:
-            raw_para = m_para.group(1).strip()
-            raw_para_low = raw_para.lower()
-            if re.search(r'\b(missed|not completed|not done|old vocabulary|same framework|imported|failed)\b', raw_para_low):
-                paradigm_check["status"] = "MISSED"
-            elif re.search(r'\b(completed|done|rival|separating prediction|yes|✓)\b', raw_para_low):
-                paradigm_check["status"] = "COMPLETED"
-            elif re.search(r'\b(pending|requested|proposed|next)\b', raw_para_low):
-                paradigm_check["status"] = "PENDING"
-            elif re.search(r'\b(none|n/a|no paradigm)\b', raw_para_low):
-                paradigm_check["status"] = "NONE"
-            paradigm_check["note"] = raw_para[:240]
+    observation, stalled = _duet_reflect_read_ledger(
+        out, ledger, protocol=protocol, stalled=stalled)
     return jsonify({"ok": bool(out), "direction": out, "stalled": stalled,
                     "controlError": control_error if not protocol else "",
                     "controlRecovered": control_recovered,
                     "inquiry": inquiry,
-                    "movement": movement, "arc": arc,
-                    "activeTask": active_task,
-                    "kernelDecision": kernel_decision,
-                    "kernelHealth": kernel_health,
-                    "inquiryPause": inquiry_pause,
-                    "protocolAudit": protocol_audit,
-                    "dependencySolver": dependency_solver,
-                    "artifactPlanner": artifact_planner,
-                    "artifactCompiler": artifact_compiler,
-                    "artifactMode": artifact_mode,
-                    "recoveryStrategy": recovery_strategy,
-                    "conceptConflict": concept_conflict,
-                    "operationCheck": operation_check,
-                    "validationGate": validation_gate,
-                    "promotionGate": promotion_gate,
-                    "paradigmCheck": paradigm_check,
+                    "movement": ledger.movement, "arc": ledger.arc,
+                    "activeTask": ledger.active_task,
+                    "kernelDecision": ledger.kernel_decision,
+                    "kernelHealth": ledger.kernel_health,
+                    "inquiryPause": ledger.inquiry_pause,
+                    "protocolAudit": ledger.protocol_audit,
+                    "dependencySolver": ledger.dependency_solver,
+                    "artifactPlanner": ledger.artifact_planner,
+                    "artifactCompiler": ledger.artifact_compiler,
+                    "artifactMode": ledger.artifact_mode,
+                    "recoveryStrategy": ledger.recovery_strategy,
+                    "conceptConflict": ledger.concept_conflict,
+                    "operationCheck": ledger.operation_check,
+                    "validationGate": ledger.validation_gate,
+                    "promotionGate": ledger.promotion_gate,
+                    "paradigmCheck": ledger.paradigm_check,
                     "observation": observation})
 
 
@@ -3115,66 +3257,11 @@ _DUET_MECHANISM_PHRASE_RE = re.compile(
     r'ontology split|economic insulation|mystification)\b', re.I)
 
 
-@dataclass(frozen=True)
-class _DuetBeats:
-    """Where the protocol has got to, and what it is asking of this turn.
-
-    Phase and job come from the turn count; the arc, monotony and gate
-    fields come from the private ledger the browser feeds back. They are
-    read together by everything that builds the prompt, so they travel
-    together.
-    """
-    ph_name: str
-    ph_gloss: str
-    ph_jobs: object
-    proto_job: str
-    inquiry_phase: str
-    inquiry_gloss: str
-    inquiry_job: str
-    source_audit_active: bool
-    arc_stage: str
-    arc_stuck: str
-    arc_break: bool
-    monotony: str
-    monotony_break: bool
-    stall_break: bool
-    conclusion_beat: bool
-    operation_missed: bool
-    validation_rejected: bool
-    promotion_rejected: bool
-    kernel_denied: bool
-    kernel_deadlocked: bool
-    kernel_health_in: str
 
 
-@dataclass(frozen=True)
-class _DuetPressures:
-    """Which protocol pressures apply to a single turn.
 
-    `task_context` is the pooled text the pressures were read out of; it is
-    returned alongside them because the prompt builder needs the same text.
-    """
-    task_context: str
-    task: bool
-    compiler: bool
-    design_variable: bool
-    operational_criterion: bool
-    artifact_plan: bool
-    comparison_grid: bool
-    artifact_execution: bool
-    artifact_mode: bool
-    concept: bool
-    deadlock: bool
-    mechanism: bool
-    artifact_editor: bool
-    execution_lock: bool
-    execution_has_mode: bool
-    operational: bool
-    artifact: bool
-    paradigm: bool
-    validation: bool
-    discrimination: bool
-    edit: bool
+
+
 
 
 def _duet_turn_pressures(*, protocol, closing, mail, student_q_text,
@@ -4135,43 +4222,8 @@ def _duet_turn_material_preamble(*, url_block: str, url_info,
 
 
 
-# Every guard a draft turn has to clear. The order is the order the failure
-# payload reports them in, so it is fixed here rather than left to the order
-# the guards happen to run in.
-_DUET_GUARDS = (
-    "family", "personalization", "source_scaffolding", "grounding",
-    "source_attribution", "information_gain", "operation_artifact",
-    "execution_output", "notebook_talk", "deadlock_artifact",
-    "design_variable", "operational_criterion", "artifact_execution",
-    "artifact_mode", "artifact_plan", "comparison_grid", "compiler",
-    "artifact_edit", "mechanism_artifact", "concept_artifact",
-    "repetition", "settled_restatement", "semantic_loop", "phase_move",
-)
 
 
-class _DuetRejections:
-    """Which guards turned down a draft while generating one turn.
-
-    This replaced twenty-four booleans and a parallel name table. They were
-    written once each, never read while generating, and existed only to name
-    what went wrong when both attempts failed.
-    """
-    __slots__ = ("_hit",)
-
-    def __init__(self):
-        self._hit = set()
-
-    def note(self, guard: str) -> None:
-        assert guard in _DUET_GUARDS, f"unknown duet guard: {guard}"
-        self._hit.add(guard)
-
-    def __contains__(self, guard: str) -> bool:
-        return guard in self._hit
-
-    @property
-    def names(self) -> list:
-        """The guards that fired, in the fixed reporting order."""
-        return [g for g in _DUET_GUARDS if g in self._hit]
 
 
 
