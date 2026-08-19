@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 from ..constants import ToolPriority
 from ..models import ToolIntent
-from ..utils import has_any_word, is_recall_question
+from ..utils import has_any_word, is_recall_question, supplies_a_literal_value
 from .base import BaseDetector
 
 
@@ -43,6 +43,12 @@ class MemoryDetector(BaseDetector):
         'remember that', 'remember this', 'remember for next time',
         'remember going forward', 'make a note', 'note that',
         'keep in mind', 'write that down', 'write this down',
+        # Polite-imperative framings. Safe to list here only because
+        # is_recall_question() has already bailed on the question reading:
+        # "can you remember what we decided" never reaches this point, while
+        # "can you remember Athena is eleven" does.
+        'can you remember', 'could you remember', 'please remember',
+        'remember my', 'remember our', 'remember for me',
         'log that', 'save that', 'store that',
         'lock that in', 'lock this in',
         'keep track of', 'hold on to that',
@@ -69,6 +75,13 @@ class MemoryDetector(BaseDetector):
         # A question about what Blue knows is never a write, no matter which
         # storage verbs it happens to contain.
         if is_recall_question(msg_lower):
+            return None
+
+        # An address or a phone number belongs in the address book, not in the
+        # fact store. Both detectors match "can you remember her email is
+        # stella@..."; drawing the line on the literal value keeps them from
+        # bidding against each other for it.
+        if supplies_a_literal_value(msg_lower):
             return None
 
         has_dont_forget = any(p in msg_lower for p in self.DONT_FORGET)

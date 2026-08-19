@@ -531,3 +531,91 @@ def test_the_recall_frames_are_shared_not_copied():
     assert not is_recall_question("remember that athena is eleven")
     assert supplies_a_literal_value("her email is stella@example.com")
     assert not supplies_a_literal_value("do you remember her email")
+
+
+# ---------------------------------------------------------------------------
+# "Remember" is not scheduling language (2026-08-19)
+#
+# CalendarDetector listed "can you remember" / "please remember" / "remember
+# that my" among its strong signals at 0.92, so asking Blue to retain a fact
+# scheduled a reminder instead — and outbid the detectors that actually store
+# things. A reminder needs something to happen AT.
+# ---------------------------------------------------------------------------
+
+from blue.tool_selector import ImprovedToolSelector
+
+
+@pytest.fixture(scope="module")
+def selector():
+    return ImprovedToolSelector()
+
+
+def chosen(selector, msg):
+    result = selector.select_tool(msg, [])
+    return result.primary_tool.tool_name if result.primary_tool else None
+
+
+FACTS_NOT_REMINDERS = [
+    "please remember that Athena is eleven",
+    "can you remember Athena is eleven now",
+    "could you remember my office is in DAWB",
+    "remember that my daughter is in french immersion",
+]
+
+
+@pytest.mark.parametrize("msg", FACTS_NOT_REMINDERS)
+def test_asking_blue_to_retain_a_fact_is_not_a_reminder(selector, msg):
+    assert chosen(selector, msg) == 'remember_fact'
+
+
+SCHEDULING = [
+    "don't forget that I have a dentist appointment tomorrow",
+    "can you remember I have a meeting at 3pm",
+    "remember that I have a call with Sofie on Tuesday",
+    "remember to call the dentist",
+    "don't let me forget the recycling",
+    "set a reminder for the dentist tomorrow at 3",
+    "remind me about the dentist tomorrow at 3",
+]
+
+
+@pytest.mark.parametrize("msg", SCHEDULING)
+def test_real_scheduling_still_creates_a_reminder(selector, msg):
+    assert chosen(selector, msg) == 'create_reminder'
+
+
+def test_dont_forget_does_not_cancel_the_thing_it_names():
+    """'forget ' is a cancel verb, and the negation in front of it was never
+    read — so "don't forget that I have a dentist appointment tomorrow"
+    cancelled a reminder. Third negation-before-imperative bug in this file."""
+    msg = "don't forget that I have a dentist appointment tomorrow"
+    intents = CalendarDetector().detect(msg, msg.lower(), {})
+    assert intents and intents[0].tool_name != 'cancel_reminder'
+
+
+CANCELLING = [
+    "cancel my dentist reminder",
+    "forget the 5pm meeting",
+    "delete the dentist appointment",
+]
+
+
+@pytest.mark.parametrize("msg", CANCELLING)
+def test_real_cancellations_still_cancel(selector, msg):
+    assert chosen(selector, msg) == 'cancel_reminder'
+
+
+def test_an_address_goes_to_the_address_book_not_the_fact_store(selector):
+    """Both detectors match "can you remember her email is ..."; the literal
+    value is what decides, so they stop bidding against each other."""
+    assert chosen(
+        selector, "can you remember her email is stella.andonoff@gmail.com"
+    ) == 'add_contact'
+    assert chosen(selector, "can you remember Athena is eleven now") == 'remember_fact'
+
+
+def test_a_wh_complement_keeps_a_frame_a_question(selector):
+    """A copula later in the clause must not turn a question into a write:
+    "do you remember what time the meeting is"."""
+    assert chosen(selector, "can you remember what we decided") != 'remember_fact'
+    assert chosen(selector, "can you remind me of those ideas?") is None

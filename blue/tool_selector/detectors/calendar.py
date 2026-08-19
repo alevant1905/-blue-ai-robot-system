@@ -77,6 +77,32 @@ def is_schedule_time_question(msg_lower: str) -> bool:
     return bool(_WHEN_IS_EVENT_RE.search(msg_lower or ""))
 
 
+_TIME_INDICATORS = (
+    ' at ', 'tomorrow', 'today', 'tonight', 'this afternoon',
+    'this evening', 'this morning',
+    'next week', 'next monday', 'next tuesday', 'next wednesday',
+    'next thursday', 'next friday', 'next saturday', 'next sunday',
+    'on monday', 'on tuesday', 'on wednesday',
+    'on thursday', 'on friday', 'on saturday', 'on sunday',
+    'in an hour', 'in a few hours', 'in 30 min', 'in 15 min',
+)
+
+_EVENT_NOUNS = (
+    'meeting', 'appointment', 'call with', 'event',
+    'lunch with', 'dinner with', 'coffee with',
+)
+
+
+_NEGATORS = ("don't", 'do not', 'dont', "won't", 'will not', 'never',
+             "didn't", 'did not', "wouldn't", 'would not')
+
+
+def _is_negated_at(msg_lower: str, pos: int) -> bool:
+    """True if a negation sits immediately in front of the verb at `pos`."""
+    window = msg_lower[max(0, pos - 14):pos]
+    return any(n in window for n in _NEGATORS)
+
+
 def is_reminder_declined(msg_lower: str) -> bool:
     """True when the user explicitly said NOT to set a reminder.
 
@@ -146,6 +172,12 @@ class CalendarDetector(BaseDetector):
         verb_pos = -1
         for v in cancel_verbs:
             i = msg_lower.find(v)
+            # "don't forget that I have a dentist appointment tomorrow" is
+            # the OPPOSITE of a cancellation, and was cancelling one: the
+            # negation sitting in front of the verb was never read. Same
+            # shape as the two negation bugs already fixed in this file.
+            while i != -1 and _is_negated_at(msg_lower, i):
+                i = msg_lower.find(v, i + 1)
             if i != -1 and (verb_pos == -1 or i < verb_pos):
                 verb_pos = i
         if verb_pos == -1:
@@ -240,12 +272,10 @@ class CalendarDetector(BaseDetector):
             'give me a reminder', 'give a reminder',
             # "Remind me" variants (trailing space avoids "remind men")
             'remind me ',
-            # Memory-aid framings
-            "don't let me forget", "don't forget that",
-            'can you remember', 'could you remember', 'please remember',
-            'remember that i have', 'remember that we have',
-            'remember that the', 'remember that my',
+            # An action to perform later is a reminder even with no time on
+            # it: "remember to call the dentist".
             'remember to ',
+            "don't let me forget",
         )
         if any(s in msg_lower for s in strong_signals):
             return ToolIntent(
@@ -256,30 +286,42 @@ class CalendarDetector(BaseDetector):
                 extracted_params={},
             )
 
+        # Memory-aid framings. These are NOT scheduling language on their own
+        # — they are how you ask Blue to retain a fact. "Can you remember her
+        # email is stella@..." was scheduling a reminder at 0.92, outbidding
+        # add_contact; "please remember Athena is eleven" would have done the
+        # same to remember_fact. A reminder needs something to happen AT, so
+        # these fire only alongside a time or an event; otherwise the turn
+        # belongs to whichever detector stores facts.
+        memory_aid_signals = (
+            "don't forget that", 'can you remember', 'could you remember',
+            'please remember', 'remember that i have',
+            'remember that we have', 'remember that the',
+            'remember that my',
+        )
+        if any(s in msg_lower for s in memory_aid_signals):
+            if any(t in msg_lower for t in _TIME_INDICATORS) or any(
+                    n in msg_lower for n in _EVENT_NOUNS):
+                return ToolIntent(
+                    tool_name='create_reminder',
+                    confidence=0.92,
+                    priority=ToolPriority.MEDIUM,
+                    reason='memory aid for a scheduled thing',
+                    extracted_params={},
+                )
+            return None
+
         # Medium signal — declarative future-event statements like "I have
         # a meeting with Bob at 4pm". Requires a time indicator AND a
         # declarative pattern AND an event noun, so it doesn't fire on
         # ambiguous prose.
-        time_indicators = (
-            ' at ', 'tomorrow', 'today', 'tonight', 'this afternoon',
-            'this evening', 'this morning',
-            'next week', 'next monday', 'next tuesday', 'next wednesday',
-            'next thursday', 'next friday', 'next saturday', 'next sunday',
-            'on monday', 'on tuesday', 'on wednesday',
-            'on thursday', 'on friday', 'on saturday', 'on sunday',
-            'in an hour', 'in a few hours', 'in 30 min', 'in 15 min',
-        )
         declarative_starts = (
             'i have a ', 'i have an ', 'we have a ', 'we have an ',
             "i've got a ", "we've got a ",
             'the meeting is', 'the call is', 'the appointment is',
         )
-        event_nouns = (
-            'meeting', 'appointment', 'call with', 'event',
-            'lunch with', 'dinner with', 'coffee with',
-        )
-
-        has_time = any(t in msg_lower for t in time_indicators)
+        has_time = any(t in msg_lower for t in _TIME_INDICATORS)
+        event_nouns = _EVENT_NOUNS
         if has_time:
             if (any(d in msg_lower for d in declarative_starts)
                     and any(n in msg_lower for n in event_nouns)):

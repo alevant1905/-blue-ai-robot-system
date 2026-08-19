@@ -328,10 +328,37 @@ def supplies_a_literal_value(text: str) -> bool:
                 or _LITERAL_PHONE_RE.search(text or ""))
 
 
+# What follows the frame decides which way it goes. "Can you remember" is a
+# polite imperative as often as it is a question, so the frame alone cannot
+# settle it: "can you remember what we decided" asks, "can you remember Athena
+# is eleven" tells.
+_WH_COMPLEMENTS = (
+    'what', 'who', 'whose', 'which', 'where', 'when', 'why', 'how',
+    'whether', 'if ',
+)
+_ASSERTION_MARKERS = (' is ', ' are ', ' was ', ' were ', ' has ', ' have ')
+
+
 def is_recall_question(msg_lower: str) -> bool:
     """True if the message asks what Blue knows rather than telling him.
 
     Callers that own a write tool should check this FIRST and decline, so a
     question can never be answered by modifying the record it asked about.
+
+    A frame followed by an assertion is NOT a recall question — it is a save
+    wearing a question mark ("can you remember her email is stella@..."). A
+    wh-word after the frame keeps it a question even when a copula turns up
+    later in the clause ("do you remember what time the meeting is").
     """
-    return any(frame in (msg_lower or "") for frame in _RECALL_FRAMES)
+    text = msg_lower or ""
+    for frame in _RECALL_FRAMES:
+        i = text.find(frame)
+        if i == -1:
+            continue
+        rest = text[i + len(frame):]
+        if any(w in rest for w in _WH_COMPLEMENTS):
+            return True
+        if any(a in rest for a in _ASSERTION_MARKERS):
+            return False   # states something: a write, not a question
+        return True
+    return False
