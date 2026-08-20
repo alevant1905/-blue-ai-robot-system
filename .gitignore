@@ -196,8 +196,10 @@ document_index.json.before-cleanup
 # Ohbot conversation files.
 *.ocf
 # Remote-access auth: the access password and the Flask session secret.
-.blue_password
-.blue_secret_key
+.blue_password*
+.blue_secret_key*
+# the * matters: a .bak or .tmp beside either of these is the same
+# secret, and the bare names would not have covered it.
 
 # Ohbot library runtime data (this branch only)
 ohbotData/
