@@ -8453,6 +8453,90 @@ def _build_email_reply(cand: Dict[str, Any]) -> tuple:
     return _generate_reply_for_email(cand), []
 
 
+
+def _email_preexecute_confident_tool(messages, executed, permitted, *,
+                                     subject, body, skip) -> bool:
+    """Run the tool the selector is sure about, before the model is asked.
+
+    The local model is unreliable at calling tools inside the email loop -
+    it narrates "done!" without ever emitting the call, which is why
+    "set the lights to galaxy" worked in chat but not by email. So the same
+    selector chat trusts runs first, and the model is told the work is
+    already done so that it only has to confirm.
+
+    `permitted` is the sender's authority and is asked before anything runs;
+    an unauthorised tool is never executed here. `messages` and `executed`
+    are added to in place.
+
+    Returns True when the request was look-and-describe, which means the
+    action loop should be skipped entirely.
+    """
+    # A "what do you see" request is look-and-describe: once the camera has
+    # fired there is no follow-up action to take. When this is set we skip the
+    # action-tool loop below and draft a text-only reply, so the model can't
+    # wander off and call an unrelated house tool (e.g. turning the lights
+    # "cool white") in response to a question that only asked Blue to look.
+    vision_only_reply = False
+    try:
+        sel = TOOL_SELECTOR.select_tool(f"{subject}. {body}") if "TOOL_SELECTOR" in globals() else None
+        prim = getattr(sel, "primary_tool", None) if sel else None
+        if prim and getattr(prim, "tool_name", None):
+            tname = prim.tool_name
+            tconf = float(getattr(prim, "confidence", 0.0) or 0.0)
+            tparams = getattr(prim, "extracted_params", {}) or {}
+            if tconf >= 0.8 and tname not in skip and permitted(tname):
+                print(f"   [AUTO-REPLY] selector pre-exec {tname}({tparams}) conf={tconf:.2f}")
+                tresult = execute_tool(tname, tparams)
+                executed.add(tname)
+                _rs = tresult if isinstance(tresult, str) else json.dumps(tresult)
+                print(f"   [AUTO-REPLY] pre-exec result: {_rs[:200]}")
+                if tname == "capture_camera":
+                    # Look-and-describe: reply from the image, never via more
+                    # tools. Branch on whether the capture actually succeeded —
+                    # a misleading "the image follows" note when the camera
+                    # failed is what used to push the model into improvising
+                    # with other tools.
+                    vision_only_reply = True
+                    try:
+                        _captured_ok = bool(json.loads(_rs).get("success"))
+                    except Exception:
+                        _captured_ok = False
+                    if _captured_ok:
+                        # _inject_pending_vision (below) carries the look-prompt
+                        # and the actual image; just steer the description.
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[You already opened your camera. The image you "
+                                "captured follows — look at it and describe what "
+                                "you actually see, then answer the sender. Do NOT "
+                                "call any tools.]"
+                            ),
+                        })
+                    else:
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[You tried to open your camera to look, but it "
+                                "isn't available right now. Tell the sender you "
+                                "tried to see but couldn't access your camera at "
+                                "the moment. Do NOT call any tools, and do NOT "
+                                "pretend you can see anything.]"
+                            ),
+                        })
+                else:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[You ALREADY handled this request by running {tname}. "
+                            f"Result: {_rs[:400]}. Do NOT call it again — just confirm "
+                            f"the outcome naturally in your reply, based on that result.]"
+                        ),
+                    })
+    except Exception as e:
+        print(f"   [AUTO-REPLY] selector pre-exec error: {e}")
+    return vision_only_reply
+
 def _generate_reply_for_email(original: Dict[str, Any]) -> str:
     """Draft a reply body via the local LM Studio model. Returns plain text.
 
@@ -8580,70 +8664,9 @@ def _generate_reply_for_email(original: Dict[str, Any]) -> str:
         "read_gmail", "send_gmail", "reply_gmail", "auto_reply_emails",
         "browse_website", "web_search",
     }
-    # A "what do you see" request is look-and-describe: once the camera has
-    # fired there is no follow-up action to take. When this is set we skip the
-    # action-tool loop below and draft a text-only reply, so the model can't
-    # wander off and call an unrelated house tool (e.g. turning the lights
-    # "cool white") in response to a question that only asked Blue to look.
-    vision_only_reply = False
-    try:
-        sel = TOOL_SELECTOR.select_tool(f"{subject}. {body}") if "TOOL_SELECTOR" in globals() else None
-        prim = getattr(sel, "primary_tool", None) if sel else None
-        if prim and getattr(prim, "tool_name", None):
-            tname = prim.tool_name
-            tconf = float(getattr(prim, "confidence", 0.0) or 0.0)
-            tparams = getattr(prim, "extracted_params", {}) or {}
-            if tconf >= 0.8 and tname not in _PREEXEC_SKIP and _permitted(tname):
-                print(f"   [AUTO-REPLY] selector pre-exec {tname}({tparams}) conf={tconf:.2f}")
-                tresult = execute_tool(tname, tparams)
-                executed.add(tname)
-                _rs = tresult if isinstance(tresult, str) else json.dumps(tresult)
-                print(f"   [AUTO-REPLY] pre-exec result: {_rs[:200]}")
-                if tname == "capture_camera":
-                    # Look-and-describe: reply from the image, never via more
-                    # tools. Branch on whether the capture actually succeeded —
-                    # a misleading "the image follows" note when the camera
-                    # failed is what used to push the model into improvising
-                    # with other tools.
-                    vision_only_reply = True
-                    try:
-                        _captured_ok = bool(json.loads(_rs).get("success"))
-                    except Exception:
-                        _captured_ok = False
-                    if _captured_ok:
-                        # _inject_pending_vision (below) carries the look-prompt
-                        # and the actual image; just steer the description.
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                "[You already opened your camera. The image you "
-                                "captured follows — look at it and describe what "
-                                "you actually see, then answer the sender. Do NOT "
-                                "call any tools.]"
-                            ),
-                        })
-                    else:
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                "[You tried to open your camera to look, but it "
-                                "isn't available right now. Tell the sender you "
-                                "tried to see but couldn't access your camera at "
-                                "the moment. Do NOT call any tools, and do NOT "
-                                "pretend you can see anything.]"
-                            ),
-                        })
-                else:
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"[You ALREADY handled this request by running {tname}. "
-                            f"Result: {_rs[:400]}. Do NOT call it again — just confirm "
-                            f"the outcome naturally in your reply, based on that result.]"
-                        ),
-                    })
-    except Exception as e:
-        print(f"   [AUTO-REPLY] selector pre-exec error: {e}")
+    vision_only_reply = _email_preexecute_confident_tool(
+        messages, executed, _permitted,
+        subject=subject, body=body, skip=_PREEXEC_SKIP)
 
     # A deterministic capture_camera (above) queued an image — show it to
     # the model before it drafts, so the reply is grounded in what Blue saw.
