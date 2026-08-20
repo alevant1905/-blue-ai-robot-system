@@ -1648,6 +1648,7 @@ app = Flask(__name__)
 # ============================================================================
 import hmac as _hmac
 import secrets as _secrets
+import urllib.parse as _urlparse
 from datetime import timedelta as _timedelta
 
 _SECRET_KEY_FILE = os.path.join(os.getcwd(), ".blue_secret_key")
@@ -1694,9 +1695,30 @@ def _access_password() -> str:
 
 app.secret_key = _load_or_create_secret_key()
 app.permanent_session_lifetime = _timedelta(days=30)
+# Don't let another site's page send the session cookie along with a request
+# it made on Alex's behalf. Not set to "Strict" because that also drops the
+# cookie on a normal link into Blue, which would look like a random logout.
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# NOT Secure: the phone reaches Blue over plain http on the LAN, and a Secure
+# cookie would never be sent there, so the login would silently never stick.
+app.config["SESSION_COOKIE_SECURE"] = False
 
 
 def _is_local_request() -> bool:
+    """True only for a request that really came from this machine.
+
+    remote_addr alone is not enough. Tailscale Serve terminates HTTPS on the
+    host and proxies in from 127.0.0.1, so every remote device arrives
+    looking local and skipped the password entirely (found 2026-08-19) - the
+    comment above says a Tailscale peer is gated, and it was not.
+
+    A proxied request carries X-Forwarded-For; the Ohbot client and the PC
+    browser never send one. The header's VALUE is deliberately not consulted,
+    because a client can set that itself: only its presence counts, and
+    adding one can make a caller look more remote, never less.
+    """
+    if request.headers.get("X-Forwarded-For"):
+        return False
     return (request.remote_addr or "") in ("127.0.0.1", "::1", "localhost")
 
 
@@ -1767,17 +1789,30 @@ def _forwarded_client_ip() -> str:
 def _identify_user_from_request() -> str:
     """Map the requesting device to the person behind it (Alex by default).
 
-    Order matters: an explicit hint from our own chat page wins; then the
-    Tailscale source IP (survives Tailscale Serve's localhost proxying); then a
-    direct localhost request is Alex (PC browser + Ohbot client); finally a
-    best-effort User-Agent guess.
+    Order matters, and it runs strongest signal first: a Tailscale address
+    mapped to a chat-only user (assigned by the tailnet, not chosen by the
+    device); then the explicit hint our own chat page sends, which is the only
+    thing that can tell a desktop-mode iPad from a Mac; then any other mapped
+    Tailscale address; then a direct localhost request is Alex (PC browser +
+    Ohbot client); finally a best-effort User-Agent guess.
+
+    The header can still give a device MORE restriction than it would
+    otherwise get - claiming to be the iPad only costs you tools - but it can
+    no longer take restriction away from a device known by address.
     """
+    fip = _forwarded_client_ip()
+    known = _TAILSCALE_IP_OWNER.get(fip)
+    # A restricted device does not get to un-restrict itself. The Tailscale
+    # address is assigned by the tailnet and travels with the machine; the
+    # header is whatever the client typed. Where they disagree about someone
+    # the chat-only fence covers, the address wins.
+    if known in _CHAT_ONLY_USERS:
+        return known
     tag = (request.headers.get("X-Blue-Device") or "").strip().lower()
     if tag:
         return _DEVICE_OWNER.get(tag, _DEFAULT_USER)
-    fip = _forwarded_client_ip()
-    if fip in _TAILSCALE_IP_OWNER:
-        return _TAILSCALE_IP_OWNER[fip]
+    if known:
+        return known
     if _is_local_request():
         return _DEFAULT_USER
     return _DEVICE_OWNER.get(
@@ -1790,6 +1825,36 @@ def _identify_user_from_request() -> str:
 # logged-out phone can actually render the login form and submit it.
 _AUTH_EXEMPT_ENDPOINTS = {"blue_login", "blue_logout", "static",
                           "asset_blue_css", "asset_blue_js"}
+
+
+# Requests a browser makes because ANOTHER site told it to. Localhost is
+# fully trusted and needs no session, which also means any page open in Alex's
+# browser can POST to 127.0.0.1 and drive the house - it never sees the
+# response, but the lights still change. Sec-Fetch-Site is set by the browser
+# itself and a page cannot forge it, so it is the one signal here that
+# separates "Alex clicked this" from "a tab did".
+_CROSS_SITE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@app.before_request
+def _reject_cross_site_requests():
+    """Refuse anything another website asked the browser to send us.
+
+    Non-browser callers - the Ohbot client, curl, the tests - send no
+    Sec-Fetch headers at all and are untouched. A person following a link to
+    Blue from elsewhere is a top-level navigation and still renders; what is
+    refused is the form post, the fetch, and the <img src> pointed at an
+    endpoint that acts.
+    """
+    if (request.headers.get("Sec-Fetch-Site") or "").strip().lower() != "cross-site":
+        return None
+    if (request.method in _CROSS_SITE_READ_METHODS
+            and (request.headers.get("Sec-Fetch-Mode") or "").strip().lower()
+            == "navigate"):
+        return None
+    print(f"   [AUTH] refused a cross-site {request.method} to {request.path}")
+    return Response("Cross-site requests are not accepted.", status=403,
+                    mimetype="text/plain")
 
 
 @app.before_request
@@ -1865,13 +1930,42 @@ from blue.server.pages.login import _LOGIN_HTML
 from blue.server.prompts import CHAT_SYSTEM_PROMPT
 
 
+def _safe_next_path(raw: str) -> str:
+    """Where a successful login may land, which is somewhere on this site.
+
+    Checking the raw string is not enough, because the browser does not use
+    the raw string. It strips tabs and newlines from a URL before parsing it,
+    so "/<TAB>/evil.com" passes a startswith("//") test here and arrives at
+    the browser as "//evil.com" - protocol-relative, and off the site. It also
+    decodes %5C and reads a backslash as a separator, so "/%5Cevil.com" leaves
+    too. Both were live (found 2026-08-19).
+
+    So the decision is made on the string as the browser will see it. The
+    original is what gets returned when it passes, so query strings survive
+    unchanged; decoding can only ever reveal an escape, never hide one.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "/chat"
+    seen = _urlparse.unquote(raw)
+    seen = "".join(ch for ch in seen if ord(ch) > 0x1f and ch != "\x7f")
+    seen = seen.replace("\\", "/")
+    if not seen.startswith("/") or seen.startswith("//"):
+        return "/chat"
+    # A backstop, not the defence: nothing that reaches here can carry a
+    # scheme or a netloc, because both need a "//" or a "x:" that the test
+    # above already refused. Deliberately kept so that loosening that test
+    # does not silently open this one - but do not read it as the guard.
+    split = _urlparse.urlsplit(seen)
+    if split.scheme or split.netloc:
+        return "/chat"
+    return raw
+
+
 @app.route("/login", methods=["GET", "POST"])
 def blue_login():
     error = None
-    nxt = request.values.get("next") or "/chat"
-    # Only allow same-site relative redirects.
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/chat"
+    nxt = _safe_next_path(request.values.get("next"))
     if request.method == "POST":
         pw = _access_password()
         supplied = request.form.get("password", "")
