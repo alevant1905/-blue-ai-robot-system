@@ -76,6 +76,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import getaddresses
 
 from blue_identity import (
     canonical_family_grounding_lines,
@@ -7303,26 +7304,94 @@ BLUE_OWNER_ADDRESSES = {
 _EMAIL_ADDR_RE = re.compile(r"[\w.+\-]+@[\w.\-]+\.\w+")
 
 
+def _email_envelope_address(sender: str) -> str:
+    """The address a From line is actually from, ignoring the display name.
+
+    A display name can say anything, including somebody else's address:
+
+        From: "alevant1905@gmail.com" <attacker@example.com>
+
+    Only the addr-spec counts. A From line carrying more than one address is
+    not a shape legitimate mail arrives in here, so it yields nothing rather
+    than a guess about which one is real.
+    """
+    try:
+        parsed = getaddresses([sender or ""])
+    except Exception:
+        return ""
+    if len(parsed) != 1:
+        return ""
+    return (parsed[0][1] or "").strip().lower()
+
+
+# One `;`-separated clause of an Authentication-Results header, e.g.
+#   dkim=pass header.i=@gmail.com header.s=20230601
+#   dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=gmail.com
+_AUTH_RESULT_RE = re.compile(r"\b(dkim|dmarc)\s*=\s*(\w+)")
+_AUTH_DOMAIN_RE = re.compile(r"\bheader\.(?:i|d|from)\s*=\s*@?([\w.\-]+)")
+
+
+def _auth_vouches_for_domain(auth: str, domain: str) -> bool:
+    """True when the stamp authenticates THIS domain, not merely some domain.
+
+    A bare "dkim=pass" says only that the message was signed by whoever sent
+    it — which an attacker's own domain satisfies honestly. What matters is
+    which domain the stamp names, so the pass and the domain have to come
+    from the same clause.
+
+    Relaxed alignment is allowed: a stamp for `example.com` vouches for
+    `mail.example.com`, the way DMARC treats a subdomain.
+    """
+    if not auth or not domain:
+        return False
+    domain = domain.lower().lstrip(".")
+    for clause in auth.split(";"):
+        results = _AUTH_RESULT_RE.findall(clause)
+        if not any(result == "pass" for _method, result in results):
+            continue
+        for signed in _AUTH_DOMAIN_RE.findall(clause):
+            signed = signed.lower().strip(".")
+            if domain == signed or domain.endswith("." + signed):
+                return True
+    return False
+
+
 def _email_sender_is_owner(headers: List[Dict[str, str]], sender: str) -> bool:
-    """True only if the email is from a trusted owner address AND passes a
-    basic anti-spoof check. From headers are forgeable, so before granting
-    the elevated (full-tool) trust level we require Gmail's own
-    Authentication-Results stamp to show a dkim/dmarc pass with no fail.
-    Gmail adds this header on every inbound message; a spoofed From for a
-    gmail.com address won't carry a valid DKIM signature."""
-    addrs = {a.lower() for a in _EMAIL_ADDR_RE.findall(sender or "")}
-    if not (addrs & BLUE_OWNER_ADDRESSES):
+    """True only for mail genuinely from one of Alex's own addresses.
+
+    This is a privilege boundary, not a courtesy: mail that passes here may
+    make Blue send email as Alex, control the house and set reminders, so it
+    has to survive a forged From line.
+
+    Three things are required, and the first two were once enough:
+
+    1. The addr-spec - NOT the display name - is an owner address. A display
+       name is free text, so "alevant1905@gmail.com" <attacker@example.com>
+       used to satisfy the check on its own (found 2026-08-19).
+    2. Gmail's Authentication-Results stamp is present and shows no failure.
+       Gmail adds it to every inbound message; its absence means this did not
+       arrive the way real mail does.
+    3. The stamp authenticates the sender's OWN domain. A pass alone proves
+       only that somebody signed the message, and an attacker's domain signs
+       its own mail perfectly well.
+    """
+    addr = _email_envelope_address(sender)
+    if addr not in BLUE_OWNER_ADDRESSES:
         return False
     auth = ""
     for h in headers or []:
-        if h.get('name', '').lower() == 'authentication-results':
-            auth += " " + (h.get('value') or "").lower()
+        if (h.get('name', '') or '').lower() == 'authentication-results':
+            auth += " " + ((h.get('value') or "").lower())
     if not auth:
         # No auth stamp at all — be conservative, don't elevate.
         return False
     if 'dkim=fail' in auth or 'dmarc=fail' in auth:
         return False
-    return ('dkim=pass' in auth) or ('dmarc=pass' in auth)
+    if not _auth_vouches_for_domain(auth, addr.rpartition("@")[2]):
+        print(f"   [AUTH] {addr} not elevated: the stamp does not authenticate "
+              f"its domain")
+        return False
+    return True
 
 
 def _should_skip_sender(sender: str, headers: List[Dict[str, str]] = None) -> bool:
