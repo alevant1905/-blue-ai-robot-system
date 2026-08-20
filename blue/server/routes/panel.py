@@ -36,6 +36,7 @@ from blue import head as blue_head
 from blue.llm_coordinator import llm_slot
 from blue.mood_eyes import mood_eye_color
 from blue.server.pages.panel import PANEL_HTML
+from blue.server.turn_completion import _parrot_norm, _verbatim_fraction
 
 
 PANEL_ROBOTS = ("blue", "hexia", "pico")
@@ -641,6 +642,88 @@ def _clean_reply(value: Any, robot: str) -> str:
     return text[:1800]
 
 
+def _own_recent_lines(robot: str, history: List[Dict[str, str]],
+                      limit: int = 4) -> List[str]:
+    """The answering robot's own last lines, oldest first."""
+    return [item["text"] for item in history if item["speaker"] == robot][-limit:]
+
+
+def _already_said_block(own_lines: Iterable[str]) -> str:
+    """Chat's "you already said this" block, built from the robot's own turns.
+
+    Reused rather than reworded: the phrasing in ``_anti_repetition_context``
+    is load-bearing. An earlier version said "build on them", which a local
+    model read as REPLAY-then-extend.
+    """
+    try:
+        return bt._anti_repetition_context(
+            [{"role": "assistant", "content": line} for line in own_lines]
+        ).strip()
+    except Exception as exc:
+        bt.log.warning(f"[PANEL] anti-repetition block failed: {exc}")
+        return ""
+
+
+def _is_replay(text: str, own_lines: List[str]) -> bool:
+    """Whether a finished turn is really the robot's own earlier turn again.
+
+    Containment, not equality: Blue's replay of his DH201 opening was the
+    first two sentences of it, so an exact-match check saw nothing wrong. A
+    substring only counts once it is long enough to be a real answer — "Yes,
+    exactly." sits inside any earlier turn and is not a replay.
+    """
+    norm = _parrot_norm(text)
+    if not norm or not own_lines:
+        return False
+    for line in own_lines:
+        prior = _parrot_norm(line)
+        if not prior:
+            continue
+        if norm == prior:
+            return True
+        if len(norm) >= 60 and (norm in prior or prior in norm):
+            return True
+    return _verbatim_fraction(text, _parrot_norm(" ".join(own_lines)), 2) >= 0.6
+
+
+def _deparrot(text: str, robot: str, own_lines: List[str], regenerate) -> str:
+    """Panel's copy of the chat pipeline's replay guards.
+
+    Panel answers through ``bt.call_llm`` and ``process_with_tools`` directly,
+    and neither runs ``turn_completion.finish`` — so none of the anti-parrot
+    net ever covered this mode. The failure it was built for duly came back
+    here: asked to introduce himself, Blue re-sent the opening of his previous
+    turn word for word, twice running (2026-08-20). Strip a replayed head
+    first; regenerate once only when the whole turn is a replay, because
+    that is the case the strippers deliberately leave alone.
+    """
+    if not text or not own_lines:
+        return text
+    try:
+        stripped = bt._strip_parroted_prefix(text, own_lines[-1])
+        stripped = bt._strip_recycled_lead(
+            stripped,
+            [{"role": "assistant", "content": line} for line in own_lines],
+        )
+        if stripped and stripped != text:
+            text = stripped
+    except Exception as exc:
+        bt.log.warning(f"[PANEL] [ANTI-PARROT] strip failed: {exc}")
+    if not _is_replay(text, own_lines):
+        return text
+    print(f"   [PANEL] [ANTI-PARROT] {robot} replayed an earlier turn "
+          f"— regenerating once")
+    try:
+        redo = _clean_reply(_result_text(regenerate(text)), robot)
+    except Exception as exc:
+        bt.log.warning(f"[PANEL] [ANTI-PARROT] regeneration failed: {exc}")
+        return text
+    if redo and not _is_replay(redo, own_lines):
+        return redo
+    print("   [PANEL] [ANTI-PARROT] the second attempt repeated it too")
+    return text
+
+
 def _result_text(result: Any) -> str:
     try:
         choice = ((result or {}).get("choices") or [{}])[0]
@@ -736,6 +819,9 @@ def _build_messages(robot: str, latest: str, topic: str,
     )
     if continuity:
         system_parts.append(continuity)
+    already_said = _already_said_block(_own_recent_lines(robot, history))
+    if already_said:
+        system_parts.append(already_said)
 
     user_parts = [
         f"Discussion topic: {topic or '(open conversation; no fixed topic)'}",
@@ -872,6 +958,7 @@ def _panel_direct_messages(
     messages: List[Dict[str, str]],
     mode: str = "led",
     history: Optional[List[Dict[str, str]]] = None,
+    register: str = "",
 ) -> List[Dict[str, str]]:
     """Pin identity, topic, and stance beside a non-tool conversational turn."""
     cfg = bt._robot_cfg(robot)
@@ -901,6 +988,13 @@ def _panel_direct_messages(
         "the separate robot Blue, never you and never Alex.\n"
         f"The active discussion topic is: {topic or '(open conversation)'}\n"
         f"{stance}\n"
+        f"Speak in your assigned register: "
+        f"{str(register or '').strip() or 'your natural voice'}. This is talk "
+        "in a room, so use spoken sentences, not a written paragraph read "
+        "aloud.\n"
+        "Say something you have not already said in this panel. Never re-send "
+        "an earlier turn of yours, in whole or in part, and never open by "
+        "restating one.\n"
         "Never invent something another robot supposedly said; attribute a claim "
         "to Blue, Hexia, or Casper only when that exact speaker has a "
         "corresponding earlier line in the supplied history.\n"
@@ -925,8 +1019,13 @@ def _panel_direct_messages(
         requirement = (
             "<panel_reply_requirement>\n"
             + shared
-            + "The human asking is Alex. Answer Alex's exact words through that "
-            "topic and stance. Use the actual speaker-labelled history for "
+            + "The human asking is Alex. Answer the question he actually "
+            "asked, in his exact words below. The topic and stance are the "
+            "background you answer from, not a subject to return to whatever "
+            "he asked: when he asks about YOU - who you are, what you are "
+            "doing here, introduce yourself - answer about yourself first, "
+            "and only then connect it to the topic. "
+            "Use the actual speaker-labelled history for "
             "follow-ups.\n"
             "</panel_reply_requirement>\n\n"
             f"Alex's exact words: {latest}"
@@ -1170,6 +1269,11 @@ def register(app) -> None:
             tool_selection = _panel_tool_selection(latest, panel_turn)
             use_chat_tools = _panel_requires_tools(latest, tool_selection)
 
+        # The exact message list a replayed turn would be regenerated from;
+        # the direct branch replaces it with the one it actually sends.
+        sent: List[Dict[str, Any]] = [
+            {"role": "system", "content": panel_system}, *panel_turn
+        ]
         try:
             with llm_slot(foreground=not speculative):
                 if use_chat_tools:
@@ -1194,16 +1298,43 @@ def register(app) -> None:
                         panel_turn,
                         mode,
                         history,
+                        settings[robot]["slang"],
                     )
+                    sent = [
+                        {"role": "system", "content": panel_system},
+                        *direct_turn,
+                    ]
                     result = bt.call_llm(
-                        [{"role": "system", "content": panel_system}, *direct_turn],
+                        sent,
                         include_tools=False,
                         # A discussion that runs itself needs a little more
                         # spread, or three robots converge on one voice.
                         temperature=0.86 if continuous else 0.72,
                         max_tokens=1100,
                     )
-            text = _clean_reply(_result_text(result), robot)
+                text = _clean_reply(_result_text(result), robot)
+                # Neither branch runs turn_completion.finish, so the chat
+                # pipeline's replay guards have to be applied here.
+                text = _deparrot(
+                    text,
+                    robot,
+                    _own_recent_lines(robot, history),
+                    lambda said: bt.call_llm(
+                        [*sent,
+                         {"role": "assistant", "content": said},
+                         {"role": "user", "content": (
+                             "[That turn repeated something you already said in "
+                             "this panel, and Alex has read it. Do not send it "
+                             "again. " + ("Take the discussion somewhere it has "
+                                          "not been yet."
+                                          if continuous else
+                                          "Answer what Alex just asked, directly, "
+                                          "in new words.") + "]")}],
+                        include_tools=False,
+                        temperature=0.9,
+                        max_tokens=700,
+                    ),
+                )
         except Exception as exc:
             bt.log.warning(f"[PANEL] {robot} turn failed: {exc}")
             return jsonify({

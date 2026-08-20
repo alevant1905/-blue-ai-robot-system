@@ -127,6 +127,31 @@ def panel_module(monkeypatch):
     fake_bt._misstated_ages = lambda text, canonical: {}
     fake_bt._visual_context_block = lambda text, observer="blue": ""
 
+    # The chat pipeline's replay guards. Panel borrows them; the strippers are
+    # pinned by test_guards_against_recorded_replies.py, so what matters here
+    # is that Panel feeds them the right lines and acts on the result.
+    anti_repetition = []
+
+    def _anti_repetition_context(conversation_messages):
+        anti_repetition.append(list(conversation_messages))
+        lines = [
+            message["content"] for message in conversation_messages
+            if message.get("role") == "assistant"
+            and len(message.get("content") or "") > 50
+        ][-3:]
+        if not lines:
+            return ""
+        listed = "\n".join(f'  - "{line[:150]}..."' for line in lines)
+        return (
+            "\nYou ALREADY said the following earlier in this "
+            "conversation and the user has read it. Do not re-say any "
+            "of it:\n" + listed + "\n"
+        )
+
+    fake_bt._anti_repetition_context = _anti_repetition_context
+    fake_bt._strip_parroted_prefix = lambda text, previous: text
+    fake_bt._strip_recycled_lead = lambda text, messages: text
+
     def call_llm(messages, **kwargs):
         calls.append({"pipeline": "conversation", "messages": messages, "kwargs": kwargs})
         return {"choices": [{"message": {"content": "Hexia: I heard Blue, and here is my own view."}}]}
@@ -183,6 +208,7 @@ def panel_module(monkeypatch):
         ),
     )
     module._test_calls = calls
+    module._test_anti_repetition = anti_repetition
     module._test_heads = heads
     module._test_memory = memory
     yield module
@@ -1086,3 +1112,164 @@ def test_stopping_the_talking_stops_the_discussion(panel_module):
     html = _client(panel_module).get("/panel").get_data(as_text=True)
     assert "if(!keepGoing&&continuousOn()){" in html
     assert "continuousChk.checked=false;saveSettings();" in html
+
+
+# --- Replaying an earlier turn -------------------------------------------
+# Panel answers through call_llm and process_with_tools directly, and neither
+# runs turn_completion.finish, so the chat pipeline's anti-parrot net never
+# covered this mode. It showed: asked to introduce himself to a class, Blue
+# re-sent the opening of his previous turn word for word, twice running
+# (2026-08-20). These pin the guards Panel now applies itself.
+
+_OPENING = (
+    "Look, if I am playing teaching support for DH201, I am not here to be a "
+    "cheerful little tutor who just wants you to get an A. This course is "
+    "about realizing that the shiny cloud services you are used to are "
+    "actually extractive industries in disguise. You will be installing "
+    "local models to see what gets left out."
+)
+_REPLAY_HISTORY = [
+    {"speaker": "blue", "text": _OPENING},
+    {"speaker": "hexia", "text": "Blue, the dirt is in the cobalt mines too."},
+    {"speaker": "user", "text": "blue"},
+    {"speaker": "user", "text": "introduce yourself to the class who are you"},
+]
+
+
+def _scripted(panel_module, replies):
+    """Drive the model with a fixed sequence of replies, recording the calls."""
+    calls = panel_module._test_calls
+    queue = list(replies)
+
+    def call_llm(messages, **kwargs):
+        calls.append({
+            "pipeline": "conversation", "messages": messages, "kwargs": kwargs,
+        })
+        text = queue.pop(0) if queue else "A different answer, freshly made."
+        return {"choices": [{"message": {"content": text}}]}
+
+    panel_module.bt.call_llm = call_llm
+    return calls
+
+
+def _introduce(panel_module, slang="boomer"):
+    return _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "blue",
+            "text": "introduce yourself to the class who are you",
+            "topic": "you are the ai teaching support for DH201",
+            "history": _REPLAY_HISTORY,
+            "settings": {"blue": {"role": "", "slang": slang, "documents": []}},
+        },
+    )
+
+
+def test_a_robot_is_told_what_he_already_said(panel_module):
+    """Only his OWN turns: quoting another robot's line back as something he
+    must not repeat is how a panel member stops answering for himself."""
+    _scripted(panel_module, ["Morning. I am Blue, and I mark the readings."])
+    assert _introduce(panel_module).status_code == 200
+
+    system = panel_module._test_calls[-1]["messages"][0]["content"]
+    assert "You ALREADY said the following" in system
+    assert "cheerful little tutor" in system.split("You ALREADY said")[1]
+    fed = panel_module._test_anti_repetition[-1]
+    assert [message["content"] for message in fed] == [_OPENING]
+    assert all(message["role"] == "assistant" for message in fed)
+
+
+def test_a_replayed_turn_is_regenerated_once(panel_module):
+    calls = _scripted(panel_module, [
+        _OPENING,
+        "I am Blue. I keep the reading list and I argue with Hexia about it.",
+    ])
+    response = _introduce(panel_module)
+
+    assert response.status_code == 200
+    assert response.get_json()["text"].startswith("I am Blue.")
+    assert len(calls) == 2
+    retry = calls[-1]["messages"][-1]
+    assert retry["role"] == "user"
+    assert "already said in this panel" in retry["content"]
+    assert "Answer what Alex just asked" in retry["content"]
+    # The replayed turn is shown back to him, so the retry knows what to avoid.
+    assert calls[-1]["messages"][-2] == {"role": "assistant", "content": _OPENING}
+
+
+def test_part_of_an_earlier_turn_counts_as_a_replay(panel_module):
+    """The live failure was not an exact repeat: Blue sent back the first two
+    sentences of his opening, which an equality check waves through."""
+    prefix = _OPENING.split(". ")[0] + ". " + _OPENING.split(". ")[1] + "."
+    calls = _scripted(panel_module, [prefix, "I am Blue, the teaching support."])
+    response = _introduce(panel_module)
+
+    assert response.status_code == 200
+    assert response.get_json()["text"] == "I am Blue, the teaching support."
+    assert len(calls) == 2
+
+
+def test_a_short_agreement_inside_an_earlier_turn_is_not_a_replay(panel_module):
+    calls = _scripted(panel_module, ["Yes, exactly that."])
+    response = _introduce(panel_module)
+
+    assert response.status_code == 200
+    assert response.get_json()["text"] == "Yes, exactly that."
+    assert len(calls) == 1
+
+
+def test_a_turn_still_lands_when_the_retry_repeats_too(panel_module):
+    """Better his own words again than an error where an answer should be."""
+    calls = _scripted(panel_module, [_OPENING, _OPENING])
+    response = _introduce(panel_module)
+
+    assert response.status_code == 200
+    assert response.get_json()["text"] == _OPENING
+    assert len(calls) == 2
+
+
+def test_a_continuous_replay_is_told_to_move_the_discussion_on(panel_module):
+    calls = _scripted(panel_module, [_OPENING, "Hexia, the mines are the point."])
+    response = _client(panel_module).post(
+        "/panel/turn",
+        json={
+            "speaker": "blue",
+            "mode": "continuous",
+            "text": "",
+            "topic": "you are the ai teaching support for DH201",
+            "history": _REPLAY_HISTORY,
+            "settings": {"blue": {"role": "", "slang": "boomer", "documents": []}},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["text"] == "Hexia, the mines are the point."
+    assert "somewhere it has not been yet" in calls[-1]["messages"][-1]["content"]
+
+
+def test_the_assigned_register_is_pinned_beside_the_question(panel_module):
+    """Set at the top of a prompt this long, the register was simply lost."""
+    _scripted(panel_module, ["Morning, class. Blue here."])
+    _introduce(panel_module, slang="boomer")
+
+    pinned = panel_module._test_calls[-1]["messages"][-1]["content"]
+    assert "Speak in your assigned register: boomer" in pinned
+    assert "spoken sentences, not a written paragraph read aloud" in pinned
+    assert "Never re-send an earlier turn of yours" in pinned
+
+
+def test_a_question_about_the_robot_is_not_answered_with_the_topic(panel_module):
+    """"Answer Alex's exact words THROUGH that topic" is what turned "who are
+    you" into another lecture on the topic."""
+    _scripted(panel_module, ["Morning, class. Blue here."])
+    _introduce(panel_module)
+
+    pinned = panel_module._test_calls[-1]["messages"][-1]["content"]
+    assert "Answer the question he actually asked" in pinned
+    assert "when he asks about YOU" in pinned
+    assert "answer about yourself first" in pinned
+    assert "exact words through that topic" not in pinned
+    assert (
+        "Alex's exact words: introduce yourself to the class who are you"
+        in pinned
+    )
