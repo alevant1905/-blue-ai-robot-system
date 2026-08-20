@@ -1648,6 +1648,8 @@ app = Flask(__name__)
 # ============================================================================
 import hmac as _hmac
 import secrets as _secrets
+import threading as _rl_threading
+import time as _time
 import urllib.parse as _urlparse
 from datetime import timedelta as _timedelta
 
@@ -1962,17 +1964,124 @@ def _safe_next_path(raw: str) -> str:
     return raw
 
 
+# ----------------------------------------------------------------------------
+# Login rate limiting
+#
+# /login accepts a shared passphrase and nothing else, so anyone who can reach
+# it can simply keep guessing. Failures are counted and a caller who is over
+# the limit is turned away without the passphrase being looked at.
+#
+# There are two counters, because the obvious key cannot be trusted.
+# X-Forwarded-For is written by the client, so a caller who wants more attempts
+# just varies it - but remote_addr comes from the TCP connection and cannot be
+# chosen, so the coarse counter catches exactly that. The fine one exists so
+# that one household device mistyping does not turn the others away, which
+# matters here because Tailscale Serve makes every remote device share a
+# remote_addr of 127.0.0.1.
+#
+# Rotating the header cannot exhaust memory either: the coarse counter stops
+# the caller at _LOGIN_FAIL_LIMIT_ADDR, so the number of keys one connection
+# can create is bounded by that.
+#
+# Only failures count, and a correct passphrase clears the caller's record. So
+# this can delay somebody who is guessing, and cannot lock out somebody who
+# knows the passphrase for longer than the window.
+# ----------------------------------------------------------------------------
+# Tuned for the person, not the attacker. The passphrase is 33 characters
+# and gets typed on a phone and on an 8-year-old's iPad, so fumbling it a
+# few times has to cost minutes rather than a quarter of an hour. Even the
+# loose end of this caps guessing at 60 per 5 minutes from one connection,
+# which against a five-word passphrase is some millions of years.
+_LOGIN_FAIL_WINDOW = 300        # seconds a failure is remembered
+_LOGIN_FAIL_LIMIT = 10          # per connection + claimed client
+_LOGIN_FAIL_LIMIT_ADDR = 60     # per connection, whatever it claims to be
+_LOGIN_FAILURES: Dict[str, List[float]] = {}
+_LOGIN_FAIL_LOCK = _rl_threading.Lock()
+
+
+def _login_rate_keys() -> tuple:
+    """(fine, coarse). They are the same string when nothing is forwarded."""
+    addr = request.remote_addr or "?"
+    fwd = _forwarded_client_ip()
+    return (addr + "|" + fwd if fwd else addr), addr
+
+
+def _prune_login_failures(now: float) -> None:
+    """Drop failures that have aged out. Call with the lock held."""
+    cutoff = now - _LOGIN_FAIL_WINDOW
+    for key in list(_LOGIN_FAILURES):
+        kept = [t for t in _LOGIN_FAILURES[key] if t > cutoff]
+        if kept:
+            _LOGIN_FAILURES[key] = kept
+        else:
+            del _LOGIN_FAILURES[key]
+
+
+def _login_retry_after() -> int:
+    """Seconds this caller must wait before another attempt; 0 to go ahead."""
+    now = _time.monotonic()
+    fine_key, addr_key = _login_rate_keys()
+    with _LOGIN_FAIL_LOCK:
+        _prune_login_failures(now)
+        for key, limit in ((fine_key, _LOGIN_FAIL_LIMIT),
+                           (addr_key, _LOGIN_FAIL_LIMIT_ADDR)):
+            hits = _LOGIN_FAILURES.get(key) or []
+            if len(hits) >= limit:
+                # The limit-th most recent failure is the one whose ageing out
+                # frees the next attempt.
+                return max(1, int(_LOGIN_FAIL_WINDOW - (now - hits[-limit])))
+    return 0
+
+
+def _record_login_failure() -> None:
+    now = _time.monotonic()
+    with _LOGIN_FAIL_LOCK:
+        _prune_login_failures(now)
+        for key in set(_login_rate_keys()):
+            _LOGIN_FAILURES.setdefault(key, []).append(now)
+
+
+def _clear_login_failures() -> None:
+    """A correct passphrase forgives the caller - and, on the coarse key, the
+    connection they share with the rest of the household."""
+    with _LOGIN_FAIL_LOCK:
+        for key in set(_login_rate_keys()):
+            _LOGIN_FAILURES.pop(key, None)
+
+
+def _login_wait_phrase(seconds: int) -> str:
+    if seconds < 60:
+        return "%d seconds" % seconds
+    minutes = (seconds + 59) // 60
+    return "1 minute" if minutes == 1 else "%d minutes" % minutes
+
+
 @app.route("/login", methods=["GET", "POST"])
 def blue_login():
     error = None
     nxt = _safe_next_path(request.values.get("next"))
     if request.method == "POST":
+        wait = _login_retry_after()
+        if wait:
+            print("   [AUTH] login throttled for %s (%ss)"
+                  % (request.remote_addr, wait))
+            page = render_template_string(
+                _LOGIN_HTML, next=nxt,
+                error="Too many attempts. Try again in %s."
+                      % _login_wait_phrase(wait))
+            return Response(page, status=429, mimetype="text/html",
+                            headers={"Retry-After": str(wait)})
         pw = _access_password()
         supplied = request.form.get("password", "")
         if pw and _hmac.compare_digest(supplied, pw):
+            _clear_login_failures()
             session["blue_auth"] = True
             session.permanent = True
             return redirect(nxt)
+        if pw:
+            # No password configured is a host misconfiguration, not a guess;
+            # counting it would throttle whoever is trying to fix it.
+            _record_login_failure()
         error = "Incorrect password." if pw else "No password is configured on the host."
     return render_template_string(_LOGIN_HTML, error=error, next=nxt)
 

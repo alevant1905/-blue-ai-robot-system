@@ -39,6 +39,9 @@ def client(monkeypatch):
                         lambda name, args=None, *a, **k: "[stubbed]")
     monkeypatch.setattr(bt, "_access_password", lambda: PASSWORD)
     bt.app.config["TESTING"] = True
+    # The login counter is module state that outlives a request, so a test
+    # that leaves failures behind would throttle the next one.
+    bt._LOGIN_FAILURES.clear()
     return bt.app.test_client()
 
 
@@ -366,3 +369,128 @@ def test_a_duet_email_can_never_call_a_tool():
     assert calls, "the duet stopped calling the model; this test is stale"
     assert "include_tools=True" not in src
     assert src.count("include_tools=False") >= len(calls) - 1
+
+
+# --------------------------------------------------------------------------
+# Guessing the passphrase
+# --------------------------------------------------------------------------
+
+def _try(client, password, ip="192.168.1.50", fwd=None):
+    headers = {"X-Forwarded-For": fwd} if fwd else {}
+    return client.post("/login", data={"password": password, "next": "/chat"},
+                       environ_base={"REMOTE_ADDR": ip}, headers=headers)
+
+
+def test_guessing_is_throttled(client):
+    """/login takes a shared passphrase and nothing else, so without this an
+    attacker who can reach it just keeps trying."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT):
+        assert _try(client, "guess").status_code == 200
+    r = _try(client, "guess")
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) > 0
+
+
+def test_a_throttled_caller_is_refused_before_the_passphrase_is_read(client,
+                                                                    monkeypatch):
+    """Being over the limit has to end the request on its own. If the correct
+    passphrase still worked while throttled, the limit would only be slowing
+    down callers who were going to fail anyway."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT):
+        _try(client, "guess")
+
+    looked = []
+    real = bt._access_password
+    monkeypatch.setattr(bt, "_access_password",
+                        lambda: looked.append(1) or real())
+    r = _try(client, PASSWORD)
+    assert r.status_code == 429
+    assert not looked, "the passphrase was compared while throttled"
+
+
+def test_rotating_the_forwarded_header_does_not_buy_more_attempts(client):
+    """X-Forwarded-For is written by the client, so the fine-grained key is
+    the attacker's to choose. The coarse counter is keyed on remote_addr,
+    which comes from the TCP connection and is not."""
+    blocked_at = None
+    for i in range(bt._LOGIN_FAIL_LIMIT_ADDR + 5):
+        r = _try(client, "guess", fwd="10.0.0.%d" % (i + 1))
+        if r.status_code == 429:
+            blocked_at = i
+            break
+    assert blocked_at is not None, "rotating the header evaded the limit"
+    assert blocked_at <= bt._LOGIN_FAIL_LIMIT_ADDR
+
+
+def test_the_key_space_an_attacker_can_create_is_bounded(client):
+    """Otherwise the defence is a memory leak with a lock on it."""
+    for i in range(bt._LOGIN_FAIL_LIMIT_ADDR + 60):
+        _try(client, "guess", fwd="10.0.1.%d" % (i % 250))
+    assert len(bt._LOGIN_FAILURES) <= bt._LOGIN_FAIL_LIMIT_ADDR + 2
+
+
+def test_the_right_passphrase_forgives_the_caller(client):
+    """Alex mistyping four times then getting it right must not leave him one
+    slip away from being locked out for the rest of the window."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT - 1):
+        _try(client, "guess")
+    assert _try(client, PASSWORD).status_code == 302
+    assert bt._LOGIN_FAILURES == {}
+    for _ in range(bt._LOGIN_FAIL_LIMIT):
+        assert _try(client, "guess").status_code == 200
+
+
+def test_one_device_cannot_lock_out_the_others(client):
+    """Under Tailscale every remote device shares remote_addr 127.0.0.1, so a
+    counter keyed only on that would let Vilda's mistyping shut Alex out."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT + 2):
+        _try(client, "guess", ip="127.0.0.1", fwd="100.71.165.19")
+    r = _try(client, PASSWORD, ip="127.0.0.1", fwd="100.99.99.99")
+    assert r.status_code == 302, "a second device was caught by the first's limit"
+
+
+def test_failures_age_out(client, monkeypatch):
+    """A lockout that never expires is a lockout, not a limit."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT):
+        _try(client, "guess")
+    assert _try(client, "guess").status_code == 429
+
+    later = [bt._time.monotonic() + bt._LOGIN_FAIL_WINDOW + 1]
+    monkeypatch.setattr(bt._time, "monotonic", lambda: later[0])
+    assert _try(client, "guess").status_code == 200
+
+
+def test_a_missing_password_file_is_not_counted_as_guessing(client, monkeypatch):
+    """That is a host misconfiguration. Throttling it would throttle whoever
+    is trying to fix it, and the attempts are not guesses at anything."""
+    monkeypatch.setattr(bt, "_access_password", lambda: "")
+    for _ in range(bt._LOGIN_FAIL_LIMIT + 3):
+        _try(client, "anything")
+    assert bt._LOGIN_FAILURES == {}
+
+
+def test_only_posted_attempts_count(client):
+    """Loading the login page is not a guess - a logged-out phone may render
+    it several times before anyone types anything."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT + 3):
+        client.get("/login", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+    assert bt._LOGIN_FAILURES == {}
+    assert _try(client, PASSWORD).status_code == 302
+
+
+def test_the_throttled_page_is_readable_on_a_phone(client):
+    """It is what Alex sees if he fumbles the passphrase, so it has to say
+    what happened rather than show a bare 429."""
+    for _ in range(bt._LOGIN_FAIL_LIMIT):
+        _try(client, "guess")
+    body = _try(client, "guess").get_data(as_text=True)
+    assert "Too many attempts" in body
+    assert "<form" in body.lower()
+
+
+@pytest.mark.parametrize("seconds, expected", [
+    (1, "1 seconds"), (45, "45 seconds"), (60, "1 minute"),
+    (61, "2 minutes"), (900, "15 minutes"),
+])
+def test_the_wait_is_described_in_units_a_person_uses(seconds, expected):
+    assert bt._login_wait_phrase(seconds) == expected
