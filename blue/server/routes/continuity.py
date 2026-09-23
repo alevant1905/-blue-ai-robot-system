@@ -1843,6 +1843,12 @@ _STARTED = False
 
 def _start_threads() -> None:
     global _STARTED
+    # Importing bluetools registers these routes, so any script or test that
+    # imports it used to start workers that claim REAL reflection jobs from
+    # data/*space/continuity.db and run them on the live model. conftest.py
+    # sets this for the whole test suite.
+    if os.environ.get("BLUE_CONTINUITY_THREADS", "1") == "0":
+        return
     with _START_LOCK:
         if _STARTED:
             return

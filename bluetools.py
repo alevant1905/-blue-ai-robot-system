@@ -10142,6 +10142,12 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
     with llm_slot(foreground=True):
         with requests.post(LM_STUDIO_URL, json=payload,
                            timeout=timeout, stream=True) as response:
+            # Read the error body before the with-block closes the response.
+            # Otherwise _lm_studio_recover sees '' — every streamed failure
+            # was anonymous ("No models loaded" on 2026-08-19 left an empty
+            # dump) and the context-overflow retrim could never fire.
+            if getattr(response, "status_code", 200) >= 400:
+                response.content
             response.raise_for_status()
             for raw in response.iter_lines():
                 if not raw or not raw.startswith(b"data: "):
@@ -15017,6 +15023,17 @@ def chat_completions():
     try:
         data = request.json
         messages = data.get("messages", [])
+        # A turn with nothing to answer is refused before the model runs. On
+        # 2026-08-19 a test script POSTed {} four times; each ran the live
+        # model, and the four "I'm still here, Alex…" replies were logged and
+        # journaled as if Blue had spoken unprompted.
+        if not isinstance(messages, list) or not any(
+                isinstance(m, dict) and m.get("role") == "user"
+                and (m.get("content").strip()
+                     if isinstance(m.get("content"), str)
+                     else bool(m.get("content")))
+                for m in messages):
+            return jsonify({"error": "no user message"}), 400
         # Voice turns (hands-free / tap-to-talk) want SHORT spoken replies:
         # fewer tokens generate faster (so Blue starts talking sooner) and are
         # nicer to listen to. The chat page sets this flag for voice messages.

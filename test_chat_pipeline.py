@@ -683,3 +683,16 @@ def test_the_home_page_reports_the_document_count(chat, monkeypatch):
                                                for i in range(7)]})
     body = chat.client.get("/").get_data(as_text=True)
     assert "Documents <b>7</b>" in body, "the document chip did not get the count"
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"messages": []},
+    {"messages": [{"role": "system", "content": "x"}]},
+    {"messages": [{"role": "user", "content": "   "}]},
+])
+def test_a_turn_with_no_user_message_is_refused(chat, body):
+    """2026-08-19: a script POSTed {} four times; each ran the live model and
+    logged "I'm still here, Alex…" as if Blue had spoken unprompted."""
+    response = chat.client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 400
+    assert chat.model.payloads == []
