@@ -17,6 +17,7 @@ import re
 from typing import Any, Dict, List
 
 import bluetools as bt
+from blue.server import runaway as _runaway
 
 
 # Compiled once. These were rebuilt on every single turn, and living inside
@@ -413,6 +414,20 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         response = {"choices": [{"message": {
             "role": "assistant", "content": final_content,
         }}]}
+
+    # A looping reply is cut before anything else sees it: the guards,
+    # the speech queue and the history replayed on later turns.
+    try:
+        _finish_reason = (response.get("choices") or [{}])[0].get("finish_reason")
+        _trimmed = _runaway.trim_runaway(
+            final_content, truncated=_finish_reason == "length")
+        if _trimmed != final_content:
+            print(f"   [RUNAWAY] trimmed reply {len(final_content or '')} -> "
+                  f"{len(_trimmed or '')} chars (finish_reason={_finish_reason})")
+            final_content = _trimmed
+            response["choices"][0]["message"]["content"] = final_content
+    except Exception as e:
+        bt.log.warning(f"[RUNAWAY] trim failed: {e}")
 
     final_content = _run_reply_guards(
         final_content, response, messages=messages, robot=robot,

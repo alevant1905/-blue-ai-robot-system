@@ -10529,6 +10529,14 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
         _vision_queue.clear()
 
 
+def _chat_max_tokens() -> int:
+    """The reply cap for chat turns; override with BLUE_CHAT_MAX_TOKENS."""
+    try:
+        return max(256, int(os.environ.get("BLUE_CHAT_MAX_TOKENS", "2048")))
+    except ValueError:
+        return 2048
+
+
 def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
                        tool_scope):
     """Assemble the request body: the turn, the tools it may use, and a trim
@@ -10548,7 +10556,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     payload = {
         "messages": messages,
         "temperature": 0.8,  # Slightly higher for more variation
-        "max_tokens": -1,
+        # Was -1 (unlimited): on 2026-09-23 a reply looped to 99,666 chars.
+        # 2048 tokens (~8,000 chars) still fits a full letter or syllabus
+        # review; blue/server/runaway.py trims whatever loops inside it.
+        "max_tokens": _chat_max_tokens(),
         "stream": False,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
