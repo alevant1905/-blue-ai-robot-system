@@ -55,6 +55,7 @@ class ReplyContext:
     identity_issue: str = ""
     identity_topic_history: Any = None
     identity_broken: Callable[[str], Any] = lambda text: False
+    identity_sentence_broken: Callable[[str], Any] = lambda text: False
     denied_recalled_evidence: Any = None
     recalled_days_evidence: str = ""
     person_ages: Optional[Dict[str, Any]] = None
@@ -132,6 +133,14 @@ def guard_denied_recall(ctx) -> Optional[str]:
     return final_content
 
 
+# shared_recall has a canned reply that already answers the question, and
+# self_state has its own plain check-in fallback.
+_SALVAGEABLE_IDENTITY_KINDS = {
+    "identity", "identity_more", "introduction", "self_memory", "selfhood",
+    "evolution", "origin", "jspace",
+}
+
+
 def guard_identity(ctx) -> Optional[str]:
     """The reply failed identity grounding — wrong name, denied body, denied memory."""
     final_content = ctx.reply
@@ -162,6 +171,14 @@ def guard_identity(ctx) -> Optional[str]:
               "message again, directly and in your own voice. Use only "
               "supported facts and say something the user has not "
               "already heard.]"
+            # The retry never saw the question's own framing, so "describe
+            # yourself in light of Ilyenkov's texts" came back as a general
+            # self-introduction — twice in a row (2026-07-14).
+            + " [The message you are answering is: \""
+            + bt._intent_text(last_user_msg if isinstance(last_user_msg, str) else "")[:240]
+            + "\". Keep its framing — a named thinker or text, a length "
+              "limit, a time span, an audience — and answer that, not a "
+              "general self-introduction.]"
         )
     else:
         _identity_retry_note = (
@@ -181,7 +198,12 @@ def guard_identity(ctx) -> Optional[str]:
             "the user's last message directly in your own voice.]"
         )
     _redo_text = _regen_once(_identity_retry_note)
-    _redo_ok = bool(_redo_text) and not _identity_broken(_redo_text)
+    # A retry whose only fault is touching the same angles as a recent
+    # answer is shipped: that check comes from the repetition heuristic, not
+    # the validator, and 32 of 35 identity answers it flagged since 07-13
+    # shared nothing more than a topic bucket.
+    _redo_issue = _identity_broken(_redo_text) if _redo_text else "empty"
+    _redo_ok = bool(_redo_text) and _redo_issue in (None, "recycles_identity_topics")
     _identity_salvage = None
     if not _redo_ok and not _identity_kind:
         # The user asked a NON-identity question — the canned
@@ -192,6 +214,20 @@ def guard_identity(ctx) -> Optional[str]:
         # reply, minus only the drifted sentence(s).
         _identity_salvage = bt.strip_drifted_sentences(
             _redo_text or final_content, _identity_broken)
+    elif not _redo_ok and _identity_kind in _SALVAGEABLE_IDENTITY_KINDS:
+        # An identity answer with ONE false sentence keeps the rest — its own
+        # framing included — instead of a canned paragraph that ignores the
+        # question. At most one sentence may go (more left fabricated
+        # remainders in replay), and the whole must then pass every check
+        # except topic recycling.
+        _identity_salvage = bt.strip_drifted_sentences(
+            _redo_text or final_content,
+            ctx.identity_sentence_broken,
+            whole_is_broken=lambda t: (
+                p if (p := _identity_broken(t)) != "recycles_identity_topics"
+                else None),
+            max_dropped=1,
+        )
     if _redo_ok:
         final_content = _redo_text
     elif _identity_salvage:
@@ -262,17 +298,29 @@ def guard_identity(ctx) -> Optional[str]:
                     not in _identity_topic_history):
                 _fallback_variant = _candidate_variant
                 break
-        final_content = bt.canonical_identity_reply(
-            _identity_name,
-            bt._robot_cfg(robot)["self_desc"],
-            request_kind=_identity_kind,
-            kid_mode=user_name in bt._CHAT_ONLY_USERS,
-            current_location=_fallback_context.current_location,
-            location_preposition=_fallback_context.location_preposition,
-            presentation_location=_fallback_context.presentation_location,
-            introduction_variant=_fallback_variant,
-            audience=_fallback_context.audience,
-        )
+        def _canned(variant):
+            return bt.canonical_identity_reply(
+                _identity_name,
+                bt._robot_cfg(robot)["self_desc"],
+                request_kind=_identity_kind,
+                kid_mode=user_name in bt._CHAT_ONLY_USERS,
+                current_location=_fallback_context.current_location,
+                location_preposition=_fallback_context.location_preposition,
+                presentation_location=_fallback_context.presentation_location,
+                introduction_variant=variant,
+                audience=_fallback_context.audience,
+            )
+        final_content = _canned(_fallback_variant)
+        # Never the canned text just sent: when all three topics were in the
+        # history the raw seed was kept, and Hexia got the same paragraph
+        # twice running (2026-09-06).
+        _recent_norms = ctx.norm_recents or set()
+        if ctx.parrot_norm(final_content) in _recent_norms:
+            for _offset in range(1, 3):
+                _alt = _canned((_fallback_variant + _offset) % 3)
+                if ctx.parrot_norm(_alt) not in _recent_norms:
+                    final_content = _alt
+                    break
         print("   [IDENTITY] retry still invalid — using canonical fallback")
     response["choices"][0]["message"]["content"] = final_content
     return final_content

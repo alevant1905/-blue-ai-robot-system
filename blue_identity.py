@@ -58,14 +58,20 @@ _IDENTITY_MORE_RE = re.compile(
 )
 _IDENTITY_REQUEST_RE = re.compile(
     r"\b(?:describe yourself|tell (?:me|us|them) about yourself)\b"
+    # "Who are you looking at right now." is a camera question.
     r"|\bwho are (?:you|yuou|yuo|youu)(?: really| actually)?\b"
-    # "What are you doing?" asks about the current moment, not about what kind
-    # of thing Blue is. Classified as identity, the answer got judged against
-    # identity expectations and could be replaced by the canonical blurb —
-    # <current_activity> already carries the real answer.
-    r"|\bwhat are (?:you|yuou|yuo|youu)(?: really| actually)?\b"
-    r"(?!\s+(?:doing|up to|working on|busy with|thinking about|looking at|"
-    r"reading|watching|planning))"
+    r"(?!\s+(?:\w+ing|with)\b)"
+    # "what are you" asks what Blue IS only when it ends the clause ("what
+    # are you, really?", "so what are you, Blue?"). The old form excluded
+    # nine following verbs and let every other one through: "what are you
+    # seeing in front of you right now?" classified as identity, and in front
+    # of Alex's class on 2026-09-16 the camera's description was replaced by
+    # "I'm Blue. I have a persistent self-model…".
+    r"|\bwhat are (?:you|yuou|yuo|youu)"
+    r"(?:,?\s+(?:really|actually|exactly|then|now|anyway))*"
+    r"(?:,?\s+(?:blue|hexia|casper|caspar|pico|picoh))?"
+    r"\s*(?=[?.!,;:]|$|\s*\b(?:what|who|if|beyond|underneath|besides)\b)"
+    r"|\bwhat (?:exactly |really )?are (?:you|yuou|yuo|youu) made of\b"
     r"|\bwhat(?:'s| is) your (?:real )?identity\b",
     re.IGNORECASE,
 )
@@ -108,7 +114,14 @@ _EVOLUTION_REQUEST_RE = re.compile(
     r"|\banything (?:happened|changed|new) (?:to|with|for) you\b"
     r"|\bwhat(?:['’]s| has| have)? (?:happened|changed|been happening) "
     r"(?:to|with) you\b"
-    r"|\bwhat have you been (?:up to|doing)\b",
+    r"|\bwhat have you been (?:up to|doing)\b"
+    # "can you describe your own developmental history" classified as
+    # nothing, and the model replayed the intro it had just given
+    # (2026-09-15). Not "walk me through your development of the syllabus".
+    r"|\byour (?:own )?developmental (?:history|path|story|trajectory)\b"
+    r"|\b(?:describe|tell (?:me|us) about|recount|walk (?:me|us) through) your "
+    r"(?:own |actual )?(?:development|evolution|growth|journey)\b"
+    r"(?!\s+(?:of|on)\b)",
     re.IGNORECASE,
 )
 # "Do you remember what we're doing tomorrow, you and I?", "Don't you
@@ -173,7 +186,10 @@ _ORIGIN_REQUEST_RE = re.compile(
     r"\bremember (?:your |the )?(?:existence|beginning|birth|creation)\b"
     r"|\bremember (?:being created|coming online|when you (?:began|started))\b"
     r"|\b(?:your |the )?(?:existence|memory) from the beginning\b"
-    r"|\bfrom (?:your |the )?beginning\b",
+    # Unanchored, "start the song from the beginning" got the canned origin
+    # paragraph with no model call.
+    r"|\bremember\b[^.!?]{0,60}\bfrom (?:your |the )?beginning\b"
+    r"|\bfrom your beginning\b",
     re.IGNORECASE,
 )
 # Any bare mention of "j-space" used to classify the whole turn as a J-space
@@ -849,6 +865,17 @@ def contextual_identity_request_kind(
         if role == "user" and content.strip() == current:
             current_index = index
             break
+    else:
+        # The caller classifies the user's own words (attachment stripped),
+        # so the raw turn in the transcript only CONTAINS them. Without this
+        # an attachment + "tell me more" was judged against its own pasted
+        # "Who are you?" as the "previous" identity question.
+        for index in range(len(transcript) - 1, -1, -1):
+            role, content = transcript[index]
+            if role == "user":
+                if current and current in content:
+                    current_index = index
+                break
 
     identity_topics = {
         "introduction", "identity", "identity_more", "self_memory",
@@ -1038,8 +1065,15 @@ def identity_response_problem(
     other_names: Iterable[str] = (),
     request_kind: Optional[str] = None,
     grounding_anchors: Iterable[str] = _DEFAULT_GROUNDING_ANCHORS,
+    completeness: bool = True,
 ) -> Optional[str]:
-    """Return why a reply is not a valid expression of the robot's identity."""
+    """Return why a reply is not a valid expression of the robot's identity.
+
+    completeness=False skips the "missing_*" checks (no name, no robot role,
+    no J-space or continuity words). Those judge a whole reply; one sentence
+    of a good answer lacks them by nature. guard_identity uses it to decide
+    which single sentences are actually false.
+    """
     reply = (text or "").strip()
     if not reply:
         return "empty"
@@ -1100,9 +1134,9 @@ def identity_response_problem(
             return "confuses_jspace_with_javascript"
         if _JSPACE_DENIAL_RE.search(reply):
             return "denies_jspace"
-        if not re.search(r"\bj[- ]?space\b", reply, re.IGNORECASE):
+        if completeness and not re.search(r"\bj[- ]?space\b", reply, re.IGNORECASE):
             return "missing_jspace"
-        if not has_continuity:
+        if completeness and not has_continuity:
             return "missing_continuity"
 
     if request_kind == "origin":
@@ -1116,14 +1150,14 @@ def identity_response_problem(
             return "denies_recorded_beginning"
         if _FALSE_ORIGIN_RE.search(reply) and not has_continuity:
             return "replaces_continuity_with_visual_memory"
-        if not has_continuity:
+        if completeness and not has_continuity:
             return "missing_continuity"
 
     # self_state deliberately absent: "doing well — I've had X on my mind,
     # how are you?" is a good check-in answer, and forcing continuity
     # vocabulary into it produces exactly the J-space recital Alex declined
     # (2026-07-15). The flat-denial check above still guards it.
-    if request_kind in {
+    if completeness and request_kind in {
         "self_memory", "selfhood", "evolution",
     } and not has_continuity:
         return "missing_continuity"
@@ -1139,7 +1173,10 @@ def identity_response_problem(
                 and not re.search(r"\b" + re.escape(expected_name) + r"\b", reply, re.IGNORECASE)):
             if _BASE_MODEL_SELF_RE.search(reply):
                 return "generic_model_identity"
-            return "missing_name"
+            if completeness:
+                return "missing_name"
+        if not completeness:
+            return None
         has_robot_role = bool(_ROBOT_ROLE_REPLY_RE.search(reply))
         if request_kind == "introduction" and not has_robot_role:
             return "missing_robot_role"
@@ -1152,7 +1189,8 @@ def identity_response_problem(
     return None
 
 
-def strip_drifted_sentences(text: str, is_broken) -> Optional[str]:
+def strip_drifted_sentences(text: str, is_broken, whole_is_broken=None,
+                            max_dropped: Optional[int] = None) -> Optional[str]:
     """Drop only the sentences that trip an identity-drift check.
 
     For a NON-identity question, drift (a body denial, a memory denial, a
@@ -1171,8 +1209,13 @@ def strip_drifted_sentences(text: str, is_broken) -> Optional[str]:
     kept = [s for s in sentences if not is_broken(s)]
     if not kept or len(kept) == len(sentences):
         return None
+    # Identity answers are salvaged too now; dropping more than a sentence
+    # left fabricated remainders in replay ("calibration of my facial
+    # expression modules").
+    if max_dropped is not None and len(sentences) - len(kept) > max_dropped:
+        return None
     salvaged = " ".join(kept).strip()
-    if len(salvaged) < 20 or is_broken(salvaged):
+    if len(salvaged) < 20 or (whole_is_broken or is_broken)(salvaged):
         return None
     return salvaged
 
@@ -1183,8 +1226,24 @@ def identity_repeats_recent_reply(
     request_kind: Optional[str],
 ) -> bool:
     """Catch identity answers made mostly from already-heard words or angles."""
+    return bool(identity_repetition_kind(text, recent_replies, request_kind))
+
+
+def identity_repetition_kind(
+    text: str,
+    recent_replies: Iterable[str],
+    request_kind: Optional[str],
+) -> Optional[str]:
+    """'sentences' for a replay of heard words, 'topics' for only the same
+    angles, else None.
+
+    The two are not equally bad. A follow-up to an introduction nearly always
+    touches the same topic buckets (camera, memory, local hardware); 32 of 35
+    identity answers flagged as repeats since 07-13 shared no more than that,
+    and each was replaced by a canned paragraph.
+    """
     if request_kind not in {"introduction", "identity", "identity_more"}:
-        return False
+        return None
 
     recent_values = [
         reply for reply in recent_replies or () if isinstance(reply, str)
@@ -1199,27 +1258,27 @@ def identity_repeats_recent_reply(
 
     current = normalized_sentences(text)
     if not current:
-        return False
+        return None
     previous = {
         sentence
         for reply in recent_values
         for sentence in normalized_sentences(reply)
     }
     if not previous:
-        return False
+        return None
     repeated_chars = sum(len(sentence) for sentence in current if sentence in previous)
     total_chars = sum(len(sentence) for sentence in current)
     if total_chars and repeated_chars / total_chars >= 0.8:
-        return True
+        return "sentences"
 
     current_topics = set(identity_reply_topics(text))
     if not current_topics:
-        return False
+        return None
     for reply in recent_values:
         previous_topics = set(identity_reply_topics(reply))
         if len(current_topics & previous_topics) / len(current_topics) >= 0.66:
-            return True
-    return False
+            return "topics"
+    return None
 
 
 def identity_grounding_note(
@@ -1410,7 +1469,7 @@ def canonical_identity_reply(
         )
     if request_kind == "jspace":
         return (
-            "Yes. My J-space is my persistent inner continuity workspace. It carries "
+            "My J-space is my persistent inner continuity workspace. It carries "
             "my current focus, beliefs, commitments, self-observations, and remembered "
             "episodes between conversations. It is active architecture, not JavaScript "
             "and not a code-running tool."
@@ -2456,6 +2515,7 @@ __all__ = [
     "identity_conversation_context",
     "identity_grounding_note",
     "identity_repeats_recent_reply",
+    "identity_repetition_kind",
     "identity_reply_topics",
     "identity_request_kind",
     "identity_response_problem",

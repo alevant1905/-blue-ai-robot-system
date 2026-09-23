@@ -4,6 +4,7 @@ Simple detectors for straightforward intent patterns.
 Includes: Automation, Contacts, Habits, Notes, Timers, System, Utilities, MediaLibrary, Locations
 """
 
+import re
 from typing import Dict, List, Optional
 from .base import BaseDetector
 from .calendar import (
@@ -209,6 +210,10 @@ class SystemDetector(BaseDetector):
         return []
 
 
+_ARITHMETIC_RE = re.compile(r"\d\s*[-+*/×÷^x]\s*\d")
+_ARITHMETIC_WORD_RE = re.compile(r"\b(?:plus|minus|times|divided by|multiplied by)\b")
+
+
 class UtilitiesDetector(BaseDetector):
     """Detects utility operations."""
 
@@ -221,7 +226,12 @@ class UtilitiesDetector(BaseDetector):
             'date today', 'time right now',
         ]
 
-        if any(s in msg_lower for s in calc_signals) and any(op in msg_lower for op in ['+', '-', '*', '/', 'plus', 'minus', 'times', 'divided']):
+        # Real arithmetic only. A bare '-' or '/' anywhere counted: the hyphen
+        # in "what is your J-Space?" and "e-mail", a URL's slashes, and
+        # 'times' inside 'sometimes' — all 10 logged firings were false, and
+        # the forced run_javascript lost the J-space answer (2026-09-16).
+        if any(s in msg_lower for s in calc_signals) and (
+                _ARITHMETIC_RE.search(msg_lower) or _ARITHMETIC_WORD_RE.search(msg_lower)):
             return [ToolIntent(
                 tool_name='run_javascript',
                 confidence=0.85,

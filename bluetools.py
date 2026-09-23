@@ -88,6 +88,7 @@ from blue_identity import (
     identity_conversation_context,
     identity_grounding_note,
     identity_repeats_recent_reply,
+    identity_repetition_kind,
     identity_reply_topics,
     identity_request_kind,
     identity_response_problem,
@@ -14703,7 +14704,12 @@ def _canonical_grounded_reply(
             kid_mode=user_name in _CHAT_ONLY_USERS,
         )
         if re.match(r"\s*(?:no[,]?\s+|i mean\s+)", message, re.I):
-            return "Right, J-space, not JavaScript. " + reply.removeprefix("Yes. ")
+            return "Right, J-space, not JavaScript. " + reply
+        # "Yes." only answers a yes/no question. It used to open every J-space
+        # answer, including "what is your J-Space? What does that mean?".
+        if re.match(r"\s*(?:do you (?:really )?have|have you got|is there)\b",
+                    message, re.I):
+            return "Yes. " + reply
         return reply
 
     request_kind = (
@@ -15264,12 +15270,18 @@ def chat_completions():
                 daemon=True
             ).start()
 
+        # The user's own words, not a pasted document: an article quoting
+        # "Who are you?" classified as an identity question, and a pasted
+        # meeting note's "present yourself" as an introduction ("Hello
+        # everyone at prompt engineering", 2026-07-31).
+        _self_request_text = (_intent_text(last_user_msg)
+                              if isinstance(last_user_msg, str) else "")
         _self_request_kind = contextual_identity_request_kind(
-            last_user_msg if isinstance(last_user_msg, str) else "",
+            _self_request_text,
             messages,
         )
         _grounded_reply = _canonical_grounded_reply(
-            last_user_msg if isinstance(last_user_msg, str) else "",
+            _self_request_text,
             robot,
             user_name,
             messages=messages,

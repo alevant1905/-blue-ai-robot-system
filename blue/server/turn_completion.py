@@ -283,7 +283,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # and nameless generic introductions, which the legacy patterns
         # above do not cover.
         _identity_kind = bt.contextual_identity_request_kind(
-            last_user_msg if isinstance(last_user_msg, str) else "",
+            bt._intent_text(last_user_msg) if isinstance(last_user_msg, str) else "",
             messages,
         )
         _identity_name = bt._robot_cfg(robot)["name"]
@@ -311,9 +311,30 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             # replies should not be relabelled.
             if _identity_kind == "self_state" and bt.self_state_readout(text):
                 return "architecture_readout"
-            if bt.identity_repeats_recent_reply(
-                text, _recent_assists, _identity_kind
-            ):
+            _repeat = bt.identity_repetition_kind(
+                text, _recent_assists, _identity_kind)
+            if _repeat == "sentences":
+                return "repeats_recent_identity"
+            if _repeat == "topics":
+                # Truthy, so every other guard's acceptance check treats it as
+                # a problem exactly as before; guard_identity alone accepts a
+                # retry whose only fault is touching the same angles.
+                return "recycles_identity_topics"
+            return None
+
+        def _identity_sentence_broken(text):
+            """Is this one sentence false? (Not: is it incomplete.)"""
+            problem = bt.identity_response_problem(
+                text,
+                _identity_name,
+                other_names=_identity_others,
+                request_kind=_identity_kind,
+                completeness=False,
+            )
+            if problem:
+                return problem
+            if bt.identity_repetition_kind(
+                    text, _recent_assists, _identity_kind) == "sentences":
                 return "repeats_recent_identity"
             return None
 
@@ -403,6 +424,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             identity_issue=_identity_issue,
             identity_topic_history=_identity_topic_history,
             identity_broken=_identity_broken,
+            identity_sentence_broken=_identity_sentence_broken,
             denied_recalled_evidence=_denied_recalled_evidence,
             recalled_days_evidence=_recalled_days_evidence,
             person_ages=_person_ages,
