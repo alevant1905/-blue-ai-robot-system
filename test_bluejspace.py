@@ -1178,3 +1178,20 @@ def test_an_ordinary_exchange_is_still_quoted(continuity_module):
     )
     memory = route.conversation_memory_block("blue", query="Sarah Matthews lab")
     assert "You replied: She wanted a costed pilot" in memory
+
+
+def test_a_family_roster_is_not_quoted_back_into_the_prompt(continuity_module):
+    """The model copied the roster word for word from its own replayed reply,
+    even with the <family> block in the prompt (2026-08-19 22:21, 22:22)."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "who else is in our family",
+        "I know your family as you and Stella, your partner; your daughters "
+        "Athena (11), Emmy (10), Vilda (8); and Nori, your Black Goldendoodle.",
+        user_name="Alex",
+    )
+    memory = route.conversation_memory_block("blue", query="who else is in our family")
+    jspace = route.jspace_context_block("blue")
+    for block in (memory, jspace):
+        assert "Black Goldendoodle" not in block
+    assert "household facts" in memory

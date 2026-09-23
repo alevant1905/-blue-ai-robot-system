@@ -286,7 +286,10 @@ def guard_unasked_ages(ctx) -> Optional[str]:
     _regen_once = ctx.regen_once
     _unasked_ages = ctx.unasked_ages
     response = ctx.response
-    if not (_unasked_ages):
+    # A grounded family answer already chose whether to carry ages. The ask
+    # window is the last three user messages, so an earlier "who is…" would
+    # otherwise send a later canned roster to the model for rewriting.
+    if not (_unasked_ages) or ctx.grounded_reply:
         return None
     # Ranked ahead of the wrong-age fix on purpose: correcting
     # 8 to 10 still answers a question nobody asked. Alex asked

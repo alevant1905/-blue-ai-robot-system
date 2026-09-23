@@ -408,12 +408,24 @@ def test_a_denial_naming_someone_on_record_is_regenerated(chat):
     people, so this one is checked against the facts table."""
     chat.model.queue(
         "I don't have any record of a Felix in our shared history.",
-        "Felix is your brother — he's in Waterloo with Svetlana.",
+        "Felix is your brother — I don't know his plans for the weekend.",
     )
-    response = chat.ask("do you remember Felix?")
+    # "do you remember Felix?" is now answered from the facts table without
+    # the model (see test_family_followups.py), so the guard is exercised on
+    # a question that still reaches it.
+    response = chat.ask("is Felix coming over this weekend?")
 
     assert "don't have any record" not in reply_of(response).lower()
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
+
+
+def test_a_question_about_a_relative_on_record_never_reaches_the_model(chat):
+    """2026-08-19: "wht about my brother" reached the model, which said Alex
+    has no brother. brother_name has been Felix since July."""
+    response = chat.ask("wht about my brother")
+
+    assert "Felix" in reply_of(response)
+    assert chat.model.payloads == []
 
 
 def test_a_voice_denial_is_regenerated_end_to_end(chat):

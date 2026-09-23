@@ -31,6 +31,7 @@ from blue_identity import (
     identity_request_kind,
     identity_response_problem,
     is_family_overview_request,
+    canonical_family_reply_kind,
     is_social_checkin,
     known_household_target,
 )
@@ -1170,6 +1171,15 @@ class RobotContinuity:
                     f"('{_clip(heard, 80)}'); your reply wording is omitted so it "
                     "is never reused."
                 )
+            elif (item.get("kind") == "exchange"
+                  and canonical_family_reply_kind(str(details.get("reply") or ""))):
+                # Keyed on the REPLY, so the model's own copy of the roster
+                # is covered too (it was re-quoted on 2026-08-19 22:22).
+                who = (item.get("participants") or ["Someone"])[0]
+                summary = (
+                    f"{who} asked about the family ('{_clip(heard, 80)}'); you "
+                    "answered from the household facts (wording omitted)."
+                )
             episode_lines.append(
                 f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
                 f"salience {item['salience']:.2f}] {summary}"
@@ -1424,6 +1434,10 @@ class RobotContinuity:
                 # copy (see is_social_checkin).
                 " (A greeting/check-in; your wording is omitted so it is never "
                 "reused.)" if replied and is_social_checkin(heard) else
+                # A roster quoted back is copied word for word, even with the
+                # <family> block in the prompt (2026-08-19 22:21 and 22:22).
+                " You answered from the household facts (wording omitted)."
+                if replied and canonical_family_reply_kind(replied) else
                 f" You replied: {_clip(replied, 180)}" if replied else ""
             )
             lines.append(

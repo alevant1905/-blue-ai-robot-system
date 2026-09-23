@@ -852,7 +852,13 @@ def test_canonical_household_answers_do_not_consult_contacts_or_visual_memory():
     detail_request = "tell me everythign you remember about our family"
     detail = canonical_household_reply(detail_request, "blue", facts, "Alex")
     followup_request = "do you know anything else about our family"
-    followup = canonical_household_reply(followup_request, "blue", facts, "Alex")
+    # A follow-up moves on from what the thread already holds: with the detail
+    # already given, it names who else is on record instead of repeating it.
+    followup = canonical_household_reply(
+        followup_request, "blue", facts, "Alex",
+        messages=[{"role": "user", "content": detail_request},
+                  {"role": "assistant", "content": detail},
+                  {"role": "user", "content": followup_request}])
 
     assert is_family_overview_request(detail_request)
     assert is_family_detail_request(detail_request)
@@ -865,8 +871,8 @@ def test_canonical_household_answers_do_not_consult_contacts_or_visual_memory():
     assert "Smart Matter and critical media theory" in detail
     assert "might enjoy" not in detail
     assert is_family_followup_request(followup_request)
-    assert "full set of stable family facts" in followup
-    assert "guess at anyone's interests" in followup
+    assert followup.startswith("That's everyone I have on record")
+    assert "Felix" in followup and "Chris and Tina" in followup
 
 
 def test_group_identity_wording_cannot_fall_through_to_alex_brevig_claim():

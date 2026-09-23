@@ -222,23 +222,51 @@ _JSPACE_PRESENCE_RE = re.compile(
     r")\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
+# Every family branch must END at "family": "tell me about our family trip to
+# toronto", "what do you remember about our family vacation" and "who is in the
+# family room" all matched and got the roster. The logged asks still pass:
+# "...our family and don't use asterisks", "...our family, Fasper."
+_FAMILY_END = (
+    r"(?=\s*(?:$|[?.!,;:()—–-]|and\b|now\b|today\b|besides\b"
+    r"|other than\b|apart from\b|except\b|please\b|but\b|without\b"
+    # Formatting asks: "...about our family don't use asterisks".
+    r"|don['’]?t\b|do not\b|in (?:brief|short|detail|full)\b|briefly\b))"
+)
 _FAMILY_OVERVIEW_RE = re.compile(
-    r"\bwhat do you (?:remember|know) about (?:our|my|the) family\b"
-    r"|\btell (?:me|us) (?:what you (?:remember|know) )?about (?:our|my|the) family\b"
-    r"|\btell (?:me|us) (?:every(?:thing|thign)|all(?: that)?) you "
-    r"(?:remember|know) about (?:our|my|the) fam(?:ily|ly)\b"
-    r"|\b(?:do you know anything (?:else|more)|what else do you "
-    r"(?:remember|know)) about (?:our|my|the) fam(?:ily|ly)\b"
-    r"|\btell (?:me|us) more about (?:our|my|the) fam(?:ily|ly)\b"
-    r"|\bwho (?:is|are) in (?:our|my|the) family\b",
+    r"\bwhat do you (?:remember|know) about (?:our|my|the) family" + _FAMILY_END
+    + r"|\btell (?:me|us) (?:what you (?:remember|know) )?about (?:our|my|the) "
+    r"family" + _FAMILY_END
+    + r"|\btell (?:me|us) (?:every(?:thing|thign)|all(?: that)?) you "
+    r"(?:remember|know) about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END
+    + r"|\b(?:do you know anything (?:else|more)|what else do you "
+    r"(?:remember|know)) about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END
+    + r"|\btell (?:me|us) more about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END
+    # "who else is in our family" and "think hard who else is in our family"
+    # reached the model, which copied the roster from its own replayed reply.
+    + r"|\bwho(?:['’]s|\s+else|\s+all)*(?:\s+is|\s+are)?\s+(?:in|part of) "
+    r"(?:our|my|the) fam(?:ily|ly)" + _FAMILY_END,
     re.IGNORECASE,
 )
 _FAMILY_DETAIL_RE = re.compile(
     r"\btell (?:me|us) (?:every(?:thing|thign)|all(?: that)?) you "
-    r"(?:remember|know) about (?:our|my|the) fam(?:ily|ly)\b"
-    r"|\b(?:do you know anything (?:else|more)|what else do you "
-    r"(?:remember|know)) about (?:our|my|the) fam(?:ily|ly)\b"
-    r"|\btell (?:me|us) more about (?:our|my|the) fam(?:ily|ly)\b",
+    r"(?:remember|know) about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END
+    + r"|\b(?:do you know anything (?:else|more)|what else do you "
+    r"(?:remember|know)) about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END
+    + r"|\btell (?:me|us) more about (?:our|my|the) fam(?:ily|ly)" + _FAMILY_END,
+    re.IGNORECASE,
+)
+# Asking for who ELSE — a step beyond whatever was already given. Excludes
+# "everything" and "tell me more", which always want the full detail.
+_FAMILY_ELSE_RE = re.compile(
+    r"\b(?:anything|anyone|anybody|who|what)\s+(?:else|more)\b"
+    r"|\bthink (?:hard|harder|again)\b",
+    re.IGNORECASE,
+)
+# A bare "what else" is a family follow-up only right after a family answer;
+# after a DH399 turn it means DH399.
+_FAMILY_BARE_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:and|so|ok(?:ay)?)[,.! ]+)?(?:what else|anything else|anyone else"
+    r"|anybody else|who else|tell (?:me|us) more|go on|and)\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
 _FAMILY_FOLLOWUP_RE = re.compile(
@@ -1679,7 +1707,7 @@ _HOUSEHOLD_NAME_ALIASES = {
     "picoh": "pico",
 }
 _WHO_IS_RE = re.compile(
-    r"^\s*(?:(?:please|hey)[, ]+)?(?:can you tell me\s+)?who is\s+"
+    r"^\s*(?:(?:please|hey)[, ]+)?(?:can you tell me\s+)?who(?:['’]s| is)\s+"
     r"([a-z][a-z -]{1,30}?)\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
@@ -1746,7 +1774,7 @@ def recalled_evidence_fallback(
     )
 _HOUSEHOLD_ABOUT_RE = re.compile(
     r"^\s*(?:(?:please|hey)[, ]+)?(?:"
-    r"what about|tell (?:me|us) about|what (?:do you know|do you remember|"
+    r"wh?a?t about|tell (?:me|us) about|what (?:do you know|do you remember|"
     r"can you tell (?:me|us)) about|do you (?:know|remember)|"
     r"what is)\s+([a-z][a-z -]{1,30}?)"
     r"(?:\s+like)?\s*[?.!]*\s*$",
@@ -1770,6 +1798,126 @@ def known_household_target(text: str) -> Optional[str]:
 def _daughter_names(facts: dict) -> list[str]:
     raw = str(facts.get("daughter_name") or facts.get("daughter_names") or "")
     return [part.strip() for part in re.split(r"[,|;]|\sand\s", raw) if part.strip()]
+
+
+# Relatives beyond the household. "wht about my brother" reached the model,
+# which answered "You don't have a brother, Alex" with brother_name = Felix on
+# record (2026-08-19). Only asks are routed; "felix is my brother" and "is
+# Felix coming over this weekend?" are not.
+_RELATIVE_ASK_RE = re.compile(
+    r"^\s*(?:(?:please|hey|so|and|ok(?:ay)?)[, ]+)?(?:"
+    r"who(?:['’]s| is| are)|wh?a?t about|tell (?:me|us) about"
+    r"|do you (?:know|remember)(?: who)?)\s+(?:my |our |your )?"
+    r"([a-z][a-z'’ -]{1,30}?)(?:\s+(?:is|are))?\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def known_relative_target(text: str, facts: Mapping[str, object]) -> Optional[str]:
+    """'brother', 'brother_spouse' or 'partner_parents' for a relative ask."""
+    match = _RELATIVE_ASK_RE.search(text or "")
+    if not match:
+        return None
+    candidate = re.sub(r"\s+", " ", match.group(1).strip().lower()).replace("’", "'")
+    partner = str(facts.get("partner_name") or "Stella").strip().lower()
+    if re.fullmatch(r"(?:alex's )?brothers?", candidate):
+        return "brother"
+    if re.fullmatch(r"sister[- ]in[- ]law|brother's wife", candidate):
+        return "brother_spouse"
+    if re.fullmatch(
+            r"in[- ]laws|(?:mother|father|parents)[- ]in[- ]laws?"
+            rf"|{re.escape(partner)}'?s parents", candidate):
+        return "partner_parents"
+    brother = str(facts.get("brother_name") or "").strip().lower()
+    spouse = str(facts.get("brother_spouse") or "").strip().lower()
+    if brother and candidate == brother:
+        return "brother"
+    if spouse and candidate == spouse:
+        return "brother_spouse"
+    parents = [name.lower() for name in _daughter_names(
+        {"daughter_name": facts.get("partner_parent_names") or ""})]
+    if candidate in parents:
+        return "partner_parents"
+    return None
+
+
+def canonical_relative_reply(
+    target: str, facts: Mapping[str, object], user_name: str = "Alex",
+) -> Optional[str]:
+    """Answer a relative question from facts only; None when not recorded."""
+    yours = (user_name or "").strip().lower() == "alex"
+    owner = "your" if yours else "Alex's"
+    brother = str(facts.get("brother_name") or "").strip()
+    spouse = str(facts.get("brother_spouse") or "").strip()
+    if target == "brother" and brother:
+        tail = f", and {spouse} is his wife" if spouse else ""
+        return f"{brother} is {owner} brother{tail}."
+    if target == "brother_spouse" and spouse:
+        if brother:
+            return f"{spouse} is {brother}'s wife, {owner} sister-in-law."
+        return f"{spouse} is {owner} sister-in-law."
+    if target == "partner_parents":
+        parents = _daughter_names(
+            {"daughter_name": facts.get("partner_parent_names") or ""})
+        if not parents:
+            return None
+        partner = str(facts.get("partner_name") or "Stella").strip()
+        names = (", ".join(parents[:-1]) + " and " + parents[-1]
+                 if len(parents) > 1 else parents[0])
+        verb = "are" if len(parents) > 1 else "is one of"
+        where = str(facts.get("partner_parent_location") or "").strip()
+        place = f"; they live in {where}" if where and len(parents) > 1 else ""
+        if len(parents) > 1:
+            return f"{names} {verb} {partner}'s parents{place}."
+        return f"{names} {verb} {partner}'s parents."
+    return None
+
+
+def _relatives_clause(facts: Mapping[str, object], user_name: str = "Alex") -> str:
+    """'Beyond the house, there's your brother Felix and his wife Svetlana,
+    and Stella's parents, Chris and Tina.' — from facts only."""
+    yours = (user_name or "").strip().lower() == "alex"
+    owner = "your" if yours else "Alex's"
+    parts = []
+    brother = str(facts.get("brother_name") or "").strip()
+    spouse = str(facts.get("brother_spouse") or "").strip()
+    if brother:
+        parts.append(f"{owner} brother {brother}"
+                     + (f" and his wife {spouse}" if spouse else ""))
+    parents = _daughter_names(
+        {"daughter_name": facts.get("partner_parent_names") or ""})
+    if parents:
+        partner = str(facts.get("partner_name") or "Stella").strip()
+        names = (", ".join(parents[:-1]) + " and " + parents[-1]
+                 if len(parents) > 1 else parents[0])
+        parts.append(f"{partner}'s parents, {names}")
+    if not parts:
+        return ""
+    return "Beyond the house, there's " + ", and ".join(parts) + "."
+
+
+FAMILY_ROSTER_OPENERS = ("I know your family as", "I know Alex's family as")
+FAMILY_DETAIL_OPENER = "Here is the confirmed family picture"
+FAMILY_OTHERS_OPENER = "That's everyone I have on record"
+FAMILY_KID_OPENER = "The family is"
+
+
+def canonical_family_reply_kind(text: str) -> Optional[str]:
+    """Which family template a reply is, if any.
+
+    A substring test, not startswith: finish() can put the daily briefing or
+    a reminder alert in front of a grounded reply.
+    """
+    body = text or ""
+    if any(opener in body for opener in FAMILY_ROSTER_OPENERS):
+        return "roster"
+    if FAMILY_DETAIL_OPENER in body:
+        return "detail"
+    if FAMILY_OTHERS_OPENER in body:
+        return "others"
+    if FAMILY_KID_OPENER in body and "Nori" in body:
+        return "kid"
+    return None
 
 
 # "Do you know who I am?" is a question about the USER's identity. Left to the
@@ -1912,62 +2060,140 @@ def canonical_family_grounding_lines(facts: Mapping[str, object]) -> list[str]:
     return lines
 
 
+def _family_roster_reply(facts, user_name="Alex", with_ages=True) -> str:
+    daughters = _daughter_names(facts)
+    daughter_bits = []
+    for daughter in daughters:
+        age = str(facts.get(f"{daughter.lower()}_age") or "").strip()
+        daughter_bits.append(f"{daughter} ({age})" if age and with_ages else daughter)
+    partner = str(facts.get("partner_name") or "Stella").strip()
+    pet = str(facts.get("pet_name") or "Nori").strip()
+    breed = str(facts.get("pet_breed") or "the family dog").strip()
+    daughters_text = ", ".join(daughter_bits) if daughter_bits else "the girls"
+    relatives = _relatives_clause(facts, user_name)
+    tail = f" {relatives}" if relatives else ""
+    if (user_name or "").strip().lower() == "alex":
+        return (
+            f"{FAMILY_ROSTER_OPENERS[0]} you and {partner}, your partner; your "
+            f"daughters {daughters_text}; and {pet}, your {breed}.{tail}"
+        )
+    return (
+        f"{FAMILY_ROSTER_OPENERS[1]} Alex and {partner}, his partner; his "
+        f"daughters {daughters_text}; and {pet}, his {breed}.{tail}"
+    )
+
+
+def _family_detail_reply(facts) -> str:
+    lines = canonical_family_grounding_lines(facts)
+    if not lines:
+        return (
+            "I do not have additional confirmed family details to add, and I "
+            "will not fill the gaps with guesses."
+        )
+    return (
+        f"{FAMILY_DETAIL_OPENER} I carry:\n- "
+        + "\n- ".join(lines)
+        + "\nThose are the stable details I can state with confidence. I also "
+        "retain dated family episodes, which I can retrieve by person or event "
+        "without treating old schedules as current."
+    )
+
+
+def _family_others_reply(facts, user_name="Alex", repeat=False) -> str:
+    """After the full detail: name who else is on record, and ask to be told.
+
+    Replaces "That is the full set of stable family facts…", which named
+    nobody and did not answer "who else is in our family".
+    """
+    relatives = _relatives_clause(facts, user_name)
+    if repeat:
+        # Asked again after being told: the facts haven't changed, so say so
+        # in new words and ask for the missing person outright.
+        return (
+            f"{FAMILY_OTHERS_OPENER}, and nobody new has been added since I "
+            "last said so. If someone's missing, tell me their name and how "
+            "they're related, and I'll save them."
+        )
+    if relatives:
+        people = relatives.removeprefix("Beyond the house, there's ").rstrip(".")
+        return (
+            f"{FAMILY_OTHERS_OPENER} beyond the six of you at home: {people}. "
+            "If I've missed someone, tell me who and I'll keep them."
+        )
+    return (
+        f"{FAMILY_OTHERS_OPENER}: the six of you at home. If I've missed "
+        "someone, tell me who and I'll keep them."
+    )
+
+
+def _kid_family_reply(facts) -> str:
+    """Vilda's iPad gets no <family> block, so this is all she is told —
+    names only, no ages, jobs, schools or bunks."""
+    names = ["Alex", str(facts.get("partner_name") or "Stella").strip()]
+    names += _daughter_names(facts)
+    pet = str(facts.get("pet_name") or "Nori").strip()
+    return f"{FAMILY_KID_OPENER} " + ", ".join(names) + f", and {pet} the dog."
+
+
 def canonical_household_reply(
     text: str,
     robot: str,
     facts: Optional[dict] = None,
     user_name: str = "Alex",
+    messages: Iterable[Mapping[str, object]] = (),
+    kid_mode: bool = False,
 ) -> Optional[str]:
-    """Answer exact household-relationship questions from canonical facts only."""
+    """Answer exact household-relationship questions from canonical facts only.
+
+    `messages` is the page thread, so a follow-up can move on from what was
+    already said. On 2026-08-19 "what else", "who else is in our family" and
+    "think hard who else is in our family" each got the same roster or the
+    same "that is the full set" line, and the relatives on record (Felix,
+    Svetlana, Chris and Tina) were never named.
+    """
     facts = facts or {}
     if is_user_identity_request(text):
         return canonical_user_identity_reply(facts, user_name)
-    if is_family_overview_request(text):
-        if is_family_followup_request(text):
-            return (
-                "That is the full set of stable family facts I can state confidently "
-                "right now. I also retain dated episodes about family activities and "
-                "appointments, but I would rather retrieve a specific person or event "
-                "than turn an old entry into a current fact or guess at anyone's "
-                "interests."
-            )
-        if is_family_detail_request(text):
-            lines = canonical_family_grounding_lines(facts)
-            if not lines:
-                return (
-                    "I do not have additional confirmed family details to add, and I "
-                    "will not fill the gaps with guesses."
-                )
-            return (
-                "Here is the confirmed family picture I carry:\n- "
-                + "\n- ".join(lines)
-                + "\nThose are the stable details I can state with confidence. I also "
-                "retain dated family episodes, which I can retrieve by person or event "
-                "without treating old schedules as current."
-            )
-        daughters = _daughter_names(facts)
-        daughter_bits = []
-        for daughter in daughters:
-            age = str(facts.get(f"{daughter.lower()}_age") or "").strip()
-            daughter_bits.append(f"{daughter} ({age})" if age else daughter)
-        partner = str(facts.get("partner_name") or "Stella").strip()
-        pet = str(facts.get("pet_name") or "Nori").strip()
-        breed = str(facts.get("pet_breed") or "the family dog").strip()
-        owner = "you" if (user_name or "").strip().lower() == "alex" else "Alex"
-        daughters_text = ", ".join(daughter_bits) if daughter_bits else "the girls"
-        possessive = "your" if owner == "you" else "his"
-        if owner == "you":
-            return (
-                f"I know your family as you and {partner}, your partner; your "
-                f"daughters {daughters_text}; and {pet}, your {breed}."
-            )
-        return (
-            f"I know Alex's family as Alex and {partner}, his partner; his "
-            f"daughters {daughters_text}; and {pet}, his {breed}."
-        )
+
+    thread = [m for m in (messages or []) if isinstance(m, Mapping)]
+    assistant_turns = [
+        str(m.get("content") or "") for m in thread[-20:]
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    ]
+    given = {canonical_family_reply_kind(t) for t in assistant_turns} - {None}
+    last_assistant = assistant_turns[-1] if assistant_turns else ""
+
+    overview = is_family_overview_request(text)
+    else_ask = bool(
+        (overview and _FAMILY_ELSE_RE.search(text or ""))
+        or (_FAMILY_BARE_FOLLOWUP_RE.match(text or "")
+            and canonical_family_reply_kind(last_assistant))
+    )
+    explicit_detail = bool(
+        is_family_detail_request(text) and not _FAMILY_ELSE_RE.search(text or ""))
+
+    if kid_mode and (overview or else_ask):
+        return _kid_family_reply(facts)
+    if explicit_detail or (else_ask and "detail" not in given):
+        return _family_detail_reply(facts)
+    if else_ask:
+        return _family_others_reply(facts, user_name, repeat="others" in given)
+    if overview:
+        # A plain repeat stays the roster, ages included: on 2026-08-19 Alex
+        # asked it again and again to check whether Athena's age correction
+        # had been saved. Ages are left out only for a "who" question, which
+        # asks for names (the 2026-08-01 complaint).
+        return _family_roster_reply(
+            facts, user_name, with_ages=not re.search(r"\bwho\b", text or "", re.I))
 
     target = known_household_target(text)
     if not target:
+        # Checked after the household so "Who is Casper?" / "Who is Stella?"
+        # still win. No location is stated for Felix and Svetlana: Alex's
+        # correction that they live in Waterloo was never saved.
+        relative = known_relative_target(text, facts)
+        if relative:
+            return canonical_relative_reply(relative, facts, user_name)
         return None
 
     robot = _HOUSEHOLD_NAME_ALIASES.get(
@@ -2196,7 +2422,9 @@ def canonical_robot_relationship_reply(
 
 __all__ = [
     "canonical_family_grounding_lines",
+    "canonical_family_reply_kind",
     "canonical_household_reply",
+    "canonical_relative_reply",
     "canonical_identity_reply",
     "canonical_robot_relationship_reply",
     "canonical_identity_more_reply",
@@ -2225,6 +2453,7 @@ __all__ = [
     "self_state_focus_hint",
     "self_state_readout",
     "known_household_target",
+    "known_relative_target",
     "robot_relationship_targets",
     "recalled_evidence_fallback",
     "strip_drifted_sentences",

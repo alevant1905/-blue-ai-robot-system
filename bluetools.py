@@ -14188,7 +14188,13 @@ _FAMILY_QUERY_RE = re.compile(
     r"\bnames?\b"
     r"|\b(?:ages?|birthday)s?\b[^.!?]{0,30}\b(?:wrong|right|correct|off)\b"
     r"|\b(?:wrong|getting (?:them|it|these) wrong|still wrong|not (?:right|correct))\b"
-    r"[^.!?]{0,20}\b(?:age|ages|old)\b",
+    r"[^.!?]{0,20}\b(?:age|ages|old)\b"
+    # Relatives. "wht about my brother" got no <family> block and the model
+    # denied Felix. Scoped to my/our, so "Murray has a Big Brother" and "your
+    # parents" said to a robot stay out.
+    r"|\b(?:my|our)\s+(?:brothers?|sisters?|siblings?|(?:brother|sister|mother"
+    r"|father|parents)[- ]in[- ]laws?|in[- ]laws|relatives|parents|cousins?"
+    r"|aunts?|uncles?|nieces?|nephews?)\b",
     re.I)
 
 _SELF_EVOLUTION_RE = re.compile(
@@ -14657,6 +14663,10 @@ def _canonical_grounded_reply(
         robot=robot,
         facts=facts,
         user_name=user_name,
+        # The raw page thread (not yet sanitized), so a follow-up can see
+        # which family answer was already given.
+        messages=messages or [],
+        kid_mode=user_name in _CHAT_ONLY_USERS,
     ) or ""
 
 
