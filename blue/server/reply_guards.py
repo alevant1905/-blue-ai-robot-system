@@ -381,10 +381,14 @@ def guard_wrong_ages(ctx) -> Optional[str]:
     _truth = ", ".join(
         f"{p.capitalize()} is {a}"
         for p, a in sorted(_person_ages.items()))
+    # Quote the question: asked "when is Athena's birthday?", the old note
+    # made the retry answer with her age (2026-08-08, four times).
+    _asked = bt._intent_text(ctx.last_user_msg or "")[:200]
     _redo_text = _regen_once(
         f"[You stated a wrong age. Ground truth from the "
-        f"household facts: {_truth}. Answer again using ONLY "
-        "these ages — do not guess or shuffle.]")
+        f"household facts: {_truth}. Answer the user's last message "
+        f"again — \"{_asked}\" — using only these ages, and mention an "
+        "age only if that message asks about one.]")
     if _redo_text and not bt._misstated_ages(_redo_text, _person_ages):
         final_content = _redo_text
         response["choices"][0]["message"]["content"] = final_content
@@ -717,7 +721,16 @@ def guard_phantom_correction_ack(ctx) -> Optional[str]:
     last_user_msg = ctx.last_user_msg
     response = ctx.response
     if not ((not _grounded_reply and bt.is_phantom_correction_ack(
-        final_content, last_user_msg or ""))):
+        final_content, bt._intent_text(last_user_msg or "")))):
+        return None
+    # A save really happened this turn: "Done, I've locked that in" after a
+    # successful remember_fact is not a phantom.
+    try:
+        _outcomes = bt._continuity_routes.turn_tool_outcomes() or []
+    except Exception:
+        _outcomes = []
+    if any(o.get("success") and o.get("name") in {
+            "remember_fact", "remember_person", "add_contact"} for o in _outcomes):
         return None
     # "I stand corrected / I have updated my records / thank you
     # for the correction" when the user corrected NOTHING — a

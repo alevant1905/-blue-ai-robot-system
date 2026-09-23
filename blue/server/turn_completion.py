@@ -73,6 +73,10 @@ def denies_a_known_person(text: str) -> bool:
     body = str(text or "")
     if not _MEMORY_DENIAL_RE.search(body):
         return False
+    # "I don't know who Howl Satina is — did you mean how old is Athena?" is
+    # the check-back a misheard turn should get, not a denial of Athena.
+    if bt._CHECKBACK_RE.search(body):
+        return False
     if _ABOUT_A_DOCUMENT_RE.search(body):
         return False
     low = body.lower()
@@ -215,6 +219,71 @@ _REPEAT_NOT_RE = re.compile(
     r"|\bin (?:french|english|danish|russian|greek|spanish|german|another language"
     r"|other words)\b"
     r"|\bdifferent(?:ly| way)\b|\bbriefly\b|\bshorter\b", re.I)
+
+
+# "I have updated my records", "I've locked that in" — first-person, past
+# tense, about Blue's memory. Measured on the log it matches claims only, not
+# requests ("tell me what it is so I can lock it in") or recall ("here is what
+# I have stored in my memory").
+_MEMORY_WRITE_CLAIM_RE = re.compile(
+    r"(?<!what )\bi(?:['’]ve| have| just| now)\s+(?:now\s+|just\s+|also\s+)?"
+    r"(?:updated|corrected|fixed|changed|saved|stored|recorded|logged|committed|locked)\b"
+    r"(?:[^.!?]{0,30}\b(?:records?|memory|memories|notes?|facts?|profile)\b"
+    r"|\s+(?:that|this|it)\s+in\b)", re.I)
+_REMINDER_CHANGE_CLAIM_RE = re.compile(
+    r"\bi(?:['’]ve| have| just)\s+(?:just\s+)?(?:cleared|cancel+ed|deleted|removed"
+    r"|ended|archived)\b[^.!?]{0,40}\breminders?\b"
+    r"|\bfinished clearing\b[^.!?]{0,40}\breminders?\b", re.I)
+_MEMORY_WRITE_TOOLS = {"remember_fact", "remember_person", "remember_place",
+                       "add_contact", "create_note", "update_note",
+                       "create_document"}
+_REMINDER_WRITE_TOOLS = {"cancel_reminder", "reschedule_reminder",
+                         "delete_reminder", "update_reminder"}
+
+
+_BARE_ACK_RE = re.compile(
+    r"(?:got it|okay|ok|done|sure|understood|right|noted|all set|"
+    r"my (?:mistake|bad|apologies)|thanks?(?: you)?)[.!,]*"
+    r"(?:\s*(?:alex|dr\.? levant|doctor levant))?[.!,]*", re.I)
+
+
+def _substantive(text):
+    """More than an acknowledgement: "She's 11 now." is; "Got it." is not."""
+    text = (text or "").strip()
+    return len(text.split()) >= 3 and not _BARE_ACK_RE.fullmatch(text)
+
+
+def _scrub_unbacked_write_claims(reply, outcomes):
+    """Remove claims of a save or a cleared reminder that did not happen.
+
+    "I've updated my records so it sticks this time" (2026-08-15) and "I have
+    updated my records" (08-19) were said with nothing written; "Just
+    finished clearing out those last CMDS4740 reminders" (08-11) with no
+    reminder tool run at all. `outcomes` is this turn's tool record; None
+    means nobody was collecting, so nothing is judged.
+    """
+    if outcomes is None or not reply:
+        return reply
+    succeeded = {o.get("name") for o in outcomes if o.get("success")}
+    checks = []
+    if not succeeded & _MEMORY_WRITE_TOOLS:
+        checks.append((_MEMORY_WRITE_CLAIM_RE,
+                       "Got it — though that isn't saved to my long-term "
+                       "memory yet. Say “remember that …” and I'll keep it."))
+    if not succeeded & _REMINDER_WRITE_TOOLS:
+        checks.append((_REMINDER_CHANGE_CLAIM_RE,
+                       "I haven't changed any reminders yet — tell me which "
+                       "one and I'll do it."))
+    out = reply
+    for pattern, fallback in checks:
+        if not pattern.search(out):
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", out.strip())
+        kept = [s for s in sentences if not pattern.search(s)]
+        remainder = " ".join(kept).strip()
+        out = remainder if _substantive(remainder) else fallback
+        print(f"   [MEMORY] removed a claim nothing backs: {pattern.pattern[:40]}…")
+    return out
 
 
 def _repeat_requested(text):
@@ -549,6 +618,15 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             if _late is not None:
                 print(f"   [ANTI-PARROT] replay survived {_guard_ctx.handled_by}")
                 final_content = _late
+        # After the chain, not as a guard: first-match-wins would let this
+        # pre-empt the wrong-age and roster checks. Kids' pages are exempt —
+        # "I'll remember that!" there is play, and remember_fact is blocked.
+        if user_name not in bt._CHAT_ONLY_USERS:
+            try:
+                final_content = _scrub_unbacked_write_claims(
+                    final_content, bt._continuity_routes.turn_tool_outcomes())
+            except Exception as e:
+                bt.log.warning(f"[MEMORY] claim check failed: {e}")
         response["choices"][0]["message"]["content"] = final_content
     except Exception as e:
         bt.log.warning(f"[ANTI-PARROT] check failed: {e}")
@@ -712,7 +790,11 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
                 # later report Vilda's statements back to Alex as his own.
                 if (uname or bt._DEFAULT_USER) != bt._DEFAULT_USER:
                     return
-                if bt.extract_and_save_facts(msgs):
+                # Blue asking "did you mean …?" did not understand the turn;
+                # learning from it is how "D8201" became current_project.
+                if bt._CHECKBACK_RE.search(_reply_only or ""):
+                    pass
+                elif bt.extract_and_save_facts(msgs):
                     bt.log.info("[MEM] ✓ Auto-saved learned facts (background)")
                 if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
                     bt.memory_system.consolidate_if_needed(user_name=uname)

@@ -231,7 +231,10 @@ _COURSE_RE = re.compile(
     r"\breadings\b"
     r"|\b(?:assigned|required|course|class|weekly)\s+readings?\b"
     r"|\breading\s+(?:for|list|report|assignment|this|next|tonight|tomorrow|today|due)\b"
-    r"|\b(?:to|should\s+i|do\s+i|have\s+to|need\s+to|gotta)\s+read\b"
+    # Not a bare "to read": "…the time to read those kind of folks" (a
+    # garbled voice turn) and "quiet time to read" searched the library.
+    r"|\b(?:(?:want|need|like|for)\s+you\s+to(?:\s+be\s+able\s+to)?|should\s+i"
+    r"|do\s+i|have\s+to|need\s+to|gotta)\s+read\b"
     r"|\bhomework\b|\bassignments?\b|\bcoursework\b|\bsyllabus\b"
     r"|\b(?:lecture|seminar)\s+(?:notes|reading|readings|material|materials)\b"
     r"|\bcourse\s+(?:material|materials|outline|schedule|reading|readings)\b"

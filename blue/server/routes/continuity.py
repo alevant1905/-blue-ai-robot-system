@@ -1984,6 +1984,14 @@ def turn_has_tools() -> bool:
     return bool(getattr(_TURN, "tools", None))
 
 
+def turn_tool_outcomes() -> Optional[List[Dict[str, Any]]]:
+    """The tools this chat request ran so far, or None when not collecting
+    (then nobody can say whether a write happened)."""
+    if not getattr(_TURN, "active", False):
+        return None
+    return list(getattr(_TURN, "tools", None) or [])
+
+
 def jspace_context_block(robot: str) -> str:
     """The robot's <j_space> block, for callers outside the chat pipeline
     (the duet injects it into each speaker's turn prompt)."""

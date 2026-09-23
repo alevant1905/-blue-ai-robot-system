@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import re
+
 import bluetools as bt
 
 
@@ -102,6 +104,25 @@ def build(messages: List[Dict[str, Any]], *, _grounded_reply, _self_request_kind
                         break
         except Exception as e:
             bt.log.warning(f"[JSPACE] dated recall injection failed: {e}")
+
+    # Alex's email addresses, only when email is the topic. "do you remember
+    # my email" got an invented alex.levant@example.com (2026-08-19): the
+    # stored fact was dictation garble and the real addresses lived only in
+    # config. Not in the always-on facts block, which also feeds duet, panel
+    # and classroom turns.
+    if (last_user_msg and isinstance(last_user_msg, str)
+            and user_name == bt._DEFAULT_USER
+            and re.search(r"\be-?mails?\b", bt._intent_text(last_user_msg), re.I)):
+        try:
+            _addrs = sorted(a for a in bt.BLUE_OWNER_ADDRESSES if "@" in a)
+            if _addrs:
+                messages = bt._splice_context_after_system(messages, [{
+                    "role": "system",
+                    "content": ("<owner_email>Alex's own email addresses: "
+                                + ", ".join(_addrs) + ". Blue's is "
+                                + bt.BLUE_OWN_EMAIL + ".</owner_email>")}])
+        except Exception as e:
+            bt.log.warning(f"[EMAIL] owner address note failed: {e}")
 
     # Family questions and family corrections ("what do you remember
     # about our family", "the girls' ages are wrong") get the canonical

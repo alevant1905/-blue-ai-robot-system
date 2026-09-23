@@ -426,13 +426,14 @@ class _ReplyRepairs:
     loop ping-pong: it refuses, the loop forces a search, it refuses again.
     """
     __slots__ = ("web_refusal", "leaked_tool", "phantom_claim",
-                 "calendar_denial")
+                 "calendar_denial", "memory_write")
 
     def __init__(self):
         self.web_refusal = False
         self.leaked_tool = False
         self.phantom_claim = False
         self.calendar_denial = False
+        self.memory_write = False
 
 
 def _judge_untooled_reply(response, assistant_message, repairs, *,
@@ -465,6 +466,18 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
         # schema needs arguments the selector could not supply,
         # let the model's own answer stand.
         missing = _missing_required_args(correct_tool, tool_args)
+        if missing and correct_tool == "remember_fact" and not repairs.memory_write:
+            # "update your memory: …" was answered "I've updated my records"
+            # with nothing written. Ask once more for the real call — or for
+            # an honest "not saved" when no value was given.
+            repairs.memory_write = True
+            print("   [MEMORY] remember_fact was forced but not called — asking again")
+            conversation_messages.append({"role": "assistant", "content": content})
+            conversation_messages.append({"role": "user", "content": (
+                "[Call remember_fact now with the fact_key and fact_value the "
+                "user just gave. If they gave no value, do not call it: ask "
+                "for the value and say plainly that nothing was saved.]")})
+            return True, "remember_fact"
         if missing:
             print(f"   [SKIP] not direct-executing {correct_tool} — "
                   f"no {', '.join(missing)} was extracted")

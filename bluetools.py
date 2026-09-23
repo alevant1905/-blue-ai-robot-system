@@ -1914,7 +1914,10 @@ _CHAT_ONLY_ALLOWED = {
 #    Gmail account — strictly an owner power.
 _KID_BLOCKED_TOOLS = {"play_music", "control_music", "music_visualizer",
                       "move_head", "create_reminder", "get_upcoming_reminders",
-                      "capture_camera", "email_snapshot"}
+                      "capture_camera", "email_snapshot",
+                      # The facts table is Alex's (single owner); the
+                      # background extractor already refuses other speakers.
+                      "remember_fact"}
 
 
 @app.before_request
@@ -7042,12 +7045,41 @@ def _ensure_blue_bcc(bcc: str) -> str:
     return bcc.rstrip(", ").rstrip() + ", " + BLUE_BCC_EMAIL
 
 
+# Reserved-for-examples domains (RFC 2606) and the like: never a real person.
+_PLACEHOLDER_ADDRESS_RE = re.compile(
+    r"@(?:[\w-]+\.)*example\.(?:com|org|net)$|\.(?:example|test|invalid|localhost)$",
+    re.I)
+
+
+def _owner_addresses_list() -> List[str]:
+    try:
+        return [a for a in sorted(BLUE_OWNER_ADDRESSES) if "@" in a]
+    except Exception:
+        return []
+
+
 def _execute_send_gmail(args: Dict[str, Any]) -> str:
     """Send an email via Gmail with optional attachments"""
     if not GMAIL_AVAILABLE:
         return json.dumps({
             "error": "Gmail libraries not installed. Install with: pip install google-auth google-auth-oauthlib google-api-python-client",
             "success": False
+        })
+
+    # Before any Gmail call. On 2026-08-12 a forced send filled `to` with the
+    # invented alex.levant@example.com; Gmail accepted it, the tool reported
+    # success, and a week later Blue gave it as Alex's address.
+    to = str(args.get("to", "") or "")
+    if to.strip().lower() in {"me", "myself", "alex", "alex levant"}:
+        to = _owner_addresses_list()[0] if _owner_addresses_list() else to
+        args = {**args, "to": to}
+    _placeholder = [a for a in re.split(r"[,;\s]+", to + "," + str(args.get("cc", "") or ""))
+                    if a and _PLACEHOLDER_ADDRESS_RE.search(a)]
+    if _placeholder:
+        return json.dumps({
+            "success": False,
+            "error": f"Refused: {', '.join(_placeholder)} is a placeholder address, "
+                     "not a real recipient. Ask the user who it should go to.",
         })
 
     try:
@@ -12501,8 +12533,27 @@ def _chat_self_context(conversation_messages, last_user_message, *,
             print(f"   [PERSPECTIVE] chat compose error: {_pe}")
     return None, _identity_kind
 
+# "did you mean …?" naming a guess — not "did you mean something specific",
+# which is the refusal of garbled input the voice note replaces.
+_CHECKBACK_RE = re.compile(
+    r"\bdid you (?:mean|say|ask)\b(?!\s+(?:some|any)(?:one|thing|body)\b)", re.I)
+
+_HEARD_NOT_TYPED_NOTE = (
+    "\nHEARD, NOT TYPED: The user's last message came through speech "
+    "recognition, which swaps in sound-alike words — most often names and "
+    "course codes. If a word sounds like a name or code you already know from "
+    "this conversation or the household facts, read it as that. If the "
+    "message as a whole still does not make sense, do not answer it literally "
+    "and do not say you don't know the phrase: use the last few turns of this "
+    "conversation to work out what was most likely said, and ask one short "
+    "question that names your guess, for example: 'I didn't catch that — did "
+    "you mean how old is Athena?' A message that makes sense gets a direct "
+    "answer; never question it.\n"
+)
+
+
 def _chat_system_message(conversation_messages, *, robot, user_name,
-                         voice, language, system_addendum):
+                         voice, language, system_addendum, heard=False):
     """Build this turn's system message, splice it in, and trim the context.
 
     Returns the conversation to use. It is not always the list that was
@@ -12637,6 +12688,21 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     else:
         conversation_messages[0] = system_msg
 
+    # Spoken input is transcribed, and names are its main casualties: "how
+    # old is Athena" arrived as "Howl Satina", "DH201" as "D8201", "courses
+    # again" as "forces against" — and each was answered literally ("I don't
+    # know who or what 'Howl Satina' is"). `heard` is set only by the chat
+    # page's voice turns: panel passes voice=True just for brevity. Not for
+    # the kids' page, where made-up words are usually play.
+    _is_kid_turn = (user_name or "").strip() in _CHAT_ONLY_USERS
+    if (heard and not _is_kid_turn and conversation_messages
+            and conversation_messages[0].get("role") == "system"
+            and isinstance(conversation_messages[0].get("content"), str)):
+        conversation_messages[0] = {
+            **conversation_messages[0],
+            "content": conversation_messages[0]["content"].rstrip() + _HEARD_NOT_TYPED_NOTE,
+        }
+
     # ===== CONTEXT TRIMMING =====
     # To reduce confusion from very long conversations or previous tool results, we
     # limit the number of messages sent to the language model. We always keep
@@ -12653,7 +12719,7 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
         pass
     return conversation_messages
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None) -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None, heard: bool = False) -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page). `focus` carries the
     chat Context panel's library picks ({"docs": [...], "folders": [...]}),
@@ -12672,7 +12738,8 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     conversation_messages = _chat_system_message(
         conversation_messages, robot=robot, user_name=user_name,
-        voice=voice, language=language, system_addendum=system_addendum)
+        voice=voice, language=language, system_addendum=system_addendum,
+        heard=heard)
 
 
     last_user_message = messages[-1].get("content", "") if messages else ""
@@ -14345,12 +14412,19 @@ def _canonical_person_ages() -> dict:
 # listed three children's ages in that bare form, two of them invented, and the
 # guard saw nothing because it required a unit (2026-08-01). Markdown counts as
 # a terminator so "**Athena** is **8**." is caught too.
-_AGE_TAIL = r"\)|years?[- ]?old|yrs?\b|(?=[\s]*[.,;:!?*\n)]|\s*$)"
+# A colon ends an age only when no digit follows: "Emmy's dentist
+# appointment at 11:00 AM" read as Emmy aged 11, and correct schedule answers
+# about the kids were regenerated and erased from history (15 logged).
+_AGE_TAIL = r"\)|years?[- ]?old|yrs?\b|(?=[\s]*(?:[.,;!?*\n)]|:(?!\d))|\s*$)"
 
-# A bare number often counts something that is not an age.
+# A bare number often counts something that is not an age — or is a date:
+# "Athena's birthday is August 15" was "corrected" to "Athena is 10" four
+# times on 2026-08-08.
 _NOT_AN_AGE_RE = re.compile(
     r"\b(?:grade|chapter|level|room|page|number|no|floor|apt|unit|bus|track|"
-    r"channel|size|version|part|week|day|hour|minute|month)\s*$")
+    r"channel|size|version|part|week|day|hour|minute|month|jan(?:uary)?|"
+    r"feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+    r"sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s*$")
 
 
 # The roster check must only run when the answer is meant to be the WHOLE
@@ -14404,7 +14478,7 @@ def _unrequested_ages(text: str, user_msg: str, canonical: dict) -> List[str]:
     for person in canonical:
         if re.search(
                 rf"\b{re.escape(person)}\b((?:(?![.!?\n]).){{0,24}}?)"
-                rf"(\d{{1,2}})\s*(?:{_AGE_TAIL})", low):
+                rf"(?<![\d/])(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
             stated.append(person)
     return stated if len(stated) >= 2 else []
 
@@ -14462,7 +14536,7 @@ def _misstated_ages(text: str, canonical: dict) -> dict:
     for person, age in (canonical or {}).items():
         for m in re.finditer(
                 rf"\b{re.escape(person)}\b((?:(?!{others}|[.!?\n]).){{0,48}}?)"
-                rf"(\d{{1,2}})\s*(?:{_AGE_TAIL})", low):
+                rf"(?<![\d/])(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
             # "grade 5", "page 5", "10 minutes" — a number that counts
             # something else entirely.
             if _NOT_AN_AGE_RE.search(m.group(1)):
@@ -14933,7 +15007,12 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
         # robot's own nature, not a data refusal — and those answers OPEN
         # with the marker, so position can't save them. A real fact-refusal
         # ("I don't have your schedule saved") never uses this vocabulary.
-        if not _IDENTITY_TALK_RE.search(content) and (
+        # A short check-back that names its guess ("I didn't catch that —
+        # did you mean how old is Athena?") is how a misheard turn should be
+        # answered, and the user's "yes" needs it as its antecedent.
+        _named_checkback = (len(content) < 240
+                            and bool(_CHECKBACK_RE.search(content)))
+        if not _named_checkback and not _IDENTITY_TALK_RE.search(content) and (
             any(marker in content_lower[:160] for marker in _ASSISTANT_REFUSAL_MARKERS)
             or (
                 len(content_lower) < 320
@@ -15350,6 +15429,7 @@ def chat_completions():
                 _pre_selection=_quick_result,
                 user_name=user_name,
                 voice=voice_turn,
+                heard=voice_turn,
                 robot=robot,
                 language=language,
                 focus=focus,

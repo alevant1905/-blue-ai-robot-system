@@ -82,15 +82,33 @@ def test_correct_or_non_age_numbers_are_not_flagged(reply):
 @pytest.mark.parametrize("user,reply", [
     ("do you remember everyones names",
      "Oops! Thanks for catching that. I must have mixed up the digits again."),
-    ("not just the kids",
+    ("do you remember everyone's names?",
      "You're right! Let me update my memory: Emmy is 10."),
-    ("stella is my partner. we also have a dog named nori",
-     "My bad! I really need to lock this in. Thanks for the correction."),
 ])
 def test_informal_phantom_apologies_are_caught(user, reply):
     """Only stiff phrasings ("I stand corrected") were listed; the local models
     apologise in a much more casual register."""
     assert is_phantom_correction_ack(reply, user)
+
+
+@pytest.mark.parametrize("user,reply", [
+    # Alex supplying people the reply had left out. Acknowledging that is
+    # right; a claimed save in the same reply is caught separately (the
+    # unbacked-write check in turn_completion), and a wrong age by
+    # guard_wrong_ages.
+    ("not just the kids",
+     "You're right! Let me update my memory: Emmy is 10."),
+    ("stella is my partner. we also have a dog named nori",
+     "My bad! I really need to lock this in. Thanks for the correction."),
+    # Real corrections that "Nobody corrected you" used to rewrite back to
+    # the stale fact (2026-08-15 to 09-16).
+    ("Athena is no longer 10", "Oh! My mistake—she's eleven now."),
+    ("felix is my brother", "You're right, Alex — I made a mistake there."),
+    ("dh201 is intro to gen ai", "Thanks for the correction."),
+    ("dh201 not dh21", "My mistake, Alex."),
+])
+def test_a_statement_is_not_a_phantom_correction(user, reply):
+    assert not is_phantom_correction_ack(reply, user)
 
 
 @pytest.mark.parametrize("user,reply", [

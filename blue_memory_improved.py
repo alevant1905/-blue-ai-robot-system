@@ -25,13 +25,15 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from blue_identity import (
     identity_request_kind,
     identity_response_problem,
+    age_on,
+    derive_ages,
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
@@ -780,11 +782,17 @@ class EnhancedMemorySystem:
     # ------------------------------------------------------------------ Facts interface (backward compat)
 
     def load_facts(self) -> Dict[str, str]:
-        """Load key-value facts for system prompt injection."""
+        """Load key-value facts for system prompt injection.
+
+        Ages come out computed from a stored birthdate where there is one
+        (blue_identity.derive_ages), so every reader — the family block, the
+        roster, the wrong-age guard, duet and panel — sees today's age.
+        """
         conn = self._conn()
         rows = conn.execute("SELECT fact_key, fact_value FROM facts").fetchall()
         conn.close()
-        return {r["fact_key"]: r["fact_value"] for r in rows}
+        return derive_ages({r["fact_key"]: r["fact_value"] for r in rows},
+                           date.today())
 
     def save_facts(self, facts: Dict[str, str]) -> bool:
         """Save key-value facts with confidence tracking and contradiction handling.
@@ -807,7 +815,7 @@ class EnhancedMemorySystem:
         saved = 0
         contradicted = 0
 
-        for key, value in facts.items():
+        for key, value in list(facts.items()):
             key = self._normalize_fact_key(key)
             value = (value or "").strip()
             if not key or not value:
@@ -817,6 +825,38 @@ class EnhancedMemorySystem:
             # Reject inputs that look like junk before they pollute the DB.
             if self._is_junk_fact(key, value):
                 continue
+            # With a birthdate on record, a stated age is a statement about
+            # the birthdate: the same age reaffirms it; a different one moves
+            # the birth YEAR (keeping the day), so "Athena is 12" can still
+            # correct a wrong year. The age row itself would only go stale.
+            if key.endswith("_age"):
+                person = key[:-len("_age")]
+                # A birthdate given in the same save is the statement; the
+                # age beside it is derived from it, not a correction of it.
+                if any(self._normalize_fact_key(k) == f"{person}_birthdate"
+                       for k in facts):
+                    continue
+                try:
+                    row = conn.execute(
+                        "SELECT fact_value FROM facts WHERE fact_key = ?",
+                        (f"{person}_birthdate",),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    row = None
+                stated = re.fullmatch(r"\d{1,3}", value)
+                if row and stated:
+                    birthdate = str(row[0] or "")
+                    today = date.today()
+                    current = age_on(birthdate, today)
+                    if current is not None:
+                        if int(value) == current:
+                            continue
+                        _, month, day = birthdate.split("-")
+                        year = (today.year - int(value)
+                                - (1 if (today.month, today.day)
+                                   < (int(month), int(day)) else 0))
+                        key, value = (f"{person}_birthdate",
+                                      f"{year:04d}-{month}-{day}")
 
             try:
                 existing = conn.execute(
@@ -2041,6 +2081,11 @@ class EnhancedMemorySystem:
         # single-digit age (e.g. vilda_age = "8") is a valid fact value.
         if not val or (len(val) < 2 and not val.isdigit()):
             return True
+        # Speech-to-text cannot carry an email address: "ALEVAT at gmail.com"
+        # replaced the real one and kept it out of the prompt from June on.
+        if "email" in key.lower() and not re.fullmatch(
+                r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", val.strip()):
+            return True
 
         key_norm = re.sub(r"[^a-z0-9]", "", key.lower())
         val_norm = re.sub(r"[^a-z0-9]", "", val.lower())
@@ -2226,7 +2271,8 @@ class EnhancedMemorySystem:
             # (which can happen during a partial migration).
             try:
                 rows = conn.execute(
-                    """SELECT fact_key, fact_value, confidence, times_confirmed
+                    """SELECT fact_key, fact_value, confidence, times_confirmed,
+                              last_updated
                        FROM facts
                        ORDER BY confidence DESC, last_updated DESC"""
                 ).fetchall()
@@ -2249,12 +2295,35 @@ class EnhancedMemorySystem:
         # share a value (emmy_age and athena_age both "10") are BOTH kept —
         # the old value-only dedup silently dropped one of the children.
         kept: List[Tuple[str, str]] = []
+        derived = derive_ages(
+            {r["fact_key"]: r["fact_value"] for r in rows}, date.today())
+        stale_before = (datetime.now() - timedelta(hours=48)).isoformat()
+        # A birthdate with no stored age still gives the model an age line.
+        rows = [dict(r) for r in rows]
+        stored_keys = {r.get("fact_key") for r in rows}
+        for derived_key, derived_val in derived.items():
+            if derived_key.endswith("_age") and derived_key not in stored_keys:
+                rows.insert(0, {"fact_key": derived_key, "fact_value": derived_val,
+                                "confidence": 1.0, "times_confirmed": 1,
+                                "last_updated": datetime.now().isoformat()})
 
         for r in rows:
             key = (r["fact_key"] or "").strip()
             val = (r["fact_value"] or "").strip()
+            if key.endswith("_age") and key in derived:
+                val = str(derived[key]).strip()
             if not key or not val or len(val) > 300:
                 continue
+            # Passing states are not facts. "Health Status: has a stomach
+            # ache" was listed as authoritative from 07-10 on, and stale
+            # "Current Project: D8201" rows pushed the real course facts out
+            # of the 25-row cap.
+            if (key.startswith("current_") or key == "health_status"):
+                try:
+                    if (r["last_updated"] or "") < stale_before:
+                        continue
+                except (IndexError, KeyError):
+                    pass
             if self._is_junk_fact(key, val):
                 continue
             # Skip facts about Blue itself — the <known_facts> block is for

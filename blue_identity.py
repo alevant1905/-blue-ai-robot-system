@@ -1741,6 +1741,8 @@ _USER_CORRECTION_CUE_RE = re.compile(
     r"aren['’]?t|wasn['’]?t|weren['’]?t|older|younger|there is no|"
     r"there(?:['’]s| is) not?)\b"
     r"|\bno[,.!]"
+    # "Athena is no longer 10" (2026-08-15) is a correction.
+    r"|\bno longer\b|\bany ?more\b|\bout ?dated\b|\bout of date\b"
     # The plainest correction there is. "Blue, that's not less than six weeks
     # away" matched nothing above, so a legitimate acknowledgment was called
     # phantom and burned a regeneration (live 2026-08-13).
@@ -1751,11 +1753,30 @@ _USER_CORRECTION_CUE_RE = re.compile(
 )
 
 
+# A phantom acknowledgement answers a QUESTION, a request or a greeting ("what
+# do you know about me" → "I stand corrected…"). A statement is usually the
+# user telling Blue something, and acknowledging it is right: about 27 of the
+# 65 pairs flagged since 07-15 were real corrections ("felix is my brother",
+# "dh201 is intro to gen ai", "dh201 not dh21") rewritten back to the stale
+# fact by "Nobody corrected you".
+_ASKS_OR_GREETS_RE = re.compile(
+    r"\?\s*$"
+    r"|^\s*(?:(?:hey|hi|ok(?:ay)?|so|and|blue|hexia|casper)[, ]+)*"
+    r"(?:what|who|whom|whose|when|where|why|how|which|do|does|did|is|are|am|"
+    r"can|could|would|will|should|have|has|tell me|show me|give me|list|"
+    r"describe)\b"
+    r"|^\s*(?:hi|hello|hey|good (?:morning|afternoon|evening)|you there)\b",
+    re.IGNORECASE,
+)
+
+
 def is_phantom_correction_ack(reply: str, user_message: str) -> bool:
     """True when the reply acknowledges a correction the user never made."""
+    user = user_message or ""
     return bool(
         _CORRECTION_ACK_RE.search(reply or "")
-        and not _USER_CORRECTION_CUE_RE.search(user_message or "")
+        and not _USER_CORRECTION_CUE_RE.search(user)
+        and _ASKS_OR_GREETS_RE.search(user)
     )
 
 
@@ -1872,6 +1893,39 @@ def known_household_target(text: str) -> Optional[str]:
         return candidate
     close = get_close_matches(candidate, _KNOWN_HOUSEHOLD_NAMES, n=1, cutoff=0.84)
     return close[0] if close else None
+
+
+_BIRTHDATE_KEY_RE = re.compile(r"^([a-z]+)_birthdate$")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def age_on(birthdate: str, today) -> Optional[int]:
+    """Whole years from a YYYY-MM-DD birthdate to `today`, else None."""
+    match = _ISO_DATE_RE.match(str(birthdate or "").strip())
+    if not match:
+        return None
+    year, month, day = (int(g) for g in match.groups())
+    return today.year - year - ((today.month, today.day) < (month, day))
+
+
+def derive_ages(facts: Mapping[str, object], today) -> dict:
+    """A copy of `facts` with each `<name>_age` computed from `<name>_birthdate`.
+
+    Ages were stored as a number and never moved: on 2026-08-19, four days
+    after Athena turned 11, Blue said "Athena is 10. Her birthday is August
+    15, so she hasn't turned 11 yet" — every family source still read the
+    May value. A birthdate answers correctly on any day. Only an explicit
+    YYYY-MM-DD counts; nothing is derived from when a number was last saved.
+    """
+    out = dict(facts or {})
+    for key, value in (facts or {}).items():
+        match = _BIRTHDATE_KEY_RE.match(str(key))
+        if not match:
+            continue
+        age = age_on(str(value), today)
+        if age is not None and age >= 0:
+            out[f"{match.group(1)}_age"] = str(age)
+    return out
 
 
 def _daughter_names(facts: dict) -> list[str]:
@@ -2500,6 +2554,8 @@ def canonical_robot_relationship_reply(
 
 
 __all__ = [
+    "age_on",
+    "derive_ages",
     "canonical_family_grounding_lines",
     "canonical_family_reply_kind",
     "canonical_household_reply",
