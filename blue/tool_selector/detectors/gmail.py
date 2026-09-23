@@ -17,6 +17,21 @@ from ..constants import ToolPriority
 from ..utils import has_any_word
 
 
+_ADDRESS_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+_EMAIL_NOUNS = ['email', 'emails', 'mail', 'gmail', 'inbox']
+
+# Blue as the RECIPIENT: "I think I've got a draft to send to you" was read
+# as "send to" at 0.95 and mailed alex.levant@example.com (2026-08-12).
+_SENT_TO_BLUE_RE = re.compile(
+    r"\bsend(?:ing)?\b(?:[^.!?]{0,30}\bto\s+you\b|\s+(?:it\s+)?you\b)")
+
+# A reply to an email, as opposed to "how would you respond to her" or "what
+# did she say in reply to that argument", which scored reply_gmail at 0.95.
+_REPLY_IMPERATIVE_RE = re.compile(
+    r"^\s*(?:(?:blue|ok(?:ay)?|please|now|so|and)[,\s]+)*"
+    r"(?:reply|respond|write\s+(?:a\s+)?reply)\b")
+
+
 class GmailDetector(BaseDetector):
     """Detects Gmail/email-related intents."""
 
@@ -120,13 +135,22 @@ class GmailDetector(BaseDetector):
         if is_email_snapshot_request(msg_lower):
             return None
 
+        has_address = bool(_ADDRESS_RE.search(message))
+        if _SENT_TO_BLUE_RE.search(msg_lower) and not has_address:
+            return None
+
         send_signals = {
             'strong': [
                 'send email to', 'send an email', 'email to', 'compose email',
-                'send to', 'write email to', 'send them an email'
+                'write email to', 'send them an email'
             ],
             'medium': ['send', 'compose', 'draft']
         }
+        # "send to" names no medium; it's an email only when one is in view.
+        if has_address or has_any_word(_EMAIL_NOUNS, msg_lower):
+            send_signals['strong'].append('send to')
+        if has_address and re.search(r'\bsend\b[^.!?]{0,40}\bto\b', msg_lower):
+            send_signals['strong'].append('send')
 
         # Follow-up imperatives — "go ahead", "send it now", "do it again", etc.
         # On their own these don't mention email. They only fire when the
@@ -202,12 +226,19 @@ class GmailDetector(BaseDetector):
 
         confidence = 0.0
         reasons = []
+        has_email_noun = has_any_word(_EMAIL_NOUNS + ['message', 'messages'],
+                                      msg_lower)
 
         if any(signal in msg_lower for signal in reply_signals['strong']):
-            confidence = 0.95
-            reasons.append("explicit reply keywords")
+            if has_email_noun:
+                confidence = 0.95
+                reasons.append("explicit reply keywords")
+            elif (context.get('has_email_in_history')
+                  and _REPLY_IMPERATIVE_RE.search(msg_lower)):
+                confidence = 0.75
+                reasons.append("reply imperative + email context")
         elif any(verb in msg_lower for verb in reply_signals['medium']):
-            if any(noun in msg_lower for noun in ['email', 'message', 'inbox']):
+            if has_email_noun:
                 confidence = 0.80
                 reasons.append("reply verb + email context")
 

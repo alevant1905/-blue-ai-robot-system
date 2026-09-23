@@ -69,6 +69,22 @@ _NON_MUSIC_FOLLOW_RE = re.compile(
 # an "artist" match is almost always a coincidence inside ordinary prose.
 _MAX_WORDS_FOR_IMPLICIT_PLAY = 8
 
+# A control command in a longer sentence must say what it controls, right next
+# to the verb. Scattered words don't count: "there may be a permanent tenure
+# track position ... next year" answered "Skipping to next track." and "the
+# previous two meetings" answered "Going back to previous track." (2026-08-10).
+_MAX_WORDS_FOR_BARE_CONTROL = 8
+_EXPLICIT_CONTROL_RE = re.compile(
+    r"\b(?:skip|next|previous|last|go\s+back\s+to\s+the)\s+"
+    r"(?:(?:the|this|that|a)\s+)?(?:song|track|tune)s?\b"
+    r"|\bskip\s+(?:ahead|forward)\b"
+    r"|\b(?:pause|stop|resume|mute|unmute|restart)\s+"
+    r"(?:(?:the|this|that|my)\s+)?(?:music|song|track|tune|audio|playback|playlist|spotify|radio)\b"
+    r"|\bvolume\b"
+    r"|\bturn\s+(?:it|the\s+music|the\s+song|that)\s+(?:up|down)\b"
+    r"|\b(?:play\s+next|next\s+song|previous\s+song)\b"
+)
+
 # Words that genuinely indicate music, matched as WHOLE words. A bare substring
 # test here silently disabled the ambiguity guard — see the note at its use.
 _MUSIC_CONTEXT_WORD_RE = re.compile(
@@ -316,16 +332,23 @@ class MusicDetector(BaseDetector):
     ) -> Optional[ToolIntent]:
         """Detect music control intent (pause, skip, etc.)."""
 
-        if not any(signal in msg_lower for signal in CONTROL_SIGNALS):
+        # Whole words: "next" is inside "context", "back" inside "feedback".
+        matched_signals = [s for s in CONTROL_SIGNALS
+                           if re.search(r"\b" + re.escape(s) + r"\b", msg_lower)]
+        if not matched_signals:
+            return None
+
+        if (len(msg_lower.split()) > _MAX_WORDS_FOR_BARE_CONTROL
+                and not _EXPLICIT_CONTROL_RE.search(msg_lower)):
             return None
 
         # Ambiguous single-word signals that commonly appear in non-music sentences
         # These need music context or music-specific phrasing to trigger
-        ambiguous_signals = {'stop', 'pause', 'back', 'next', 'skip', 'mute', 'resume'}
+        ambiguous_signals = {'stop', 'pause', 'back', 'next', 'previous',
+                             'skip', 'mute', 'resume'}
         # Multi-word signals that can appear as substrings of non-music phrases
         # e.g., "skip this part" matches "skip this" but isn't about music
         ambiguous_multi = {'skip this', 'go back'}
-        matched_signals = [s for s in CONTROL_SIGNALS if s in msg_lower]
 
         # Check if ONLY ambiguous signals matched (no definitive music phrases)
         all_ambiguous = all(s in ambiguous_signals or s in ambiguous_multi for s in matched_signals)

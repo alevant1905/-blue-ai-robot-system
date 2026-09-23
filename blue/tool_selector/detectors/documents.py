@@ -61,7 +61,13 @@ systems process processes development developing education feedback thoughts
 thought toward towards press master costs fight creative acting archive
 movements resistance reproduction realism recorded producing untitled thesis
 disagree
+think commercial mirror mark ethical interaction driven architecture
+developmental pedagogical
 """.split())
+# The last two lines came from sweeping every logged user message through
+# _library_match (2026-09-23): "think", out of an "AIME Think Tank" report,
+# alone fired a document search on 102 of them — "I don't think you're
+# actually searching the net" among them.
 
 # Contractions break at the apostrophe when the query is tokenised, and the
 # stem can collide with a library token: "we haven't celebrated yet" produced

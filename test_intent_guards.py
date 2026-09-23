@@ -853,3 +853,67 @@ def test_a_common_title_word_never_becomes_a_single_term_trigger(
     assert D._library_match("the mark humphries substack") is not None
     # Still reachable on two shared title words, which "disagree" can join.
     assert D._library_match("when models disagree") is not None
+
+
+# ---------------------------------------------------------------------------
+# Conversation that fired real tools (log sweep, 2026-09-23)
+#
+# Every message below is real, and every one ran a tool in the middle of an
+# ordinary conversation: a tenure-track job skipped a song, a draft Alex was
+# about to share mailed alex.levant@example.com, and a question about his
+# morning set a reminder.
+# ---------------------------------------------------------------------------
+
+CONVERSATION_NOT_TOOLS = [
+    ("it went well. there may be a permanent tenure track position available "
+     "in our department next year", "control_music"),
+    ("great. thanks. i wanted you to have a sense of the previous two "
+     "meetings. that's why i gave you those minutes", "control_music"),
+    ("I'm pretty good. I think I've got a draft to send to you", "send_gmail"),
+    ("i'll send it to you in a minute", "send_gmail"),
+    ("how would you respond to her", "reply_gmail"),
+    ("what did she say in reply to that argument", "reply_gmail"),
+    ("do you remember who I was meeting with this morning?", "create_reminder"),
+    ("who was i meeting this morning", "create_reminder"),
+    # "think" was a library term, out of an "AIME Think Tank" report title.
+    ("I don't think you're actually searching the net.", "search_documents"),
+]
+
+
+@pytest.mark.parametrize("msg,must_not_be", CONVERSATION_NOT_TOOLS)
+def test_conversation_does_not_run_a_tool(msg, must_not_be):
+    assert _selected_tool(msg) != must_not_be
+
+
+REAL_COMMANDS = [
+    ("next song", "control_music"),
+    ("skip", "control_music"),
+    ("hey blue can you please pause the music for a moment", "control_music"),
+    ("can you skip to the next track please blue", "control_music"),
+    ("turn the volume down a little bit please", "control_music"),
+    ("send an email to stella saying hi", "send_gmail"),
+    ("send it to stella@example.com", "send_gmail"),
+    ("can you send an email to felix", "send_gmail"),
+    ("reply to the last email", "reply_gmail"),
+    ("respond to felix's email", "reply_gmail"),
+    ("I have a meeting with Bob at 4pm", "create_reminder"),
+    ("can you schedule a meeting with felix tomorrow at 3?", "create_reminder"),
+]
+
+
+@pytest.mark.parametrize("msg,expected", REAL_COMMANDS)
+def test_real_commands_still_reach_their_tool(msg, expected):
+    assert _selected_tool(msg) == expected
+
+
+def test_a_reply_imperative_uses_the_email_already_in_view():
+    """Without an email noun, "reply to her" is a reply only when an email is
+    already the subject of the conversation."""
+    from blue.tool_selector.detectors.gmail import GmailDetector
+    in_view = {"has_email_in_history": True}
+    for msg in ("reply to her", "blue, respond to him and say thanks"):
+        tools = [i.tool_name for i in GmailDetector().detect(msg, msg, in_view)]
+        assert tools == ["reply_gmail"]
+        assert GmailDetector().detect(msg, msg, {}) == []
+    msg = "how would you respond to her"
+    assert GmailDetector().detect(msg, msg, in_view) == []

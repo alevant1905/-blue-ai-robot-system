@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
+from ..utils import is_recall_question
 
 # "Remind me" is two different requests wearing one phrase. "Remind me TO call
 # her" schedules something; "remind me OF what we decided" asks to be told
@@ -119,6 +120,15 @@ _EVENT_NOUNS = (
     'meeting', 'appointment', 'call with', 'event',
     'lunch with', 'dinner with', 'coffee with',
 )
+
+
+# Asking about an event, or talking about one that already happened.
+_EVENT_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:blue|hey|so|and|ok(?:ay)?|um+)[,\s]+)*"
+    r"(?:who|what|when|where|which|why|how|do\s+you|did|was|were|had|"
+    r"have\s+(?:i|we)|is\s+there|are\s+there|am\s+i)\b")
+_PAST_EVENT_RE = re.compile(
+    r"\b(?:was|were)\s+(?:meeting|having|at)\b|\bmet\b|\bdid\s+(?:i|we)\b")
 
 
 _NEGATORS = ("don't", 'do not', 'dont', "won't", 'will not', 'never',
@@ -343,6 +353,15 @@ class CalendarDetector(BaseDetector):
         # a meeting with Bob at 4pm". Requires a time indicator AND a
         # declarative pattern AND an event noun, so it doesn't fire on
         # ambiguous prose.
+        # Below here nothing asked for a reminder; the message only mentions
+        # a meeting and a time. A question about one is never a request to
+        # create one: "do you remember who I was meeting with this morning?"
+        # set a reminder to "check meeting notes" (2026-08-12).
+        if (_EVENT_QUESTION_RE.search(msg_lower)
+                or _PAST_EVENT_RE.search(msg_lower)
+                or is_recall_question(msg_lower)):
+            return None
+
         declarative_starts = (
             'i have a ', 'i have an ', 'we have a ', 'we have an ',
             "i've got a ", "we've got a ",
