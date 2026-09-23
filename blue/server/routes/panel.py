@@ -1312,6 +1312,14 @@ def register(app) -> None:
                         temperature=0.86 if continuous else 0.72,
                         max_tokens=1100,
                     )
+                # The model was down: a "[System: ...]" line is not a panel
+                # turn, and must not be spoken as Hexia's or Casper's words.
+                if isinstance(result, dict) and result.get("blue_error"):
+                    return jsonify({
+                        "ok": False,
+                        "retryable": True,
+                        "error": _result_text(result),
+                    }), 503
                 text = _clean_reply(_result_text(result), robot)
                 # Neither branch runs turn_completion.finish, so the chat
                 # pipeline's replay guards have to be applied here.

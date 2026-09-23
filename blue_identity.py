@@ -880,6 +880,26 @@ def is_self_state_request(text: str) -> bool:
     return bool(_SELF_STATE_REQUEST_RE.search(text or ""))
 
 
+# What a model failure looks like in history. New failures carry the prefix
+# (bluetools.model_unavailable_reply); the three legacy placeholders were said
+# in Blue's own voice and are matched exactly, so a real reply such as "I had
+# trouble connecting to the Guardian site earlier…" is untouched. 105 logged
+# rows match, and no other assistant row does.
+MODEL_ERROR_PREFIX = "[System:"
+_LEGACY_FAILURE_PLACEHOLDERS = frozenset({
+    "hey there", "done", "i m having trouble connecting",
+})
+
+
+def is_failure_placeholder(text: str) -> bool:
+    """True for a model-failure line, never for something Blue said."""
+    import html
+    raw = html.unescape(str(text or "")).strip()
+    if raw.startswith(MODEL_ERROR_PREFIX):
+        return True
+    return re.sub(r"[^a-z0-9]+", " ", raw.lower()).strip() in _LEGACY_FAILURE_PLACEHOLDERS
+
+
 _CHECKIN_HEAR = (
     r"(?:(?:are )?you there|can you (?:still )?hear me"
     r"(?: now| okay| ok| alright)?)"
@@ -2448,8 +2468,10 @@ __all__ = [
     "is_family_overview_request",
     "is_jspace_presence_request",
     "is_self_state_request",
+    "is_failure_placeholder",
     "is_social_checkin",
     "is_user_identity_request",
+    "MODEL_ERROR_PREFIX",
     "self_state_focus_hint",
     "self_state_readout",
     "known_household_target",

@@ -426,8 +426,53 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         bt.log.warning(f"[ANTI-PARROT] check failed: {e}")
     return final_content
 
+def _finish_failed_turn(response, *, last_user_msg, robot, user_name):
+    """The model could not answer: show why, and keep it out of every record.
+
+    No guards (they would call the dead model again, and guard_identity could
+    swap the outage for a canned self-introduction), no conversation_log row,
+    no fact extraction, no reflection. Reminder alerts are still delivered —
+    the chat reply is their only channel — and are the only part spoken.
+    """
+    system_line = response["choices"][0]["message"].get("content", "")
+    print(f"[LLM-DOWN] {response.get('blue_error')}: {system_line[:160]}")
+    if (bt.PROACTIVE_QUEUE_AVAILABLE and user_name not in bt._CHAT_ONLY_USERS
+            and robot == "blue"):
+        parts = []
+        try:
+            briefing = bt.blue_proactive.daily_briefing_if_due()
+            if briefing:
+                parts.append(briefing)
+        except Exception as e:
+            bt.log.warning(f"[PROACTIVE] daily briefing failed: {e}")
+        alerts = bt.blue_proactive.drain_for_response()
+        if alerts:
+            parts.append(alerts)
+        if parts:
+            prefix = " ".join(parts)
+            response["choices"][0]["message"]["content"] = f"{prefix} {system_line}"
+            response["spoken"] = prefix
+    # A tool that already ran (email_snapshot mailed a photo) must still be
+    # recorded, or a later "did you send it?" has nothing to answer from. The
+    # exchange row itself is filtered out at read time.
+    if robot in bt._continuity_routes.ROBOTS:
+        try:
+            if bt._continuity_routes.turn_has_tools():
+                bt._continuity_routes.note_exchange(
+                    robot, last_user_msg, system_line, user_name=user_name,
+                    enqueue_reflection=False)
+            else:
+                bt._continuity_routes.cancel_turn()
+        except Exception as e:
+            bt.log.warning(f"[JSPACE] failed-turn bookkeeping: {e}")
+    return response
+
+
 def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages, robot, user_messages, user_name) -> Dict[str, Any]:
     """Check, correct, deliver and record the reply. Mutates `response`."""
+    if isinstance(response, dict) and response.get("blue_error"):
+        return _finish_failed_turn(response, last_user_msg=last_user_msg,
+                                   robot=robot, user_name=user_name)
     try:
         final_content = response["choices"][0]["message"].get("content", "")
     except (KeyError, IndexError, TypeError):

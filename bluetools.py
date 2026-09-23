@@ -94,6 +94,7 @@ from blue_identity import (
     is_family_overview_request,
     is_jspace_presence_request,
     is_phantom_correction_ack,
+    is_failure_placeholder,
     is_recorded_recall_denial,
     is_self_state_request,
     is_social_checkin,
@@ -136,6 +137,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # Third-party
 import requests
+import threading
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
 from werkzeug.utils import secure_filename
 from googleapiclient.discovery import build
@@ -10640,6 +10642,37 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     return payload
 
 
+# Why the last chat model call on this thread failed, for the honest
+# out-of-character reply (model_unavailable_reply). None after a success.
+_LM_FAILURE = threading.local()
+
+
+def _classify_lm_failure(e, body):
+    """Name a model-call failure: no_model, unreachable, timeout, dropped,
+    server_error, rejected or unknown.
+
+    A streamed read timeout arrives as ConnectionError(ReadTimeoutError) and a
+    mid-stream drop as ChunkedEncodingError, so both are checked before the
+    generic connection error.
+    """
+    import urllib3
+    cause = e.args[0] if getattr(e, "args", None) else None
+    if (isinstance(e, requests.exceptions.ReadTimeout)
+            or isinstance(cause, urllib3.exceptions.ReadTimeoutError)):
+        return "timeout"
+    if (isinstance(e, requests.exceptions.ChunkedEncodingError)
+            or (isinstance(e, requests.exceptions.ConnectionError)
+                and isinstance(cause, urllib3.exceptions.ProtocolError))):
+        return "dropped"
+    if isinstance(e, requests.exceptions.ConnectionError):
+        return "unreachable"
+    if re.search(r"no models? (?:are )?loaded|model (?:is )?not loaded",
+                 body or "", re.I):
+        return "no_model"
+    status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+    return "server_error" if status >= 500 else "rejected" if status >= 400 else "unknown"
+
+
 def _lm_studio_recover(e, payload):
     """What to do when LM Studio refuses the request.
 
@@ -10723,6 +10756,10 @@ def _lm_studio_recover(e, payload):
             )
 
     print(f"[ERROR] Error calling LM Studio: {e}")
+    _LM_FAILURE.kind = ("overflow" if (_ctx_match or _ctx_unnumbered)
+                        else _classify_lm_failure(e, body))
+    _LM_FAILURE.detail = (body or repr(e))[:160]
+    _LM_FAILURE.dump = ""
     # On 400, dump the offending payload + LM Studio's error body so we can
     # see what was wrong. Strips base64 image data to keep the dump small.
     try:
@@ -10744,6 +10781,11 @@ def _lm_studio_recover(e, payload):
         with open(dump_path, 'w', encoding='utf-8') as f:
             _json.dump({
                 'lm_studio_error_body': body[:4000],
+                # An empty body was ambiguous: a refused connection and a
+                # streamed 400 looked the same.
+                'exception': f"{type(e).__name__}: {e}"[:500],
+                'failure_kind': _LM_FAILURE.kind,
+                'streamed': bool(getattr(_LM_FAILURE, "streamed", False)),
                 'request_payload': slim_payload,
                 'message_count': len(payload.get('messages', [])),
                 'message_roles': [m.get('role') for m in payload.get('messages', [])],
@@ -10753,6 +10795,7 @@ def _lm_studio_recover(e, payload):
                 ],
             }, f, indent=2, default=str)
         print(f"[DEBUG] Dumped failing request to: {dump_path}")
+        _LM_FAILURE.dump = dump_path
     except Exception as dump_err:
         print(f"[DEBUG] Could not write dump: {dump_err}")
     return None
@@ -10790,12 +10833,73 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         messages, include_tools=include_tools, force_tool=force_tool,
         iteration=iteration, tool_scope=tool_scope)
 
+    _LM_FAILURE.kind = None
+    _LM_FAILURE.streamed = on_token is not None
     try:
         if on_token is not None:
-            return _stream_from_model(payload, on_token)
-        return _post_to_model(payload)
+            result = _stream_from_model(payload, on_token)
+        else:
+            result = _post_to_model(payload)
     except Exception as e:
         return _lm_studio_recover(e, payload)
+    # An HTTP 200 carrying {"error": ...} or no usable message is a failure
+    # too. It used to pass the fast path's truthiness check and become an
+    # in-voice "Sorry, something went wrong", or a KeyError 500 on the
+    # direct-execute path.
+    try:
+        usable = isinstance(result["choices"][0]["message"], dict)
+    except (KeyError, IndexError, TypeError):
+        usable = False
+    if not usable:
+        _LM_FAILURE.kind = "unusable"
+        _LM_FAILURE.detail = str(result)[:160]
+        _LM_FAILURE.dump = ""
+        print(f"[ERROR] LM Studio returned no usable message: {str(result)[:200]}")
+        return None
+    return result
+
+
+def model_unavailable_reply(robot: str = "blue", user_name: str = "Alex",
+                            tool_ran: Optional[str] = None) -> Dict:
+    """An honest, out-of-character reply for a turn the model could not answer.
+
+    Every model failure used to become a line in Blue's own voice — "Hey
+    there!", "Done!", "I'm having trouble connecting." — which was spoken,
+    saved, journaled and fed back to him (105 rows; 12 copies in one prompt
+    on 2026-08-19, when LM Studio simply had no model loaded). The "[System:"
+    prefix marks it as not his words; turn_completion.finish() and the chat
+    page key on the blue_error field and neither store nor speak it.
+    """
+    kind = getattr(_LM_FAILURE, "kind", None) or "unknown"
+    detail = (getattr(_LM_FAILURE, "detail", "") or "").strip()
+    dump = getattr(_LM_FAILURE, "dump", "") or ""
+    try:
+        name = _robot_cfg(robot)["name"]
+    except Exception:
+        name = "Blue"
+    if user_name in _CHAT_ONLY_USERS:
+        text = f"[System: {name} can't talk right now. Ask a grown-up to check the computer.]"
+    elif kind == "no_model":
+        text = (f"[System: {name}'s language model isn't loaded in LM Studio. "
+                "Load it (or run `lms load`) and ask again.]")
+    elif kind == "unreachable":
+        text = "[System: can't reach LM Studio at 127.0.0.1:1234. Its server isn't running.]"
+    elif kind == "dropped":
+        text = "[System: LM Studio stopped in the middle of the reply. Ask again.]"
+    elif kind == "timeout":
+        text = ("[System: the language model didn't answer within 2 minutes. "
+                "It may be busy; ask again shortly.]")
+    else:
+        where = f" See {dump}." if dump else ""
+        reason = f" ({detail[:120]})" if detail else ""
+        text = f"[System: LM Studio rejected the request{reason}.{where}]"
+    if tool_ran and user_name not in _CHAT_ONLY_USERS:
+        text = text[:-1] + f" The {tool_ran} step itself did run.]"
+    return {
+        "choices": [{"message": {"role": "assistant", "content": text},
+                     "finish_reason": "error"}],
+        "blue_error": kind,
+    }
 
 
 def purge_old_camera_images(messages: List[Dict]) -> List[Dict]:
@@ -12605,7 +12709,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
         if response:
             return response
-        return {"choices": [{"message": {"role": "assistant", "content": "Hey there!"}}]}
+        return model_unavailable_reply(robot, user_name)
 
     # ================================================================================
     # v8 ENHANCEMENT: Check for compound requests and follow-up corrections
@@ -14761,6 +14865,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
     out, dropped_refusal, dropped_wrong_name = [], 0, 0
     dropped_wrong_identity = 0
     dropped_prompt_pairs = 0
+    dropped_failure = 0
 
     def _drop_previous_user() -> None:
         nonlocal dropped_prompt_pairs
@@ -14787,6 +14892,16 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
             previous_user_text = out[-1].get("content", "")
             if not isinstance(previous_user_text, str):
                 previous_user_text = ""
+
+        # A model-failure line ("I'm having trouble connecting.", "Hey
+        # there!", "[System: ...]") is not something Blue said. Kept, it was
+        # replayed as history and the recovered model invented stories from
+        # it ("the system was dropping my context window"). Pair-drop, so the
+        # unanswered question does not merge into the live turn.
+        if is_failure_placeholder(content):
+            _drop_previous_user()
+            dropped_failure += 1
+            continue
 
         # Canonical family overviews are reconstructed fresh from facts. Drop
         # old overview exchanges wholesale so visual-memory additions from an
@@ -14861,11 +14976,12 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
 
         out.append(m)
 
-    if dropped_refusal or dropped_wrong_name or dropped_wrong_identity:
+    if dropped_refusal or dropped_wrong_name or dropped_wrong_identity or dropped_failure:
         print(
             f"   [SANITIZE] Dropped {dropped_refusal} refusal + "
             f"{dropped_wrong_name} stale-name + "
-            f"{dropped_wrong_identity} wrong-identity assistant turn(s) "
+            f"{dropped_wrong_identity} wrong-identity + "
+            f"{dropped_failure} model-failure assistant turn(s) "
             f"from inbound history; removed {dropped_prompt_pairs} paired user turn(s)"
         )
     return out
@@ -15254,7 +15370,8 @@ def chat_completions():
                     (response.get("choices") or [{}])[0]
                     .get("message", {}).get("content", "")
                 )
-                if _reply_text:
+                # A failure line is not Blue's mood and gets no nod or shake.
+                if _reply_text and not response.get("blue_error"):
                     response["eye_mood"] = mood_eye_color(_reply_text)
                     # Nod on a strong agreement opener, shake on a strong
                     # disagreement — the chat page fires it as speech starts.

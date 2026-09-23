@@ -47,6 +47,8 @@ class ModelStub:
         if main:
             self.main.append(payload)
         content = self.replies.pop(0) if self.replies else self.default
+        if isinstance(content, BaseException):  # LM Studio down, 400, timeout
+            raise content
         if isinstance(content, dict):          # a raw tool-call response
             return content
         return {"choices": [{"message": {"role": "assistant", "content": content},

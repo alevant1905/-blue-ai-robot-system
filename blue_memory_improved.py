@@ -33,6 +33,7 @@ from blue_identity import (
     identity_request_kind,
     identity_response_problem,
     is_correction_ack_reply,
+    is_failure_placeholder,
     is_family_overview_request,
 )
 
@@ -2500,6 +2501,9 @@ class EnhancedMemorySystem:
                     # the ack primed "what do you know about me" into a phantom
                     # correction, twice in a row (2026-07-14).
                     or is_correction_ack_reply(content)
+                    # "I'm having trouble connecting." filled 5 of 8 lines of
+                    # <recent_history> during the 2026-08-19 outage.
+                    or is_failure_placeholder(content)
                     or bool(identity_response_problem(
                         content,
                         expected_robot_name,
@@ -3127,6 +3131,10 @@ class EnhancedMemorySystem:
                 continue
             if content.startswith(("{", "[", "```")):
                 continue
+            # The 2026-08-17 recap was built from "I'm having trouble
+            # connecting." rows and fed <earlier_sessions> afterwards.
+            if r["role"] == "assistant" and is_failure_placeholder(content):
+                continue
             lines.append(f"{(r['role'] or '').upper()}: {content[:300]}")
         transcript = "\n".join(lines)
         # Cap to the most recent slice so a very chatty day still fits the
@@ -3552,7 +3560,7 @@ class EnhancedMemorySystem:
                     continue
                 if row["role"] == "assistant" and (
                         self._is_assistant_refusal(content)
-                        or "having trouble connecting" in content.lower()
+                        or is_failure_placeholder(content)
                         or is_correction_ack_reply(content)
                         or bool(identity_response_problem(
                             content, expected_name, other_names=other_names))):
@@ -3664,6 +3672,7 @@ class EnhancedMemorySystem:
                 continue
             if (self._is_assistant_refusal(content)
                     or is_correction_ack_reply(content)
+                    or is_failure_placeholder(content)
                     or identity_response_problem(
                         content, expected_name, other_names=other_names)):
                 continue

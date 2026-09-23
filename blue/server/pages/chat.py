@@ -133,6 +133,7 @@ CHAT_HTML = """
         .sendbtn:hover:not(:disabled) { background: var(--forest); }
         .sendbtn:disabled { background: #c7cdc5; cursor: not-allowed; }
         .typing { font-family: 'IBM Plex Mono', monospace; font-size: 0.8em; color: var(--slate); }
+        .bubble.sys-error { font-family: 'IBM Plex Mono', monospace; font-size: 0.85em; color: var(--slate); }
         .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 8px; }
         .voice-panel { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(26,46,26,0.45);
                        display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
@@ -616,7 +617,21 @@ CHAT_HTML = """
                 if (preview) { preview.stop(); preview = null; }
                 let reply = '';
                 try { reply = data.choices[0].message.content || ''; } catch (e) { reply = ''; }
-                if (!reply) reply = 'Sorry, I didn\\'t catch that — could you try again?';
+                // A failed turn is shown, never spoken, and never resent: its
+                // "[System: ...]" line is not Blue's words, and the unanswered
+                // question would merge into the next turn. Reminders that came
+                // with it (data.spoken) are still said aloud.
+                if (!res.ok || (data && data.blue_error) || !reply) {
+                    const bubbleEl = thinking.querySelector('.bubble');
+                    bubbleEl.textContent = reply || '[System: the server sent an empty reply.]';
+                    bubbleEl.classList.add('sys-error');
+                    setFaceState('');
+                    faceCuriousBriefly();
+                    if (data && data.spoken) speak(data.spoken);
+                    if (apiMessages.length && apiMessages[apiMessages.length - 1].role === 'user') apiMessages.pop();
+                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                    return;
+                }
                 // Always overwrite: whatever the preview showed, the guarded
                 // reply is what the user reads, hears and what goes in history.
                 thinking.querySelector('.bubble').textContent = reply;
@@ -630,7 +645,9 @@ CHAT_HTML = """
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
             } catch (e) {
-                thinking.querySelector('.bubble').textContent = 'I had trouble reaching my brain just now. Is the server running?';
+                thinking.querySelector('.bubble').textContent = '[System: could not reach the server. Is it running?]';
+                thinking.querySelector('.bubble').classList.add('sys-error');
+                if (apiMessages.length && apiMessages[apiMessages.length - 1].role === 'user') apiMessages.pop();
                 faceCuriousBriefly();
             } finally {
                 if (preview) { preview.stop(); preview = null; }

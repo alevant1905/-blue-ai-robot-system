@@ -32,6 +32,7 @@ from blue_identity import (
     identity_response_problem,
     is_family_overview_request,
     canonical_family_reply_kind,
+    is_failure_placeholder,
     is_social_checkin,
     known_household_target,
 )
@@ -139,6 +140,17 @@ _SALIENCE_WORDS = {
 }
 
 _TURN = threading.local()
+
+
+def _is_failure_exchange(episode: Dict[str, Any]) -> bool:
+    """An exchange whose "reply" was a model-failure line, not Blue's words.
+
+    38 such exchanges sit in Blue's journal from outages; reflections read
+    them and wrote SELF-OBSERVATIONS about a "connection failure".
+    """
+    if episode.get("kind") != "exchange":
+        return False
+    return is_failure_placeholder((episode.get("details") or {}).get("reply") or "")
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -936,9 +948,12 @@ class RobotContinuity:
             episode for episode in (
                 self.store.get_episode(episode_id)
                 for episode_id in (job.get("episode_ids") or [])
-            ) if episode
+            ) if episode and not _is_failure_exchange(episode)
         ]
-        recent = list(reversed(self.store.list_episodes(limit=12)))
+        recent = [
+            episode for episode in reversed(self.store.list_episodes(limit=12))
+            if not _is_failure_exchange(episode)
+        ]
         drives = self.store.get_drives()
         elapsed = _parse_time(workspace.get("updated"))
         elapsed_hours = 0.0
@@ -1157,7 +1172,7 @@ class RobotContinuity:
         ]
         episode_lines = []
         for item in episodes:
-            if item.get("kind") == "deletion":
+            if item.get("kind") == "deletion" or _is_failure_exchange(item):
                 continue
             summary, _ = self._episode_context_summary(item)
             details = item.get("details") or {}
@@ -1290,6 +1305,8 @@ class RobotContinuity:
             if is_robot_exchange and not include_robots:
                 continue
             if not is_robot_exchange and not include_humans:
+                continue
+            if _is_failure_exchange(episode):
                 continue
             eligible.append(episode)
         if not eligible:
@@ -1951,14 +1968,20 @@ def messages_with_jspace(robot: str, messages: List[Dict[str, Any]]) -> List[Dic
 
 
 def note_exchange(robot: str, user_text: str, reply: str,
-                  user_name: str = "Alex") -> None:
+                  user_name: str = "Alex",
+                  enqueue_reflection: bool = True) -> None:
     """Record a completed chat exchange plus this turn's collected tools."""
     hub = _hub(robot)
     tools = _finish_turn_collection()
     if not hub:
         return
     hub.note_exchange(user_text, reply, user_name=user_name, tools=tools,
-                      source="chat")
+                      source="chat", enqueue_reflection=enqueue_reflection)
+
+
+def turn_has_tools() -> bool:
+    """True when this chat request has already run a real tool."""
+    return bool(getattr(_TURN, "tools", None))
 
 
 def jspace_context_block(robot: str) -> str:

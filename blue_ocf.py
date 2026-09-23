@@ -88,7 +88,13 @@ def _norm(s: str) -> str:
 
 def _is_failure(assistant_raw: str) -> bool:
     n = _norm(assistant_raw)
-    return any(m in n for m in _FAILURE_MARKERS)
+    if any(m in n for m in _FAILURE_MARKERS):
+        return True
+    # The chat server now answers an outage with "[System: ...]", which the
+    # Ohbot desktop app writes into its .ocf as the assistant turn; the bare
+    # "Hey there!" and "Done!" placeholders are the older equivalents.
+    raw = html.unescape(assistant_raw or "").strip()
+    return raw.startswith("[System:") or n in ("hey there", "done")
 
 
 def _is_greeting_only(user_raw: str) -> bool:

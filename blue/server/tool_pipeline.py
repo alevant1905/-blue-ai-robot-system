@@ -410,7 +410,10 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                 bt._save_visual_observation(content, observer=bt._ACTIVE_CHAT_ROBOT)
             return response, pending_force_tool
     else:
-        return {"choices": [{"message": {"role": "assistant", "content": "Done!"}}]}, pending_force_tool
+        # The tool already ran; only the call that words its result failed.
+        # "Done!" claimed success and threw the result away.
+        return bt.model_unavailable_reply(
+            robot, tool_ran=improved_force_tool), pending_force_tool
     return None, pending_force_tool
 
 
@@ -748,7 +751,16 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
             response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
                                       on_token=on_token)
             if not response:
-                return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
+                # Tools ran this turn; say which, since the answer is lost.
+                _ran = sorted({
+                    (call.get("function") or {}).get("name") or "tool"
+                    for m in conversation_messages
+                    for call in (m.get("tool_calls") or [])
+                    if isinstance(call, dict)
+                })
+                return bt.model_unavailable_reply(
+                    bt._ACTIVE_CHAT_ROBOT, user_name,
+                    tool_ran=", ".join(_ran) or None)
             return response
 
         _include_tools = not (_identity_kind and not force_tool)
@@ -765,7 +777,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
         )
 
         if not response:
-            return {"choices": [{"message": {"role": "assistant", "content": "I'm having trouble connecting."}}]}
+            return bt.model_unavailable_reply(bt._ACTIVE_CHAT_ROBOT, user_name)
 
         # A malformed reply must degrade, not raise. LM Studio can answer with
         # {"error": ...} or an empty choices list — an unloaded model, a
