@@ -721,6 +721,18 @@ class ContinuityStore:
                 "WHERE status = 'processing' AND claimed_at < ? AND attempts < 3",
                 (stale_before,),
             )
+            # A job the worker died on during its LAST attempt matched neither
+            # the recovery above nor any retry path, so it stayed 'processing'
+            # forever — and one 'processing' row blocks every claim below.
+            # Blue's job 2454 did exactly that on 2026-08-19 (a restart mid
+            # pass): no reflection committed for five weeks and his workspace
+            # FOCUS stayed "Athena's age update loop" into late September.
+            conn.execute(
+                "UPDATE reflection_jobs SET status = 'failed', completed_at = ?, "
+                "error = 'Abandoned on its final attempt (worker exited mid-pass)' "
+                "WHERE status = 'processing' AND claimed_at < ? AND attempts >= 3",
+                (_now(), stale_before),
+            )
             active = conn.execute(
                 "SELECT id FROM reflection_jobs WHERE status = 'processing' "
                 "LIMIT 1"

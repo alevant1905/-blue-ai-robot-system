@@ -115,6 +115,54 @@ def test_reflection_jobs_are_claimed_one_at_a_time_across_instances(tmp_path):
     assert second_job["id"] == second_id
 
 
+def _orphan_on_final_attempt(store, minutes_ago):
+    """A job the worker died on during its third and last attempt."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    job_id = store.enqueue_reflection("exchange", [], "orphaned")
+    store.claim_reflection()
+    store.fail_reflection(job_id, "timed out")
+    store.claim_reflection()
+    store.fail_reflection(job_id, 'reflection was not valid JSON: "That\'s an '
+                                  'interesting way to put it, Alex."')
+    job = store.claim_reflection()
+    assert job["id"] == job_id and job["attempts"] == 3
+    claimed = (datetime.now(timezone.utc)
+               - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+    with sqlite3.connect(str(store.db_path)) as conn:
+        conn.execute("UPDATE reflection_jobs SET claimed_at = ? WHERE id = ?",
+                     (claimed, job_id))
+    return job_id
+
+
+def test_a_job_orphaned_on_its_final_attempt_stops_blocking_the_queue(tmp_path):
+    """Blue's job 2454 was claimed a third time on 2026-08-19, the server
+    restarted mid-pass, and the recovery only covered attempts < 3 — so the
+    row stayed 'processing' and no reflection committed for five weeks."""
+    store = make_store(tmp_path)
+    orphan = _orphan_on_final_attempt(store, minutes_ago=20)
+    waiting = store.enqueue_reflection("idle", [], "waiting behind it")
+
+    restarted = ContinuityStore(tmp_path / "bluej", SEED)
+    job = restarted.claim_reflection()
+
+    assert job is not None and job["id"] == waiting
+    import sqlite3
+    with sqlite3.connect(str(store.db_path)) as conn:
+        status = conn.execute("SELECT status FROM reflection_jobs WHERE id = ?",
+                              (orphan,)).fetchone()[0]
+    assert status == "failed"
+
+
+def test_a_final_attempt_still_running_keeps_the_one_at_a_time_rule(tmp_path):
+    store = make_store(tmp_path)
+    _orphan_on_final_attempt(store, minutes_ago=1)
+    store.enqueue_reflection("idle", [], "must wait")
+
+    assert ContinuityStore(tmp_path / "bluej", SEED).claim_reflection() is None
+
+
 def test_workspace_compare_and_set_blocks_stale_reflections(tmp_path):
     store = make_store(tmp_path)
     initial = store.get_workspace()

@@ -991,6 +991,29 @@ class RobotContinuity:
             f"[{reflection['id'][:8]}]"
         )
 
+    def _warn_if_reflections_stalled(self) -> None:
+        """Say so, once an hour, when work is queued but nothing commits.
+
+        Blue's queue sat blocked from 2026-08-19 to 2026-09-23 with three jobs
+        waiting, and the only sign was "3 queued" on the continuity page.
+        """
+        now = time.time()
+        if now - getattr(self, "_stall_warned_at", 0.0) < 3600:
+            return
+        try:
+            if not self.store.pending_reflections():
+                return
+            updated = self.store.get_workspace().get("updated") or ""
+            age_h = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(updated)).total_seconds() / 3600
+        except Exception:
+            return
+        if age_h > 24:
+            self._stall_warned_at = now
+            bt.log.warning(
+                f"[JSPACE {self.robot}] reflections queued but the workspace "
+                f"has not changed in {age_h:.0f}h — the queue may be stuck")
+
     def worker_loop(self) -> None:
         while True:
             job = None
@@ -1010,6 +1033,7 @@ class RobotContinuity:
                 if job:
                     self._process_reflection_job(job)
                     continue
+                self._warn_if_reflections_stalled()
             except ReflectionPreempted as exc:
                 # Alex started talking. Put it back untouched and go quiet —
                 # the guard at the top of the loop now holds it until he stops.
