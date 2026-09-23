@@ -29,9 +29,9 @@ _SRC = open(BLUETOOLS, encoding="utf-8").read()
 _TREE = ast.parse(_SRC)
 
 
-def _lift(*names):
+def _lift(*names, ns=None):
     """Exec the named module-level functions/assignments in isolation."""
-    ns = {"re": re, "List": list}
+    ns = {"re": re, "List": list, **(ns or {})}
     for node in _TREE.body:
         if isinstance(node, ast.Assign):
             target = getattr(node.targets[0], "id", "")
@@ -234,3 +234,42 @@ def test_ages_are_fine_when_ages_were_asked_for(question):
 def test_a_single_age_in_passing_is_not_a_recital():
     assert not _unasked("Emmy is 10 and she's just got home.",
                         "do you remember everyones names")
+
+
+# ---- 5. adults' check-ins reach the model (2026-09-23) ----------------------
+# The self_state short-circuit read the workspace FOCUS line aloud and repeated
+# itself across pages. Adults now get "" (the model answers with a pinned
+# note); Vilda keeps the short fixed kid reply.
+
+def _grounded_reply_fn():
+    import types
+    from blue_identity import canonical_self_state_reply
+    import typing
+    ns = _lift("_canonical_grounded_reply", ns={
+        "Optional": typing.Optional, "Dict": dict})
+    fake_routes = types.SimpleNamespace(HUB={})
+    ns.update({
+        "is_jspace_presence_request": lambda text: False,
+        "contextual_identity_request_kind": lambda text, msgs: "self_state",
+        "identity_conversation_context": lambda msgs, text: types.SimpleNamespace(
+            prior_self_state_requests=0, current_location=None,
+            location_preposition="at"),
+        "canonical_self_state_reply": canonical_self_state_reply,
+        "_robot_cfg": lambda robot: {"name": "Blue", "self_desc": "a robot"},
+        "_CHAT_ONLY_USERS": {"Vilda"},
+        "_continuity_routes": fake_routes,
+    })
+    return ns["_canonical_grounded_reply"]
+
+
+@pytest.mark.parametrize("message", [
+    "How's it going?", "how are you", "hi blue, how is it going",
+    "good morning, how are you doing?", "how are you doing today?",
+])
+def test_an_adult_check_in_is_left_to_the_model(message):
+    assert _grounded_reply_fn()(message, "blue", "Alex") == ""
+
+
+def test_vildas_check_in_keeps_the_fixed_kid_reply():
+    reply = _grounded_reply_fn()("How are you?", "blue", "Vilda")
+    assert reply.startswith("I'm doing okay, Vilda!")

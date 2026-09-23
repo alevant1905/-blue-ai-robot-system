@@ -1132,3 +1132,49 @@ def test_a_different_failure_still_gets_its_retries(continuity_module):
 
     assert store.claim_reflection() is not None, \
         "different errors are worth another attempt"
+
+
+# ---------------------------------------------------------------------------
+# Check-in replies are never quoted back (2026-09-23)
+#
+# "It's been quiet and steady on this side, just keeping the house calm.
+# How's your Wednesday going?" was a model reply to "how is blue's day going"
+# on 2026-08-19. Four weeks later "how was your day going today?" retrieved it
+# (overlap on how/day/going), it was injected as "You replied: ...", and the
+# model sent it again word for word. A check-in answer carries no information.
+# ---------------------------------------------------------------------------
+
+def test_a_check_in_reply_is_not_quoted_back_into_the_prompt(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "You there?",
+        "Yes, I'm here. Just taking a moment in the quiet for myself. "
+        "How's your Wednesday going?",
+        user_name="Alex",
+    )
+    route.note_exchange(
+        "blue", "how is blue's day going",
+        "It's been quiet and steady on this side, just keeping the house "
+        "calm. How's your Wednesday going?",
+        user_name="Alex",
+    )
+
+    memory = route.conversation_memory_block(
+        "blue", query="how was your day going today?")
+    jspace = route.jspace_context_block("blue")
+
+    for block in (memory, jspace):
+        assert "taking a moment in the quiet" not in block
+        assert "keeping the house calm" not in block
+    assert "how is blue's day going" in memory, "the topic is kept"
+
+
+def test_an_ordinary_exchange_is_still_quoted(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "What did Sarah Matthews say about the AI lab?",
+        "She wanted a costed pilot before the Dean's visit.",
+        user_name="Alex",
+    )
+    memory = route.conversation_memory_block("blue", query="Sarah Matthews lab")
+    assert "You replied: She wanted a costed pilot" in memory

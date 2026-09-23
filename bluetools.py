@@ -95,7 +95,11 @@ from blue_identity import (
     is_jspace_presence_request,
     is_phantom_correction_ack,
     is_recorded_recall_denial,
+    is_self_state_request,
+    is_social_checkin,
     recalled_evidence_fallback,
+    self_state_focus_hint,
+    self_state_readout,
     strip_drifted_sentences,
 )
 
@@ -12311,11 +12315,25 @@ def _chat_self_context(conversation_messages, last_user_message, *,
                 and isinstance(message.get("content"), str)
                 for topic in identity_reply_topics(message["content"])
             ))
+            _state_hint = ""
+            if _identity_kind == "self_state":
+                try:
+                    _hub = _continuity_routes.HUB.get(robot)
+                    if _hub:
+                        _ws = _hub.store.get_workspace()
+                        _focus = re.search(r"(?mi)^FOCUS:\s*(.+)$",
+                                           _ws.get("workspace") or "")
+                        _state_hint = self_state_focus_hint(
+                            _focus.group(1) if _focus else "",
+                            _ws.get("updated") or "")
+                except Exception as _hint_e:
+                    log.warning(f"[IDENTITY] check-in state hint failed: {_hint_e}")
             _identity_note = identity_grounding_note(
                 _robot_cfg(robot)["name"],
                 _robot_cfg(robot)["self_desc"],
                 _identity_kind,
                 avoid_topics=_recent_identity_topics,
+                state_hint=_state_hint,
             )
             for _identity_i in range(len(conversation_messages) - 1, -1, -1):
                 _identity_m = conversation_messages[_identity_i]
@@ -14579,24 +14597,17 @@ def _canonical_grounded_reply(
     )
     identity_context = identity_conversation_context(messages or [], message)
     if request_kind == "self_state":
-        focus = ""
-        drives = {}
-        try:
-            hub = _continuity_routes.HUB.get(robot)
-            if hub:
-                workspace = hub.store.get_workspace().get("workspace") or ""
-                focus_match = re.search(r"(?mi)^FOCUS:\s*(.+)$", workspace)
-                focus = focus_match.group(1).strip() if focus_match else ""
-                drives = hub.store.get_drives()
-        except Exception:
-            focus, drives = "", {}
+        # Adults' check-ins go to the model with a pinned note (see
+        # _chat_self_context). The template read the workspace FOCUS line
+        # aloud — "I've still got athena's age update loop and its resolution
+        # on my mind" four mornings running — and could not stop repeating
+        # itself across pages. Vilda keeps the short, fixed kid reply.
+        if user_name not in _CHAT_ONLY_USERS:
+            return ""
         return canonical_self_state_reply(
             _robot_cfg(robot)["name"],
-            focus=focus,
-            drives=drives,
-            variant=identity_context.prior_self_state_requests,
             user_name=user_name,
-            kid_mode=user_name in _CHAT_ONLY_USERS,
+            kid_mode=True,
         )
 
     current_location = identity_context.current_location

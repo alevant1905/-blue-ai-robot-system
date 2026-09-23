@@ -197,6 +197,30 @@ def guard_identity(ctx) -> Optional[str]:
     elif _identity_salvage:
         final_content = _identity_salvage
         print("   [IDENTITY] retry still invalid — kept on-topic reply minus drifted sentences")
+    elif _identity_kind == "self_state":
+        # A check-in must never fall back to canonical_identity_reply: it has
+        # no self_state branch, so its default is the "persistent J-space"
+        # self-description — the architecture talk the check-in note forbids.
+        # The template without a focus line says only mood and asks back.
+        _drives = {}
+        try:
+            _hub = bt._continuity_routes.HUB.get(robot)
+            if _hub:
+                _drives = _hub.store.get_drives() or {}
+        except Exception:
+            _drives = {}
+        final_content = bt.canonical_self_state_reply(
+            _identity_name,
+            focus="",
+            drives=_drives,
+            variant=bt.identity_conversation_context(
+                messages,
+                last_user_msg if isinstance(last_user_msg, str) else "",
+            ).prior_self_state_requests,
+            user_name=user_name,
+            kid_mode=user_name in bt._CHAT_ONLY_USERS,
+        )
+        print("   [IDENTITY] check-in retry still invalid — using plain check-in fallback")
     else:
         # Never send or remember a vendor/model identity. A
         # deterministic truthful answer is safer than retaining

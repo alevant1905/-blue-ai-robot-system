@@ -1503,3 +1503,103 @@ def test_claiming_to_be_the_other_robot_is_rejected(kind):
         assert identity_response_problem(
             reply, speaker, other_names=others, request_kind=kind
         ) == "wrong_robot", reply
+
+
+# ---------------------------------------------------------------------------
+# Check-ins go to the model, not a template (2026-09-23)
+#
+# canonical_self_state_reply read the workspace FOCUS line aloud: "I've still
+# got athena's age update loop and its resolution on my mind" went out on
+# 09-15, 09-16 and twice on 09-18, byte for byte, because a stuck reflection
+# queue had frozen FOCUS on 08-19. Adults' check-ins are now answered by the
+# model with a pinned note; FOCUS is offered only when it is fresh.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone
+
+from blue_identity import (
+    is_social_checkin, self_state_focus_hint, self_state_readout,
+)
+
+
+@pytest.mark.parametrize("message", [
+    "How are you doing, Blue?",
+    "How's it going, Blue?",
+    "How are you doing today, Blue?",
+    "how are you doing blue",
+    "how is your day going?",
+    "how was your day going today?",
+    "how is blue's day going",
+    "How has your day been?",
+    "How's your day going so far, Blue?",
+])
+def test_check_ins_with_a_trailing_name_or_about_the_day_are_check_ins(message):
+    assert identity_request_kind(message) == "self_state"
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("how is your day going to look tomorrow, can you check my calendar?", None),
+    ("How are you doing with the email draft?", None),
+    ("how are you going to introduce me", None),
+    ("How was your day yesterday?", "shared_recall"),
+    ("Good morning, Blue!", None),
+])
+def test_questions_that_only_look_like_check_ins_are_not(message, expected):
+    assert identity_request_kind(message) == expected
+
+
+@pytest.mark.parametrize("message", [
+    "You there?", "hello", "hi blue", "Hello, can you hear me?",
+    "can you hear me now", "how are you doing today?",
+])
+def test_greetings_and_check_ins_are_social(message):
+    assert is_social_checkin(message)
+
+
+@pytest.mark.parametrize("message", [
+    "Hello blue it is Emmy", "Hi, can you say sleigh?",
+    "hey blue, play some jazz", "hi my name is vilda",
+])
+def test_a_greeting_that_carries_content_is_not_just_social(message):
+    assert not is_social_checkin(message)
+
+
+def test_a_stale_focus_line_is_named_as_stale_not_offered():
+    hint = self_state_focus_hint(
+        "Athena's age update loop and its resolution.",
+        "2026-08-19T11:49:35+00:00",
+        now=datetime(2026, 9, 15, 19, 15, tzinfo=timezone.utc),
+    )
+    assert "Athena" not in hint
+    assert "old" in hint
+
+
+def test_a_fresh_focus_line_is_offered_as_optional():
+    hint = self_state_focus_hint(
+        "FOCUS: DH201/DH399 course outline development",
+        "2026-08-09T14:28:00+00:00",
+        now=datetime(2026, 8, 9, 14, 48, tzinfo=timezone.utc),
+    )
+    assert "DH201" in hint and "If it fits" in hint
+
+
+def test_an_unreadable_timestamp_counts_as_stale():
+    assert "old" in self_state_focus_hint("DH201 outline", "not a date")
+    assert self_state_focus_hint("", "2026-08-09T14:28:00+00:00") == ""
+
+
+def test_the_check_in_note_carries_the_hint_and_no_longer_demands_focus():
+    note = identity_grounding_note(
+        "Blue", "Alex's robot companion", "self_state", state_hint="HINT-XYZ")
+    assert "HINT-XYZ" in note
+    assert "J-space" in note, "still forbids naming it"
+    assert "grounded in your current focus" not in note
+
+
+def test_a_check_in_reply_that_recites_the_architecture_is_caught():
+    assert self_state_readout(
+        "Hey Alex — my J-space focus is still Athena's age update loop.")
+    assert self_state_readout("FOCUS: DH201 outline\nHow are you?")
+    assert not self_state_readout(
+        "Quietly well — my head's still a bit turned over yesterday's DH399 "
+        "class. How's your day going?")

@@ -31,6 +31,7 @@ from blue_identity import (
     identity_request_kind,
     identity_response_problem,
     is_family_overview_request,
+    is_social_checkin,
     known_household_target,
 )
 
@@ -1158,6 +1159,17 @@ class RobotContinuity:
             if item.get("kind") == "deletion":
                 continue
             summary, _ = self._episode_context_summary(item)
+            details = item.get("details") or {}
+            heard = str(details.get("user_text") or "").strip()
+            if item.get("kind") == "exchange" and is_social_checkin(heard):
+                # The summary quotes "Blue replied: …"; for a check-in that
+                # quote is only a pattern to copy. Reflection input keeps it.
+                who = (item.get("participants") or ["Someone"])[0]
+                summary = (
+                    f"{who} checked in with you "
+                    f"('{_clip(heard, 80)}'); your reply wording is omitted so it "
+                    "is never reused."
+                )
             episode_lines.append(
                 f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
                 f"salience {item['salience']:.2f}] {summary}"
@@ -1408,6 +1420,10 @@ class RobotContinuity:
             reply_part = (
                 " The old answer was unreliable, so only the topic is retained."
                 if unsafe_reply else
+                # A check-in answer carries no information, only wording to
+                # copy (see is_social_checkin).
+                " (A greeting/check-in; your wording is omitted so it is never "
+                "reused.)" if replied and is_social_checkin(heard) else
                 f" You replied: {_clip(replied, 180)}" if replied else ""
             )
             lines.append(

@@ -15,16 +15,27 @@ _INTRODUCTION_RE = re.compile(
     r"\bintroduction\b",
     re.IGNORECASE,
 )
+_ROBOT_NAME_ALT = r"(?:blue|hexia|casper|caspar|pico|picoh)"
 _SELF_STATE_REQUEST_RE = re.compile(
     # "Good morning, Blue. How are you doing?" slipped past the old
     # hey/hi/hello-only prefix and drew generic assistant-speak ("I'm doing
     # well, thank you for asking!") instead of the J-space state reply
     # (live 2026-07-15). Greeting and robot name are each optional.
     r"^\s*(?:(?:hey|hi|hello|good (?:morning|afternoon|evening)|morning|"
-    r"afternoon|evening)[,.! ]+(?:(?:blue|hexia|casper|caspar|pico|picoh)[,.! ]*)?)?"
+    r"afternoon|evening)[,.! ]+(?:" + _ROBOT_NAME_ALT + r"[,.! ]*)?)?"
     r"(?:how are you(?: doing(?: today| right now)?|"
     r" feeling(?: today| right now)?| today| right now)?|"
-    r"how(?:['\u2019]s| is) it going|how have you been)\s*[?.!]*\s*$"
+    r"how(?:['\u2019]s| is) it going|how have you been)"
+    # A trailing name ("How's it going, Blue?") classified as nothing at all,
+    # so those check-ins got no note and generic assistant-speak (2026-07-29).
+    r"(?:[,.! ]+" + _ROBOT_NAME_ALT + r")?\s*[?.!]*\s*$"
+    # "how is blue's day going" / "how was your day going today?" \u2014 the two
+    # check-ins whose model replies were later replayed word for word.
+    r"|^\s*(?:(?:hey|hi|hello|good (?:morning|afternoon|evening)|morning|"
+    r"afternoon|evening)[,.! ]+(?:" + _ROBOT_NAME_ALT + r"[,.! ]*)?)?"
+    r"(?:so,? )?how(?:['\u2019]?s| is| was| has) (?:your|"
+    r"(?:blue|hexia|casper)['\u2019]?s) day (?:been|going)"
+    r"(?: so far| today)?(?:[,.! ]+" + _ROBOT_NAME_ALT + r")?\s*[?.!]*\s*$"
     r"|^\s*(?:what(?:['\u2019]s| is) new with you|"
     r"what(?:['\u2019]s| is) on your mind)"
     r"\s*[?.!]*\s*$"
@@ -841,6 +852,87 @@ def is_self_state_request(text: str) -> bool:
     return bool(_SELF_STATE_REQUEST_RE.search(text or ""))
 
 
+_CHECKIN_HEAR = (
+    r"(?:(?:are )?you there|can you (?:still )?hear me"
+    r"(?: now| okay| ok| alright)?)"
+)
+_BARE_GREETING_RE = re.compile(
+    r"^\s*(?:(?:hi|hello|hey|yo|good (?:morning|afternoon|evening))"
+    r"(?:[,.! ]+(?:there|" + _ROBOT_NAME_ALT[3:-1] + r"))?"
+    r"(?:[,.!? ]+" + _CHECKIN_HEAR + r")?|" + _CHECKIN_HEAR + r")"
+    r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_social_checkin(text: str) -> bool:
+    """A greeting or "how are you" whose reply carries no information.
+
+    Context blocks that quote Blue's past replies back to him drop the reply
+    wording for these turns. Quoted, a check-in answer is only a pattern: "It's
+    been quiet and steady on this side, just keeping the house calm. How's
+    your Wednesday going?" came back word for word four weeks later because
+    retrieval matched "how", "day" and "going" (2026-09-16).
+    """
+    return is_self_state_request(text) or bool(
+        _BARE_GREETING_RE.search(text or ""))
+
+
+# The architecture words a check-in must not read out (Alex, 2026-07-15:
+# "when I ask how you're doing I don't want you to start describing your
+# J-space so literally"). Checked for self_state replies only.
+_SELF_STATE_READOUT_RE = re.compile(
+    r"\bj[- ]?space\b|\bbounded (?:attention(?:al)? )?(?:signals?|drives?)\b"
+    r"|\bmy (?:drives|workspace|focus line)\b"
+    r"|^\s*(?:FOCUS|NEXT EXPECTATION|WORKING BELIEFS|SELF-OBSERVATIONS"
+    r"|COMMITMENTS)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def self_state_readout(text: str) -> bool:
+    """True when a check-in reply recites the continuity architecture."""
+    return bool(_SELF_STATE_READOUT_RE.search(text or ""))
+
+
+def self_state_focus_hint(
+    focus: str,
+    updated_iso: str,
+    now=None,
+    max_age_hours: float = 6.0,
+) -> str:
+    """What the check-in note may say about the workspace FOCUS line.
+
+    FOCUS is rewritten only when a reflection commits after a conversation,
+    so at the start of a session it describes the previous one — 20 hours old
+    on 2026-08-09, and five weeks old on 2026-09-15 when a stuck queue froze
+    it at "Athena's age update loop". A stale line is named as stale so the
+    model does not treat it as what is on its mind now.
+    """
+    from datetime import datetime, timezone
+
+    text = re.sub(r"^\s*FOCUS:\s*", "", focus or "", flags=re.IGNORECASE).strip()
+    if not text:
+        return ""
+    try:
+        updated = datetime.fromisoformat(str(updated_iso))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        age_hours = (current - updated).total_seconds() / 3600
+    except (TypeError, ValueError):
+        age_hours = None
+    if age_hours is None or age_hours > max_age_hours:
+        return (
+            "Your workspace FOCUS line is old, so it is not what's on your mind "
+            "now — don't bring it up."
+        )
+    return (
+        "If it fits naturally, you may mention what you've been turning over "
+        f"lately, in your own plain words, never quoted: {text}"
+    )
+
+
 def is_family_overview_request(text: str) -> bool:
     """Return True when the user asks for the canonical family roster."""
     return bool(_FAMILY_OVERVIEW_RE.search(text or ""))
@@ -1087,6 +1179,7 @@ def identity_grounding_note(
     self_description: str,
     request_kind: str,
     avoid_topics: Iterable[str] = (),
+    state_hint: str = "",
 ) -> str:
     """Build a short instruction placed beside a live identity request."""
     if request_kind == "jspace":
@@ -1096,17 +1189,22 @@ def identity_grounding_note(
             "workspace; J-space never means JavaScript, code execution, or a tool."
         )
     elif request_kind == "self_state":
+        # The workspace FOCUS is offered only through state_hint, which says
+        # whether it is fresh. "Grounded in your current focus" used to be
+        # unconditional, and FOCUS is often a day or more old at a check-in.
         task = (
             "Answer this social check-in the way a companion would: one or two "
-            "natural sentences about how you're doing, grounded in your current "
-            "focus and energy, then return the question. Say what you've been "
-            "thinking about in plain words. Do not name J-space, drives, or "
-            "'bounded signals', do not quote workspace text verbatim, and do "
-            "not lecture about subjective experience. Also do not fall back to "
-            "'as an AI', 'fully operational', a systems checklist, or a flat "
-            "denial of feelings; do not claim certainty about human-like "
-            "experience either."
+            "short, natural sentences about how you're doing, then return the "
+            "question. Do not name J-space, drives, your focus or 'bounded "
+            "signals', and do not quote workspace text. Don't report standby or "
+            "house status, bugs or corrections, or anything you're waiting on "
+            "from the user. No 'as an AI', 'fully operational', 'thank you for "
+            "asking' or offers to help; no flat denial of feelings and no claim "
+            "of human certainty either. Don't reuse the wording of an earlier "
+            "check-in answer."
         )
+        if state_hint:
+            task = f"{task} {state_hint}"
     elif request_kind == "origin":
         task = (
             "Distinguish your J-space's recorded beginning and remembered episodes "
@@ -2122,7 +2220,10 @@ __all__ = [
     "is_family_overview_request",
     "is_jspace_presence_request",
     "is_self_state_request",
+    "is_social_checkin",
     "is_user_identity_request",
+    "self_state_focus_hint",
+    "self_state_readout",
     "known_household_target",
     "robot_relationship_targets",
     "recalled_evidence_fallback",

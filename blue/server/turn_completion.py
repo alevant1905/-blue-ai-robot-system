@@ -191,6 +191,27 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         _norm_recents = {_parrot_norm(a) for a in _recent_assists if a}
         if _prev_assist:
             _norm_recents.add(_parrot_norm(_prev_assist))
+        # The page's own transcript starts empty on every reload, so a
+        # check-in answer from another page or an earlier day was invisible
+        # here — the same reply went out on 09-15, 09-16 and twice on 09-18.
+        # Add the robot's recent check-in replies to the exact-replay set only
+        # (not _recents_norm: short "How are you?" endings would trip the
+        # recycled-lead ratio).
+        if (isinstance(last_user_msg, str)
+                and bt.is_self_state_request(last_user_msg)):
+            try:
+                _hub = bt._continuity_routes.HUB.get(robot)
+                _checkin_replies = [
+                    (ep.get("details") or {}).get("reply") or ""
+                    for ep in (_hub.store.list_episodes(limit=60, kind="exchange")
+                               if _hub else [])
+                    if bt.is_social_checkin(
+                        (ep.get("details") or {}).get("user_text") or "")
+                ][:5]
+                _norm_recents.update(
+                    _parrot_norm(r) for r in _checkin_replies if r)
+            except Exception as e:
+                bt.log.warning(f"[ANTI-PARROT] check-in history failed: {e}")
         def _regen_once(note, max_tokens=900):
             # The model's chat template only allows ONE system message,
             # at position 0 (anything else → LM Studio 400): merge the
@@ -285,6 +306,11 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             )
             if problem:
                 return problem
+            # Local to the check-in turn on purpose: identity_response_problem
+            # also filters stored history and reflection input, where old
+            # replies should not be relabelled.
+            if _identity_kind == "self_state" and bt.self_state_readout(text):
+                return "architecture_readout"
             if bt.identity_repeats_recent_reply(
                 text, _recent_assists, _identity_kind
             ):
