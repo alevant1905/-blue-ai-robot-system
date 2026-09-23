@@ -4276,6 +4276,31 @@ class EnhancedMemorySystem:
 
     # ------------------------------------------------------------------ Summary / stats
 
+    def recent_assistant_replies(
+        self,
+        user_name: str = "Alex",
+        robot: str = "blue",
+        hours: float = 48,
+        limit: int = 150,
+    ) -> List[str]:
+        """What the robot said to this user in the last `hours`, newest first.
+
+        The chat page's thread starts empty on every reload, so the replay
+        checks could only see the current page; the prompt meanwhile quotes
+        older replies (<recent_history>, <conversation_memory>, <j_space>).
+        """
+        try:
+            since = (datetime.now() - timedelta(hours=hours)).isoformat()
+            rows = self._conn().execute(
+                "SELECT content FROM conversation_log WHERE user_name = ? "
+                "AND robot = ? AND role = 'assistant' AND timestamp >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (user_name, robot, since, max(1, min(int(limit), 500))),
+            ).fetchall()
+            return [r[0] for r in rows if r[0]]
+        except Exception:
+            return []
+
     def get_recent_conversations(
         self,
         user_name: str = "Alex",

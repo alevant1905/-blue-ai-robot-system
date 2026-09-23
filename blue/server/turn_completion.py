@@ -152,9 +152,79 @@ def _verbatim_fraction(reply_text, source_norm, min_sents):
     hits = sum(1 for s in long_sents if _parrot_norm(s) in source_norm)
     return hits / len(long_sents)
 
+# The daily briefing and reminder alerts (blue_proactive) around a reply. The
+# page thread still carries them in the displayed text, and older log rows
+# carry them in front; neither is something the model said.
+_PROACTIVE_RE = re.compile(
+    r"(?:Here's your day — (?:one thing|\d+ things) on the calendar: .*?(?:AM|PM)\."
+    r"(?: Heads up — \".*?\" and \".*?\" (?:overlap on your schedule|are scheduled "
+    r"at the same time|are only \d+ min apart)\.)*"
+    r"|Heads up, [^—\n]{1,40} — '.*?' (?:is starting now|started at [^.\n]*"
+    r"|in \d+ minutes?|(?:today|tomorrow) at [^.\n]*|on \w+ at [^.\n]*)\.)\s*",
+    re.S)
+
+
+def _without_proactive(text):
+    return _PROACTIVE_RE.sub("", text or "").strip()
+
+
+def _lcp(a, b):
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def _shared_opening(reply, norms):
+    """A reply that opens with a long stretch of an earlier one.
+
+    The 2026-08-10 agenda reply came back as the 180-character clip the
+    prompt quoted plus a new ending ("…before you all adjourn."): neither an
+    exact match nor two recycled sentences, so no net caught it.
+    """
+    norm = _parrot_norm(reply)
+    if len(norm) < 40:
+        return False
+    for earlier in norms:
+        if len(earlier) < 40:
+            continue
+        shared = _lcp(norm, earlier)
+        if shared >= 100 and shared >= 0.6 * len(norm):
+            return True
+    return False
+
+
+# Asked to hear it again: a verbatim repeat is then the right answer. The
+# negative list keeps "Don't repeat yourself", "one more time, briefly"-style
+# retries and "repeat that in French" from being taken as a request for the
+# same words.
+_REPEAT_ASK_RE = re.compile(
+    r"\b(?:(?:say|read|play) (?:that|it|this) (?:one more time|again|back)"
+    r"|say again\s*[?.!]*$"
+    r"|repeat (?:that|it|this|what you (?:just )?said|the last (?:part|bit|line|sentence))"
+    r"|(?:can|could|would) you repeat\b"
+    r"|come again\s*[?.!]*$"
+    r"|what did you (?:just )?say"
+    r"|did(?:n['’]?t| not) (?:quite )?(?:hear|catch) (?:you|that|it|what you said"
+    r"|the (?:first|last) (?:time|part))"
+    r"|(?:want|like|need) to hear (?:it|that) again"
+    r"|one more time\s*[?.!]*$)", re.I)
+_REPEAT_NOT_RE = re.compile(
+    r"\b(?:do(?:n['’]?t| not)|dont|stop|never|quit|not when you)\b[^.!?]{0,25}\brepeat"
+    r"|\bin (?:french|english|danish|russian|greek|spanish|german|another language"
+    r"|other words)\b"
+    r"|\bdifferent(?:ly| way)\b|\bbriefly\b|\bshorter\b", re.I)
+
+
+def _repeat_requested(text):
+    t = bt._intent_text(text) if isinstance(text, str) else ""
+    return bool(_REPEAT_ASK_RE.search(t)) and not _REPEAT_NOT_RE.search(t)
+
+
 def _run_reply_guards(final_content, response, *, messages, robot,
                       last_user_msg, user_messages, user_name,
-                      _grounded_reply):
+                      _grounded_reply, templated=False):
     """Check the finished reply and correct it where it went wrong.
 
     Parroting, recycled openings, identity drift, misstated ages, a dropped
@@ -168,6 +238,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
     # before answering (the classroom-introduction bug), cut the replay.
     try:
         _, _prev_assist = bt._last_exchange(messages)
+        _prev_assist = _without_proactive(_prev_assist)
         if _prev_assist:
             _deparroted = bt._strip_parroted_prefix(final_content, _prev_assist)
             if _deparroted != final_content:
@@ -183,10 +254,11 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # Compare against the last several assistant turns, not just
         # the previous one: seen live 2026-07-10, a mis-heard question
         # got a word-for-word replay of the reply from TWO turns back.
-        _recent_assists = [
-            m.get("content") for m in messages
+        _live_assists = [
+            _without_proactive(m.get("content")) for m in messages
             if m.get("role") == "assistant" and isinstance(m.get("content"), str)
-        ][-6:]
+        ]
+        _recent_assists = _live_assists[-6:]
         _norm_final = _parrot_norm(final_content)
         _norm_recents = {_parrot_norm(a) for a in _recent_assists if a}
         if _prev_assist:
@@ -212,6 +284,26 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                     _parrot_norm(r) for r in _checkin_replies if r)
             except Exception as e:
                 bt.log.warning(f"[ANTI-PARROT] check-in history failed: {e}")
+        # Whole-reply replays from beyond the six-turn window and from other
+        # pages or days (the last 48 h of this robot's replies to this user).
+        # Exact match or a long shared opening only — the sentence-level net
+        # stays on the live six turns. Not for templated confirmations
+        # ("Light show started!") or Vilda's page, whose regeneration would
+        # run without the kid prompt.
+        _wide = []
+        if not templated and user_name not in bt._CHAT_ONLY_USERS:
+            _wide = list(_live_assists[:-6])
+            try:
+                if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
+                    _wide += bt.memory_system.recent_assistant_replies(
+                        user_name=user_name, robot=robot, hours=48, limit=150)
+            except Exception as e:
+                bt.log.warning(f"[ANTI-PARROT] durable replies failed: {e}")
+        _wide_norms = {
+            n for n in (_parrot_norm(_without_proactive(x)) for x in _wide)
+            if len(n) >= 40
+        }
+        _all_norms = _norm_recents | _wide_norms
         def _regen_once(note, max_tokens=900):
             # The model's chat template only allows ONE system message,
             # at position 0 (anything else → LM Studio 400): merge the
@@ -410,7 +502,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # The seventeen output guards now live in
         # blue/server/reply_guards.py — same conditions, same order,
         # same bodies. The first guard that matches decides the reply.
-        final_content = bt._reply_guards.apply(bt._reply_guards.ReplyContext(
+        _guard_ctx = bt._reply_guards.ReplyContext(
             reply=final_content,
             response=response,
             messages=messages,
@@ -435,14 +527,28 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             has_family_facts=_has_family_facts,
             ask_window=_ask_window,
             norm_final=_norm_final,
-            norm_recents=_norm_recents,
+            norm_recents=_all_norms,
+            opening_replay=lambda t: _shared_opening(t, _all_norms),
+            repeat_requested=_repeat_requested(last_user_msg),
+            templated=templated,
             parrot_norm=_parrot_norm,
             recycled_from_recents=_recycled_from_recents,
             profile_recited_fraction=_profile_recited_fraction,
             denies_known_person=denies_a_known_person,
             family_refusal_re=_family_refusal_re,
             flat_denial_re=_flat_denial_re,
-        ))
+        )
+        final_content = bt._reply_guards.apply(_guard_ctx)
+        # First match wins in the chain, so a guard that matched and returned
+        # the reply unchanged (no syllabus text to add; a failed retry) hid a
+        # replay from guard_verbatim_replay: Hexia sent the same reply twice
+        # on 2026-09-04 and 09-06 that way.
+        if (_guard_ctx.handled_by not in ("", "guard_verbatim_replay")
+                and final_content == _guard_ctx.reply):
+            _late = bt._reply_guards.guard_verbatim_replay(_guard_ctx)
+            if _late is not None:
+                print(f"   [ANTI-PARROT] replay survived {_guard_ctx.handled_by}")
+                final_content = _late
         response["choices"][0]["message"]["content"] = final_content
     except Exception as e:
         bt.log.warning(f"[ANTI-PARROT] check failed: {e}")
@@ -522,10 +628,15 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
     except Exception as e:
         bt.log.warning(f"[RUNAWAY] trim failed: {e}")
 
+    # A template (a device confirmation, the kids' decline) is not model
+    # output, and repeating it is correct.
+    _templated = bool(isinstance(response, dict)
+                      and response.pop("blue_templated", False))
     final_content = _run_reply_guards(
         final_content, response, messages=messages, robot=robot,
         last_user_msg=last_user_msg, user_messages=user_messages,
-        user_name=user_name, _grounded_reply=_grounded_reply)
+        user_name=user_name, _grounded_reply=_grounded_reply,
+        templated=_templated)
 
     # Strip the closing offer and the emoji. Done here rather than by
     # instruction because the persona has asked for concise replies all
@@ -553,30 +664,41 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
     # from real reminder rows, never from the model's guesses.
     # Never lead Vilda's replies with the schedule briefing / reminder
     # alerts — Blue doesn't discuss the calendar with the kids' iPad.
+    # The reply alone is what gets recorded. The briefing and alerts are
+    # delivered, not said: stored with the reply, "Heads up — '...' is
+    # starting now." flowed back into <recent_history>, <conversation_memory>
+    # and <j_space>, and broke every replay comparison against that turn.
+    _reply_only = final_content
     if bt.PROACTIVE_QUEUE_AVAILABLE and user_name not in bt._CHAT_ONLY_USERS and robot == "blue":
         _proactive_parts = []
+        _briefing = ""
         try:
             _briefing = bt.blue_proactive.daily_briefing_if_due()
             if _briefing:
                 _proactive_parts.append(_briefing)
         except Exception as e:
             bt.log.warning(f"[PROACTIVE] daily briefing failed: {e}")
-        _alerts = bt.blue_proactive.drain_for_response()
+        # An alert for an event the briefing already lists is not stacked on it.
+        _alerts = bt.blue_proactive.drain_for_response(skip_text=_briefing or "")
         if _alerts:
             _proactive_parts.append(_alerts)
         if _proactive_parts:
-            _prefix = " ".join(_proactive_parts)
-            final_content = f"{_prefix} {final_content}".strip()
+            # After the answer, as its own paragraph: "Heads up, Alex — …
+            # Hey Alex — I'm steady and curious today…" read as one reply.
+            _block = " ".join(_proactive_parts)
+            final_content = (_reply_only + "\n\n" + _block if _reply_only
+                             else _block)
             response["choices"][0]["message"]["content"] = final_content
-            print(f"[PROACTIVE] Prepended {len(_prefix)} chars (briefing/alerts)")
+            print(f"[PROACTIVE] Appended {len(_block)} chars (briefing/alerts)")
 
     if final_content:
         print(f"[OUT] Sending response: {final_content[:100]}..." if len(final_content) > 100 else f"[OUT] Sending response: {final_content}")
 
+    if _reply_only:
         bt.save_conversation_to_db(
             user_name=user_name,
             role="assistant",
-            content=final_content,
+            content=_reply_only,
             session_id=None,
             robot=robot,
         )
@@ -614,7 +736,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         # turns is enough context, small enough to stay cheap.
         non_system = [m for m in messages if m.get("role") != "system"]
         latest_context = non_system[-4:] if non_system else []
-        latest_context.append({"role": "assistant", "content": final_content})
+        latest_context.append({"role": "assistant", "content": _reply_only})
 
         threading.Thread(
             target=_background_fact_extraction,
@@ -625,7 +747,7 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         if robot in bt._continuity_routes.ROBOTS:
             try:
                 bt._continuity_routes.note_exchange(
-                    robot, last_user_msg, final_content, user_name=user_name
+                    robot, last_user_msg, _reply_only, user_name=user_name
                 )
             except Exception as e:
                 bt.log.warning(f"[JSPACE] could not schedule J-space pass: {e}")

@@ -12288,7 +12288,10 @@ def _chat_choose_tool(conversation_messages, last_user_message, *,
         print(f"   [KID] Blocked '{improved_force_tool}' for {user_name}")
         return _ChatToolChoice(reply={"choices": [{"message": {"role": "assistant", "content":
             "That's not something I can do here — but we can talk about anything "
-            "you like! What would you like to chat about?"}}]})
+            "you like! What would you like to chat about?"}}],
+            # A template: repeating it is right, and the replay nets must not
+            # regenerate it through the adult persona.
+            "blue_templated": True})
 
     # ================================================================================
     # ZERO-LLM PATH: For simple tools, execute and return a templated response
@@ -12309,7 +12312,8 @@ def _chat_choose_tool(conversation_messages, last_user_message, *,
         templated = _tool_pipeline.template_response(improved_force_tool, improved_tool_args, tool_result)
         if templated:
             print(f"   [ZERO-LLM] Returning templated response (0 LLM calls)")
-            return _ChatToolChoice(reply={"choices": [{"message": {"role": "assistant", "content": templated}}]})
+            return _ChatToolChoice(reply={"choices": [{"message": {"role": "assistant", "content": templated}}],
+                                          "blue_templated": True})
     return _ChatToolChoice(detect_msg=_detect_msg,
                            force_tool=improved_force_tool,
                            tool_args=improved_tool_args,

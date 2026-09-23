@@ -76,6 +76,13 @@ class ReplyContext:
     denies_known_person: Callable[[str], bool] = lambda text: False
     family_refusal_re: Any = _NEVER_MATCHES
     flat_denial_re: Any = _NEVER_MATCHES
+    # Replays: a long shared opening with an earlier reply; the user asking
+    # to hear it again; a template reply (repeating it is correct).
+    opening_replay: Callable[[str], bool] = lambda text: False
+    repeat_requested: bool = False
+    templated: bool = False
+    # Set by apply(): which guard decided the reply.
+    handled_by: str = ""
 
 
 def apply(ctx: ReplyContext) -> str:
@@ -91,6 +98,7 @@ def apply(ctx: ReplyContext) -> str:
             bt.log.warning(f"[GUARD] {guard.__name__} failed: {exc}")
             continue
         if corrected is not None:
+            ctx.handled_by = guard.__name__
             return corrected
     return ctx.reply
 
@@ -743,8 +751,11 @@ def guard_verbatim_replay(ctx) -> Optional[str]:
     _parrot_norm = ctx.parrot_norm
     _regen_once = ctx.regen_once
     response = ctx.response
-    if not ((not _grounded_reply and _norm_final
-      and _norm_final in _norm_recents)):
+    if (_grounded_reply or ctx.repeat_requested or ctx.templated
+            or not _norm_final):
+        return None
+    if not (_norm_final in (_norm_recents or set())
+            or ctx.opening_replay(final_content)):
         return None
     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
     _redo_text = _regen_once(
@@ -754,7 +765,8 @@ def guard_verbatim_replay(ctx) -> Optional[str]:
         max_tokens=700)
     if (_redo_text
             and not _identity_broken(_redo_text)
-            and _parrot_norm(_redo_text) not in _norm_recents):
+            and _parrot_norm(_redo_text) not in (_norm_recents or set())
+            and not ctx.opening_replay(_redo_text)):
         final_content = _redo_text
         response["choices"][0]["message"]["content"] = final_content
     return final_content
@@ -768,7 +780,8 @@ def guard_recycled_lead(ctx) -> Optional[str]:
     _recycled_from_recents = ctx.recycled_from_recents
     _regen_once = ctx.regen_once
     response = ctx.response
-    if not ((not _grounded_reply
+    if not ((not _grounded_reply and not ctx.repeat_requested
+      and not ctx.templated
       and _recycled_from_recents(final_content) >= 0.6)):
         return None
     print("   [ANTI-PARROT] near-replay of recent replies — regenerating once")

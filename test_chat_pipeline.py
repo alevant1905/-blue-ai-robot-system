@@ -137,6 +137,20 @@ def chat(monkeypatch):
         monkeypatch.setattr(bt._continuity_routes, "cancel_turn",
                             lambda *a, **k: None, raising=False)
 
+    # The replay net reads the robot's last 48 h of replies; tests set it.
+    durable = []
+    if getattr(bt, "memory_system", None):
+        monkeypatch.setattr(bt.memory_system, "recent_assistant_replies",
+                            lambda *a, **k: list(durable), raising=False)
+    # The daily briefing is once a day and persisted in data/proactive_state.
+    # json: a morning test run used to consume Alex's real briefing.
+    proactive = {"briefing": "", "alerts": ""}
+    if getattr(bt, "blue_proactive", None):
+        monkeypatch.setattr(bt.blue_proactive, "daily_briefing_if_due",
+                            lambda: proactive["briefing"])
+        monkeypatch.setattr(bt.blue_proactive, "drain_for_response",
+                            lambda *a, **k: proactive["alerts"])
+
     # 4) HARDWARE. No head should twitch during a test run.
     monkeypatch.setattr(bt.blue_head, "get_head",
                         lambda *a, **k: types.SimpleNamespace(
@@ -155,6 +169,7 @@ def chat(monkeypatch):
 
     return types.SimpleNamespace(
         ask=ask, model=model, executed=executed, saved=saved, client=client,
+        durable=durable, proactive=proactive,
     )
 
 

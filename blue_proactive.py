@@ -77,7 +77,7 @@ class ProactiveQueue:
         self._messages: List[Dict] = []
         self._alerted_keys: set = set()
 
-    def push(self, text: str, key: str) -> bool:
+    def push(self, text: str, key: str, occ: Optional[Dict] = None) -> bool:
         with self._lock:
             if key in self._alerted_keys:
                 return False
@@ -85,15 +85,19 @@ class ProactiveQueue:
             self._messages.append({
                 "text": text,
                 "key": key,
+                "occ": occ,
                 "queued_at": datetime.now().isoformat(timespec="seconds"),
             })
             return True
 
     def drain(self) -> List[str]:
+        return [m["text"] for m in self.drain_items()]
+
+    def drain_items(self) -> List[Dict]:
         with self._lock:
-            msgs = [m["text"] for m in self._messages]
+            items = list(self._messages)
             self._messages = []
-            return msgs
+            return items
 
     def reset_dedup(self, key: str) -> None:
         with self._lock:
@@ -119,7 +123,13 @@ def _voice_phrase(occ: Dict, now: datetime) -> str:
     start = occ["start"]
     delta_min = int((start - now).total_seconds() // 60)
     if delta_min <= 0:
-        return f"Heads up, {who} — '{title}' is starting now."
+        # "is starting now" was fixed at queue time and delivered with the
+        # next reply, however late: DH201 "is starting now" went out at 13:13
+        # for a 10:00-12:50 class (2026-09-23).
+        if (now - start) <= timedelta(minutes=2):
+            return f"Heads up, {who} — '{title}' is starting now."
+        clock = start.strftime("%I:%M %p").lstrip("0")
+        return f"Heads up, {who} — '{title}' started at {clock}."
     if delta_min == 1:
         return f"Heads up, {who} — '{title}' in 1 minute."
     if delta_min < 60:
@@ -142,7 +152,9 @@ def _scan_reminders(now: datetime) -> int:
                                      grace_min=ALERT_WINDOW_MIN):
         text = _voice_phrase(occ, now)
         key = f"reminder:{occ['id']}:{occ['occurrence_iso']}"
-        if QUEUE.push(text, key=key):
+        if QUEUE.push(text, key=key, occ={
+                "start": occ["start"], "end": occ.get("end"),
+                "title": occ["title"], "user_name": occ["user_name"]}):
             mark_occurrence_alerted(occ["id"], occ["occurrence_iso"], "queue")
             pushed += 1
     return pushed
@@ -306,10 +318,40 @@ def start() -> None:
     )
 
 
-def drain_for_response() -> str:
-    """Drain queued alerts into a single string. Empty if none pending."""
-    msgs = QUEUE.drain()
-    return " ".join(msgs) if msgs else ""
+# An alert this long past its start is dropped rather than delivered late;
+# its email already went out at the due time.
+ALERT_STALE_MIN = int(os.environ.get("BLUE_PROACTIVE_STALE_MIN", "10"))
+
+
+def drain_for_response(now: Optional[datetime] = None, skip_text: str = "") -> str:
+    """Drain queued alerts into a single string. Empty if none pending.
+
+    Alerts wait for the next chat turn, which can be hours away: of 10
+    "is starting now" deliveries, 8 went out 42-285 minutes late. Each is
+    re-worded for the moment it is delivered, dropped once its event has
+    ended or is more than ALERT_STALE_MIN past its start, and dropped when
+    `skip_text` (the day's briefing) already names it.
+    """
+    now = now or datetime.now()
+    out = []
+    for item in QUEUE.drain_items():
+        occ = item.get("occ")
+        if not occ:
+            out.append(item["text"])
+            continue
+        start, end = occ.get("start"), occ.get("end")
+        start = start if isinstance(start, datetime) else None
+        end = end if isinstance(end, datetime) else None
+        title = occ.get("title") or ""
+        stale = bool(
+            (end and now >= end)
+            or (start and now - start > timedelta(minutes=ALERT_STALE_MIN)))
+        if stale or (title and title in (skip_text or "")):
+            print(f"[PROACTIVE] dropped {'stale' if stale else 'briefed'} alert "
+                  f"'{title}' (queued {item.get('queued_at', '?')[11:16]})")
+            continue
+        out.append(_voice_phrase(occ, now))
+    return " ".join(out)
 
 
 # ===== Daily briefing + conflict detection =====
