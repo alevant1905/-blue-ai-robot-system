@@ -519,6 +519,12 @@ def _expand_row(row, window_start: datetime,
     return occurrences
 
 
+def _series_end_now() -> str:
+    """Completing a recurring series ends it now: past occurrences stay in
+    the record, future ones stop."""
+    return datetime.now().isoformat(timespec="minutes")
+
+
 def occurrences_in_window(window_start: datetime, window_end: datetime,
                           user_name: Optional[str] = None,
                           include_completed: bool = False,
@@ -558,6 +564,14 @@ def occurrences_in_window(window_start: datetime, window_end: datetime,
         ).fetchall()
     out: List[Dict[str, Any]] = []
     for row in rows:
+        # A recurring series marked done with no end date cannot be dated,
+        # so it shows nothing rather than every week forever. "Girls' dance
+        # practice" was completed in June and kept appearing in the
+        # past-tense schedule each Wednesday: "How are you doing tonight
+        # after the girls' dance practice?" (2026-08-19).
+        if (row["recurrence"] and row["completed"]
+                and not (row["until_iso"] or "").strip()):
+            continue
         out.extend(_expand_row(row, window_start, window_end))
     out.sort(key=lambda o: o["start"])
     return out
@@ -1009,9 +1023,11 @@ class CalendarManager:
     def complete_reminder(reminder_id: int) -> Dict[str, Any]:
         with _DB_LOCK, _conn() as c:
             cur = c.execute(
-                "UPDATE reminders SET completed = 1 "
+                "UPDATE reminders SET completed = 1, until_iso = CASE "
+                "WHEN COALESCE(recurrence, '') != '' AND COALESCE(until_iso, '') = '' "
+                "THEN ? ELSE until_iso END "
                 "WHERE id = ? AND completed = 0 AND archived = 0",
-                (reminder_id,),
+                (_series_end_now(), reminder_id),
             )
             changed = cur.rowcount
         if changed == 0:
@@ -1040,9 +1056,11 @@ class CalendarManager:
         if reminder_id is not None:
             with _DB_LOCK, _conn() as c:
                 cur = c.execute(
-                    "UPDATE reminders SET completed = 1 "
+                    "UPDATE reminders SET completed = 1, until_iso = CASE "
+                    "WHEN COALESCE(recurrence, '') != '' AND COALESCE(until_iso, '') = '' "
+                    "THEN ? ELSE until_iso END "
                     "WHERE id = ? AND completed = 0 AND archived = 0",
-                    (reminder_id,),
+                    (_series_end_now(), reminder_id),
                 )
                 changed = cur.rowcount
             if changed == 0:
@@ -1092,7 +1110,10 @@ class CalendarManager:
         rid = rows[0]["id"]
         with _DB_LOCK, _conn() as c:
             c.execute(
-                "UPDATE reminders SET completed = 1 WHERE id = ?", (rid,),
+                "UPDATE reminders SET completed = 1, until_iso = CASE "
+                "WHEN COALESCE(recurrence, '') != '' AND COALESCE(until_iso, '') = '' "
+                "THEN ? ELSE until_iso END WHERE id = ?",
+                (_series_end_now(), rid),
             )
         return {
             "success": True,

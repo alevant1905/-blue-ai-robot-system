@@ -142,6 +142,14 @@ _SALIENCE_WORDS = {
 _TURN = threading.local()
 
 
+def _wording_omitted(user_text: str) -> bool:
+    """Turns whose reply wording is never quoted back: greetings and
+    check-ins, and self-introductions — Hexia's class introductions came back
+    near word for word from these quotes (2026-09-06..09-11)."""
+    return bool(is_social_checkin(user_text) or identity_request_kind(user_text)
+                in {"introduction", "identity", "identity_more"})
+
+
 def _is_failure_exchange(episode: Dict[str, Any]) -> bool:
     """An exchange whose "reply" was a model-failure line, not Blue's words.
 
@@ -1177,13 +1185,13 @@ class RobotContinuity:
             summary, _ = self._episode_context_summary(item)
             details = item.get("details") or {}
             heard = str(details.get("user_text") or "").strip()
-            if item.get("kind") == "exchange" and is_social_checkin(heard):
+            if item.get("kind") == "exchange" and _wording_omitted(heard):
                 # The summary quotes "Blue replied: …"; for a check-in that
                 # quote is only a pattern to copy. Reflection input keeps it.
                 who = (item.get("participants") or ["Someone"])[0]
                 summary = (
-                    f"{who} checked in with you "
-                    f"('{_clip(heard, 80)}'); your reply wording is omitted so it "
+                    f"{who} said "
+                    f"'{_clip(heard, 80)}'; your reply wording is omitted so it "
                     "is never reused."
                 )
             elif (item.get("kind") == "exchange"
@@ -1449,8 +1457,8 @@ class RobotContinuity:
                 if unsafe_reply else
                 # A check-in answer carries no information, only wording to
                 # copy (see is_social_checkin).
-                " (A greeting/check-in; your wording is omitted so it is never "
-                "reused.)" if replied and is_social_checkin(heard) else
+                " (Your reply wording is omitted so it is never "
+                "reused.)" if replied and _wording_omitted(heard) else
                 # A roster quoted back is copied word for word, even with the
                 # <family> block in the prompt (2026-08-19 22:21 and 22:22).
                 " You answered from the household facts (wording omitted)."

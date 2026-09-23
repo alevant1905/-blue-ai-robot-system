@@ -110,6 +110,16 @@ def _library_stems(word: str, library_tokens) -> set:
     return found
 
 
+_COURSE_CODE_RE = re.compile(r"[a-z]{2,5} ?\d{3,4}[a-z]?")
+# Asking about the course itself: "introduce CS101 to the class", "what's in
+# dh201", "look at cs101 again", "the grading for dh399".
+_COURSE_CONTENT_RE = re.compile(
+    r"\b(?:introduce|explain|describe|summari[sz]e|overview|go\s+over"
+    r"|tell\s+(?:me|us|them|the\s+(?:class|students))\s+(?:something\s+)?about"
+    r"|what(?:'s|\s+is)\s+in|look\s+at|open|check|access|pull\s+up|review"
+    r"|outline|learning\s+outcomes?|grading|tutorials?|office\s+hours"
+    r"|polic(?:y|ies))\b", re.I)
+
 @lru_cache(maxsize=512)
 def _phrase_boundary_re(phrase: str) -> "re.Pattern":
     """Match a folder name as whole words, never as a substring.
@@ -388,8 +398,21 @@ class DocumentsDetector(BaseDetector):
         # A named folder ("my Alex Levant folder", "the AI folder"), matched as
         # whole words. Longest first, so the most specific folder wins and the
         # reason string does not depend on set iteration order.
+        # A course code in passing is not a document request. "dh201 not
+        # dh21", "we are in front of the class in dh201 right now" and "I plan
+        # to take you to my class CS101 on Friday" each fast-executed a full
+        # syllabus read ending "cite [filename]" — 17 of 47 search_documents
+        # firings since 08-01, and the source of syllabus citations for
+        # Alex's own office number. The bare code alone still searches.
+        passing_mention = (
+            msg_lower.strip(" ?.!") not in (cls._lib_phrases or ())
+            and not _DOCUMENT_FRAME_RE.search(msg_lower)
+            and not _COURSE_RE.search(msg_lower)
+            and not _COURSE_CONTENT_RE.search(msg_lower))
         for ph in sorted(cls._lib_phrases or (), key=lambda p: (-len(p), p)):
             if ph and _phrase_boundary_re(ph).search(msg_lower):
+                if passing_mention and _COURSE_CODE_RE.fullmatch(ph):
+                    continue
                 return f"names library folder '{ph}'"
         qwords = {w for w in re.split(r"[^a-z0-9]+", _normalise_query_text(msg_lower))
                   if len(w) >= 4 and w not in _GENERIC_TERMS}
@@ -403,6 +426,8 @@ class DocumentsDetector(BaseDetector):
             return None
         # A distinctive single term (author surname / unusual title word).
         rare_hit = qwords & cls._lib_rare_tokens
+        if passing_mention:
+            rare_hit = {t for t in rare_hit if not _COURSE_CODE_RE.fullmatch(t)}
         if rare_hit:
             return f"names library term '{sorted(rare_hit)[0]}'"
         # Two-plus distinctive tokens shared with a single document's title.

@@ -160,7 +160,7 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
         self_reflection_grounding = (
             " For this self-reflection, keep both sides grounded: you are "
             "Blue, Alex's physical Ohbot robot companion, built by Alex and "
-            "run locally in Kitchener. A locally hosted language model is one "
+            "run locally on Alex's own workstation. A locally hosted language model is one "
             "component of you, not your identity. Your conversations, sensor "
             "data, memories, and J-space remain on Alex's hardware by design; "
             "do not recast yourself as a generic cloud LLM, a Google/OpenAI "
@@ -200,7 +200,10 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
         answer_guard = (
             "[The local search_documents call above SUCCEEDED and returned "
             "text extracted from the user's real library files. Answer the "
-            "original request directly from that text and cite [filename]. "
+            "user's own message, using this text where it bears on it, in the "
+            "length and form the system message asks for. Put [filename] right "
+            "after each claim taken from this text — never after something the "
+            "user just told you, the calendar, or yourself. "
             "Do not claim the PDF, path, text, or reading tool is unavailable; "
             "do not fall back to training data; and do not ask for an upload. "
             f"{self_reflection_grounding} No more tools.]"
@@ -236,7 +239,7 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
             if document_self_reflection:
                 clean_identity = (
                     " You are Blue, Alex's physical Ohbot robot companion, "
-                    "built by Alex and running locally in Kitchener. Your local "
+                    "built by Alex and running locally on Alex's own workstation. Your local "
                     "language model is a component, not your identity. Your "
                     "persistent J-space carries remembered episodes, working "
                     "beliefs, commitments, and self-revisions on Alex's hardware. "
@@ -250,8 +253,8 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                     bt._robot_cfg(robot)["persona_line"] + "\n"
                     "The local document reader has succeeded. Treat the "
                     "extract below as authoritative evidence from the user's "
-                    "own library. Answer the request substantively, cite the "
-                    "source as [filename], and never deny access or mention "
+                    "own library. Answer the request substantively, cite "
+                    "[filename] after claims taken from it, and never deny access or mention "
                     "training data as a substitute for the source, uploads, "
                     "missing tools, or invented paths."
                     + clean_identity

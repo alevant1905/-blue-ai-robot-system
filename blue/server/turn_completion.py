@@ -387,8 +387,10 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                     _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
             else:
                 _retry_msgs.insert(0, {"role": "system", "content": _persona})
-            _redo = bt.call_llm(_retry_msgs, include_tools=False,
-                             temperature=0.8, max_tokens=max_tokens)
+            # Unpolished: the polisher compared a regeneration with the reply
+            # it replaces (appended just above) and cut it to two sentences.
+            _redo = bt._raw_call_llm(_retry_msgs, include_tools=False,
+                                     temperature=0.8, max_tokens=max_tokens)
             _t = ""
             try:
                 _t = (((_redo or {}).get("choices") or [{}])[0]

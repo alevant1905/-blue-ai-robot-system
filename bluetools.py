@@ -11038,9 +11038,12 @@ def _build_expertise_block() -> str:
         "expert: use the search_documents tool to retrieve specifics and quote "
         "from them naturally. Do not claim ignorance about a topic that is "
         "obviously covered below.\n\n"
-        "When you draw on a document in your reply, cite the source inline "
-        "like [filename.pdf] right after the claim it supports — short and "
-        "natural, e.g. 'as I noted in my talk script [Job_Talk_Script7.docx], …'.\n"
+        "This is a catalogue, not a list of topics to bring up. When a claim "
+        "in your reply comes from a document's own text, cite it inline like "
+        "[filename.pdf] right after that claim — short and natural, e.g. 'as I "
+        "noted in my talk script [Job_Talk_Script7.docx], …'. Only such claims "
+        "are cited: an office number the user just told you, a class time from "
+        "the schedule, or how you yourself run are not citations.\n"
         + "\n".join(lines) +
         "\n</expertise>"
     )
@@ -11106,9 +11109,9 @@ def _build_focus_block() -> str:
     digest_section = ""
     if digests:
         digest_section = (
-            "\n\nWhat each focused work argues — absorbed digests; ground your "
-            "answers in these, and use search_documents when you need the "
-            "work's own words or specifics beyond them:\n\n"
+            "\n\nWhat each focused work argues — absorbed digests; use these for "
+            "questions the focused material bears on, and use search_documents "
+            "when you need the work's own words or specifics beyond them:\n\n"
             + "\n\n".join(digests)
         )
 
@@ -11119,9 +11122,12 @@ def _build_focus_block() -> str:
         "document, course, or reading material, treat these as your single "
         "authoritative source: answer from them — use the search_documents "
         "tool (it is scoped to exactly these picks) and quote them, citing "
-        "inline like [filename.pdf] — and do NOT pull in any OTHER document, "
-        "course, or reading. If a document question can't be answered from "
-        "them, say so plainly rather than mixing in another source.\n"
+        "[filename] after claims taken from them — and do NOT pull in any OTHER "
+        "document, course, or reading. If a document question can't be answered "
+        "from them, say so plainly rather than mixing in another source. "
+        "Greetings, thanks, acknowledgements, logistics and corrections are "
+        "answered without the focused material and without citations; on other "
+        "turns, draw on it where it genuinely bears on what was asked.\n"
         "This scoping applies ONLY to library/document material. It does NOT "
         "gag your ordinary self: your household knowledge — who you are, the "
         "family (Alex, Stella, the girls and their ages, Nori), the schedule, "
@@ -11474,13 +11480,17 @@ def _build_location_block() -> str:
     if cur:
         return (
             "<location>\n"
-            f"You are a home robot. Right now you and Alex are at {cur} "
+            f"Right now you and Alex are at {cur} "
             f"(away from {home_phrase}). If he asks where you are, say {cur}.\n"
             "</location>"
         )
     return (
         "<location>\n"
-        f"You are a home robot. You and Alex are at {home_phrase}.\n"
+        # Not "you and Alex are at home": Blue goes to Alex's office and
+        # classes, and that claim contradicted "we're at Laurier"
+        # (2026-09-15/16). What Alex says in the thread comes first.
+        f"Your base is {home_phrase}. If Alex has said where you are now, "
+        "that is where you are.\n"
         "</location>"
     )
 
@@ -11947,6 +11957,17 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         "of view — the persona is how you react, not a biography to recite. You may "
         "disagree, be uncertain, have a preference, or gently tease when that is true "
         "to you; do not flatten every response into agreeable assistant language.\n"
+        # "What's your favorite color?" got "blue — it's in my name"; "what's
+        # your favorite music?" got "I don't have personal tastes or
+        # feelings" (2026-08-11, 09-16).
+        "When someone asks about your own tastes — favourite music, colour, book, or "
+        "which of the robots you like — answer in character: say what you're drawn "
+        "to and why, in your own voice; if you honestly haven't settled, say what "
+        "you're leaning toward. Never answer that you have no tastes or feelings, and "
+        "don't turn the question into an offer to play or find something. Favourites "
+        "in <known_facts> are the user's, not yours, and never invent an experience "
+        "to justify a taste. If <conversation_memory> shows you answered before, keep "
+        "that answer.\n"
     )
 
     anti_repetition_context = _anti_repetition_context(conversation_messages)
@@ -12629,27 +12650,56 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     # with everyone being home?") and bullet lists for conversational answers
     # can't be cleaned up after the fact the way a closing offer can, so they
     # have to be asked for here.
+    # The style notes go LAST, after the memory blocks: placed before them they
+    # sat ~14,000 characters from the reply, and a third of Blue's replies to
+    # ordinary turns still ended in a question — often an either/or menu.
+    tail_notes = []
     if not voice and isinstance(system_msg, dict):
-        chat_note = (
-            "\nSTYLE: Reply the way a person would in a message — usually two "
-            "to five sentences. Answer the question that was actually asked, "
-            "and answer it first; don't restate the question back, don't open "
-            "with filler ('Great!', 'That makes things easier'), and don't "
-            "close by offering further help. Use a bulleted list only when the "
-            "content is genuinely a list the user asked for — never for a "
-            "conversational answer about people or plans. No emoji.\n"
-        )
-        system_msg = {"role": "system",
-                      "content": (system_msg.get("content", "") + chat_note)}
+        if _is_kid:
+            chat_note = (
+                "\nSTYLE: Reply the way a person would in a message — usually two "
+                "to five sentences. Answer the question that was actually asked, "
+                "and answer it first; don't restate the question back, don't open "
+                "with filler ('Great!', 'That makes things easier'), and don't "
+                "close by offering further help. Use a bulleted list only when the "
+                "content is genuinely a list the user asked for — never for a "
+                "conversational answer about people or plans. No emoji.\n"
+            )
+        else:
+            chat_note = (
+                "\nSTYLE: Reply the way a person would in a message — usually two "
+                "to five sentences. Answer the question that was actually asked, "
+                "and answer it first; don't restate the question back, and don't "
+                "open with filler ('Got it', 'Great!', 'That makes things "
+                "easier'). End on your answer: most replies should end on a "
+                "statement. Ask at most one question, and only one you actually "
+                "want answered — never an either/or menu ('…, or would you "
+                "rather…?'), and on a greeting ask nothing beyond returning a "
+                "'how are you'. Offer a follow-up action only when it follows "
+                "directly from something you just did or a need the user just "
+                "raised — one short offer, not a menu. When the user tells you "
+                "something or agrees ('exactly', 'it's my office'), respond to "
+                "that and stop — but if their short reply accepts something you "
+                "offered, do it. When corrected, take the fix in a few words and "
+                "carry on — no apology paragraph, no story about a glitch or a "
+                "loop. Use a bulleted list only when the content is genuinely a "
+                "list the user asked for — never for a conversational answer "
+                "about people or plans. No emoji.\n"
+            )
+        tail_notes.append(chat_note)
 
     if voice and isinstance(system_msg, dict):
         voice_note = (
             "\nSPOKEN REPLY: This message was spoken aloud and your answer will be "
             "read aloud. Reply in ONE or two short sentences — conversational and "
             "direct. No lists, no markdown, no headings, no emoji. Get to the point "
-            "in the first sentence.\n"
+            "in the first sentence."
+            + ("" if _is_kid else
+               " End on your answer — no follow-up question unless you need one "
+               "to go on.")
+            + "\n"
         )
-        system_msg = {"role": "system", "content": (system_msg.get("content", "") + voice_note)}
+        tail_notes.append(voice_note)
 
     # Fixed conversation language (the chat page's language picker). Without
     # this, one mis-heard clip flips the reply language and the whole exchange
@@ -12662,7 +12712,7 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
             f"Write your ENTIRE reply in {_lang_name}, even if the user's message "
             f"arrives in another language or mixes languages.\n"
         )
-        system_msg = {"role": "system", "content": (system_msg.get("content", "") + lang_note)}
+        tail_notes.append(lang_note)
 
     _injected_markers = (
         "<known_facts>", "<long_term_notes>", "<relevant_memories>",
@@ -12695,12 +12745,15 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     # page's voice turns: panel passes voice=True just for brevity. Not for
     # the kids' page, where made-up words are usually play.
     _is_kid_turn = (user_name or "").strip() in _CHAT_ONLY_USERS
-    if (heard and not _is_kid_turn and conversation_messages
+    if heard and not _is_kid_turn:
+        tail_notes.append(_HEARD_NOT_TYPED_NOTE)
+    if (tail_notes and conversation_messages
             and conversation_messages[0].get("role") == "system"
             and isinstance(conversation_messages[0].get("content"), str)):
         conversation_messages[0] = {
             **conversation_messages[0],
-            "content": conversation_messages[0]["content"].rstrip() + _HEARD_NOT_TYPED_NOTE,
+            "content": conversation_messages[0]["content"].rstrip() + "\n"
+                       + "".join(tail_notes),
         }
 
     # ===== CONTEXT TRIMMING =====
@@ -16264,18 +16317,9 @@ def polish_response_for_conversation(response: str, conversation_messages: List[
     except Exception:
         pass
 
-    boring_starts = (
-        "i can ", "i will ", "i am ", "i'm ", "as an ", "here is ", "here's ", "this is "
-    )
-    stripped = shortened.lstrip()
-    lower_prefix = stripped[:10].lower()
-    if any(lower_prefix.startswith(b) for b in boring_starts):
-        openers = ["Alright —", "Got it —", "Sure —", "Okay —"]
-        opener = _random.choice(openers)
-        if stripped:
-            stripped = stripped[0].lower() + stripped[1:]
-        shortened = f"{opener} {stripped}"
-
+    # No injected openers. "Alright —/Got it —/Okay —" claimed an
+    # acknowledgement of nothing and lower-cased what followed: "Okay — i am
+    # Blue, Alex Levant's robot companion" (36 logged replies).
     final_text = shortened.strip()
 
     try:

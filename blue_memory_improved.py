@@ -34,9 +34,11 @@ from blue_identity import (
     identity_response_problem,
     age_on,
     derive_ages,
+    contextual_identity_request_kind,
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
+    is_social_checkin,
 )
 
 # ---------------------------------------------------------------------------
@@ -3797,6 +3799,13 @@ class EnhancedMemorySystem:
         and the model fills the gap."""
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
+        # Not for greetings or "who are you" turns. Old self-descriptions
+        # came back through here as "your own work… answer from this" on 44
+        # of Blue's 63 turns since 09-01, most saying he runs "here in
+        # Kitchener"; the identity note already forbids reusing them.
+        if (is_social_checkin(user_msg)
+                or contextual_identity_request_kind(user_msg, messages)):
+            return ""
         try:
             terms = self._topic_query_terms(messages, user_msg)
             hits = self._search_past_answers(terms, robot=robot)
@@ -3824,7 +3833,10 @@ class EnhancedMemorySystem:
             "Summarise or quote it as needed. Long answers are cut off at the "
             "end; if the user needs the rest, say so rather than filling the "
             "gap from imagination. Never invent content to stand in for this — "
-            "if what they want isn't here, say you don't have it:\n"
+            "if what they want isn't here, say you don't have it. Each was true "
+            "when written (see its date): where you are, schedules and anything "
+            "Alex has corrected since may have changed, and the current "
+            "<location>, facts and corrections outrank these:\n"
             + "\n".join(lines) +
             "\n</earlier_answers>"
         )
