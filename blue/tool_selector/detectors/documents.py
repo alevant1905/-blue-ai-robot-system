@@ -61,8 +61,7 @@ systems process processes development developing education feedback thoughts
 thought toward towards press master costs fight creative acting archive
 movements resistance reproduction realism recorded producing untitled thesis
 disagree
-think commercial mirror mark ethical interaction driven architecture
-developmental pedagogical
+think mirror mark ethical interaction driven architecture developmental
 """.split())
 # The last two lines came from sweeping every logged user message through
 # _library_match (2026-09-23): "think", out of an "AIME Think Tank" report,
@@ -114,11 +113,17 @@ _COURSE_CODE_RE = re.compile(r"[a-z]{2,5} ?\d{3,4}[a-z]?")
 # Asking about the course itself: "introduce CS101 to the class", "what's in
 # dh201", "look at cs101 again", "the grading for dh399".
 _COURSE_CONTENT_RE = re.compile(
-    r"\b(?:introduce|explain|describe|summari[sz]e|overview|go\s+over"
-    r"|tell\s+(?:me|us|them|the\s+(?:class|students))\s+(?:something\s+)?about"
-    r"|what(?:'s|\s+is)\s+in|look\s+at|open|check|access|pull\s+up|review"
-    r"|outline|learning\s+outcomes?|grading|tutorials?|office\s+hours"
-    r"|polic(?:y|ies))\b", re.I)
+    r"\b(?:introduc(?:e|ed|ing)|explain|describe|summari[sz]e|overview|go\s+over"
+    r"|tell\s+(?:me|us|them|the\s+(?:class|students))\b[^.!?]{0,40}\babout"
+    r"|is\s+(?:all\s+)?about|what(?:'s|\s+is)\s+in|look\s+at|open|check|access"
+    r"|pull\s+up|review|outline|learning\s+outcomes?|grad(?:ed|ing|es?)"
+    r"|cover(?:s|ed|ing)?|tutorials?|office\s+hours|polic(?:y|ies)|tas?|room"
+    r"|topics?)\b", re.I)
+# A question about a course is a request for its syllabus: "what is dh201
+# about?", "how is dh201 graded", "who are the TAs for cs101".
+_COURSE_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:can|could|would)\s+you\s+(?:tell\s+me\s+)?)?"
+    r"(?:what|what's|whats|who|how|when|where|which)\b", re.I)
 
 @lru_cache(maxsize=512)
 def _phrase_boundary_re(phrase: str) -> "re.Pattern":
@@ -408,7 +413,8 @@ class DocumentsDetector(BaseDetector):
             msg_lower.strip(" ?.!") not in (cls._lib_phrases or ())
             and not _DOCUMENT_FRAME_RE.search(msg_lower)
             and not _COURSE_RE.search(msg_lower)
-            and not _COURSE_CONTENT_RE.search(msg_lower))
+            and not _COURSE_CONTENT_RE.search(msg_lower)
+            and not _COURSE_QUESTION_RE.search(msg_lower))
         for ph in sorted(cls._lib_phrases or (), key=lambda p: (-len(p), p)):
             if ph and _phrase_boundary_re(ph).search(msg_lower):
                 if passing_mention and _COURSE_CODE_RE.fullmatch(ph):

@@ -88,7 +88,7 @@ def test_dont_forget_is_a_store_not_a_negation():
 def test_saving_a_fact_reaches_the_store(monkeypatch):
     written = {}
     monkeypatch.setattr(bt, "save_blue_facts",
-                        lambda facts: written.update(facts) or True)
+                        lambda facts, **kw: written.update(facts) or True)
 
     result = json.loads(bt.execute_tool(
         "remember_fact", {"fact_key": "athena_age", "fact_value": "11"}))
@@ -100,7 +100,7 @@ def test_saving_a_fact_reaches_the_store(monkeypatch):
 def test_a_rejected_save_is_reported_as_a_failure(monkeypatch):
     """save_facts drops junk silently. The model must be told, or it will
     announce a save that did not happen — the whole bug."""
-    monkeypatch.setattr(bt, "save_blue_facts", lambda facts: False)
+    monkeypatch.setattr(bt, "save_blue_facts", lambda facts, **kw: False)
 
     result = json.loads(bt.execute_tool(
         "remember_fact", {"fact_key": "athena_age", "fact_value": "11"}))
@@ -111,7 +111,7 @@ def test_a_rejected_save_is_reported_as_a_failure(monkeypatch):
 
 def test_missing_arguments_do_not_claim_a_save(monkeypatch):
     called = []
-    monkeypatch.setattr(bt, "save_blue_facts", lambda facts: called.append(facts))
+    monkeypatch.setattr(bt, "save_blue_facts", lambda facts, **kw: called.append(facts))
 
     result = json.loads(bt.execute_tool("remember_fact", {}))
 
@@ -120,7 +120,7 @@ def test_missing_arguments_do_not_claim_a_save(monkeypatch):
 
 
 def test_a_store_failure_is_not_swallowed(monkeypatch):
-    def boom(facts):
+    def boom(facts, **kw):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(bt, "save_blue_facts", boom)

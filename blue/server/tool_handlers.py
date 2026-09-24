@@ -604,7 +604,10 @@ def _tool_remember_fact(tool_name, tool_args):
         })
 
     try:
-        saved = bt.save_blue_facts({fact_key: fact_value})
+        # An explicit "remember that …" is the one write allowed to move a
+        # stored birth year to match a stated age.
+        saved = bt.save_blue_facts({fact_key: fact_value},
+                                   age_moves_birthdate=True)
     except Exception as e:
         bt.log.error(f"[FACT] save failed for {fact_key!r}: {e}")
         return json.dumps({

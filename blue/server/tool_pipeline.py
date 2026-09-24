@@ -833,6 +833,17 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
         print(f"[TOOL] Model requested {len(tool_calls)} tool call(s)")
 
+        # A call cut off by the token cap has truncated JSON arguments —
+        # half a document, half an email. Running it would save or send the
+        # fragment; parsing it used to raise straight to a 500.
+        if (response.get("choices") or [{}])[0].get("finish_reason") == "length":
+            print("   [LLM] tool call cut off at the length limit — not running it")
+            return {"choices": [{"message": {"role": "assistant", "content": (
+                "[System: that was cut off at the length limit before it could "
+                "be saved or sent. Nothing was done — ask for a shorter version "
+                "or in parts.]")}, "finish_reason": "length"}],
+                "blue_error": "length"}
+
         # Check if model is using tools when it shouldn't
         if is_greeting and not force_tool:
             print(f"   [WARN] Model called tool for greeting/casual chat - this is unnecessary!")
@@ -842,7 +853,17 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
         for tool_call in tool_calls:
             function_name = tool_call["function"]["name"]
-            function_args = json.loads(tool_call["function"]["arguments"])
+            try:
+                function_args = json.loads(tool_call["function"]["arguments"] or "{}")
+            except (ValueError, TypeError) as exc:
+                bt.log.warning(f"[TOOL] unreadable {function_name} arguments: {exc}")
+                conversation_messages.append({
+                    "role": "tool", "tool_call_id": tool_call["id"],
+                    "name": function_name,
+                    "content": json.dumps({"success": False, "error":
+                        "The call's arguments were not valid JSON; nothing was run."}),
+                })
+                continue
             tool_result = bt.execute_tool(function_name, function_args)
             conversation_messages.append({
                 "role": "tool",

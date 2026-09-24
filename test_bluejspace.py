@@ -1195,3 +1195,18 @@ def test_a_family_roster_is_not_quoted_back_into_the_prompt(continuity_module):
     for block in (memory, jspace):
         assert "Black Goldendoodle" not in block
     assert "household facts" in memory
+
+
+def test_the_models_own_roster_is_hidden_after_a_non_family_question(continuity_module):
+    """The reply, not the question, marks a roster: "can you list them
+    again?" names no family, but the reply is the roster all the same."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "can you list them again?",
+        "I know your family as you and Stella, your partner; your daughters "
+        "Athena (11), Emmy (10), Vilda (8); and Nori, your Black Goldendoodle.",
+        user_name="Alex",
+    )
+    jspace = route.jspace_context_block("blue")
+    assert "Black Goldendoodle" not in jspace
+    assert "answered from the household facts" in jspace

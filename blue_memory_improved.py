@@ -460,6 +460,10 @@ class EnhancedMemorySystem:
             ("decay_score", "REAL DEFAULT 1.0"),
             ("tags", "TEXT"),
             ("related_ids", "TEXT"),
+            # Legacy columns the insert still fills. Without them every
+            # memory saved to a freshly created database failed silently.
+            ("memory_type", "TEXT"),
+            ("timestamp", "REAL"),
         ]:
             if col not in existing_cols:
                 c.execute(f"ALTER TABLE memories ADD COLUMN {col} {defn}")
@@ -796,7 +800,8 @@ class EnhancedMemorySystem:
         return derive_ages({r["fact_key"]: r["fact_value"] for r in rows},
                            date.today())
 
-    def save_facts(self, facts: Dict[str, str]) -> bool:
+    def save_facts(self, facts: Dict[str, str],
+                   age_moves_birthdate: bool = False) -> bool:
         """Save key-value facts with confidence tracking and contradiction handling.
 
         Behaviour:
@@ -815,6 +820,7 @@ class EnhancedMemorySystem:
         conn = self._conn()
         now = datetime.now().isoformat()
         saved = 0
+        confirmed = 0
         contradicted = 0
 
         for key, value in list(facts.items()):
@@ -852,6 +858,13 @@ class EnhancedMemorySystem:
                     current = age_on(birthdate, today)
                     if current is not None:
                         if int(value) == current:
+                            # Already true: a success, not "rejected as junk".
+                            confirmed += 1
+                            continue
+                        # Only an explicit "remember that Athena is 12"
+                        # moves the birth year. A background extraction of
+                        # "why did you say Athena is 10?" must not.
+                        if not age_moves_birthdate:
                             continue
                         _, month, day = birthdate.split("-")
                         year = (today.year - int(value)
@@ -970,7 +983,7 @@ class EnhancedMemorySystem:
                 tags=["fact", "core"],
             )
 
-        return saved > 0
+        return saved > 0 or confirmed > 0
 
     def _log_contradiction(self, conn: sqlite3.Connection, key: str,
                            old_value: str, new_value: str) -> None:
@@ -2085,9 +2098,16 @@ class EnhancedMemorySystem:
             return True
         # Speech-to-text cannot carry an email address: "ALEVAT at gmail.com"
         # replaced the real one and kept it out of the prompt from June on.
-        if "email" in key.lower() and not re.fullmatch(
-                r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", val.strip()):
-            return True
+        # Only keys that name an address ("email", "stella_email",
+        # "alex_emails"), and a list of addresses is fine; "email_preference"
+        # is not an address at all.
+        _k = re.sub(r"[\s-]+", "_", key.lower().strip())
+        if re.search(r"(?:^|_)e_?mails?(?:_address(?:es)?)?$", _k):
+            _parts = [p for p in re.split(r"[,;\s]+", val.strip().rstrip("."))
+                      if p and p.lower() not in ("and", "or")]
+            if not _parts or not all(
+                    re.fullmatch(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", p) for p in _parts):
+                return True
 
         key_norm = re.sub(r"[^a-z0-9]", "", key.lower())
         val_norm = re.sub(r"[^a-z0-9]", "", val.lower())

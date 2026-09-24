@@ -63,10 +63,15 @@ def test_a_stated_age_moves_the_birth_year_not_a_stale_number(memory):
     memory.save_facts({"athena_birthdate": "2015-08-15", "athena_age": "10"})
     assert memory.load_facts()["athena_age"] == "11"
 
-    memory.save_facts({"athena_age": "11"})
+    assert memory.save_facts({"athena_age": "11"}), "already true is a success"
     assert memory.load_facts()["athena_birthdate"] == "2015-08-15"
 
-    memory.save_facts({"athena_age": "12"})
+    # A background extraction ("why did you say Athena is 10?") must not move it.
+    memory.save_facts({"athena_age": "10"})
+    assert memory.load_facts()["athena_birthdate"] == "2015-08-15"
+
+    # An explicit remember_fact does.
+    memory.save_facts({"athena_age": "12"}, age_moves_birthdate=True)
     facts = memory.load_facts()
     assert facts["athena_birthdate"] == "2014-08-15"
     assert facts["athena_age"] == "12"
@@ -81,6 +86,8 @@ def test_the_prompt_block_shows_the_derived_age(memory):
 def test_a_dictated_email_is_not_a_fact(memory):
     assert memory._is_junk_fact("email_address", "ALEVAT at gmail.com")
     assert not memory._is_junk_fact("stella_email", "stella.andonoff@gmail.com")
+    assert not memory._is_junk_fact("alex_emails", "a@x.com, b@y.ca")
+    assert not memory._is_junk_fact("email_preference", "prefers email over phone")
 
 
 # ---- dates and times are not ages ---------------------------------------------
@@ -104,6 +111,8 @@ AGES = {"emmy": "10", "athena": "11", "vilda": "8"}
     "Athena was born in 2015.",
     "Athena's birthday is 8/15.",
     "Emmy's birthday is March 3.",
+    "Vilda's swim lesson is at 4:30.",
+    "Emmy has the dentist at 11:00, then school.",
 ])
 def test_a_date_or_a_time_is_not_an_age(reply):
     assert NS["_misstated_ages"](reply, AGES) == {}
@@ -123,9 +132,43 @@ def test_a_wrong_age_is_still_caught(reply):
 from blue.server.turn_completion import _scrub_unbacked_write_claims as scrub  # noqa: E402
 
 
-def test_a_claimed_save_with_nothing_saved_is_removed():
+def test_a_claimed_save_answering_a_question_is_removed():
     reply = "She's 11 now. I've updated my records so it sticks this time."
-    assert scrub(reply, []) == "She's 11 now."
+    assert scrub(reply, [], user_text="How old is athena") == "She's 11 now."
+
+
+def test_a_statement_may_still_be_saved_after_the_reply():
+    """The background extractor saves plain statements after the reply."""
+    reply = "Got it. I've updated my notes: Vilda is not in French immersion."
+    assert scrub(reply, [], user_text="vilda is not in french immersion") == reply
+
+
+def test_a_reminder_or_task_write_backs_a_locked_in_claim():
+    for tool in ("create_reminder", "reschedule_reminder", "create_task"):
+        reply = "I've locked it in for Friday at 3 PM."
+        assert scrub(reply, [{"name": tool, "success": True}],
+                     user_text="remind me friday at 3 to call the dentist") == reply
+
+
+def test_completed_reminders_back_a_cleared_claim():
+    reply = "Done — I've cleared the two remaining CMDS4740 reminders."
+    assert scrub(reply, [{"name": "complete_reminder", "success": True}],
+                 user_text="yes") == reply
+
+
+def test_an_earlier_save_backs_did_you_save_that():
+    reply = "Yes, I've saved that to my memory."
+    assert scrub(reply, [], user_text="did you save that?",
+                 recent={"remember_fact"}) == reply
+
+
+@pytest.mark.parametrize("reply", [
+    "All I have saved in my memory about Felix is that he's your brother.",
+    "Everything I have stored in my notes says Athena turned 11 on August 15.",
+    "The only address I have saved in my records is stella.andonoff@gmail.com.",
+])
+def test_recall_is_not_a_claim(reply):
+    assert scrub(reply, [], user_text="what do you know about felix?") == reply
 
 
 def test_a_real_save_keeps_its_claim():
@@ -151,7 +194,8 @@ def test_asking_to_be_told_is_not_a_claim():
 
 
 def test_a_bare_claim_becomes_an_honest_not_saved():
-    out = scrub("Got it. I've updated my memory for Vilda: she's eight.", [])
+    out = scrub("Got it. I've updated my memory for Vilda: she's eight.", [],
+                user_text="remember that vilda is eight")
     assert "isn't saved" in out
 
 
@@ -173,11 +217,56 @@ def test_placeholder_recipients_are_refused_before_gmail_is_touched(monkeypatch)
     called = []
     monkeypatch.setattr(bt, "get_gmail_service", lambda: called.append(1))
     monkeypatch.setattr(bt, "GMAIL_AVAILABLE", True)
-    result = bt._execute_send_gmail({"to": "alex.levant@example.com",
-                                     "subject": "Draft for Review", "body": "x"})
-    assert '"success": false' in result
+    for to in ("alex.levant@example.com", "Alex Levant <alex.levant@example.com>",
+               "alex.levant@example.com."):
+        result = bt._execute_send_gmail({"to": to, "subject": "Draft", "body": "x"})
+        assert '"success": false' in result, to
     assert called == []
 
 
 def test_the_kids_page_cannot_write_facts():
     assert "remember_fact" in bt._KID_BLOCKED_TOOLS
+
+
+def test_the_send_detector_needs_an_instruction():
+    from blue.tool_selector.selector import ImprovedToolSelector
+    selector = ImprovedToolSelector()
+
+    def tool(message):
+        primary = selector.select_tool(message, []).primary_tool
+        return primary.tool_name if primary else None
+
+    for message in ("Did you send the photo to stella.andonoff@gmail.com?",
+                    "Don't send anything to stella.andonoff@gmail.com yet",
+                    "Stella said she would send the forms to alevant@yorku.ca next week",
+                    "Did you send an email to Stella?"):
+        assert tool(message) != "send_gmail", message
+    for message in ("send it to stella@example.com",
+                    "can you send the photo to x@y.com",
+                    "please send the draft to alevant@yorku.ca"):
+        assert tool(message) == "send_gmail", message
+
+
+def test_your_brother_asked_of_the_robot_is_not_alexs_brother():
+    from blue_identity import canonical_household_reply
+    facts = {"brother_name": "Felix", "brother_spouse": "Svetlana",
+             "daughter_name": "Athena, Emmy, Vilda"}
+    assert canonical_household_reply("who is your brother?", "blue", facts, "Alex") is None
+
+
+def test_a_yes_to_an_offer_can_still_be_a_phantom_correction():
+    from blue_identity import is_phantom_correction_ack
+    assert is_phantom_correction_ack("Right. I stand corrected—Athena is 10.", "yes")
+    assert is_phantom_correction_ack(
+        "You're right—I've been stuck in my introduction loop.",
+        "tell the class about yourself")
+
+
+def test_a_fresh_database_can_store_memories(memory):
+    """The insert fills legacy columns the new schema never created, so every
+    memory saved to a new database failed with only a printed warning."""
+    import sqlite3
+    memory._store_memory("event", "swim", "Vilda swam her first length today.")
+    with sqlite3.connect(memory.db_path) as conn:
+        rows = conn.execute("SELECT content FROM memories").fetchall()
+    assert rows == [("Vilda swam her first length today.",)]

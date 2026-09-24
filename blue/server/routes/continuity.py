@@ -1992,6 +1992,29 @@ def turn_has_tools() -> bool:
     return bool(getattr(_TURN, "tools", None))
 
 
+def recent_successful_tools(robot: str, minutes: float = 30) -> set:
+    """Tools that succeeded for this robot in the last `minutes` — so "did you
+    save that?" → "Yes, I've saved it" is backed by the earlier turn's save."""
+    hub = _hub(robot)
+    if not hub:
+        return set()
+    since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    names = set()
+    try:
+        for episode in hub.store.list_episodes(limit=30):
+            if episode.get("source") != "tool_executor":
+                continue
+            when = _parse_time(episode.get("occurred_at"))
+            if when and when < since:
+                continue
+            details = episode.get("details") or {}
+            if details.get("success") and details.get("tool"):
+                names.add(str(details["tool"]))
+    except Exception:
+        return set()
+    return names
+
+
 def turn_tool_outcomes() -> Optional[List[Dict[str, Any]]]:
     """The tools this chat request ran so far, or None when not collecting
     (then nobody can say whether a write happened)."""

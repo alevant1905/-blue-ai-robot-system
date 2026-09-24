@@ -101,6 +101,8 @@ def test_a_reminder_follows_the_answer_and_is_not_recorded(chat):
     reply = reply_of(response)
     assert reply.startswith("Yes, I can hear you perfectly.")
     assert reply.endswith("Heads up, Alex — 'DH201' is starting now.")
-    saved = [a for a, k in chat.saved
-             if k.get("role", a[1] if len(a) > 1 else None) == "assistant"]
-    assert saved and all("Heads up" not in str(row) for row in saved)
+    rows = [k.get("content", a[2] if len(a) > 2 else "")
+            for a, k in chat.saved
+            if k.get("role", a[1] if len(a) > 1 else None) == "assistant"]
+    assert rows and all("Heads up" not in row for row in rows)
+    assert any(row.startswith("Yes, I can hear you perfectly.") for row in rows)

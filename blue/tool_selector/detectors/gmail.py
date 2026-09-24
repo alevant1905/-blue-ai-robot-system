@@ -32,6 +32,17 @@ _REPLY_IMPERATIVE_RE = re.compile(
     r"(?:reply|respond|write\s+(?:a\s+)?reply)\b")
 
 
+_SEND_IMPERATIVE_RE = re.compile(
+    r"^\s*(?:(?:blue|ok(?:ay)?|please|now|so|and|then|hey)[,\s]+)*"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+)?"
+    r"send\b[^.!?]{0,40}\bto\b")
+_SEND_NEGATED_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|never|no\s+need\s+to|won'?t|shouldn'?t)\s+"
+    r"(?:\w+\s+){0,2}(?:send|e-?mail)\b")
+_SEND_ASKED_ABOUT_RE = re.compile(
+    r"^\s*(?:(?:blue|so|and|hey)[,\s]+)*(?:did|have|has|why\s+did|when\s+did|"
+    r"who\s+did|what\s+did|where\s+did)\b[^.!?]{0,60}\bsen[dt]\b")
+
 class GmailDetector(BaseDetector):
     """Detects Gmail/email-related intents."""
 
@@ -138,6 +149,10 @@ class GmailDetector(BaseDetector):
         has_address = bool(_ADDRESS_RE.search(message))
         if _SENT_TO_BLUE_RE.search(msg_lower) and not has_address:
             return None
+        # Asking about a send, or telling Blue not to send, is never a send:
+        # "Did you send the photo to stella…?", "Don't send anything to … yet".
+        if _SEND_NEGATED_RE.search(msg_lower) or _SEND_ASKED_ABOUT_RE.search(msg_lower):
+            return None
 
         send_signals = {
             'strong': [
@@ -149,7 +164,9 @@ class GmailDetector(BaseDetector):
         # "send to" names no medium; it's an email only when one is in view.
         if has_address or has_any_word(_EMAIL_NOUNS, msg_lower):
             send_signals['strong'].append('send to')
-        if has_address and re.search(r'\bsend\b[^.!?]{0,40}\bto\b', msg_lower):
+        # Only an instruction to Blue: "Stella said she would send the forms
+        # to alevant@yorku.ca" names an address and a send, and is neither.
+        if has_address and _SEND_IMPERATIVE_RE.search(msg_lower):
             send_signals['strong'].append('send')
 
         # Follow-up imperatives — "go ahead", "send it now", "do it again", etc.

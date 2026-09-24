@@ -1134,14 +1134,16 @@ def _facts_block() -> str:
 
 
 
-def save_blue_facts(facts: Dict[str, str], db_path: str = None) -> bool:
+def save_blue_facts(facts: Dict[str, str], db_path: str = None,
+                    age_moves_birthdate: bool = False) -> bool:
     """Save facts using improved memory system if available."""
     global BLUE_FACTS
     BLUE_FACTS.update(facts)
     invalidate_facts_cache()
     
     if ENHANCED_MEMORY_AVAILABLE and memory_system:
-        return memory_system.save_facts(facts)
+        return memory_system.save_facts(
+            facts, age_moves_birthdate=age_moves_birthdate)
     
     # Fallback to legacy system
     if db_path is None:
@@ -7073,8 +7075,12 @@ def _execute_send_gmail(args: Dict[str, Any]) -> str:
     if to.strip().lower() in {"me", "myself", "alex", "alex levant"}:
         to = _owner_addresses_list()[0] if _owner_addresses_list() else to
         args = {**args, "to": to}
-    _placeholder = [a for a in re.split(r"[,;\s]+", to + "," + str(args.get("cc", "") or ""))
-                    if a and _PLACEHOLDER_ADDRESS_RE.search(a)]
+    # getaddresses handles "Alex Levant <alex.levant@example.com>"; a bare
+    # split left "<…>" and the anchored pattern missed it.
+    _addrs = [a.strip().strip(".<>()\"' ")
+              for _, a in getaddresses([to, str(args.get("cc", "") or ""),
+                                        str(args.get("bcc", "") or "")])]
+    _placeholder = [a for a in _addrs if a and _PLACEHOLDER_ADDRESS_RE.search(a)]
     if _placeholder:
         return json.dumps({
             "success": False,
@@ -10574,6 +10580,10 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
         _vision_queue.clear()
 
 
+_LONG_ARGUMENT_TOOLS = {"create_document", "create_note", "update_note",
+                        "send_gmail", "reply_gmail", "write_file"}
+
+
 def _chat_max_tokens() -> int:
     """The reply cap for chat turns; override with BLUE_CHAT_MAX_TOKENS."""
     try:
@@ -10604,7 +10614,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         # Was -1 (unlimited): on 2026-09-23 a reply looped to 99,666 chars.
         # 2048 tokens (~8,000 chars) still fits a full letter or syllabus
         # review; blue/server/runaway.py trims whatever loops inside it.
-        "max_tokens": _chat_max_tokens(),
+        # A forced document, note or email carries its whole body in the
+        # tool arguments; 2048 tokens would cut the JSON off mid-document.
+        "max_tokens": (8192 if force_tool in _LONG_ARGUMENT_TOOLS
+                       else _chat_max_tokens()),
         "stream": False,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
@@ -14531,7 +14544,7 @@ def _unrequested_ages(text: str, user_msg: str, canonical: dict) -> List[str]:
     for person in canonical:
         if re.search(
                 rf"\b{re.escape(person)}\b((?:(?![.!?\n]).){{0,24}}?)"
-                rf"(?<![\d/])(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
+                rf"(?<![\d/])(?<!\d:)(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
             stated.append(person)
     return stated if len(stated) >= 2 else []
 
@@ -14589,7 +14602,7 @@ def _misstated_ages(text: str, canonical: dict) -> dict:
     for person, age in (canonical or {}).items():
         for m in re.finditer(
                 rf"\b{re.escape(person)}\b((?:(?!{others}|[.!?\n]).){{0,48}}?)"
-                rf"(?<![\d/])(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
+                rf"(?<![\d/])(?<!\d:)(\d{{1,2}})(?!\d)\s*(?:{_AGE_TAIL})", low):
             # "grade 5", "page 5", "10 minutes" — a number that counts
             # something else entirely.
             if _NOT_AN_AGE_RE.search(m.group(1)):

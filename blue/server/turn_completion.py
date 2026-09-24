@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 
 import bluetools as bt
 from blue.server import runaway as _runaway
+from blue_identity import _ASKS_OR_GREETS_RE
 
 
 # Compiled once. These were rebuilt on every single turn, and living inside
@@ -238,7 +239,22 @@ _MEMORY_WRITE_TOOLS = {"remember_fact", "remember_person", "remember_place",
                        "add_contact", "create_note", "update_note",
                        "create_document"}
 _REMINDER_WRITE_TOOLS = {"cancel_reminder", "reschedule_reminder",
-                         "delete_reminder", "update_reminder"}
+                         "complete_reminder", "create_reminder"}
+# Any real write backs a "…locked it in / saved that in…" claim: "I've
+# locked it in for Friday at 3 PM" after create_reminder is true.
+_ANY_WRITE_TOOLS = (_MEMORY_WRITE_TOOLS | _REMINDER_WRITE_TOOLS
+                    | {"create_task", "complete_task", "write_file"})
+# The user asked for something to be kept.
+_STORE_REQUEST_RE = re.compile(
+    r"\b(?:remember|update (?:your|my) (?:memory|records?)|save (?:that|this|it)"
+    r"|don['’]?t forget|lock (?:that|it|this) in|make a note|note (?:that|this))\b",
+    re.I)
+# "All I have saved in my memory about Felix is…", "The only address I have
+# saved in my records is…" — recall, not a claim of a new save.
+_RECALL_BEFORE_RE = re.compile(
+    r"\b(?:all|everything|anything|nothing|only|what|that|which|the \w+)\s*$", re.I)
+_RECALL_AFTER_RE = re.compile(
+    r"^[^.!?]{0,40}?\b(?:is|are|was|says|shows|include[sd]?)\b", re.I)
 
 
 _BARE_ACK_RE = re.compile(
@@ -253,20 +269,38 @@ def _substantive(text):
     return len(text.split()) >= 3 and not _BARE_ACK_RE.fullmatch(text)
 
 
-def _scrub_unbacked_write_claims(reply, outcomes):
-    """Remove claims of a save or a cleared reminder that did not happen.
+def _claims(pattern, sentence):
+    for m in pattern.finditer(sentence):
+        if _RECALL_BEFORE_RE.search(sentence[:m.start()]):
+            continue
+        if _RECALL_AFTER_RE.search(sentence[m.end():]):
+            continue
+        return True
+    return False
 
-    "I've updated my records so it sticks this time" (2026-08-15) and "I have
-    updated my records" (08-19) were said with nothing written; "Just
-    finished clearing out those last CMDS4740 reminders" (08-11) with no
-    reminder tool run at all. `outcomes` is this turn's tool record; None
-    means nobody was collecting, so nothing is judged.
+
+def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=()):
+    """Remove claims of a save or a cleared reminder that cannot be true.
+
+    "How old is athena" → "She's 11 now. I've updated my records so it sticks
+    this time" (2026-08-15): nothing was written. "Just finished clearing out
+    those last CMDS4740 reminders" (08-11): no reminder tool ran.
+
+    Judged narrowly, because a wrong "not saved" is as false as a wrong
+    "saved": `outcomes` is this turn's tool record (None: nobody collecting,
+    judge nothing) and `recent` the tools that succeeded in the last half
+    hour. A save claim is judged only when the user asked a question (a save
+    does not answer one) or asked for a save that no tool made; a plain
+    statement may still be saved by the background extractor after the reply.
     """
     if outcomes is None or not reply:
         return reply
     succeeded = {o.get("name") for o in outcomes if o.get("success")}
+    succeeded |= set(recent or ())
+    user = user_text or ""
     checks = []
-    if not succeeded & _MEMORY_WRITE_TOOLS:
+    if (not succeeded & _ANY_WRITE_TOOLS
+            and (_ASKS_OR_GREETS_RE.search(user) or _STORE_REQUEST_RE.search(user))):
         checks.append((_MEMORY_WRITE_CLAIM_RE,
                        "Got it — though that isn't saved to my long-term "
                        "memory yet. Say “remember that …” and I'll keep it."))
@@ -276,10 +310,10 @@ def _scrub_unbacked_write_claims(reply, outcomes):
                        "one and I'll do it."))
     out = reply
     for pattern, fallback in checks:
-        if not pattern.search(out):
-            continue
         sentences = re.split(r"(?<=[.!?])\s+", out.strip())
-        kept = [s for s in sentences if not pattern.search(s)]
+        if not any(_claims(pattern, s) for s in sentences):
+            continue
+        kept = [s for s in sentences if not _claims(pattern, s)]
         remainder = " ".join(kept).strip()
         out = remainder if _substantive(remainder) else fallback
         print(f"   [MEMORY] removed a claim nothing backs: {pattern.pattern[:40]}…")
@@ -626,7 +660,9 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         if user_name not in bt._CHAT_ONLY_USERS:
             try:
                 final_content = _scrub_unbacked_write_claims(
-                    final_content, bt._continuity_routes.turn_tool_outcomes())
+                    final_content, bt._continuity_routes.turn_tool_outcomes(),
+                    user_text=bt._intent_text(last_user_msg or ""),
+                    recent=bt._continuity_routes.recent_successful_tools(robot))
             except Exception as e:
                 bt.log.warning(f"[MEMORY] claim check failed: {e}")
         response["choices"][0]["message"]["content"] = final_content

@@ -55,13 +55,14 @@ def test_short_stock_phrases_may_recur():
 
 
 def test_repeated_code_lines_are_not_cut():
-    reply = (
-        "Try this:\n```python\n"
-        "print('this line is long enough to count as a sentence here')\n"
-        "print('this line is long enough to count as a sentence here')\n"
-        "```\nThat prints it twice."
-    )
+    block = "".join(f"print('line number {i} of this block is long enough to count here ok')\n"
+                    for i in range(6))
+    reply = "Try this:\n```python\n" + block + block + "```\nThat prints it twice."
     assert trim_runaway(reply) == reply
+    # The same text outside a fence is long enough to be cut, so the fence is
+    # what keeps it.
+    prose = "Try this: " + block.replace("')\n", "'). ") * 2
+    assert trim_runaway(prose) != prose
 
 
 def test_capped_reply_drops_trailing_fragment():

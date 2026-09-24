@@ -360,6 +360,40 @@ def test_a_camera_request_runs_the_camera_tool(chat):
     assert any(call["tool"] == "capture_camera" for call in chat.executed)
 
 
+def _tool_call(name, arguments, finish_reason="tool_calls"):
+    return {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": name, "arguments": arguments}}]},
+        "finish_reason": finish_reason}]}
+
+
+def test_a_tool_call_cut_off_at_the_length_limit_is_not_run(chat):
+    """Half a document is not saved: the arguments stop mid-string."""
+    chat.model.queue(_tool_call(
+        "create_document", '{"title": "Syllabus", "content": "Week 1: intro',
+        finish_reason="length"))
+    response = chat.ask("draft my thoughts on memory as a long piece")
+
+    assert response.status_code == 200
+    assert response.get_json()["blue_error"] == "length"
+    assert reply_of(response).startswith("[System:")
+    assert not any(call["tool"] == "create_document" for call in chat.executed)
+
+
+def test_unreadable_tool_arguments_are_reported_not_a_500(chat):
+    chat.model.queue(
+        _tool_call("create_document", '{"title": "Notes", "content": "abc'),
+        "Sorry, that didn't save. Want me to try again?",
+    )
+    response = chat.ask("what do you make of memory?")
+
+    assert response.status_code == 200
+    assert not any(call["tool"] == "create_document" for call in chat.executed)
+    tool_rows = [m for m in chat.model.payloads[-1]["messages"] if m.get("role") == "tool"]
+    assert tool_rows and "not valid JSON" in tool_rows[-1]["content"]
+
+
 def test_the_tool_schema_is_sent_on_an_ordinary_turn(chat):
     """It costs ~9,300 tokens but catches elliptical follow-ups the selector
     cannot see. If this ever changes it should be a decision, not a drift."""
@@ -420,9 +454,12 @@ def test_a_clock_denial_is_regenerated_end_to_end(chat):
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
 
 
-def test_a_denial_naming_someone_on_record_is_regenerated(chat):
+def test_a_denial_naming_someone_on_record_is_regenerated(chat, monkeypatch):
     """The Felix case, through the whole pipeline. No pattern can enumerate
     people, so this one is checked against the facts table."""
+    live = bt.memory_system.load_facts
+    monkeypatch.setattr(bt.memory_system, "load_facts", lambda *a, **k: {
+        **(live(*a, **k) or {}), "brother_name": "Felix", "brother_spouse": "Svetlana"})
     chat.model.queue(
         "I don't have any record of a Felix in our shared history.",
         "Felix is your brother — I don't know his plans for the weekend.",
@@ -436,9 +473,12 @@ def test_a_denial_naming_someone_on_record_is_regenerated(chat):
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
 
 
-def test_a_question_about_a_relative_on_record_never_reaches_the_model(chat):
+def test_a_question_about_a_relative_on_record_never_reaches_the_model(chat, monkeypatch):
     """2026-08-19: "wht about my brother" reached the model, which said Alex
     has no brother. brother_name has been Felix since July."""
+    live = bt.memory_system.load_facts
+    monkeypatch.setattr(bt.memory_system, "load_facts", lambda *a, **k: {
+        **(live(*a, **k) or {}), "brother_name": "Felix", "brother_spouse": "Svetlana"})
     response = chat.ask("wht about my brother")
 
     assert "Felix" in reply_of(response)

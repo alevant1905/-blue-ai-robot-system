@@ -58,8 +58,11 @@ def test_no_model_on_a_greeting_is_an_honest_system_line(chat):
 
 
 def test_no_model_on_a_streamed_check_in_is_not_trouble_connecting(chat):
+    from blue.server.routes import stream as stream_routes
+    stream_routes.open_stream("p-test")  # an unopened id silently takes the POST path
     chat.model.queue(http_error(400, NO_MODEL))
     response = chat.ask("how is blue today", stream_id="p-test")
+    assert bt._LM_FAILURE.streamed is True, "the turn never used the streamed transport"
     assert response.get_json()["blue_error"] == "no_model"
     assert "trouble connecting" not in reply_of(response)
 

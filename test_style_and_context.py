@@ -50,9 +50,21 @@ def test_a_course_code_in_passing_is_not_a_document_request(library, message):
     "introduce cs101 to the class. tell them something about the course.",
     "can you introduce the course dh399 to the class?",
     "look at my syllabus for dh201",
+    "what is dh201 about?",
+    "how is dh201 graded",
+    "who are the TAs for cs101",
+    "what topics does dh399 cover",
+    "tell the class what cs101 is about",
 ])
 def test_asking_about_the_course_still_searches(library, message):
     assert library._library_match(message) is not None
+
+
+def test_words_that_are_real_titles_are_not_stop_words():
+    """"commercial" and "pedagogical" name documents in Alex's library."""
+    from blue.tool_selector.detectors import documents
+    assert "commercial" not in documents._COMMON_TITLE_WORDS
+    assert "pedagogical" not in documents._COMMON_TITLE_WORDS
 
 
 # ---- the style note is the last thing the model reads -----------------------------

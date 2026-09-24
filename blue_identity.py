@@ -1765,7 +1765,15 @@ _ASKS_OR_GREETS_RE = re.compile(
     r"(?:what|who|whom|whose|when|where|why|how|which|do|does|did|is|are|am|"
     r"can|could|would|will|should|have|has|tell me|show me|give me|list|"
     r"describe)\b"
-    r"|^\s*(?:hi|hello|hey|good (?:morning|afternoon|evening)|you there)\b",
+    r"|^\s*(?:hi|hello|hey|good (?:morning|afternoon|evening)|you there)\b"
+    # A bare yes to an offer, and a request to the class, are not corrections
+    # either: "yes" → "I stand corrected—Athena is 10" (2026-08-08); "tell
+    # the class about yourself" → "You're right—I've been stuck in a loop".
+    r"|^\s*(?:(?:ok(?:ay)?|blue|hexia|casper)[, ]+)*(?:yes|yeah|yep|yup|sure"
+    r"|please(?: do)?|go ahead|do it|sounds good)(?:[, ]+(?:please|thanks?"
+    r"|thank you))?\W*$"
+    r"|^\s*(?:(?:ok(?:ay)?|so|now|blue|hexia|casper)[, ]+)*(?:tell (?:us|them"
+    r"|everyone|the (?:class|students))|introduce|let['’]?s see)\b",
     re.IGNORECASE,
 )
 
@@ -1940,7 +1948,7 @@ def _daughter_names(facts: dict) -> list[str]:
 _RELATIVE_ASK_RE = re.compile(
     r"^\s*(?:(?:please|hey|so|and|ok(?:ay)?)[, ]+)?(?:"
     r"who(?:['’]s| is| are)|wh?a?t about|tell (?:me|us) about"
-    r"|do you (?:know|remember)(?: who)?)\s+(?:my |our |your )?"
+    r"|do you (?:know|remember)(?: who)?)\s+(?:my |our )?"
     r"([a-z][a-z'’ -]{1,30}?)(?:\s+(?:is|are))?\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
