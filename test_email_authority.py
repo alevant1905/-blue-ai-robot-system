@@ -11,6 +11,8 @@ SAFETY: these call the two predicates directly. No inbox is read, no reply is
 composed, and no tool is executed.
 """
 
+import os
+
 import pytest
 
 import bluetools as bt
@@ -177,6 +179,17 @@ YORKU_STAMP = ("mx.google.com; dkim=pass header.i=@yorku.ca header.s=selector1; 
 O365_STAMP = ("mx.google.com; dkim=pass header.i=@yorku.onmicrosoft.com "
               "header.s=sel1; spf=pass; dmarc=pass (p=NONE) "
               "header.from=yorku.ca")
+# Laurier: Microsoft 365, and a public DMARC record (p=none, checked against
+# 8.8.8.8 on 2026-09-23; the campus resolver answers NXDOMAIN, split-horizon).
+WLU_STAMP = ("mx.google.com; dkim=pass header.i=@wlu.ca header.s=selector1 "
+             "header.b=aBc; spf=pass (google.com: domain of alevant@wlu.ca "
+             "designates 40.107.0.1 as permitted sender) "
+             "smtp.mailfrom=alevant@wlu.ca; dmarc=pass (p=NONE sp=NONE dis=NONE) "
+             "header.from=wlu.ca")
+# Signed only by the Microsoft tenant; DMARC aligns it through SPF.
+WLU_TENANT_STAMP = ("mx.google.com; dkim=pass header.i=@lauriercloud.onmicrosoft.com "
+                    "header.s=selector1-wlu-ca; spf=pass smtp.mailfrom=alevant@wlu.ca; "
+                    "dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=wlu.ca")
 
 
 @pytest.mark.parametrize("sender, auth", [
@@ -186,14 +199,53 @@ O365_STAMP = ("mx.google.com; dkim=pass header.i=@yorku.onmicrosoft.com "
     ("Alex <{OWNER_UPPER}>", GMAIL_STAMP),
     ("Alex Levant <alevant@yorku.ca>", YORKU_STAMP),
     ("Alex Levant <alevant@yorku.ca>", O365_STAMP),
+    ("Alex Levant <alevant@wlu.ca>", WLU_STAMP),
+    ("Alex Levant <alevant@wlu.ca>", WLU_TENANT_STAMP),
 ])
 def test_alex_is_not_locked_out_of_his_own_email(sender, auth):
     """Realistic Gmail and institutional stamps, in the shapes they arrive in."""
-    if "yorku" in sender and "alevant@yorku.ca" not in bt.BLUE_OWNER_ADDRESSES:
+    # Skip only when BLUE_OWNER_EMAILS overrides the default; dropping an
+    # address from the default itself must fail here.
+    overridden = bool(os.environ.get("BLUE_OWNER_EMAILS"))
+    if overridden and "yorku" in sender and "alevant@yorku.ca" not in bt.BLUE_OWNER_ADDRESSES:
         pytest.skip("the institutional address is not configured here")
+    if overridden and "wlu" in sender and "alevant@wlu.ca" not in bt.BLUE_OWNER_ADDRESSES:
+        pytest.skip("the Laurier address is not configured here")
     sender = sender.format(owner=OWNER, OWNER_UPPER=OWNER.upper())
     assert bt._email_sender_is_owner(
         _headers(auth.format(owner=OWNER)), sender) is True
+
+
+def test_the_default_owner_set_holds_all_three_addresses():
+    if os.environ.get("BLUE_OWNER_EMAILS"):
+        pytest.skip("BLUE_OWNER_EMAILS overrides the default")
+    assert {"alevant1905@gmail.com", "alevant@yorku.ca",
+            "alevant@wlu.ca"} <= bt.BLUE_OWNER_ADDRESSES
+
+
+def test_laurier_mail_with_nothing_aligned_is_not_elevated(monkeypatch):
+    """A tenant signature and no DMARC pass vouch for nobody at wlu.ca."""
+    monkeypatch.setattr(bt, "BLUE_OWNER_ADDRESSES",
+                        bt.BLUE_OWNER_ADDRESSES | {"alevant@wlu.ca"})
+    assert bt._email_sender_is_owner(
+        _headers("mx.google.com; dkim=pass header.i=@lauriercloud.onmicrosoft.com "
+                 "header.s=selector1-wlu-ca; spf=pass smtp.mailfrom=alevant@wlu.ca"),
+        "Alex Levant <alevant@wlu.ca>") is False
+
+
+def test_a_colleague_at_the_same_institution_is_not_alex(monkeypatch):
+    """A genuine wlu.ca signature proves the institution, not the person."""
+    monkeypatch.setattr(bt, "BLUE_OWNER_ADDRESSES",
+                        bt.BLUE_OWNER_ADDRESSES | {"alevant@wlu.ca"})
+    assert bt._email_sender_is_owner(
+        _headers(WLU_STAMP), "Colleague <someone@wlu.ca>") is False
+    assert bt._email_sender_is_owner(
+        _headers(WLU_STAMP), "alevant@wlu.ca <someone@wlu.ca>") is False
+
+
+def test_email_me_still_goes_to_the_personal_gmail():
+    """send_gmail maps "me" to the first owner address in sorted order."""
+    assert bt._owner_addresses_list()[0] == "alevant1905@gmail.com"
 
 
 def test_a_subdomain_of_a_signed_domain_still_aligns():

@@ -370,8 +370,9 @@ def _tool_auto_reply_emails(tool_name, tool_args):
             "there. State ONLY what the tool result actually says — "
             "do NOT speculate about Blue's capabilities and do NOT "
             "claim Blue cannot do something the tool just did. Blue's "
-            "inbox is alevantresearch@gmail.com (NOT alevant1905 or "
-            "alevant@yorku.ca — those are Alex's addresses)."
+            "inbox is alevantresearch@gmail.com (NOT alevant1905@gmail.com, "
+            "alevant@yorku.ca or alevant@wlu.ca — those are Alex's "
+            "addresses)."
         )
         result = json.dumps(result_obj)
     except Exception:

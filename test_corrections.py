@@ -270,3 +270,79 @@ def test_a_fresh_database_can_store_memories(memory):
     with sqlite3.connect(memory.db_path) as conn:
         rows = conn.execute("SELECT content FROM memories").fetchall()
     assert rows == [("Vilda swam her first length today.",)]
+
+
+def test_a_birthdate_rides_on_the_age_line(memory):
+    """Three birthdate rows pushed "Course Dh399" out of the 25-row cap."""
+    import sqlite3
+    with sqlite3.connect(memory.db_path) as conn:
+        now = "2026-08-19T09:00:00"
+        conn.executemany(
+            "INSERT INTO facts (fact_key, fact_value, last_updated, source, "
+            "times_confirmed, first_seen, confidence) VALUES (?, ?, ?, 'save_facts', 1, ?, 0.7)",
+            [("athena_birthdate", "2015-08-15", now, now),
+             ("athena_age", "10", now, now),
+             ("emmy_birthdate", "2015-11-15", now, now)])
+    block = memory._build_facts_block()
+    assert "- Athena Age: 11 (born 2015-08-15)" in block
+    assert "- Emmy Age: 10 (born 2015-11-15)" in block
+    assert "Birthdate" not in block
+
+
+def test_a_fact_save_indexes_what_it_saved_not_what_it_was_given(memory, monkeypatch):
+    indexed = []
+    monkeypatch.setattr(memory, "_store_memory",
+                        lambda **kw: indexed.append((kw["subject"], kw["content"])))
+    memory.save_facts({"athena_birthdate": "2015-08-15", "athena_age": "10"})
+    assert indexed == [("athena birthdate", "2015-08-15")]
+
+    indexed.clear()
+    memory.save_facts({"athena_age": "12"}, age_moves_birthdate=True)
+    assert indexed == [("athena birthdate", "2014-08-15")]
+
+
+def test_a_memory_that_failed_to_save_is_not_indexed(memory, monkeypatch):
+    import sqlite3
+    indexed = []
+    monkeypatch.setattr(memory, "_index_memory", lambda *a, **k: indexed.append(a))
+    with sqlite3.connect(memory.db_path) as conn:
+        conn.execute("DROP TABLE memories")
+    memory._store_memory("event", "swim", "Vilda swam her first length today.")
+    assert indexed == []
+
+
+def test_a_birthdate_in_the_future_keeps_its_own_line(memory):
+    """A misheard year makes no age: the birthdate must still be shown, and
+    never pinned to a stale age it contradicts."""
+    import sqlite3
+    with sqlite3.connect(memory.db_path) as conn:
+        now = "2026-08-19T09:00:00"
+        conn.executemany(
+            "INSERT INTO facts (fact_key, fact_value, last_updated, source, "
+            "times_confirmed, first_seen, confidence) VALUES (?, ?, ?, 'save_facts', 1, ?, 0.7)",
+            [("emmy_birthdate", "2026-11-15", now, now),
+             ("athena_birthdate", "2027-08-15", now, now),
+             ("athena_age", "10", now, now)])
+    block = memory._build_facts_block()
+    assert "- Emmy Birthdate: 2026-11-15" in block
+    assert "- Athena Birthdate: 2027-08-15" in block
+    assert "(born 2027" not in block
+
+
+def test_the_suite_never_opens_the_live_vector_index():
+    """Checks what the import-time build left behind. Calling the getter would
+    only reach conftest's stub, and without the switch the real one would open
+    the live index itself."""
+    import os
+    import blue_memory_improved as bmi
+    assert bt.memory_system is not None, "the import-time build never ran"
+    assert os.environ.get("BLUE_MEMORY_VECTORS") == "0"
+    assert bmi._chroma_client is None and bmi._memory_collection is None
+
+
+def test_the_suite_never_opens_a_real_robot_head():
+    import os
+    from blue import head
+    assert os.environ.get("BLUE_HEADS_DISABLED") == "1"
+    assert head._load_private_ohbot("blue", "COM14") is None
+    assert head._load_private_picoh("pico", "COM8") is None

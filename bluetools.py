@@ -7538,12 +7538,14 @@ BLUE_SELF_ADDRESSES = {
 # these, Blue gets the SAME full tool access he has in chat (send mail,
 # control lights, set reminders, search the document library, …) instead
 # of the read-only public-info whitelist used for everyone else. Default
-# is Alex's personal gmail; extend via BLUE_OWNER_EMAILS.
+# is Alex's personal gmail plus his York and Laurier addresses.
+# BLUE_OWNER_EMAILS REPLACES this default (it does not extend it), so an
+# override must list every address.
 BLUE_OWNER_ADDRESSES = {
     a.strip().lower()
     for a in os.environ.get(
         "BLUE_OWNER_EMAILS",
-        "alevant1905@gmail.com,alevant@yorku.ca",
+        "alevant1905@gmail.com,alevant@yorku.ca,alevant@wlu.ca",
     ).split(",")
     if a.strip()
 }

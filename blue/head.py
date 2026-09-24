@@ -213,6 +213,8 @@ def _load_private_ohbot(tag, target_port):
     grabbing the first board. We temporarily restrict comports() to just
     `target_port` while the copy loads, so its auto-init grabs exactly our board
     and never touches the other head. Returns the module, or None on failure."""
+    if os.environ.get("BLUE_HEADS_DISABLED") == "1":
+        return None  # the test suite: never open a real board
     if not _OHBOT_LIB or not _OHBOT_PY or _list_ports_mod is None or not target_port:
         return None
     modname = f"ohbot_private_{tag}"
@@ -242,6 +244,8 @@ def _load_private_picoh(tag, target_port):
     handshake alone cannot distinguish Picoh from an eight-motor Ohbot, so the
     port restriction and persisted driver type are safety-critical.
     """
+    if os.environ.get("BLUE_HEADS_DISABLED") == "1":
+        return None  # the test suite: never open a real board
     if not _PICOH_LIB or not _PICOH_PY or _list_ports_mod is None or not target_port:
         return None
     modname = f"picoh_private_{tag}"

@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from blue_identity import (
     identity_request_kind,
     identity_response_problem,
+    _BIRTHDATE_KEY_RE,
     age_on,
     derive_ages,
     contextual_identity_request_kind,
@@ -274,6 +275,11 @@ _memory_collection = None
 def _get_memory_collection():
     """Get or create the ChromaDB collection for memories."""
     global _chroma_client, _memory_collection
+    # Off for the test suite (conftest.py): the index is shared by every
+    # EnhancedMemorySystem whatever its db_path, and a second process opening
+    # it while the server runs risks the corruption this index has a history of.
+    if os.environ.get("BLUE_MEMORY_VECTORS", "1") == "0":
+        return None
     if _memory_collection is not None:
         return _memory_collection
 
@@ -694,6 +700,7 @@ class EnhancedMemorySystem:
         mem_id = self._make_id(content, subject)
         now = created_at or datetime.now().isoformat()
 
+        stored = False
         conn = self._conn()
         try:
             # Upsert: if same id exists, update if new content is longer or importance is higher
@@ -717,13 +724,16 @@ class EnhancedMemorySystem:
                 """, (mem_id, mem_type, mem_type, subject, content, source, importance,
                       _t.time(), now, now, json.dumps(tags or []), json.dumps(related_ids or [])))
                 conn.commit()
+            stored = True
         except Exception as e:
             print(f"   [MEM-STORE] SQLite error (ignored): {e}")
         finally:
             conn.close()
 
-        # Index in ChromaDB
-        self._index_memory(mem_id, subject, content, mem_type, tags)
+        # A vector with no row behind it is an orphan the index keeps for
+        # good; that is how test facts reached the live index on 2026-09-23.
+        if stored:
+            self._index_memory(mem_id, subject, content, mem_type, tags)
 
         return mem_id
 
@@ -822,6 +832,10 @@ class EnhancedMemorySystem:
         saved = 0
         confirmed = 0
         contradicted = 0
+        # What actually reaches the table, after an age became a birthdate or
+        # was skipped: the memory mirror must not index "athena age: 10"
+        # beside a birthdate that says otherwise.
+        written: List[Tuple[str, str]] = []
 
         for key, value in list(facts.items()):
             key = self._normalize_fact_key(key)
@@ -873,6 +887,7 @@ class EnhancedMemorySystem:
                         key, value = (f"{person}_birthdate",
                                       f"{year:04d}-{month}-{day}")
 
+            written.append((key, value))
             try:
                 existing = conn.execute(
                     "SELECT fact_value, times_confirmed, confidence FROM facts WHERE fact_key = ?",
@@ -969,11 +984,7 @@ class EnhancedMemorySystem:
             print(f"   [MEM] {contradicted} fact contradiction(s) reconciled (kept newest, logged old)")
 
         # Index facts as memories for semantic search AFTER releasing the DB lock
-        for key, value in facts.items():
-            key = self._normalize_fact_key(key)
-            value = (value or "").strip()
-            if not key or not value or len(value) > 400 or self._is_junk_fact(key, value):
-                continue
+        for key, value in written:
             self._store_memory(
                 mem_type="fact",
                 subject=key.replace("_", " "),
@@ -2320,6 +2331,17 @@ class EnhancedMemorySystem:
         derived = derive_ages(
             {r["fact_key"]: r["fact_value"] for r in rows}, date.today())
         stale_before = (datetime.now() - timedelta(hours=48)).isoformat()
+        # A birthdate rides on its age line ("Athena Age: 11 (born
+        # 2015-08-15)") instead of a row of its own: three birthdate rows
+        # pushed "Course Dh399" out of the 25-row cap.
+        # Same rule as derive_ages: a birthdate still in the future (a
+        # misheard year) makes no age line, so it keeps a row of its own.
+        born = {}
+        for r in rows:
+            match = _BIRTHDATE_KEY_RE.match(str(r["fact_key"] or ""))
+            age = age_on(str(r["fact_value"] or ""), date.today()) if match else None
+            if age is not None and age >= 0:
+                born[match.group(1)] = str(r["fact_value"]).strip()
         # A birthdate with no stored age still gives the model an age line.
         rows = [dict(r) for r in rows]
         stored_keys = {r.get("fact_key") for r in rows}
@@ -2332,8 +2354,13 @@ class EnhancedMemorySystem:
         for r in rows:
             key = (r["fact_key"] or "").strip()
             val = (r["fact_value"] or "").strip()
+            match = _BIRTHDATE_KEY_RE.match(key)
+            if match and match.group(1) in born:
+                continue
             if key.endswith("_age") and key in derived:
                 val = str(derived[key]).strip()
+                if key[:-len("_age")] in born:
+                    val = f"{val} (born {born[key[:-len('_age')]]})"
             if not key or not val or len(val) > 300:
                 continue
             # Passing states are not facts. "Health Status: has a stomach
