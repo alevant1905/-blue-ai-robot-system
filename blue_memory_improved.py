@@ -3058,10 +3058,14 @@ class EnhancedMemorySystem:
                         pass
             merged += len(ids_to_delete)
 
-        # Pass 1: same subject, ignoring case.
+        # Pass 1: same subject, ignoring case. Not user notes: every one is
+        # "user-requested memory", and merging kept only three of them \u2014
+        # a note Alex asked Blue to keep was lost that way (2026-09-24).
+        # Identical notes still merge in pass 2.
         dupes = conn.execute("""
             SELECT type, LOWER(subject) AS subj, COUNT(*) AS cnt
             FROM memories
+            WHERE type != 'user_note'
             GROUP BY type, LOWER(subject)
             HAVING cnt > 1
         """).fetchall()

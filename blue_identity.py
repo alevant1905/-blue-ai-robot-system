@@ -39,7 +39,12 @@ _SELF_STATE_REQUEST_RE = re.compile(
     r"|^\s*(?:what(?:['\u2019]s| is) new with you|"
     r"what(?:['\u2019]s| is) on your mind)"
     r"\s*[?.!]*\s*$"
-    r"|\btell (?:me|us) (?:honestly )?how you(?:['\u2019]re| are) doing\b",
+    r"|\btell (?:me|us) (?:honestly )?how you(?:['\u2019]re| are) doing\b"
+    # "you okey", "u good?", "are you alright, blue?" \u2014 the whole message.
+    r"|^\s*(?:(?:hey|hi|hello)[,.! ]+)?(?:" + _ROBOT_NAME_ALT + r"[,.! ]+)?"
+    r"(?:are |r )?(?:you|u|ya) (?:ok(?:ay|ey)?|alright|all right|good|"
+    r"doing (?:ok(?:ay)?|well|good|alright))"
+    r"(?:[,.! ]+" + _ROBOT_NAME_ALT + r")?\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
 _IDENTITY_MORE_RE = re.compile(
@@ -970,6 +975,20 @@ _SELF_STATE_READOUT_RE = re.compile(
 )
 
 
+_CHECKIN_ACTIVITY_CLAIM_RE = re.compile(
+    # The robot as subject: "Just finishing up...", "I've been preparing...",
+    # "I just wrapped up..." \u2014 not "Are you currently grading the essays?"
+    r"(?:(?:^|(?<=[.!?,;:\u2014]\s)|(?<=[.!?,;:\u2014]))\s*(?:just|currently)"
+    r"|\bi(?:['\u2019]m|\s+am|['\u2019]ve(?:\s+been)?|\s+have(?:\s+been)?)?"
+    r"(?:\s+(?:just|currently))?)\s+(?:\w+\s+){0,2}?"
+    r"(?:finishing(?: up)?|working on|preparing|reviewing|organi[sz]ing|busy with|"
+    r"going through|wrapping up|putting together|drafting|updating|grading|"
+    r"finished|wrapped up|worked on|prepared|reviewed|organi[sz]ed|went through|"
+    r"put together|drafted|updated|graded)\b",
+    re.IGNORECASE,
+)
+
+
 def self_state_readout(text: str) -> bool:
     """True when a check-in reply recites the continuity architecture."""
     return bool(_SELF_STATE_READOUT_RE.search(text or ""))
@@ -1124,6 +1143,10 @@ def identity_response_problem(
             return "false_longevity"
         if _UNSUPPORTED_OPERATIONAL_SELF_RE.search(reply):
             return "invented_current_activity"
+    # "Just finishing up some work on the DH399 course materials" answered
+    # "you okey" (2026-09-24): a check-in reports no work nobody gave him.
+    if request_kind == "self_state" and _CHECKIN_ACTIVITY_CLAIM_RE.search(reply):
+        return "invented_current_activity"
     if request_kind == "introduction" and _INTRODUCTION_META_RE.search(reply):
         return "defers_introduction"
     if (request_kind in {

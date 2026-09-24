@@ -854,7 +854,8 @@ def guard_verbatim_replay(ctx) -> Optional[str]:
         return None
     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
     _redo_text = _regen_once(_internal_note(
-        "your draft repeated an earlier reply word for word", ctx),
+        "your draft repeated an earlier reply word for word; do not repeat "
+        "your earlier reply", ctx),
         max_tokens=700)
     if (_redo_text
             and not _LOOP_CONFESSION_RE.search(_redo_text)

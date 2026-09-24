@@ -5089,6 +5089,39 @@ def _syllabus_rows_for_date(text: str, target) -> str:
     return text[start:end].strip()[:1200]
 
 
+_SCHEDULE_HEADING_RE = re.compile(r"\b(?:class|course|weekly)\s+schedule\b", re.I)
+_DATED_ROW_RE = re.compile(
+    r"^\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\s*[:\-\u2013\u2014]",
+    re.I | re.M)
+
+
+def _named_syllabus(d) -> bool:
+    fn = (d.get('filename') or '').lower()
+    return ('syllab' in fn or 'syllab' in (d.get('folder') or '').lower()
+            or 'course outline' in fn)
+
+
+def _course_code_of(d) -> str:
+    """'dh399' for DH399/DH399_AL_2026F.docx: a course folder whose file
+    starts with the same code. '' otherwise."""
+    leaf = (d.get('folder') or '').replace('\\', '/').rstrip('/').split('/')[-1]
+    m = re.fullmatch(r"([A-Za-z]{2,5})\s?(\d{3,4})[A-Za-z-]*", leaf)
+    if not m:
+        return ""
+    code = (m.group(1) + m.group(2)).lower()
+    fn = re.sub(r"[\s_-]", "", (d.get('filename') or '').lower())
+    return code if fn.startswith(code) else ""
+
+
+def _looks_like_syllabus_entry(d) -> bool:
+    """Named a syllabus, or a course's own document in its course folder.
+
+    Alex's syllabi are DH399/DH399_AL_2026F.docx, DH201/..., CS101/...: none
+    says "syllab", so the date lookup never ran and "what's assigned
+    tomorrow" fell back to a search that missed the row (2026-09-24)."""
+    return _named_syllabus(d) or bool(_course_code_of(d))
+
+
 def _syllabus_schedule_text(max_docs: int = 2, query: str = ""):
     """Full schedule/readings text of the syllabus document(s), or None.
 
@@ -5101,10 +5134,13 @@ def _syllabus_schedule_text(max_docs: int = 2, query: str = ""):
         docs = index.get("documents", []) if isinstance(index, dict) else []
     except Exception:
         return None
-    syll = [d for d in docs
-            if 'syllab' in (d.get('filename', '') or '').lower()
-            or 'syllab' in (d.get('folder', '') or '').lower()
-            or 'course outline' in (d.get('filename', '') or '').lower()]
+    syll = [d for d in docs if _looks_like_syllabus_entry(d)]
+    # A question that names a course reads only that course's syllabus; a
+    # second course's rows must not fill its slot.
+    _asked = re.sub(r"[\s_-]", "", (query or "").lower())
+    _named = [d for d in syll if _course_code_of(d) and _course_code_of(d) in _asked]
+    if _named:
+        syll = _named
     # Honour an active library focus (chat Context panel): only consider syllabi
     # the user actually selected, so a course/schedule/readings question can
     # never pull in a DIFFERENT course's syllabus. With nothing focused, behave
@@ -5136,7 +5172,14 @@ def _syllabus_schedule_text(max_docs: int = 2, query: str = ""):
             continue
         if not txt:
             continue
-        start = txt.lower().find('class schedule')
+        # "Class Schedule" (DH201, DH399), "Course schedule and important
+        # dates" (CS101).
+        _heading = _SCHEDULE_HEADING_RE.search(txt)
+        start = _heading.start() if _heading else -1
+        if start < 0 and not _named_syllabus(d) and len(_DATED_ROW_RE.findall(txt)) < 3:
+            # A course-folder document with no schedule is readings, not the
+            # syllabus.
+            continue
         if start < 0:
             m = re.search(r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\s*[:\-]',
                           txt, re.I)
@@ -9945,7 +9988,8 @@ _ACTION_CLAIM_PATTERNS = {
         # "rather than sending it to a remote cloud" are not claims (Sept).
         # Any present-tense send, except the idioms: "stop sending you on
         # ghost hunts", "rather than sending it to a remote cloud" (Sept).
-        r"(?<!\bstop )(?<!\bthan )(?<!\bof )(?<!\bwithout )(?<!\bavoid )"
+        # "Thanks for sending that over" thanks the user; it is not a claim.
+        r"(?<!\bstop )(?<!\bthan )(?<!\bof )(?<!\bwithout )(?<!\bavoid )(?<!\bfor )"
         r"(?<!\bkeep )(?<!\bfrom )(?<!\bby )(?<!\babout )"
         r"(?:sending|delivering|firing\s+off)\s+(?:the|that|an?|it|over|now|you|to)\b(?!\s+on\b)|"
         r"emailing\s+(?:you|it|that|the|now)"
@@ -10099,7 +10143,8 @@ def _user_requested_action(tool_name: str, user_text: str) -> bool:
     words = _ACTION_REQUEST_WORDS.get(tool_name)
     if not words:
         return True
-    t = (user_text or "").lower()
+    # The user's own words: an attached syllabus says "email" a dozen times.
+    t = _intent_text(user_text or "").lower()
     return any(w in t for w in words)
 
 
@@ -10278,6 +10323,10 @@ _REFLEX_TOOL_NAMES = {
     "remember_fact",
 }
 
+
+
+# Tools that tied in the selector this turn: offered beside the reflex set.
+_TURN_OFFER = threading.local()
 
 
 def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
@@ -10661,8 +10710,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         # Applied last so it composes with the iteration filter above rather
         # than being silently replaced by it.
         if tool_scope == "reflex" and not force_tool:
+            _extra = set(getattr(_TURN_OFFER, "tools", ()) or ())
             reflex = [t for t in tools_to_use
-                      if t['function']['name'] in _REFLEX_TOOL_NAMES]
+                      if t['function']['name'] in _REFLEX_TOOL_NAMES
+                      or t['function']['name'] in _extra]
             if reflex:
                 print(f"   [TOOLS] Conversational turn — offering {len(reflex)} "
                       f"reflex tools instead of {len(tools_to_use)}")
@@ -11755,6 +11806,11 @@ _DATE_CORRECTION_RE = re.compile(
     re.I)
 
 
+_DAY_WORD_RE = re.compile(
+    r"\b(?:today|tonight|tomorrow|yesterday|next (?:week|class)|this week|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
+
+
 def _schedule_correction_query(message: str,
                                messages: List[Dict]) -> Optional[str]:
     """Re-run the syllabus lookup when the user corrects a readings answer.
@@ -11781,12 +11837,20 @@ def _schedule_correction_query(message: str,
         return f"class readings for {date_fix.group(1)}"
     # Reuse the user's original schedule question so "tomorrow" still
     # resolves to the intended date.
+    asks = []
     for msg in reversed(prior[-8:]):
-        if (msg.get("role") == "user"
-                and isinstance(msg.get("content"), str)
-                and _is_course_schedule_query(msg["content"])):
-            return msg["content"]
-    return "course readings schedule"
+        if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+            # The user's own words: a pasted syllabus matched "syllabus" and
+            # its "reply to your email" line picked reply_gmail (2026-09-24).
+            ask = _intent_text(msg["content"])
+            if ask and _is_course_schedule_query(ask):
+                asks.append(ask)
+    # The question that names the day ("what is assigned for tomorrow in
+    # dh399"), not "here's the correct syllabus" riding on an attachment.
+    for ask in asks:
+        if _schedule_target_date(ask) or _DAY_WORD_RE.search(ask):
+            return ask
+    return asks[0] if asks else "course readings schedule"
 
 
 def _contextual_document_query(message: str,
@@ -12191,6 +12255,7 @@ class _ChatToolChoice:
 def _chat_choose_tool(conversation_messages, last_user_message, *,
                       correction, user_name, pre_selection):
     """Decide which tool, if any, this turn needs before the model is asked."""
+    _TURN_OFFER.tools = ()
     # Every path that currently reaches the read below binds this, but only
     # via a chain of coincidences (a correction can only force a zero-LLM
     # tool, and those always template a reply and return). Bind it here so
@@ -12286,21 +12351,22 @@ def _chat_choose_tool(conversation_messages, last_user_message, *,
             selection_result = TOOL_SELECTOR.select_tool(_intent_text(last_user_message), recent_history)
 
         # Check if disambiguation is needed
+        # Two tools scored close: the model decides, with the conversation in
+        # view. The canned "Did you want to search your documents or
+        # create_reminder?" was a dead end 16 times since May, most of them
+        # naming a raw tool id.
         if selection_result.needs_disambiguation:
-            print(f"   [SELECTOR] Low confidence - asking user for clarification")
-            # The clarifying question IS Blue's reply this turn — return it in
-            # the standard choices shape so chat_completions can read it like
-            # any other response. (A bare {'response':...} dict here used to
-            # KeyError on response['choices'] and 500 the whole request.)
-            clarify = (selection_result.disambiguation_prompt
-                       or "Could you tell me a bit more about what you'd like?")
-            return _ChatToolChoice(reply={"choices": [{"message": {
-                "role": "assistant",
-                "content": clarify,
-            }}]})
-
+            print("   [SELECTOR] Ambiguous - no tool forced; the model chooses")
+            is_greeting = False
+            # Offer the tools that tied, which the reflex set often lacks
+            # (send_gmail, create_document, browse_website...).
+            _tied = [selection_result.primary_tool] + list(selection_result.alternative_tools or [])
+            _TURN_OFFER.tools = tuple(
+                t.tool_name for t in _tied if t is not None
+                and not ((user_name or "") in _CHAT_ONLY_USERS
+                         and t.tool_name in _KID_BLOCKED_TOOLS))
         # Set variables for compatibility with rest of code
-        if selection_result.primary_tool:
+        elif selection_result.primary_tool:
             selected_tool = selection_result.primary_tool
 
             # Don't overwrite if priority detection (camera) already set a tool
@@ -12751,6 +12817,20 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
             f"arrives in another language or mixes languages.\n"
         )
         tail_notes.append(lang_note)
+    elif not language and isinstance(system_msg, dict):
+        # Auto. The memory blocks quote earlier turns, so after one Russian
+        # exchange an English "hi blue" was answered in Russian (2026-09-24).
+        _newest = next((m.get("content") for m in reversed(conversation_messages)
+                        if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+        _auto = _message_language(_newest)
+        if _auto in _BLUE_LANGS:
+            _lang_name = _BLUE_LANGS[_auto]
+            # First among the tail notes: the style note stays the last thing
+            # the model reads on an ordinary turn.
+            tail_notes.insert(0, 
+                f"\nLANGUAGE: The user's newest message is in {_lang_name}. Write "
+                f"your ENTIRE reply in {_lang_name}. Earlier turns and the memory "
+                "blocks above may be in other languages; do not carry theirs over.\n")
 
     _injected_markers = (
         "<known_facts>", "<long_term_notes>", "<relevant_memories>",
@@ -13178,6 +13258,58 @@ _WHISPER_LOCK = _threading_stt.Lock()
 # Norwegian or Russian for Ukrainian, then transcribes into the wrong language.
 _BLUE_LANGS = {"en": "English", "fr": "French", "ru": "Russian",
                "el": "Greek", "da": "Danish"}
+
+
+_ATTACH_CAP = 8000
+
+
+def _cap_attachment_text(text: str, name: str, cap: int = _ATTACH_CAP) -> str:
+    """At most `cap` characters of an attached document, marked when cut.
+
+    When the cut would lose a class schedule, keep the head and the schedule
+    instead of the head alone."""
+    n = len(text)
+    if n <= cap:
+        return text
+    sched = text.lower().find("class schedule")
+    if sched > cap // 2:
+        head = cap // 3
+        kept = (text[:head] + "\n[... part of the document omitted ...]\n"
+                + text[sched:sched + (cap - head)])
+    else:
+        kept = text[:cap]
+    return (kept + f"\n[TRUNCATED: only part of {name} ({len(kept):,} of {n:,} "
+            "characters) is included here; the rest was NOT given to you. Do not "
+            "treat this as the whole document or fill in what is missing.]")
+
+
+def _message_language(text: str) -> str:
+    """The language of a message when it is unmistakable, else ''.
+
+    Used only on Auto: a Cyrillic or Greek majority, or plain English /
+    French / Danish function words. Unsure means no note at all."""
+    t = _intent_text(text or "")
+    letters = [c for c in t if c.isalpha()]
+    if not letters:
+        return ""
+    if sum('\u0400' <= c <= '\u04ff' for c in letters) * 2 >= len(letters):
+        return "ru"
+    if sum('\u0370' <= c <= '\u03ff' for c in letters) * 2 >= len(letters):
+        return "el"
+    low = t.lower()
+    # "reply in French", "translate this": the user is choosing, not writing.
+    if re.search(r"\b(?:in|into|to)\s+(?:english|french|russian|greek|danish)\b|\btranslat", low):
+        return ""
+    # Danish and French first, on words English does not share ("comment",
+    # "ok", "is" and "no" decided nothing).
+    if re.search(r"\b(?:hej|tak|jeg|hvordan|godmorgen|hvad|nej|ikke|det|er)\b", low):
+        return "da"
+    if re.search(r"\b(?:bonjour|merci|oui|vous|est-ce|pourquoi|c['\u2019]est|ça|je suis)\b", low):
+        return "fr"
+    if re.search(r"\b(?:hi|hey|hello|you|are|the|what|how|thanks|thank|please|can|i'm|"
+                 r"it's|yes|why|where|when)\b", low):
+        return "en"
+    return ""
 
 
 def _get_whisper():
@@ -14179,8 +14311,10 @@ def chat_attach():
                 text = (extract_text_from_file(saved) or "").strip()
                 if not text:
                     text = f"(No readable text could be extracted from {orig}.)"
-                # Cap so a huge file can't blow up the prompt.
-                text = text[:8000]
+                # Cap so a huge file can't blow up the prompt \u2014 and say so:
+                # a syllabus cut mid-schedule read as the whole document, and
+                # the missing weeks were invented (2026-09-24).
+                text = _cap_attachment_text(text, orig)
                 print(f"   [CHAT] extracted {len(text)} chars from doc attachment: {safe}")
                 results.append({"name": orig, "kind": "doc", "text": text})
         except Exception as e:
@@ -15477,6 +15611,12 @@ def chat_completions():
         _context_doc_query = _contextual_document_query(_intent_msg, messages)
         _selector_intent = _context_doc_query or _intent_msg
         _quick_result = TOOL_SELECTOR.select_tool(_selector_intent) if _selector_intent else None
+        # A context-derived query exists only to re-run a document search; it
+        # must never pick another tool (a mutating one least of all).
+        if (_context_doc_query and _quick_result and _quick_result.primary_tool
+                and _quick_result.primary_tool.tool_name != "search_documents"):
+            _context_doc_query = None
+            _quick_result = TOOL_SELECTOR.select_tool(_intent_msg) if _intent_msg else None
         if (_context_doc_query and _quick_result and _quick_result.primary_tool
                 and _quick_result.primary_tool.tool_name == "search_documents"):
             _quick_result.primary_tool.extracted_params["query"] = _context_doc_query
@@ -15484,6 +15624,7 @@ def chat_completions():
         _quick_tool = _quick_result.primary_tool.tool_name if (_quick_result and _quick_result.primary_tool) else None
         _quick_params = _quick_result.primary_tool.extracted_params if (_quick_result and _quick_result.primary_tool) else {}
         _is_zero_llm = (_quick_tool in _ZERO_LLM_QUICK and bool(_quick_params)
+                        and not (_quick_result and _quick_result.needs_disambiguation)
                         and len(_intent_msg) <= 120)
         # An attached/queued image must reach the vision model, which only
         # happens on the LLM path — never take the zero-LLM shortcut then.

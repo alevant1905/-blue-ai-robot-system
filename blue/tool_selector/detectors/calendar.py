@@ -106,8 +106,26 @@ def is_schedule_time_question(msg_lower: str) -> bool:
                 or _WHEN_EVENT_IS_RE.search(text))
 
 
+# A bare " at " matched "look AT the syllabus", and with "class schedule" in
+# the same message create_reminder tied search_documents (2026-09-24).
+_AT_CLOCK_RE = re.compile(
+    r"\bat\s+(?:\d{1,2}(?::\d{2}|h\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.|o['\u2019]?clock)?\b"
+    r"|\d{3,4}\b|noon\b|midnight\b"
+    r"|(?:half|quarter)\s+(?:past|to)\s+\w+"
+    # "at three", "at eleven thirty" \u2014 but not "at one of the schedules",
+    # "at one point"
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
+    r"(?!\s+(?:of|point|time|another|less|more|least|most|stage|end|side|level|way)\b))",
+    re.I)
+
+
+def _has_time(msg_lower: str) -> bool:
+    return (any(t in msg_lower for t in _TIME_INDICATORS)
+            or bool(_AT_CLOCK_RE.search(msg_lower)))
+
+
 _TIME_INDICATORS = (
-    ' at ', 'tomorrow', 'today', 'tonight', 'this afternoon',
+    'tomorrow', 'today', 'tonight', 'this afternoon',
     'this evening', 'this morning',
     'next week', 'next monday', 'next tuesday', 'next wednesday',
     'next thursday', 'next friday', 'next saturday', 'next sunday',
@@ -338,7 +356,7 @@ class CalendarDetector(BaseDetector):
             'remember that my',
         )
         if any(s in msg_lower for s in memory_aid_signals):
-            if any(t in msg_lower for t in _TIME_INDICATORS) or any(
+            if _has_time(msg_lower) or any(
                     n in msg_lower for n in _EVENT_NOUNS):
                 return ToolIntent(
                     tool_name='create_reminder',
@@ -367,7 +385,7 @@ class CalendarDetector(BaseDetector):
             "i've got a ", "we've got a ",
             'the meeting is', 'the call is', 'the appointment is',
         )
-        has_time = any(t in msg_lower for t in _TIME_INDICATORS)
+        has_time = _has_time(msg_lower)
         event_nouns = _EVENT_NOUNS
         if has_time:
             if (any(d in msg_lower for d in declarative_starts)

@@ -233,9 +233,9 @@ class ImprovedToolSelector:
             'search_scholar': 'search academic journals',
         }
 
-        primary_name = tool_names.get(primary.tool_name, primary.tool_name)
+        primary_name = tool_names.get(primary.tool_name, primary.tool_name.replace('_', ' '))
         alt_names = [
-            tool_names.get(alt.tool_name, alt.tool_name)
+            tool_names.get(alt.tool_name, alt.tool_name.replace('_', ' '))
             for alt in alternatives
         ]
 
