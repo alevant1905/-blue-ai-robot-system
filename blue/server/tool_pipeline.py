@@ -312,7 +312,8 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                 "role": "assistant", "content": fallback,
             }}]}, pending_force_tool
 
-        if improved_force_tool == "web_search" and bt.detect_web_refusal(content):
+        if improved_force_tool == "web_search" and (
+                bt.detect_web_refusal(content) or bt._SEARCH_OFFER_RE.search(content or "")):
             print("   [WEB] Search ran, but response dodged the answer - retrying from results")
             conversation_messages.append({"role": "assistant", "content": content})
             conversation_messages.append({
@@ -646,7 +647,7 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
                 "content": (
                     "[Correction: you claimed you performed an action, but the "
                     "user did not ask for any such action and no tool was called. "
-                    "Nothing was sent or done. Do NOT perform, offer, or claim any "
+                    "Nothing was sent or done. Do NOT perform or claim any "
                     "action. Just answer the user's actual question directly: "
                     f"\"{(last_user_message or '').strip()[:300]}\"]"
                 ),

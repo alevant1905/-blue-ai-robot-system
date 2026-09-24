@@ -214,3 +214,37 @@ def test_no_hop_by_hop_headers_on_the_event_stream(client):
     }
     assert not {k.lower() for k, _ in resp.headers} & hop_by_hop
     assert resp.headers["Cache-Control"].startswith("no-cache")
+
+
+def _events(payload):
+    return [body for body in (json.loads(line[6:]) for line in payload.splitlines()
+                              if line.startswith("data: ")) if body]
+
+
+def test_each_model_call_starts_the_draft_afresh(client):
+    """A tool lead-in and the answer after the tool used to run together in
+    one bubble, so the preview looked longer than anything Blue said."""
+    stream_routes.open_stream("turn-reset")
+    sink = stream_routes.token_sink("turn-reset")
+    sink("Let me check your library. ")
+    sink.reset()
+    sink("DH201 meets Fridays.")
+    stream_routes.mark_phase("turn-reset", "checking")
+    stream_routes.close_stream("turn-reset")
+
+    events = _events(client.get("/chat/stream/turn-reset").get_data(as_text=True))
+    assert events == [{"delta": "Let me check your library. "}, {"reset": True},
+                      {"delta": "DH201 meets Fridays."}, {"phase": "checking"}]
+
+
+def test_a_phase_for_a_closed_or_unknown_turn_is_ignored(client):
+    stream_routes.open_stream("turn-closed")
+    stream_routes.close_stream("turn-closed")
+    stream_routes.mark_phase("turn-closed", "checking")
+    events = _events(client.get("/chat/stream/turn-closed").get_data(as_text=True))
+    assert {"phase": "checking"} not in events
+
+    stream_routes.mark_phase("never-opened", "checking")
+    stream_routes.mark_phase("", "checking")
+    assert "never-opened" not in stream_routes._STREAMS
+    assert "" not in stream_routes._STREAMS

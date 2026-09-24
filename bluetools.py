@@ -9730,17 +9730,28 @@ def detect_hallucinated_search(response: str) -> bool:
 # 2026-07-09). When a reply is that refusal AND no tool ran, force the search.
 _WEB_REFUSAL_RE = re.compile(
     # ['’] — the model emits curly apostrophes ("I don’t") as often as ASCII.
-    r"i (?:don['’]?t|do not) have (?:a )?(?:live|real[- ]?time|current)"
+    r"i (?:don['’]?t|do not) have (?:a )?(?:live|real[- ]?time|current),? "
+    r"(?:(?!camera\b|video\b|tracker\b)[\w-]+,?\s+){0,2}"
+    r"(?:internet|web|data|feeds?|access|information|info|updates?|news|results"
+    r"|scoreboards?|scores?|search(?:es)?|browsing|connection|capabilit(?:y|ies)"
+    r"|abilit(?:y|ies)|knowledge|standings|stat(?:s|istics)|prices?|pricing|rates?"
+    r"|quotes?|coverage|details|conditions|weather|events?|fixtures?|schedules?"
+    r"|figures|numbers|brackets?|markets?|tables?|rankings?|leaderboards?)\b"
     r"|i (?:don['’]?t|do not) have access to (?:live|real[- ]?time|current)"
     r"|can['’]?t access (?:live|real[- ]?time|current)"
     r"|no (?:live|real[- ]?time) (?:access|feed|data|scoreboard)"
     r"|i(?:['’]d)? recommend checking|your best bet is to check"
     r"|best (?:place|way) to check|check a live sports"
-    r"|you can check (?:the|a|full|live)"
-    r"|would you like me to (?:look up|search|check)"
-    r"|if you(?:['’]d| would) like,? i can (?:look up|search|check)",
+    r"|you can check (?:the|a|full|live)",
     re.IGNORECASE,
 )
+
+
+# After a search has run, offering to search is a dodge, not a useful offer.
+_SEARCH_OFFER_RE = re.compile(
+    r"would you like me to (?:look up|search|check)"
+    r"|if you(?:['’]d| would) like,? i can (?:look up|search|check)",
+    re.IGNORECASE)
 
 
 def detect_web_refusal(response: str) -> bool:
@@ -9930,8 +9941,13 @@ _ACTION_CLAIM_PATTERNS = {
         r"sent\s+(?:the|a|that)\s+\w+(?:\s+\w+)?\s+to\b|"
         r"message\s+(?:has been|is|was)\s+sent|"
         # Present continuous (the model often says "Sending...!" as if it's happening now):
-        r"(?:i'?m\s+|^|\s)(?:sending|emailing|delivering|firing\s+off)\s+(?:the|that|an?|it|you|over|to)|"
-        r"sending\s+(?:the|that|an?|it|over|now|you)|"
+        # Only as the speaker's own act: "stop sending you on ghost hunts" and
+        # "rather than sending it to a remote cloud" are not claims (Sept).
+        # Any present-tense send, except the idioms: "stop sending you on
+        # ghost hunts", "rather than sending it to a remote cloud" (Sept).
+        r"(?<!\bstop )(?<!\bthan )(?<!\bof )(?<!\bwithout )(?<!\bavoid )"
+        r"(?<!\bkeep )(?<!\bfrom )(?<!\bby )(?<!\babout )"
+        r"(?:sending|delivering|firing\s+off)\s+(?:the|that|an?|it|over|now|you|to)\b(?!\s+on\b)|"
         r"emailing\s+(?:you|it|that|the|now)"
         r")\b",
         re.IGNORECASE,
@@ -10885,6 +10901,13 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
     _LM_FAILURE.streamed = on_token is not None
     try:
         if on_token is not None:
+            # Each call starts the draft afresh (tool lead-ins, retries).
+            _reset = getattr(on_token, "reset", None)
+            if _reset:
+                try:
+                    _reset()
+                except Exception:
+                    pass
             result = _stream_from_model(payload, on_token)
         else:
             result = _post_to_model(payload)
@@ -11835,7 +11858,7 @@ def _strip_recycled_lead(text: str, messages) -> str:
     if not drop:
         return text
     rest = ' '.join(parts[drop:]).strip()
-    if len(rest) < 20:
+    if len(rest) < max(20, 0.4 * len(t)):
         return text
     print(f"   [ANTI-PARROT] dropped {drop} recycled sentence(s) from the reply head")
     return rest
@@ -14525,7 +14548,8 @@ _COMPLETENESS_CLAIM_RE = re.compile(
 # whole line instead of answering the question. Wrong ages were only half the
 # problem; ages were never the question.
 _ASKED_FOR_NAMES_RE = re.compile(
-    r"\bnames?\b|\bwho (?:is|are|all)\b|\bremember everyone"
+    r"\bnames?\b|\bwho (?:is|are|all)\b(?!\s+(?:you|u|ya|yourself|blue|hexia|casper)\b)"
+    r"|\bremember everyone"
     r"|\beveryone['’]?s?\b|\beverybody['’]?s?\b",
     re.I,
 )
@@ -15503,6 +15527,8 @@ def chat_completions():
                 focus=focus,
                 on_token=_stream_routes.token_sink(_stream_id),
             )
+            # The draft is done; the output checks may still replace it.
+            _stream_routes.mark_phase(_stream_id, "checking")
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
 

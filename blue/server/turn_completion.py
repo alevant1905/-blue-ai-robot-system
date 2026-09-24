@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 import bluetools as bt
 from blue.server import runaway as _runaway
-from blue_identity import _ASKS_OR_GREETS_RE
+from blue_identity import _ASKS_OR_GREETS_RE, _USER_CORRECTION_CUE_RE
 
 
 # Compiled once. These were rebuilt on every single turn, and living inside
@@ -80,9 +80,40 @@ def denies_a_known_person(text: str) -> bool:
         return False
     if _ABOUT_A_DOCUMENT_RE.search(body):
         return False
-    low = body.lower()
-    return any(re.search(rf"\b{re.escape(n.lower())}\b", low)
-               for n in _people_on_record() if n)
+    # "I don't know who Chatsubt is ... Alex Levant's hardware" denies
+    # Chatsubt, not Alex: look only in the clause the denial governs.
+    names = [n for n in _people_on_record() if n]
+    for match in _MEMORY_DENIAL_RE.finditer(body):
+        clause = re.split(r"[.!?;]|\bbut\b|\u2014", body[match.start():],
+                          maxsplit=1)[0]
+        head = body[:match.start()]
+        # "Felix? I don't have any record of him." / "As for Felix, I don't
+        # have anything stored": the name comes first in the same sentence,
+        # or the denied clause points back to it with a pronoun.
+        # "I don't have any record of that \u2014 Felix hasn't come up": the
+        # unnamed object is named after the dash.
+        rest = body[match.start() + len(clause):]
+        if rest.startswith("\u2014") and _UNNAMED_OBJ_RE.search(clause.strip()):
+            clause += " " + re.split(r"[.!?;]", rest[1:], maxsplit=1)[0]
+        if _BACKREF_RE.search(clause):
+            scope = " ".join(re.split(r"[.!?;]|\u2014", head)[-3:]) + " " + clause
+        else:
+            scope = re.split(r"[.!;]|\u2014", head)[-1] + " " + clause
+            # "Sorry Alex, I don't have any record of a Chatsubt": addressed,
+            # not denied.
+            for n in names:
+                scope = re.sub(rf"(?:^|\b(?:sorry|hi|hey|okay|ok|well|hmm|yes|no|so)\b)"
+                               rf",?\s*{re.escape(n)}\s*,", " ", scope.strip(), flags=re.I)
+                scope = re.sub(rf",\s*{re.escape(n)}\s*(?=[.!?]|$)", " ", scope, flags=re.I)
+        scope = scope.lower()
+        if any(re.search(rf"\b{re.escape(n.lower())}\b", scope) for n in names):
+            return True
+    return False
+
+
+_BACKREF_RE = re.compile(r"\b(?:him|her|them|he|she|they)\b", re.I)
+_UNNAMED_OBJ_RE = re.compile(
+    r"\b(?:that|this|it|anything|anyone|anybody|someone|him|her|them)\s*$", re.I)
 
 
 def _people_on_record() -> List[str]:
@@ -215,6 +246,33 @@ _REPEAT_ASK_RE = re.compile(
     r"|the (?:first|last) (?:time|part))"
     r"|(?:want|like|need) to hear (?:it|that) again"
     r"|one more time\s*[?.!]*$)", re.I)
+_SHOW_AGAIN_RE = re.compile(
+    r"\b(?:let(?:['’]?s| me)|can i|show me|give me)\s+(?:see|read|have)?\s*"
+    r"(?:the|that|your)\s+(?:script|draft|intro(?:duction)?|speech|text|version)\b",
+    re.I)
+# "redo the intro", "try again": a new version, never permission to replay.
+_REDO_RE = re.compile(r"\b(?:re-?do|do (?:it|that) (?:again|over)|try (?:it |that )?again)\b", re.I)
+# "change the date to Friday and show me the draft" asks for an EDITED draft.
+_EDIT_ASK_RE = re.compile(
+    r"\b(?:change|fix|edit|update|revise|rewrite|add|remove|drop|replace|move|swap|"
+    r"shorten|lengthen|make it|new|revised|updated|corrected|with the)\b", re.I)
+
+
+def _explicit_repeat(text):
+    """This message plainly asks for the same words again."""
+    t = bt._intent_text(text) if isinstance(text, str) else ""
+    if not t or _REPEAT_NOT_RE.search(t):
+        return False
+    if _REPEAT_ASK_RE.search(t):
+        return True
+    return bool(_SHOW_AGAIN_RE.search(t) and not _REDO_RE.search(t)
+                and not _EDIT_ASK_RE.search(t))
+_DELIVER_RE = re.compile(
+    r"\b(?:tell|introduce|present|read|say|give)\b[^.!?]{0,40}\b(?:to |for )?"
+    r"(?:the|this|my) (?:class|students|audience|room)\b", re.I)
+_SELF_INTRO_ASK_RE = re.compile(
+    r"\b(?:introduce yourself|about yourself|who you are|what you are)\b", re.I)
+_REHEARSAL_RE = re.compile(r"\b(?:practi[cs]e|rehearse|rehearsal|draft|script)\b", re.I)
 _REPEAT_NOT_RE = re.compile(
     r"\b(?:do(?:n['’]?t| not)|dont|stop|never|quit|not when you)\b[^.!?]{0,25}\brepeat"
     r"|\bin (?:french|english|danish|russian|greek|spanish|german|another language"
@@ -320,9 +378,110 @@ def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=()):
     return out
 
 
-def _repeat_requested(text):
+# "not in kitchener. in waterloo at laurier": the right answer is the same
+# reply with the detail fixed, and most of its sentences come back verbatim.
+_REISSUE_CUE_RE = re.compile(r"\bnot (?:in|at|a|an|my|the|on)\b", re.I)
+# A write confirmation: short, and says what was done.
+_CONFIRMATION_RE = re.compile(
+    r"\b(?:done|saved|added|set|scheduled|created|updated|cancel{1,2}ed|removed|"
+    r"deleted|cleared|marked|noted|locked (?:it|that) in|on your (?:calendar|list)|"
+    r"reminder)\b", re.I)
+
+
+_REISSUE_STOPWORDS = frozenset(
+    "that this with what your from have they them their there then than "
+    "about just like when were will would could should also into only".split())
+
+
+def _corrected_reissue(text, earlier, reply, recents):
+    """The reply re-issues an earlier one with a detail the user replaced.
+
+    "not in kitchener. in waterloo at laurier": the replaced word was in the
+    reply being re-issued and is gone from this one, and a new word from the
+    same correction, which that reply lacked, is in it. A complaint ("I didn't ask about GPS") is not a
+    correction, and must not switch the near-replay check off. The correction
+    is the last user message, or the one before a bare "redo the intro".
+    """
+    if not reply:
+        return False
     t = bt._intent_text(text) if isinstance(text, str) else ""
-    return bool(_REPEAT_ASK_RE.search(t)) and not _REPEAT_NOT_RE.search(t)
+    candidates = [t]
+    if _REDO_RE.search(t) and earlier and isinstance(earlier[-1], str):
+        candidates.append(bt._intent_text(earlier[-1]))
+    # The reply being re-issued: the recent one it shares most sentences with.
+    def _sents(x):
+        return {re.sub(r"\W+", " ", p.lower()).strip()
+                for p in re.split(r"(?<=[.!?])\s+", x or "") if len(p.strip()) >= 20}
+    mine = _sents(reply)
+    source = max((r or "" for r in recents), key=lambda r: len(mine & _sents(r)),
+                 default="")
+    if not mine & _sents(source):
+        return False
+    said = source.lower()
+    low_reply = reply.lower()
+    in_reply = set(re.findall(r"[a-z][a-z'’-]{3,}", low_reply))
+    has = lambda word, hay: re.search(rf"\b{re.escape(word)}\b", hay) is not None
+    for c in candidates:
+        low = c.lower()
+        for m in _REISSUE_CUE_RE.finditer(low):
+            old = re.match(r"\s*([a-z][a-z'’-]{3,})", low[m.end():])
+            if not old or not has(old.group(1), said) or has(old.group(1), low_reply):
+                continue
+            new = {w for w in re.findall(r"[a-z][a-z'’-]{3,}", low)
+                   if w not in _REISSUE_STOPWORDS and w != old.group(1)}
+            if any(w in in_reply and not has(w, said) for w in new):
+                return True
+    return False
+
+
+def _rehearsed_source(reply, messages, lenient=False):
+    """True when `reply` mostly reuses an earlier reply that answered a
+    rehearsal ("let's practice. introduce yourself to the class")."""
+    if not reply or not messages:
+        return False
+
+    def sents(s):
+        return {x for x in (re.sub(r"\W+", " ", p.lower()).strip()
+                            for p in re.split(r"(?<=[.!?])\s+", s or "")) if len(x) >= 25}
+
+    mine = sents(reply)
+    if not mine:
+        return False
+    prior_user = ""
+    for m in (messages or [])[-24:]:
+        content = m.get("content") if isinstance(m.get("content"), str) else ""
+        if m.get("role") == "user":
+            prior_user = bt._intent_text(content)
+        elif m.get("role") == "assistant" and content:
+            # The reply must BE the rehearsed piece, nothing added: "tell the
+            # class what we'll cover next week" answered with the intro plus
+            # a new sentence is the 2026-07-09 replay bug.
+            if ((not (mine - sents(content)) or (
+                    lenient and len(mine & sents(content)) >= max(2, len(mine) // 2)))
+                    and (_DELIVER_RE.search(prior_user) or _REHEARSAL_RE.search(prior_user))):
+                return True
+    return False
+
+
+def _repeat_requested(text, earlier=(), messages=None, reply=""):
+    """Asked to hear it again, in THIS message.
+
+    "lets see the script" asks for the prepared text; a rehearsed piece asked
+    for "for the class" is a delivery, not a replay. The replay guards fought
+    both in September and regenerated the script away. Only the current
+    message counts: an earlier "say that again", once answered, must not
+    exempt the next replay.
+    """
+    if _explicit_repeat(text):
+        return True
+    t = bt._intent_text(text) if isinstance(text, str) else ""
+    if (not t or _REPEAT_NOT_RE.search(t) or _REDO_RE.search(t)
+            or not _DELIVER_RE.search(t)):
+        return False
+    # "tell the class about yourself" asks for the rehearsed intro itself, so
+    # a line added to it is still the intro (guard_identity still checks it);
+    # "tell the class what we'll cover" asks for something new.
+    return _rehearsed_source(reply, messages, lenient=bool(_SELF_INTRO_ASK_RE.search(t)))
 
 
 def _run_reply_guards(final_content, response, *, messages, robot,
@@ -342,14 +501,52 @@ def _run_reply_guards(final_content, response, *, messages, robot,
     try:
         _, _prev_assist = bt._last_exchange(messages)
         _prev_assist = _without_proactive(_prev_assist)
-        if _prev_assist:
+        _earlier_users = [str(m.get("content") or "") for m in (user_messages or [])[:-1]]
+        _repeat_ok = _repeat_requested(last_user_msg, _earlier_users,
+                                       messages=messages, reply=final_content)
+        # A write that really happened this turn may be confirmed in the same
+        # words as an earlier (phantom) confirmation — it is true now.
+        try:
+            _writes = [o for o in (bt._continuity_routes.turn_tool_outcomes() or [])
+                       if o.get("success") and o.get("name") in _ANY_WRITE_TOOLS]
+        except Exception:
+            _writes = []
+        _tool_backed = bool(_writes)
+        # What this turn's writes were about ("call Felix at 5"): a replayed
+        # confirmation of an EARLIER write names none of it.
+        _write_words = set()
+        for _o in _writes:
+            _args = _o.get("args")
+            _vals = _args.values() if isinstance(_args, dict) else [_args]
+            for _v in _vals:
+                _write_words |= {w for w in re.findall(r"[a-z]{4,}", str(_v).lower())
+                                 if w not in _REISSUE_STOPWORDS}
+        # Only a plain "say that again" skips the strips: a delivery that
+        # staples new content onto the rehearsed piece must still be cut.
+        _skip_strips = templated or _explicit_repeat(last_user_msg)
+        if _prev_assist and not _skip_strips:
             _deparroted = bt._strip_parroted_prefix(final_content, _prev_assist)
             if _deparroted != final_content:
                 final_content = _deparroted
                 response["choices"][0]["message"]["content"] = final_content
         # And the finer-grained variant: individual sentences replayed
         # from ANY earlier reply as a preamble to the real answer.
-        _derecycled = bt._strip_recycled_lead(final_content, messages)
+        _derecycled = (final_content if _skip_strips
+                       else bt._strip_recycled_lead(final_content, messages))
+        if _derecycled != final_content:
+            # Cutting "Hi everyone, I'm Hexia, ..." from a requested
+            # re-introduction left a nameless one, which the identity check
+            # then replaced with a canned paragraph (2026-09-09).
+            _pre_kind = bt.contextual_identity_request_kind(
+                bt._intent_text(last_user_msg) if isinstance(last_user_msg, str) else "",
+                messages)
+            if _pre_kind:
+                _pre_name = bt._robot_cfg(robot)["name"]
+                if (bt.identity_response_problem(_derecycled, _pre_name, request_kind=_pre_kind)
+                        and not bt.identity_response_problem(
+                            final_content, _pre_name, request_kind=_pre_kind)):
+                    print("   [ANTI-PARROT] kept the recycled lead: cutting it broke the self-description")
+                    _derecycled = final_content
         if _derecycled != final_content:
             final_content = _derecycled
             response["choices"][0]["message"]["content"] = final_content
@@ -634,8 +831,14 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             norm_final=_norm_final,
             norm_recents=_all_norms,
             opening_replay=lambda t: _shared_opening(t, _all_norms),
-            repeat_requested=_repeat_requested(last_user_msg),
+            repeat_requested=_repeat_ok,
             templated=templated,
+            tool_backed=lambda t: (_tool_backed and len(t or "") < 240
+                                   and bool(_CONFIRMATION_RE.search(t or ""))
+                                   and bool(_write_words & set(re.findall(
+                                       r"[a-z]{4,}", (t or "").lower())))),
+            corrected_reissue=lambda t: _corrected_reissue(
+                last_user_msg, _earlier_users, t, _recent_assists),
             parrot_norm=_parrot_norm,
             recycled_from_recents=_recycled_from_recents,
             profile_recited_fraction=_profile_recited_fraction,

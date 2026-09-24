@@ -765,3 +765,26 @@ def test_a_turn_with_no_user_message_is_refused(chat, body):
     response = chat.client.post("/v1/chat/completions", json=body)
     assert response.status_code == 400
     assert chat.model.payloads == []
+
+
+def test_the_draft_restarts_for_each_model_call_and_ends_checking(chat):
+    """After a tool, the preview shows the answer, not the lead-in plus it."""
+    from blue.server.routes import stream as stream_routes
+
+    stream_routes.open_stream("resettest")
+    chat.model.queue(
+        {"choices": [{"message": {
+            "role": "assistant", "content": "Let me check your library.",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "search_documents", "arguments": '{"query": "memory"}'}}]}}]},
+        "Memory is less a store than a practice, in your notes.",
+    )
+    chat.ask("what do you make of memory?", stream_id="resettest")
+    body = chat.client.get("/chat/stream/resettest").get_data(as_text=True)
+    events = [e for e in (json.loads(line[6:]) for line in body.splitlines()
+                          if line.startswith("data: ")) if e]
+    resets = [i for i, e in enumerate(events) if e.get("reset")]
+    assert len(resets) >= 2, "each model call begins with a reset"
+    after_last = "".join(e.get("delta", "") for e in events[resets[-1]:])
+    assert after_last.strip() == "Memory is less a store than a practice, in your notes."
+    assert events[-1] == {"phase": "checking"}

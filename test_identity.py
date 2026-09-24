@@ -286,17 +286,23 @@ def test_identity_repetition_detects_recycled_topics_not_just_words():
     assert set(identity_reply_topics(previous)) == {
         "embodiment", "local operation",
     }
+    # Asked for MORE, a paraphrase of the same angles is recycling.
     assert identity_repeats_recent_reply(
-        paraphrase, [previous], "introduction"
-    )
-    assert identity_repeats_recent_reply(
-        "Hi, I'm Blue. My face moves while I talk so I can look at you.",
-        [previous],
-        "introduction",
+        paraphrase, [previous], "identity_more"
     )
     assert not identity_repeats_recent_reply(
-        new_angle, [previous], "introduction"
+        new_angle, [previous], "identity_more"
     )
+    # A fresh introduction or "who are you" naturally covers the same ground:
+    # 8 of 12 flagged in September were good answers replaced by a canned one.
+    assert not identity_repeats_recent_reply(
+        paraphrase, [previous], "introduction"
+    )
+    assert not identity_repeats_recent_reply(
+        "Hi, I'm Blue. My face moves while I talk so I can look at you.",
+        [previous],
+        "identity_more",
+    ), "one shared topic is not recycling"
 
 
 def test_wrong_robot_name_is_rejected():

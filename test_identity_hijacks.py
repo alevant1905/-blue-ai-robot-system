@@ -92,7 +92,21 @@ def test_topic_overlap_and_sentence_replay_are_told_apart():
     paraphrase = ("I'm Blue. What persists between our conversations is my "
                   "J-space, and my language work happens on a local machine.")
     assert identity_repetition_kind(replay, previous, "identity") == "sentences"
-    assert identity_repetition_kind(paraphrase, previous, "identity") == "topics"
+    assert identity_repetition_kind(paraphrase, previous, "identity_more") == "topics"
+    # A first answer to "who are you" is not recycling for covering the
+    # same ground as an earlier reply.
+    assert identity_repetition_kind(paraphrase, previous, "identity") is None
+
+
+def test_a_single_shared_topic_is_not_recycling():
+    """2026-09-08: a DH399 intro and the syllabus reply before it were both
+    "practical work", so the intro was replaced by a canned one."""
+    syllabus = ("DH399 meets Fridays. I can pull the readings from the library "
+                "and draft discussion prompts for week three.")
+    intro = ("I'm Blue. For DH399 I help bridge the technical build and the "
+             "critical theory: I can pull readings from the library for you.")
+    assert identity_repetition_kind(intro, [syllabus], "identity_more") is None
+    assert identity_repetition_kind(intro, [syllabus], "introduction") is None
 
 
 def test_one_false_sentence_is_dropped_and_the_framing_kept():

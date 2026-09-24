@@ -113,7 +113,11 @@ _FILLER_CLOSER_RE = re.compile(
     r"|(?:just\s+)?let\s+me\s+know\b[!.]*"
     r"|how\s+(?:can|may)\s+i\s+(?:help|assist)\b.*"
     r"|what\s+(?:can|else can)\s+i\s+(?:help|do)\b.*"
-    r"|i(?:'|’)?m\s+here\s+(?:to\s+help|if\s+you)\b.*"
+    r"|i(?:'|’)?m\s+(?:always\s+|just\s+)?here\s+(?:to\s+(?:help|assist)(?:\s+you)?"
+    r"(?=\s*(?:[.!?]|$|,\s*(?:alex|anytime|always)\b"
+    r"|\s(?:with\s+(?:any|anything|whatever|all|your\s+questions)\b"
+    r"|whenever\b|if\b|when\b|in\s+any\b|any\s*time\b)))"
+    r"|if\s+you\b).*"
     r"|feel\s+free\s+to\s+ask\b.*"
     r"|hope\s+(?:that|this)\s+helps\b.*"
     r")\s*$",

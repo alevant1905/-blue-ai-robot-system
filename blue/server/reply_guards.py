@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import bluetools as bt
+from blue_identity import _CORRECTION_ACK_RE
 
 # A pattern that cannot match anything, used as a safe default so a context
 # built without one makes its guard decline instead of raising on None.
@@ -81,6 +82,12 @@ class ReplyContext:
     opening_replay: Callable[[str], bool] = lambda text: False
     repeat_requested: bool = False
     templated: bool = False
+    # A write tool succeeded this turn and the reply is a short confirmation:
+    # worded like an earlier (phantom) one, it is true now, not a replay.
+    tool_backed: Callable[[str], bool] = lambda text: False
+    # The reply re-issues an earlier one with a detail the user just
+    # corrected: most sentences come back verbatim, and that is right.
+    corrected_reissue: Callable[[str], bool] = lambda text: False
     # Set by apply(): which guard decided the reply.
     handled_by: str = ""
 
@@ -238,6 +245,13 @@ def guard_identity(ctx) -> Optional[str]:
         )
     if _redo_ok:
         final_content = _redo_text
+    elif _identity_issue == "recycles_identity_topics":
+        # The validator passed the original; only the repetition heuristic
+        # objected. A failed retry must not throw a good answer away for a
+        # canned one — and declining lets the age, roster and family checks
+        # after this one still judge it.
+        print("   [IDENTITY] retry failed — keeping the original, which only recycled topics")
+        return None
     elif _identity_salvage:
         final_content = _identity_salvage
         print("   [IDENTITY] retry still invalid — kept on-topic reply minus drifted sentences")
@@ -288,11 +302,6 @@ def guard_identity(ctx) -> Optional[str]:
                 1: "practical work",
                 2: "embodiment",
             },
-            "identity": {
-                0: "embodiment",
-                1: "continuity and J-space",
-                2: "open selfhood question",
-            },
             "identity_more": {
                 0: "continuity and J-space",
                 1: "relationship with Alex",
@@ -300,6 +309,10 @@ def guard_identity(ctx) -> Optional[str]:
             },
         }.get(_identity_kind, {})
         _seed_variant = _fallback_variant % 3
+        # "Who are you" gets who the robot is (name, body, machine), not the
+        # subjective-experience paragraph the topic rotation used to land on.
+        if _identity_kind == "identity":
+            _seed_variant = 0
         for _offset in range(3):
             _candidate_variant = (_seed_variant + _offset) % 3
             if (_fallback_primary_topics.get(_candidate_variant)
@@ -437,17 +450,60 @@ def guard_family_refusal(ctx) -> Optional[str]:
            or ctx.denies_known_person(final_content or "")))):
         return None
     print("   [ANTI-PARROT] family-memory refusal despite facts — regenerating once")
+    _asked = bt._intent_text(ctx.last_user_msg if isinstance(ctx.last_user_msg, str)
+                             else "")[:200]
     _redo_text = _regen_once(
-        "[You DO know Alex's family — the household facts and "
-        "your memories are right here in this prompt. You just "
-        "claimed to have no memory of the family or not to store "
-        "personal details, which is false. Answer again, warmly, "
-        "from what you actually know about the family.]")
-    if (_redo_text and not _family_refusal_re.search(_redo_text)
-            and not ctx.denies_known_person(_redo_text)):
+        "[Internal check, not from the user: your draft said you have no "
+        "memory of Alex's family, but the household facts and your memories "
+        "are in this prompt. Answer the user's last message again: \""
+        + _asked + "\" — using only what the facts say, without "
+        "apologising or mentioning this note.]")
+    _last = ctx.last_user_msg if isinstance(ctx.last_user_msg, str) else ""
+    if _redo_text and bt.is_phantom_correction_ack(_redo_text, _last):
+        # "Ah, you're right \u2014 they're Athena, Emmy and Vilda" keeps the
+        # answer; only the apology to the user goes.
+        _redo_text = _without_ack(_redo_text) or _redo_text
+    _usable = bool(_redo_text and not _family_refusal_re.search(_redo_text)
+                   and not ctx.denies_known_person(_redo_text))
+    if _usable and not bt._misstated_ages(_redo_text, ctx.person_ages or {}):
         final_content = _redo_text
-        response["choices"][0]["message"]["content"] = final_content
+    else:
+        # Never ship the false refusal when the facts can answer.
+        try:
+            _facts = (bt.memory_system.load_facts() or {}) if bt.memory_system else {}
+            _canned = bt.canonical_household_reply(
+                bt._intent_text(_last), robot=robot, facts=_facts,
+                user_name=ctx.user_name, messages=ctx.messages or [],
+                kid_mode=ctx.user_name in bt._CHAT_ONLY_USERS)
+        except Exception:
+            _canned = None
+        if _canned:
+            final_content = _canned
+        elif _usable:
+            # No template for this question: a retry that states an age wrong
+            # still beats "I have no memory of your family" \u2014 and the
+            # wrong-age check after the chain can still correct it.
+            final_content = _redo_text
+    response["choices"][0]["message"]["content"] = final_content
     return final_content
+
+
+def _without_ack(text: str) -> str:
+    """The retry minus its apology to the user ("You're right", "My mistake").
+
+    Only the apology phrase goes; a sentence that carried the answer keeps it
+    ("Ah, you're right \u2014 they're Athena, Emmy and Vilda").
+    """
+    kept = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+        s = _CORRECTION_ACK_RE.sub("", sentence)
+        s = re.sub(r"^(?:[\s,.;:!\u2014\u2013-]|(?:ah|oh|well|hmm|sorry about that|sorry)\b)+",
+                   "", s.strip(), flags=re.I)
+        s = re.sub(r"\s+([,.;:!?])", r"\1", s).strip()
+        if len(re.findall(r"\w+", s)) < 2:
+            continue
+        kept.append(s[:1].upper() + s[1:])
+    return " ".join(kept)
 
 
 def guard_voice_denial(ctx) -> Optional[str]:
@@ -754,6 +810,28 @@ def guard_phantom_correction_ack(ctx) -> Optional[str]:
     return final_content
 
 
+# A retry that confesses the check instead of answering: "You're right—I'm
+# stuck in a loop" went out after notes that read like the user scolding.
+_LOOP_CONFESSION_RE = re.compile(
+    r"\b(?:stuck in|caught in) (?:a|my|the) [\w ]{0,20}loop\b"
+    r"|\brepeat(?:ing)? (?:myself|the script|that)\b"
+    r"|\bshowing the text again\b", re.I)
+
+
+def _internal_note(problem: str, ctx) -> str:
+    """A regeneration instruction the model cannot mistake for the user.
+
+    It goes in as a user-role message (one system message only), so the
+    wording carries the framing: the retries used to open with apologies to
+    Alex for a loop he never complained about.
+    """
+    asked = bt._intent_text(ctx.last_user_msg if isinstance(ctx.last_user_msg, str)
+                            else "")[:200]
+    return (f"[Internal check, not from the user: {problem}. Write a fresh "
+            f"answer to the user's last message: \"{asked}\". Do not apologise "
+            "or mention repeating, a loop, or this note.]")
+
+
 def guard_verbatim_replay(ctx) -> Optional[str]:
     """The whole reply is a verbatim replay of an earlier one."""
     final_content = ctx.reply
@@ -765,18 +843,21 @@ def guard_verbatim_replay(ctx) -> Optional[str]:
     _regen_once = ctx.regen_once
     response = ctx.response
     if (_grounded_reply or ctx.repeat_requested or ctx.templated
-            or not _norm_final):
+            or ctx.tool_backed(final_content) or not _norm_final):
         return None
-    if not (_norm_final in (_norm_recents or set())
-            or ctx.opening_replay(final_content)):
+    _exact = _norm_final in (_norm_recents or set())
+    if not (_exact or ctx.opening_replay(final_content)):
+        return None
+    # A long shared opening is right when the user corrected a detail further
+    # on; an exact replay never is.
+    if not _exact and ctx.corrected_reissue(final_content):
         return None
     print("   [ANTI-PARROT] pure replay of an earlier reply — regenerating once")
-    _redo_text = _regen_once(
-        "[That reply was a word-for-word repeat of something you "
-        "already said in this conversation. Do not repeat it. "
-        "Answer my last question directly, in new words.]",
+    _redo_text = _regen_once(_internal_note(
+        "your draft repeated an earlier reply word for word", ctx),
         max_tokens=700)
     if (_redo_text
+            and not _LOOP_CONFESSION_RE.search(_redo_text)
             and not _identity_broken(_redo_text)
             and _parrot_norm(_redo_text) not in (_norm_recents or set())
             and not ctx.opening_replay(_redo_text)):
@@ -793,19 +874,23 @@ def guard_recycled_lead(ctx) -> Optional[str]:
     _recycled_from_recents = ctx.recycled_from_recents
     _regen_once = ctx.regen_once
     response = ctx.response
-    if not ((not _grounded_reply and not ctx.repeat_requested
-      and not ctx.templated
-      and _recycled_from_recents(final_content) >= 0.6)):
+    _recycled = _recycled_from_recents(final_content) if not (
+        _grounded_reply or ctx.repeat_requested or ctx.templated
+        or ctx.tool_backed(final_content)) else 0.0
+    # A correction re-issued with the detail fixed keeps most sentences; only
+    # a reply with nothing changed at all is still a replay.
+    if (ctx.corrected_reissue(final_content)
+            and ctx.norm_final not in (ctx.norm_recents or set())):
+        return None
+    if _recycled < 0.6:
         return None
     print("   [ANTI-PARROT] near-replay of recent replies — regenerating once")
-    _redo_text = _regen_once(
-        "[Nearly every sentence of that reply is a word-for-word "
-        "repeat of what you said in your last few turns. The user "
-        "heard it already. Answer their LAST message with new "
-        "words and, if you have nothing new, say so briefly "
-        "instead of repeating.]",
-        max_tokens=700)
+    _redo_text = _regen_once(_internal_note(
+        "most sentences of your draft repeated your last few replies word for "
+        "word. If there is nothing new to add, answer in one short sentence",
+        ctx), max_tokens=700)
     if (_redo_text
+            and not _LOOP_CONFESSION_RE.search(_redo_text)
             and not _identity_broken(_redo_text)
             and _recycled_from_recents(_redo_text) < 0.6):
         final_content = _redo_text

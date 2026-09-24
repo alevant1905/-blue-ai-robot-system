@@ -41,6 +41,11 @@ _MAX_STREAMS = 64
 # Sent when the turn produced no tokens for this subscriber (a tool call, a
 # canonical grounded answer, or a turn that finished before anyone subscribed).
 _DONE = object()
+# A new model call in the same turn: the page clears the draft instead of
+# appending to it. A tool lead-in ("let me check your library") and a rejected
+# first attempt used to run together with the answer, so the preview looked
+# far longer than anything Blue said (September: 9 of 44 changed turns).
+_RESET = object()
 
 
 def _prune_locked(now: float) -> None:
@@ -93,7 +98,24 @@ def token_sink(stream_id: Any):
     def sink(piece: str) -> None:
         entry["q"].put(piece)
 
+    def reset() -> None:
+        entry["q"].put(_RESET)
+
+    sink.reset = reset
     return sink
+
+
+def mark_phase(stream_id: Any, phase: str) -> None:
+    """Tell the page what the turn is doing now ("checking": the model is
+    done and the output checks are running, which can replace the draft)."""
+    stream_id = str(stream_id or "").strip()[:80]
+    if not stream_id:
+        return
+    with _LOCK:
+        entry = _STREAMS.get(stream_id)
+        if entry is None or entry["done"]:
+            return
+    entry["q"].put(("phase", str(phase)[:20]))
 
 
 def close_stream(stream_id: Any) -> None:
@@ -145,7 +167,12 @@ def register(app) -> None:
                     continue
                 if item is _DONE:
                     break
-                yield f"data: {json.dumps({'delta': item})}\n\n"
+                if item is _RESET:
+                    yield f"data: {json.dumps({'reset': True})}\n\n"
+                elif isinstance(item, tuple) and item and item[0] == "phase":
+                    yield f"data: {json.dumps({'phase': item[1]})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'delta': item})}\n\n"
             yield "event: end\ndata: {}\n\n"
 
         return Response(

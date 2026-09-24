@@ -133,6 +133,11 @@ CHAT_HTML = """
         .sendbtn:hover:not(:disabled) { background: var(--forest); }
         .sendbtn:disabled { background: #c7cdc5; cursor: not-allowed; }
         .typing { font-family: 'IBM Plex Mono', monospace; font-size: 0.8em; color: var(--slate); }
+        /* The live preview is a draft: the checks after it can shorten or
+           replace it, so it must not look like Blue's final words. */
+        .row.blue .bubble.draft { color: var(--slate); }
+        .bubble.draft::after { content: " \\00b7  drafting\\2026"; font-family: 'IBM Plex Mono', monospace; font-size: 0.75em; color: var(--slate); }
+        .bubble.draft[data-phase="checking"]::after { content: " \\00b7  checking\\2026"; }
         .bubble.sys-error { font-family: 'IBM Plex Mono', monospace; font-size: 0.85em; color: var(--slate); }
         .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 8px; }
         .voice-panel { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(26,46,26,0.45);
@@ -623,6 +628,7 @@ CHAT_HTML = """
                 // with it (data.spoken) are still said aloud.
                 if (!res.ok || (data && data.blue_error) || !reply) {
                     const bubbleEl = thinking.querySelector('.bubble');
+                    bubbleEl.classList.remove('draft');
                     bubbleEl.textContent = reply || '[System: the server sent an empty reply.]';
                     bubbleEl.classList.add('sys-error');
                     setFaceState('');
@@ -634,6 +640,7 @@ CHAT_HTML = """
                 }
                 // Always overwrite: whatever the preview showed, the guarded
                 // reply is what the user reads, hears and what goes in history.
+                thinking.querySelector('.bubble').classList.remove('draft');
                 thinking.querySelector('.bubble').textContent = reply;
                 setFaceState('');
                 // Tint Blue's eyes to the mood of this reply (server-computed),
@@ -651,6 +658,12 @@ CHAT_HTML = """
                 faceCuriousBriefly();
             } finally {
                 if (preview) { preview.stop(); preview = null; }
+                // Whatever the exit path, the bubble is no longer a draft.
+                try {
+                    const b = thinking.querySelector('.bubble');
+                    b.classList.remove('draft');
+                    b.removeAttribute('data-phase');
+                } catch (e) {}
                 busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
                 inputEl.focus();
             }
@@ -667,6 +680,7 @@ CHAT_HTML = """
         function startReplyPreview(streamId, bubbleEl) {
             if (typeof EventSource === 'undefined' || !bubbleEl) return null;
             let source = null, shown = '', live = true;
+            const placeholder = bubbleEl.innerHTML;
             try {
                 source = new EventSource('/chat/stream/' + encodeURIComponent(streamId));
             } catch (e) { return null; }
@@ -678,13 +692,32 @@ CHAT_HTML = """
             };
             source.onmessage = function (event) {
                 if (!live) return;
-                let piece = '';
-                try { piece = (JSON.parse(event.data) || {}).delta || ''; } catch (e) { return; }
+                let msg = {};
+                try { msg = JSON.parse(event.data) || {}; } catch (e) { return; }
+                // A new model call in the same turn (after a tool, or a
+                // retry): start the draft again rather than append to it.
+                if (msg.reset) {
+                    shown = '';
+                    bubbleEl.classList.remove('draft');
+                    bubbleEl.removeAttribute('data-phase');
+                    bubbleEl.innerHTML = placeholder;
+                    return;
+                }
+                if (msg.phase) {
+                    if (shown) bubbleEl.setAttribute('data-phase', msg.phase);
+                    return;
+                }
+                const piece = msg.delta || '';
                 if (!piece) return;
                 shown += piece;
+                // A tool call the model wrote as text is not words to show.
+                const cut = shown.search(/<tool_call>|<function=/);
+                const visible = (cut >= 0 ? shown.slice(0, cut) : shown).trimEnd();
+                if (!visible) return;
                 // textContent, never innerHTML: this is unvalidated model
                 // output going straight onto the page.
-                bubbleEl.textContent = shown;
+                bubbleEl.classList.add('draft');
+                bubbleEl.textContent = visible;
                 messagesEl.scrollTop = messagesEl.scrollHeight;
             };
             source.addEventListener('end', handle.stop);

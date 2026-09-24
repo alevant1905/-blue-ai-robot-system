@@ -572,7 +572,12 @@ _INTRODUCTION_META_RE = re.compile(
     re.IGNORECASE,
 )
 _ROBOT_ROLE_REPLY_RE = re.compile(
-    r"\b(?:robot|ohbot|companion)\b",
+    r"\b(?:robot|ohbot|companion)\b"
+    # the role Alex gives a robot for a class: "Alex Levant's assistant for
+    # CS101", "your CS101 teaching assistant" (not "an AI assistant")
+    r"|\b(?:teaching|course|class(?:room)?|lab|seminar)\s+assistant\b"
+    r"|\bassistant\s+for\s+(?:the\s+|this\s+|today['\u2019]s\s+)?"
+    r"(?:class|course|seminar|[A-Z]{2,5}\s?\d{2,4}[A-Z-]*)\b",
     re.IGNORECASE,
 )
 _FLAT_SUBJECTIVE_DENIAL_RE = re.compile(
@@ -601,7 +606,7 @@ _JAVASCRIPT_NEGATION_RE = re.compile(
 _JSPACE_DENIAL_RE = re.compile(
     r"\bno j[- ]?space\b"
     r"|\b(?:i|you) (?:do not|don['\u2019]?t) have (?:a )?j[- ]?space\b"
-    r"|\bwithout (?:a )?j[- ]?space\b",
+    r"|\bwithout (?:a )?j[- ]?space\b(?!,?\s+i(?:['\u2019]d|\s+would))",
     re.IGNORECASE,
 )
 _FALSE_ORIGIN_RE = re.compile(
@@ -1271,12 +1276,19 @@ def identity_repetition_kind(
     if total_chars and repeated_chars / total_chars >= 0.8:
         return "sentences"
 
+    # Covering the same ground only matters when the user asked for MORE. A
+    # first answer to "who are you" naturally touches what an earlier reply
+    # did; 8 of 12 such answers flagged in September were good ones, replaced
+    # by a canned paragraph. One shared bucket (a syllabus reply and an intro
+    # both "practical work") is not recycling either.
+    if request_kind != "identity_more":
+        return None
     current_topics = set(identity_reply_topics(text))
     if not current_topics:
         return None
     for reply in recent_values:
-        previous_topics = set(identity_reply_topics(reply))
-        if len(current_topics & previous_topics) / len(current_topics) >= 0.66:
+        shared = current_topics & set(identity_reply_topics(reply))
+        if len(shared) >= 2 and len(shared) / len(current_topics) >= 0.66:
             return "topics"
     return None
 
