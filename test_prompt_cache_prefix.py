@@ -27,17 +27,48 @@ def _system_text(messages=None, robot="blue"):
     return msg["content"]
 
 
+def _openings(text, tag):
+    """How many blocks open with `tag`. Counted as a line of its own, since a
+    block may name another in its prose ("only Alex or <location> can")."""
+    return len(re.findall("^" + re.escape(tag) + "$", text, re.M))
+
+
 def test_every_volatile_block_still_appears():
     """Reordering must not have dropped a block on the floor."""
     text = _system_text()
     for tag in VOLATILE_TAGS:
-        assert tag in text, f"{tag} vanished from the system prompt"
+        assert _openings(text, tag), f"{tag} vanished from the system prompt"
 
 
 def test_no_block_is_duplicated():
     text = _system_text()
     for tag in VOLATILE_TAGS:
-        assert text.count(tag) == 1, f"{tag} appears {text.count(tag)} times"
+        count = _openings(text, tag)
+        assert count == 1, f"{tag} appears {count} times"
+
+
+def test_an_event_in_progress_does_not_count_as_a_second_block(
+        monkeypatch, tmp_path):
+    """<current_activity> names <location> in its prose while an event runs,
+    so a raw tag count failed whenever the live calendar had one running."""
+    from datetime import datetime, timedelta
+    import blue_tools_enhanced as bte
+    monkeypatch.setattr(bte, "_DB_PATH", str(tmp_path / "enhanced.db"))
+    bte._init_db()
+    bte._migrate_reminders_columns()
+    now = datetime.now()
+    with bte._conn() as c:
+        c.execute(
+            "INSERT INTO reminders (user_name, title, when_iso, end_iso, "
+            "remind_before_min, completed, archived) "
+            "VALUES ('Alex', 'CS101-A: Intro (Lecture)', ?, ?, 0, 0, 0)",
+            ((now - timedelta(minutes=7)).isoformat(timespec="minutes"),
+             (now + timedelta(minutes=103)).isoformat(timespec="minutes")))
+    monkeypatch.setattr(bt, "ENHANCED_TOOLS_AVAILABLE", True)
+    text = _system_text()
+    assert "only Alex or <location> can" in text
+    for tag in VOLATILE_TAGS:
+        assert _openings(text, tag) == 1, tag
 
 
 def test_identity_and_rules_come_before_the_clock():

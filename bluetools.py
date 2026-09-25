@@ -11725,9 +11725,26 @@ def _build_current_activity_block() -> str:
                 end = o["end"] or start
                 if start <= now <= end:
                     title = o["title"]
-                    until = (" until " + end.strftime("%I:%M %p").lstrip("0")
+                    # The event is the calendar owner's, not Blue's. "You're in
+                    # the middle of CS101-A" had him talking as if he sat in
+                    # Alex's lecture (5/5 on "what are you up to right now?",
+                    # 0/5 with this wording, 2026-09-25). "started" because
+                    # "until" alone read as "waiting for you to head into
+                    # CS101" at 08:37. Not %-I: it fails on Windows.
+                    who = str(o.get("user_name") or "Alex").strip() or "Alex"
+                    if who.lower().startswith("alex"):
+                        who = "Alex"
+                    started = start.strftime("%I:%M %p").lstrip("0")
+                    until = (", until " + end.strftime("%I:%M %p").lstrip("0")
                              if o["end"] else "")
-                    now_event = f" You're in the middle of \"{title}\"{until}."
+                    now_event = (
+                        f" On the calendar right now: {who}'s \"{title}\" "
+                        f"(started {started}{until}). That is {who}'s event, "
+                        "not yours, and it doesn't say where you are — only "
+                        "Alex or <location> can. Between conversations you "
+                        "are simply idle; don't describe your inner workspace "
+                        "as something you're doing."
+                    )
                     break
         except Exception as e:
             log.warning(f"[ACTIVITY] now-event check failed: {e}")

@@ -11,6 +11,9 @@ Run with: python -m pytest test_style_and_context.py
   kept listing it every Wednesday: "How are you doing tonight after the
   girls' dance practice?" (2026-08-19).
 - The polisher prefixed "Okay —" and lower-cased "I am Blue".
+- <current_activity> said "You're in the middle of CS101-A", and Blue talked
+  as if he sat in Alex's lecture (2026-09-25 harness, 5/5 on "what are you up
+  to right now?").
 """
 
 import sqlite3
@@ -156,3 +159,38 @@ def test_completing_a_weekly_series_ends_it_but_keeps_its_past(reminders_db):
     past = bte.occurrences_in_window(datetime(2026, 5, 1), datetime(2026, 5, 31),
                                      include_completed=True)
     assert past, "May's practices are still on record"
+
+
+# ---- the calendar event is Alex's, not Blue's -----------------------------------
+
+def _activity_block(monkeypatch, occurrences):
+    import blue_tools_enhanced as bte
+    monkeypatch.setattr(bt, "ENHANCED_TOOLS_AVAILABLE", True)
+    monkeypatch.setattr(bte, "occurrences_in_window", lambda *a, **k: occurrences)
+    return bt._build_current_activity_block()
+
+
+def _lecture(user_name="Alex"):
+    now = datetime.now()
+    return {"title": "CS101-A: Intro (Lecture)", "user_name": user_name,
+            "start": now - timedelta(minutes=7),
+            "end": now + timedelta(minutes=103)}
+
+
+def test_an_event_in_progress_belongs_to_alex_and_does_not_place_blue(monkeypatch):
+    block = _activity_block(monkeypatch, [_lecture()])
+    assert "Alex's \"CS101-A" in block
+    assert "started" in block and "not yours" in block
+    assert "You're in the middle of" not in block
+    assert "this conversation with Alex" in block
+
+
+@pytest.mark.parametrize("user_name, owner", [
+    ("Alex Levant", "Alex's"), ("Emmy", "Emmy's"), ("", "Alex's"),
+])
+def test_the_event_is_named_as_its_owners(monkeypatch, user_name, owner):
+    assert f"{owner} \"CS101-A" in _activity_block(monkeypatch, [_lecture(user_name)])
+
+
+def test_no_event_says_nothing_about_the_calendar(monkeypatch):
+    assert "On the calendar" not in _activity_block(monkeypatch, [])
