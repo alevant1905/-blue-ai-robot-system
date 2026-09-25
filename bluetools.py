@@ -8520,6 +8520,12 @@ ROBOTS = {
             "shift color to match the mood of what you're saying; a camera to "
             "see; and a speaker to talk"
         ),
+        # Follows the shared "you can be carried" sentence in EMBODIMENT.
+        # Blue only: his cart is attested (09-24), Hexia's and Casper's aren't.
+        "mobility_line": (
+            " Alex takes you to his classes on a wheeled cart and plugs you "
+            "in there."
+        ),
         "voice_lang_pref": "en",
         "voice_pitch": 1.0, "voice_rate": 1.0,
         "voice_prefer_female": False,
@@ -12351,6 +12357,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             robot_name=_robot_cfg(robot)["name"],
             robot_relationship=robot_relationship,
             embodiment_line=embodiment_line,
+            mobility_line=_robot_cfg(robot).get("mobility_line", ""),
             conversational_guidance=conversational_guidance,
             expertise_section=expertise_section,
             face_capability=face_capability,

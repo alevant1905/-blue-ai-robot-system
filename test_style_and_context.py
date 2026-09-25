@@ -14,8 +14,11 @@ Run with: python -m pytest test_style_and_context.py
 - <current_activity> said "You're in the middle of CS101-A", and Blue talked
   as if he sat in Alex's lecture (2026-09-25 harness, 5/5 on "what are you up
   to right now?").
+- EMBODIMENT said "You have no wheels", so an invitation to class came back
+  as "locked to this workstation"; nothing said a face needs a photo.
 """
 
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -72,9 +75,9 @@ def test_words_that_are_real_titles_are_not_stop_words():
 
 # ---- the style note is the last thing the model reads -----------------------------
 
-def _system_text(user="Alex", voice=False, heard=False, text="hi"):
+def _system_text(user="Alex", voice=False, heard=False, text="hi", robot="blue"):
     msgs = bt._chat_system_message(
-        [{"role": "user", "content": text}], robot="blue", user_name=user,
+        [{"role": "user", "content": text}], robot=robot, user_name=user,
         voice=voice, language="", system_addendum="", heard=heard)
     return msgs[0]["content"]
 
@@ -113,6 +116,50 @@ def test_blue_is_not_told_to_keep_an_old_answer_about_his_tastes():
 def test_no_hard_coded_home_city_for_blue():
     # blue_profile.json (Alex's own profile text) may still name the city.
     assert "workstation in Alex's house in Kitchener" not in _system_text()
+
+
+# ---- the static rules say what is true -------------------------------------------
+
+def test_blue_can_be_carried_but_cannot_move_himself():
+    """"You have no wheels, legs..." made an invitation to class come back as
+    "my physical presence is locked to this workstation... be there in
+    spirit" or "I am already here" (location_corrections[3], both runs)."""
+    text = _system_text()
+    assert "You have no wheels" not in text
+    assert "you can be carried" in text and "mains power" in text
+    assert "on a wheeled cart" in text
+    assert "Kuri" in text, "the hallucinated-body guard stays"
+
+
+@pytest.mark.parametrize("robot", ["hexia", "pico"])
+def test_only_blue_is_said_to_ride_a_cart(robot):
+    text = _system_text(robot=robot)
+    assert "you can be carried" in text
+    assert not re.search(r"\bcart\b", text, re.I)
+
+
+def test_no_face_is_said_to_be_saved_without_a_reference_photo():
+    """"I've saved a description of Clover so I can match her" (09-23): no
+    face was stored, and none can be without a photo."""
+    text = _system_text()
+    rule = text[text.index("NO FAKE ACTIONS:"):text.index("REMINDER TIME RULES:")]
+    assert "never say you've noted, saved or stored their face" in rule
+    assert "Visual Memory page" in rule
+
+
+def test_the_light_moods_are_left_to_the_tool_schema():
+    from blue.server.tool_schemas import RAW_TOOLS
+    lights = next(t for t in RAW_TOOLS if t["function"]["name"] == "control_lights")
+    assert "moonlight" in str(lights)
+    assert "Moods: moonlight" not in _system_text()
+
+
+def test_the_reminder_example_does_not_prime_tomorrow_at_ten():
+    """Invented reminder times were "tomorrow at 10/10:30" in 12 of 15
+    samples; the only example in the rules said exactly that."""
+    text = _system_text()
+    assert "ALWAYS state the full day and date" in text
+    assert "tomorrow, Tuesday May 13 at 10am" not in text
 
 
 # ---- the polisher adds no openers --------------------------------------------------
