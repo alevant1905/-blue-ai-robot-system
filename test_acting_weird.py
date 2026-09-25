@@ -259,13 +259,17 @@ def test_a_day_question_gets_the_syllabus_row_not_memory(monkeypatch, tmp_path):
     _one_course_library(monkeypatch, tmp_path, date.today() + timedelta(days=1))
     note = bt._syllabus_day_note([{"role": "user", "content": "what do we have tomorrow"}])
     assert "What is under the hood" in note and "AI Lab 2" in note
-    assert "override anything in your memory" in note
+    assert "override anything in your memory" in note and "Otherwise ignore them" in note
     # the corrections that followed keep the day
     thread = [{"role": "user", "content": "what do we have tomorrow"},
               {"role": "assistant", "content": "AI Lab 5: Building your own agents."},
               {"role": "user", "content": "its not lab 5"}]
     assert "What is under the hood" in bt._syllabus_day_note(thread)
     assert bt._syllabus_day_note([{"role": "user", "content": "play some jazz please"}]) == ""
+    for other in ("what's the weather tomorrow", "remind me friday to call mom"):
+        assert bt._syllabus_day_note([{"role": "user", "content": other}]) == "", other
+    assert "What is under the hood" in bt._syllabus_day_note(
+        [{"role": "user", "content": "what are we reading in dh399 tomorrow"}])
 
 
 def test_a_weekday_is_a_day():

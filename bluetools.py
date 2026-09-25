@@ -5117,6 +5117,13 @@ def _syllabus_file_text(fp: str) -> str:
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
+# A question about what is on that day, or about the courses: not "what's the
+# weather tomorrow" or "remind me friday to call mom".
+_DAY_SCHEDULE_ASK_RE = re.compile(
+    r"\bwhat(?:['\u2019]s| is| are| do| am| have)?\s+(?:on|up|happening|planned|"
+    r"scheduled|we doing|i doing|we have|i have|do we have|do i have|are we doing)\b"
+    r"|\b(?:class|classes|lab|labs|lecture|reading|readings|course|syllabus|topic|"
+    r"teach|teaching|seminar|tutorial)\b|\b[a-z]{2,4}\s?\d{3}\b", re.I)
 _DAY_FOLLOWUP_RE = re.compile(
     r"\b(?:lab|labs|topic|reading|readings|class|session|lecture|syllabus|"
     r"assigned|week|schedule)\b|\bnot\b|\bwrong\b|\bsure\b", re.I)
@@ -5152,12 +5159,15 @@ def _syllabus_day_note(conversation_messages) -> str:
     if not users:
         return ""
     newest = _intent_text(users[-1])
-    target = _day_of(newest)
-    if target is None and (len(newest) <= 60 or _DAY_FOLLOWUP_RE.search(newest)):
+    target = _day_of(newest) if _DAY_SCHEDULE_ASK_RE.search(newest) else None
+    if (target is None and _day_of(newest) is None
+            and (len(newest) <= 60 or _DAY_FOLLOWUP_RE.search(newest))):
         for earlier in reversed(users[-4:-1]):
-            target = _day_of(_intent_text(earlier))
-            if target:
-                break
+            ask = _intent_text(earlier)
+            if _DAY_SCHEDULE_ASK_RE.search(ask):
+                target = _day_of(ask)
+                if target:
+                    break
     if target is None:
         return ""
     try:
@@ -5181,9 +5191,10 @@ def _syllabus_day_note(conversation_messages) -> str:
         return ""
     day = f"{target.strftime('%A, %B')} {target.day}, {target.year}"
     return ("\n<syllabus_day>\nThe user is asking about " + day + ". These rows "
-            "come straight from the course syllabus files. They are authoritative: "
-            "they override anything in your memory, your workspace or your earlier "
-            "replies, which have been wrong about this. Answer from them.\n"
+            "come straight from the course syllabus files. When the question is about "
+            "classes, answer from them: they override anything in your memory, your "
+            "workspace or your earlier replies, which have been wrong about this. "
+            "Otherwise ignore them.\n"
             + "\n\n".join(rows) + "\n</syllabus_day>\n")
 
 
