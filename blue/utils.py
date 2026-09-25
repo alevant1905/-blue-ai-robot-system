@@ -13,6 +13,9 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# One emoji pattern, shared with the memory-block quoting helpers.
+from blue_reply_text import _EMOJI_RE
+
 # ================================================================================
 # LOGGING
 # ================================================================================
@@ -122,15 +125,6 @@ _FILLER_CLOSER_RE = re.compile(
     r"|hope\s+(?:that|this)\s+helps\b.*"
     r")\s*$",
     re.I,
-)
-
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F300-\U0001FAFF"   # pictographs, emoticons, symbols
-    "\U0001F000-\U0001F0FF"
-    "☀-➿"           # misc symbols and dingbats
-    "️‍"            # variation selectors, ZWJ
-    "]+"
 )
 
 # Where the final sentence begins: after a sentence ender, OR after a blank
