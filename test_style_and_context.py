@@ -103,6 +103,13 @@ def test_blue_answers_questions_about_his_own_tastes():
     assert "your own tastes" in text and "never invent an experience" in text
 
 
+def test_blue_is_not_told_to_keep_an_old_answer_about_his_tastes():
+    """The old answer <conversation_memory> held was the 09-16 flat denial
+    ("I don't have personal tastes or feelings"), recited 2/3 in replays."""
+    text = _system_text(text="what's your favorite music?")
+    assert "keep that answer" not in text
+
+
 def test_no_hard_coded_home_city_for_blue():
     # blue_profile.json (Alex's own profile text) may still name the city.
     assert "workstation in Alex's house in Kitchener" not in _system_text()
