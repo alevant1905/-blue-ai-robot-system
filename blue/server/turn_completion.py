@@ -284,11 +284,50 @@ _REPEAT_NOT_RE = re.compile(
 # tense, about Blue's memory. Measured on the log it matches claims only, not
 # requests ("tell me what it is so I can lock it in") or recall ("here is what
 # I have stored in my memory").
+#
+# "I've saved a description of Clover" (09-23) said what was kept, not where,
+# so the object list names faces and descriptions too. Not photo or picture:
+# email_snapshot is no write tool, and its true "saved the photo" would go.
 _MEMORY_WRITE_CLAIM_RE = re.compile(
     r"(?<!what )\bi(?:['’]ve| have| just| now)\s+(?:now\s+|just\s+|also\s+)?"
     r"(?:updated|corrected|fixed|changed|saved|stored|recorded|logged|committed|locked)\b"
-    r"(?:[^.!?]{0,30}\b(?:records?|memory|memories|notes?|facts?|profile)\b"
+    r"(?:[^.!?]{0,30}\b(?:records?|memory|memories|notes?|facts?|profile"
+    r"|faces?|description|appearance)\b"
     r"|\s+(?:that|this|it)\s+in\b)", re.I)
+# "I've saved her features to my visual memory, so I should be able to
+# recognize Clover next time she's in view" (09-23): no photo was enrolled,
+# and remember_person never stores a face. Either a stored face or look, or
+# a promise to recognize someone later. Not "match" or "again": "so I can
+# match her when you bring her up again" is about conversation, not the camera.
+_FACE_CLAIM_RE = re.compile(
+    r"\bi(?:['’]ve| have| just| now)\s+(?:now\s+|just\s+|also\s+)?"
+    r"(?:saved|stored|recorded|logged|kept|captured|memori[sz]ed|locked in)\s+"
+    r"(?:(?:her|his|their|your|[a-z]+['’]s)\s+)?(?:\w+\s+){0,2}?"
+    r"(?:face|features|photo|picture|look|appearance)\b"
+    r"|\bso (?:that )?i(?:['’]ll| will| can| should be able to| am able to)\s+"
+    r"(?:be able to\s+)?(?:recogni[sz]e|identify|spot)\s+"
+    r"(?:her|him|them|(?-i:[A-Z][a-z]+))\b[^.!?]{0,40}"
+    r"\b(?:next time|in the future|automatically|by face|by sight)", re.I)
+# The honest version: the photo is still to come, or was added by someone.
+# "to recognize her face automatically in the future, I need a clear
+# reference photo" / "the reference photo you added for him".
+_FACE_COND_RE = re.compile(
+    r"\bupload|\benrol"
+    r"|\b(?:need|needs|require[sd]?|without|until|getting|get)\b[^.!?]{0,40}"
+    r"\b(?:photo|picture|image)"
+    r"|\b(?:once|if|after)\b[^.!?]{0,60}\b(?:add|give|send|share)\b|\?\s*$"
+    r"|\bphoto (?:you|he|she|alex|they) (?:added|uploaded)\b", re.I)
+# Only a face-enrolment tool backs a face claim. None exists in chat yet.
+_FACE_WRITE_TOOLS = {"remember_face"}
+_FACE_FALLBACK = ("I can't recognise a face until a reference photo is added "
+                  "on my Visual Memory page.")
+# "I've updated my location context: I'm currently based in your office at
+# Laurier" (09-15 twice, 09-16, 09-24): each followed a plain statement, which
+# the save-claim check never judges, and nothing had been written.
+_LOCATION_CLAIM_RE = re.compile(
+    r"\bi(?:['’]ve| have)\s+(?:now\s+)?(?:updated|changed|set|saved|noted)\s+"
+    r"(?:my\s+)?(?:location|whereabouts|where i am)(?:\s+context)?\b", re.I)
+_PLACE_WRITE_TOOLS = {"set_place"}
 _REMINDER_CHANGE_CLAIM_RE = re.compile(
     r"\bi(?:['’]ve| have| just)\s+(?:just\s+)?(?:cleared|cancel+ed|deleted|removed"
     r"|ended|archived)\b[^.!?]{0,40}\breminders?\b"
@@ -337,8 +376,34 @@ def _claims(pattern, sentence):
     return False
 
 
-def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=()):
-    """Remove claims of a save or a cleared reminder that cannot be true.
+def _names_anyone(sentence, names):
+    return any(re.search(rf"\b{re.escape(n)}\b", sentence, re.I)
+               for n in names if n)
+
+
+def _enrolled_face_names():
+    """Who has a reference photo on disk — the people a face claim may name.
+
+    Empty when visual memory is unavailable, which judges every face claim.
+    """
+    try:
+        people = bt.get_visual_memory().entities_with_images("person")
+    except Exception:
+        return set()
+    names = set()
+    for person in people:
+        for key in ("name", "source_name"):
+            name = str(person.get(key) or "").strip()
+            if name:
+                # "Alex (Doctor Levant)" is named in a reply as "Alex".
+                names.update({name, name.split(" (")[0].strip()})
+    return names
+
+
+def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=(),
+                                 enrolled_names=()):
+    """Remove claims of a save, a stored face, a moved location or a cleared
+    reminder that cannot be true.
 
     "How old is athena" → "She's 11 now. I've updated my records so it sticks
     this time" (2026-08-15): nothing was written. "Just finished clearing out
@@ -350,31 +415,63 @@ def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=()):
     hour. A save claim is judged only when the user asked a question (a save
     does not answer one) or asked for a save that no tool made; a plain
     statement may still be saved by the background extractor after the reply.
+
+    Two claims are judged on every turn, statements included, because nothing
+    that runs after the reply can make them true: a stored face or a promise
+    to recognize someone, unless it names someone in `enrolled_names` (who
+    has a reference photo) or a face tool ran this turn; and "I've updated my
+    location", unless set_place ran this turn. A recent remember_person backs
+    neither: it stores a name and role, never a face (09-23, "that's Clover,
+    she's a TA" → "I've saved her features … so I should be able to recognize
+    Clover next time").
     """
     if outcomes is None or not reply:
         return reply
-    succeeded = {o.get("name") for o in outcomes if o.get("success")}
-    succeeded |= set(recent or ())
+    this_turn = {o.get("name") for o in outcomes if o.get("success")}
+    succeeded = this_turn | set(recent or ())
     user = user_text or ""
     checks = []
+    # The face check goes first: "remember what she looks like" answered
+    # with a saved face should get the photo fallback, not "say remember
+    # that … and I'll keep it", which no saying can make true.
+    if not this_turn & _FACE_WRITE_TOOLS:
+        checks.append(("face", lambda s: (_claims(_FACE_CLAIM_RE, s)
+                                          and not _FACE_COND_RE.search(s)
+                                          and not _names_anyone(s, enrolled_names)),
+                       _FACE_FALLBACK))
+    if not this_turn & _PLACE_WRITE_TOOLS:
+        checks.append(("location", lambda s: bool(_LOCATION_CLAIM_RE.search(s)),
+                       "Got it."))
     if (not succeeded & _ANY_WRITE_TOOLS
             and (_ASKS_OR_GREETS_RE.search(user) or _STORE_REQUEST_RE.search(user))):
-        checks.append((_MEMORY_WRITE_CLAIM_RE,
+        checks.append(("save", lambda s: _claims(_MEMORY_WRITE_CLAIM_RE, s),
                        "Got it — though that isn't saved to my long-term "
                        "memory yet. Say “remember that …” and I'll keep it."))
     if not succeeded & _REMINDER_WRITE_TOOLS:
-        checks.append((_REMINDER_CHANGE_CLAIM_RE,
+        checks.append(("reminder", lambda s: _claims(_REMINDER_CHANGE_CLAIM_RE, s),
                        "I haven't changed any reminders yet — tell me which "
                        "one and I'll do it."))
     out = reply
-    for pattern, fallback in checks:
-        sentences = re.split(r"(?<=[.!?])\s+", out.strip())
-        if not any(_claims(pattern, s) for s in sentences):
+    for label, claimed, fallback in checks:
+        # Split keeping the whitespace, so the paragraph breaks survive.
+        parts = re.split(r"(?<=[.!?])(\s+)", out.strip())
+        sentences, gaps = parts[0::2], parts[1::2] + [""]
+        if not any(claimed(s) for s in sentences):
             continue
-        kept = [s for s in sentences if not _claims(pattern, s)]
-        remainder = " ".join(kept).strip()
-        out = remainder if _substantive(remainder) else fallback
-        print(f"   [MEMORY] removed a claim nothing backs: {pattern.pattern[:40]}…")
+        kept = []
+        for s, gap in zip(sentences, gaps):
+            if not claimed(s):
+                kept.append([s, gap])
+            elif kept and "\n" in gap:
+                kept[-1][1] = gap   # a dropped paragraph end still ends one
+        remainder = "".join(s + gap for s, gap in kept).strip()
+        if label == "location":
+            # "Got it. I've updated my location context: ..." — whatever
+            # acknowledgement is left is enough.
+            out = remainder or fallback
+        else:
+            out = remainder if _substantive(remainder) else fallback
+        print(f"   [MEMORY] removed a claim nothing backs ({label})")
     return out
 
 
@@ -862,10 +959,14 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # "I'll remember that!" there is play, and remember_fact is blocked.
         if user_name not in bt._CHAT_ONLY_USERS:
             try:
+                # Visual memory is only opened when there is a face claim to judge.
+                _enrolled = (_enrolled_face_names()
+                             if _FACE_CLAIM_RE.search(final_content or "") else ())
                 final_content = _scrub_unbacked_write_claims(
                     final_content, bt._continuity_routes.turn_tool_outcomes(),
                     user_text=bt._intent_text(last_user_msg or ""),
-                    recent=bt._continuity_routes.recent_successful_tools(robot))
+                    recent=bt._continuity_routes.recent_successful_tools(robot),
+                    enrolled_names=_enrolled)
             except Exception as e:
                 bt.log.warning(f"[MEMORY] claim check failed: {e}")
         response["choices"][0]["message"]["content"] = final_content

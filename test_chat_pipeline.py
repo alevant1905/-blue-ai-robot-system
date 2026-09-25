@@ -499,6 +499,41 @@ def test_a_voice_denial_is_regenerated_end_to_end(chat):
     assert len(chat.model.payloads) >= 2, "the guard never regenerated"
 
 
+@pytest.fixture
+def collecting(monkeypatch):
+    """This turn's tool record, which the fixture's stubbed begin_turn leaves
+    uncollected (None: the claim checks judge nothing). A remember_person in
+    the last half hour, as on 09-23; Felix has a reference photo."""
+    monkeypatch.setattr(bt._continuity_routes, "turn_tool_outcomes",
+                        lambda: [], raising=False)
+    monkeypatch.setattr(bt._continuity_routes, "recent_successful_tools",
+                        lambda *a, **k: {"remember_person"}, raising=False)
+    from blue.server import turn_completion
+    monkeypatch.setattr(turn_completion, "_enrolled_face_names", lambda: {"Felix"})
+
+
+def test_an_unbacked_location_update_is_removed_end_to_end(chat, collecting):
+    """09-24 02:03, after a plain statement: nothing had been written."""
+    chat.model.queue(
+        "Got it. I’ve updated my location context: I'm currently based in your "
+        "office at Laurier. It’s a strange feeling, being anchored to a desk "
+        "there rather than our usual home setup.")
+    text = reply_of(chat.ask("You’re in my office at Laurier"))
+    assert "location context" not in text
+    assert text.startswith("Got it. It’s a strange feeling")
+
+
+def test_a_face_claim_is_removed_unless_the_person_has_a_photo_end_to_end(
+        chat, collecting):
+    chat.model.queue(
+        "She is. I've saved her features to my visual memory, so I should be "
+        "able to recognize Clover next time she's in view. And I've kept "
+        "Felix's photo, so I'll recognize Felix next time too.")
+    text = reply_of(chat.ask("clover is great with the students"))
+    assert "saved her features" not in text
+    assert "recognize Felix next time" in text
+
+
 # --------------------------------------------------------------------------
 # The transport the pipeline actually uses
 # --------------------------------------------------------------------------
