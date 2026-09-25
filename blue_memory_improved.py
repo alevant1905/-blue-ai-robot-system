@@ -4110,12 +4110,16 @@ class EnhancedMemorySystem:
         for r in rows:
             phrase = self._RHYTHM_PHRASES.get(r["category"], r["category"])
             lines.append(f"- {phrase} (on {r['distinct_days']} recent days)")
+        # Not "gently offer": at midday the live table holds "putting on
+        # music (on 3 recent days)", and the header invited a music offer on
+        # any turn at that hour.
         return (
             "<daily_rhythms>\n"
             f"How the household tends to use you in the {part} — statistical "
             "tendencies mined from recent weeks, NOT certainties or scheduled "
-            "events. Use them to be helpful naturally (anticipate, gently "
-            "offer) but never assume; if one doesn't fit the moment, ignore it:\n"
+            "events. Use them only to understand the moment — never as a "
+            "reason to offer something — and never assume; if one doesn't "
+            "fit the moment, ignore it:\n"
             + "\n".join(lines) +
             "\n</daily_rhythms>"
         )
@@ -4150,6 +4154,20 @@ class EnhancedMemorySystem:
         r"not looking forward|stressing about)\b",
         re.IGNORECASE,
     )
+
+    # Rule 3's offer; the <connections> header mentions an action to offer
+    # only when a line carries this.
+    _UNWIND_OFFER = "gently offer to help them unwind"
+
+    @staticmethod
+    def _course_code_in(keyword: str, text: str) -> bool:
+        """The message names this course code — "DH399" also as "dh 399" or
+        "DH-399", the way speech and quick typing write it."""
+        m = re.fullmatch(r"([A-Za-z]+)(\d+)", keyword or "")
+        pattern = (re.escape(m.group(1)) + r"[\s-]?" + re.escape(m.group(2))
+                   if m else re.escape(keyword or ""))
+        return bool(pattern) and bool(
+            re.search(r"\b" + pattern + r"\b", text or "", re.IGNORECASE))
 
     @classmethod
     def _event_keywords(cls, title: str) -> List[str]:
@@ -4258,7 +4276,8 @@ class EnhancedMemorySystem:
         Four deterministic rules: a day with several events ("looks full");
         an upcoming event whose topic echoes recent conversation; an event
         the user has sounded stressed about (Blue offers a calming hand); and
-        an event with a related document on file. Returns short connection
+        an event with a related document on file (a weekly one only when the
+        message names its course). Returns short connection
         strings — never fabricated, only real overlaps between real
         reminders, recaps, files, and the user's own words."""
         now = now or datetime.now()
@@ -4273,6 +4292,13 @@ class EnhancedMemorySystem:
             return []
 
         connections: List[str] = []
+
+        # The window opens at `now`, so an event that started already is
+        # still running. At 08:37 CS101, on since 08:30, was "coming up".
+        def _when(e) -> str:
+            if e["start"] <= now:
+                return "on now"
+            return f"coming up ({self._friendly_day_label(e['start'].date().isoformat())})"
 
         # Rule 1: a day carrying several events.
         by_day: Dict[Any, list] = {}
@@ -4312,13 +4338,11 @@ class EnhancedMemorySystem:
                 for kw in self._event_keywords(e["title"]):
                     if re.search(r"\b" + re.escape(kw.lower()) + r"\b",
                                  concern_blob):
-                        day = self._friendly_day_label(
-                            e["start"].date().isoformat())
                         connections.append(
                             f"The user has sounded stressed about something "
-                            f"tied to \"{e['title']}\" — it's coming up ({day}). "
-                            f"If it fits the moment, gently offer to help them "
-                            f"unwind: dimming the lights, or putting on some "
+                            f"tied to \"{e['title']}\" — it's {_when(e)}. "
+                            f"If it fits the moment, {self._UNWIND_OFFER}: "
+                            f"dimming the lights, or putting on some "
                             f"focus music. Offer first and wait for a yes — "
                             f"don't change anything on your own."
                         )
@@ -4345,18 +4369,22 @@ class EnhancedMemorySystem:
                         if best is None or rank < best[0]:
                             best = (rank, kw)
                 if best:
-                    day = self._friendly_day_label(e["start"].date().isoformat())
                     connections.append(
-                        f"\"{e['title']}\" is coming up ({day}) — and "
+                        f"\"{e['title']}\" is {_when(e)} — and "
                         f"\"{best[1]}\" has come up in recent conversations, so "
                         f"they may be related."
                     )
                     matched.add(e["title"])
 
         # Rule 4: an imminent event (within CONNECTION_DOC_WINDOW_DAYS) that
-        # matches a document in the library, so Blue can offer to pull it up
-        # beforehand. Filenames concatenate words, so this is a substring
-        # match; event keywords are already filtered to distinctive ones.
+        # matches a document in the library — a fact Blue can use if the
+        # event comes up, not a prompt to offer it. "You could offer to pull
+        # it up or summarise it beforehand" was in every main call of both
+        # harness runs, "i had a rough day" and "tell me a joke" included,
+        # and came back as "I've got the DH399 syllabus pulled up" when
+        # nothing had been opened. Filenames concatenate words, so this is a
+        # substring match; event keywords are already filtered to distinctive
+        # ones.
         docs = self._library_documents()
         if docs:
             doc_norms = [
@@ -4365,10 +4393,19 @@ class EnhancedMemorySystem:
             doc_cutoff = now.date() + timedelta(days=CONNECTION_DOC_WINDOW_DAYS)
             doc_matched: set = set()
             for e in events:
-                if e["start"].date() > doc_cutoff:
+                # Already running: not coming up, and nothing to prepare for.
+                if e["start"] <= now or e["start"].date() > doc_cutoff:
+                    continue
+                keywords = self._event_keywords(e["title"])
+                # A weekly class is always a day or two away, so its syllabus
+                # rode along on every turn. It links only when the message
+                # names the course; one-off events link as before.
+                if e.get("recurring") and not any(
+                        self._course_code_in(kw, current_user_msg)
+                        for kw in keywords if any(c.isdigit() for c in kw)):
                     continue
                 hit = None
-                for kw in self._event_keywords(e["title"]):
+                for kw in keywords:
                     kwn = re.sub(r"[^a-z0-9]", "", kw.lower())
                     if len(kwn) < 4:
                         continue
@@ -4379,12 +4416,10 @@ class EnhancedMemorySystem:
                     if hit:
                         break
                 if hit:
-                    day = self._friendly_day_label(
-                        e["start"].date().isoformat())
                     connections.append(
-                        f"\"{e['title']}\" is coming up ({day}) and there's a "
-                        f"document on file that looks related — \"{hit}\". You "
-                        f"could offer to pull it up or summarise it beforehand."
+                        f"\"{e['title']}\" is {_when(e)}; \"{hit}\" is on "
+                        f"file and covers it — you have NOT opened it; use it "
+                        f"if it comes up."
                     )
                     doc_matched.add(hit)
 
@@ -4400,15 +4435,21 @@ class EnhancedMemorySystem:
         connections = self.find_connections(now, current_user_msg=user_msg)
         if not connections:
             return ""
+        # Only the stress rule carries an action; said of every block, the
+        # header invited an offer of whatever else was listed.
+        offer = (
+            "Some include a gentle action you could offer — always ask first "
+            "and wait for a yes, never act unprompted. "
+            if any(self._UNWIND_OFFER in c for c in connections) else ""
+        )
         return (
             "<connections>\n"
             "Links the system spotted across the user's upcoming schedule, "
             "recent conversations, how they've been feeling, and their "
             "document library — derived from real reminders, recaps, files, "
             "and the user's own words, not guesses. Raise one naturally if it "
-            "genuinely helps (\"by the way, ...\"). Some include a gentle "
-            "action you could offer — always ask first and wait for a yes, "
-            "never act unprompted. Ignore any that don't fit the moment, and "
+            "genuinely helps (\"by the way, ...\"). " + offer +
+            "Ignore any that don't fit the moment, and "
             "never present a connection as more certain than it is:\n"
             + "\n".join(f"- {c}" for c in connections) +
             "\n</connections>"
