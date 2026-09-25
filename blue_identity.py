@@ -963,6 +963,165 @@ def is_social_checkin(text: str) -> bool:
         _BARE_GREETING_RE.search(text or ""))
 
 
+# Replies whose wording must never be quoted back to the robot, however the
+# question was put. Keyed on the question alone, the rule missed the sources
+# Blue recited in class: identity_request_kind is None for "we're in front of
+# the DH399 class... say hello to everyone?", and the 09-16 introduction came
+# back for 26-38 words at the next demo (2026-09-25 harness). Over 4,302
+# logged replies these match 278 self-introductions and 57 flat denials.
+_SELF_INTRO_REPLY_RE = re.compile(
+    r"^[^\n]{0,80}?\b(?:I['’]m|I am|my name is)\s+" + _ROBOT_NAME_ALT + r"\b"
+    r"|^[^\n]{0,60}?\b(?:hello|hi|good (?:morning|afternoon|evening)),?\s+"
+    r"(?:everyone|everybody|all|class|students|folks)\b",
+    re.IGNORECASE,
+)
+# "I don't have personal tastes or feelings, so I don't have a favorite" was
+# the required answer to "what's your favorite music?" once it was quoted.
+_FLAT_SELF_DENIAL_RE = re.compile(
+    r"\bI (?:don['’]?t|do not) (?:really )?have (?:any )?"
+    r"(?:personal |real |genuine )?(?:tastes?|preferences?|feelings?|"
+    r"emotions?|opinions?|favou?rites?|a favou?rite|consciousness|"
+    r"subjective experiences?|likes)\b"
+    r"|\bas an AI\b"
+    r"|\bI(?:['’]m| am) (?:just )?(?:an AI|a language model|a program)\b",
+    re.IGNORECASE,
+)
+# Questions about the robot itself. Not shared_recall (the answer is the
+# recalled content) and not jspace (a definition, answered from the block).
+_WITHHELD_REQUEST_KINDS = frozenset({
+    "introduction", "identity", "identity_more", "selfhood", "self_memory",
+    "origin", "evolution", "self_state",
+})
+
+
+def is_self_introduction_reply(reply: str) -> bool:
+    """A reply that opens by introducing the robot or greeting a room."""
+    return bool(_SELF_INTRO_REPLY_RE.search(reply or ""))
+
+
+def is_flat_self_denial(reply: str) -> bool:
+    """"I don't have personal tastes", "as an AI", "I'm just a program"."""
+    return bool(_FLAT_SELF_DENIAL_RE.search(reply or ""))
+
+
+def reply_wording_withheld(user_text: str, reply: str) -> bool:
+    """True when a memory block must not quote this reply's wording.
+
+    Check-ins, questions about the robot itself, self-introductions, flat
+    self-denials and the canned family replies: quoted, each is only a
+    pattern, and the model says it again word for word.
+    """
+    return (
+        is_social_checkin(user_text)
+        or identity_request_kind(user_text) in _WITHHELD_REQUEST_KINDS
+        or is_self_introduction_reply(reply)
+        or is_flat_self_denial(reply)
+        or bool(canonical_family_reply_kind(reply))
+    )
+
+
+# Asks for the robot to describe itself that identity_request_kind leaves
+# unclassified on purpose: routing "how are you different from chat gpt?"
+# as identity would answer it with the canonical self-introduction.
+_SELF_DESCRIPTION_REQUEST_RE = re.compile(
+    r"\b(?:you|yourself|your \w+|" + _ROBOT_NAME_ALT[3:-1] + r")"
+    r"(?:\s+\w+)?\s+differ(?:s|ent)?\s+from\b"
+    r"|\btell (?:me|us|them|everyone|everybody|"
+    r"the (?:class|students|group|audience)) "
+    r"(?:(?:a (?:little )?bit|a little|something|more) )?about yourself\b"
+    r"|\byour earliest memory\b"
+    r"|\byour favou?rite \w+",
+    re.IGNORECASE,
+)
+
+
+def is_self_description_request(text: str) -> bool:
+    """"How do you differ from ChatGPT?", "tell the students a bit about
+    yourself", "your earliest memory", "your favourite music"."""
+    return bool(_SELF_DESCRIPTION_REQUEST_RE.search(text or ""))
+
+
+_REASK_STOPWORDS = frozenset("""
+a an the and or but if so to of in on at for from with about how what why who
+whom which is are was were be been am do does did you your yours yourself i me
+my we us our it its this that these those can could would should will just
+please tell more some any there here now then than as by into have has had not
+don very really hey hello okay yes yeah well let blue hexia casper caspar pico
+picoh
+""".split())
+_ADDRESSES_ROBOT_RE = re.compile(r"\b(?:you|your|yourself|u)\b", re.IGNORECASE)
+
+
+def _reask_terms(text: str) -> set:
+    terms = set()
+    for word in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if len(word) < 3 or word in _REASK_STOPWORDS:
+            continue
+        # Crude stem, so "different" meets "differ" and "ideas" meets "idea".
+        for suffix in ("ence", "ent", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[:-len(suffix)]
+                break
+        terms.add(word)
+    return terms
+
+
+def is_reask(old_user_text: str, live_user_text: str) -> bool:
+    """True when an old question put to the robot is the live one again.
+
+    "how are you different from chat gpt?" (09-15) and "how do you differ
+    from Chat GPT?" (today): quoted, the old answer is re-said word for word.
+    The old text must address the robot, so a topical callback ("What did
+    Sarah Matthews say about the AI lab?" against "Sarah Matthews lab") keeps
+    its factual answer.
+    """
+    live = _reask_terms(live_user_text)
+    if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_user_text or ""):
+        return False
+    return len(live & _reask_terms(old_user_text)) / len(live) >= 0.6
+
+
+# The user asking what the robot said before: "What were your four ideas?",
+# "Can you remind me of those ideas?", "Can you tell me what they were?". The
+# first draft of this caught 3 of the 9 real recall questions from 2026-07-31
+# (the incident behind <earlier_answers>), so it is deliberately wide — and it
+# only ever KEEPS a quote, never removes one. A miss would take away the
+# source and invite invention; a false hit costs one quoted line.
+_RECALL_CUE_RE = re.compile(
+    r"\b(?:your|those|these|the) (?:\w+ ){0,2}(?:ideas?|suggestions?|points?|"
+    r"draft|list|plan|outline|proposal)\b"
+    r"|\byou (?:just |already )?(?:said|told me|mentioned|suggested|wrote|"
+    r"gave me|came up with|recommended|proposed|drafted|made|put together)\b"
+    r"|\bwhat (?:were|was) (?:they|those|the \w+)\b"
+    r"|\bwhat (?:they|those) (?:were|was)\b"
+    r"|\bwhat (?:exactly |else )?(?:do )?you remember about\b"
+    r"|\bremind me (?:of |what )"
+    r"|\b(?:say|tell me|go over|run through|read) (?:that|it|them|those) "
+    r"(?:again|back)\b"
+    r"|\bwhat did (?:you|we) (?:say|tell(?: me)?|decide|come up with|"
+    r"talk about|discuss)\b"
+    r"|\brecap\b"
+    r"|\b(?:earlier|last time|yesterday|last (?:week|night)|this morning),? you\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_recall(user_texts) -> bool:
+    """True when either of the last two user turns asks what was said before.
+
+    Used only to KEEP a quote that would otherwise be withheld as a re-ask.
+    Pass the user's own words (intent text), not pasted material.
+    """
+    if isinstance(user_texts, str):
+        user_texts = [user_texts]
+    for text in list(user_texts or [])[-2:]:
+        text = str(text or "")
+        if (_RECALL_CUE_RE.search(text)
+                or identity_request_kind(text) == "shared_recall"):
+            return True
+    return False
+
+
 # The architecture words a check-in must not read out (Alex, 2026-07-15:
 # "when I ask how you're doing I don't want you to start describing your
 # J-space so literally"). Checked for self_state replies only.

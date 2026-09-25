@@ -1615,3 +1615,129 @@ def test_a_check_in_reply_that_recites_the_architecture_is_caught():
     assert not self_state_readout(
         "Quietly well — my head's still a bit turned over yesterday's DH399 "
         "class. How's your day going?")
+
+
+# ---------------------------------------------------------------------------
+# Which past replies a memory block may quote. Question-keyed exclusion missed
+# the sources Blue recited at the 2026-09-25 class demos: the 09-16
+# introduction ("we're in front of the class... say hello to everyone?" is no
+# identity kind) and the 09-16 "I don't have personal tastes" denial. Re-asks
+# of the same question are withheld too, unless the user asks for the recall.
+# ---------------------------------------------------------------------------
+
+from blue_identity import (
+    asks_for_recall, is_flat_self_denial, is_reask, is_self_description_request,
+    is_self_introduction_reply, reply_wording_withheld,
+)
+
+# The nine recall questions from 2026-07-31, the incident behind
+# <earlier_answers> (conversation_log 8509-8555).
+JULY_31_RECALL_QUESTIONS = [
+    "What were some of your ideas for that meeting? Do you remember?",
+    "Yes, that is the correct meeting and you had some ideas for it when we "
+    "were preparing for it. Do you remember what they were?",
+    "You had some ideas for the meeting, but I can't remember them. Can you "
+    "tell me what they were?",
+    "Great. Can you remind me of those ideas?",
+    "Can you tell me what those ideas were?",
+    "I'm doing okay. What were your four ideas?",
+    "What were the four ideas that you gave me in preparation for our meeting "
+    "with Sarah Matthews?",
+    "Great, can you summarize those four ideas for me?",
+    "I was thinking about your idea about the local AI lab that you discussed "
+    "earlier.",
+]
+
+
+@pytest.mark.parametrize("message", JULY_31_RECALL_QUESTIONS + [
+    "Can you tell me what they were?",
+    "what did you tell me last week about how you're different from chat gpt?",
+    "what did we talk about yesterday?",
+    "what were the lab ideas you gave me last night?",
+])
+def test_recall_questions_ask_for_recall(message):
+    assert asks_for_recall([message])
+
+
+@pytest.mark.parametrize("message", [
+    "how are you different from chat gpt?",
+    "any ideas for making the lab more hands-on?",
+    "explain what an AI agent is",
+])
+def test_ordinary_questions_do_not_ask_for_recall(message):
+    assert not asks_for_recall(message)
+
+
+def test_recall_looks_back_only_two_user_turns():
+    turns = ["What were your four ideas?", "the first one", "and the lab?"]
+    assert asks_for_recall(turns[:2])
+    assert not asks_for_recall(turns)
+
+
+@pytest.mark.parametrize("reply", [
+    # 09-15 15:19, 09-16 12:27 and 09-18 10:22, opening lines.
+    "Alright, Blue is online and ready. Good morning, everyone.\n\nI’m Blue, "
+    "Alex Levant’s robot companion.",
+    "Good morning, everyone. I’m Blue, Alex Levant’s robot companion. I exist "
+    "here in this room with you, running on local hardware.",
+    "I'd be happy to! Good morning, everyone. I'm Blue, Alex Levant's robot "
+    "companion. It's nice to meet you all.",
+])
+def test_self_introductions_are_recognised_from_the_reply(reply):
+    assert is_self_introduction_reply(reply)
+    assert reply_wording_withheld("do you want to say hello?", reply)
+
+
+def test_an_ordinary_reply_is_not_a_self_introduction():
+    reply = ("That sounds peaceful. Nori picking up on the calm is classic—that "
+             "dog knows when to just *be*.")
+    assert not is_self_introduction_reply(reply)
+    assert not is_flat_self_denial(reply)
+    assert not reply_wording_withheld("nori is sleeping on the floor", reply)
+
+
+def test_a_flat_self_denial_is_recognised():
+    reply = "I don't have personal tastes or feelings, so I don't have a favorite."
+    assert is_flat_self_denial(reply)
+    assert reply_wording_withheld("what's your favorite music?", reply)
+
+
+def test_questions_about_the_robot_withhold_the_reply_wording():
+    assert reply_wording_withheld("how are you doing?", "Quietly well.")
+    assert reply_wording_withheld("are you conscious?", "I keep that open.")
+    assert not reply_wording_withheld(
+        "what did we talk about yesterday?", "We planned the DH399 lab.")
+
+
+@pytest.mark.parametrize("message", [
+    "can you tell the students a bit about yourself?",
+    "tell everyone a bit about yourself",
+    "how are you different from chat gpt?",
+    "how do you differ from Chat GPT?",
+    "what is your earliest memory?",
+    "what's your favorite music?",
+])
+def test_self_description_requests(message):
+    assert is_self_description_request(message)
+
+
+def test_a_comparison_of_courses_is_not_a_self_description():
+    assert not is_self_description_request("how is DH399 different from DH201?")
+
+
+def test_the_chatgpt_comparison_stays_out_of_the_identity_fallback():
+    """Classifying it would answer it with the canonical self-introduction."""
+    assert identity_request_kind("how are you different from chat gpt?") is None
+    assert identity_request_kind("how do you differ from Chat GPT?") is None
+
+
+def test_a_reworded_question_to_the_robot_is_a_reask():
+    assert is_reask("how are you different from chat gpt?",
+                    "how do you differ from Chat GPT?")
+
+
+def test_a_topical_callback_is_not_a_reask():
+    assert not is_reask("What did Sarah Matthews say about the AI lab?",
+                        "Sarah Matthews lab")
+    assert not is_reask("how are you different from chat gpt?",
+                        "what's on for today?")
