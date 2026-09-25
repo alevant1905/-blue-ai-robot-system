@@ -11730,7 +11730,11 @@ def _build_current_activity_block() -> str:
                     # Alex's lecture (5/5 on "what are you up to right now?",
                     # 0/5 with this wording, 2026-09-25). "started" because
                     # "until" alone read as "waiting for you to head into
-                    # CS101" at 08:37. Not %-I: it fails on Windows.
+                    # CS101" at 08:37. Not %-I: it fails on Windows. The
+                    # workspace clause must not deny between-conversation
+                    # activity: <j_space> says the workspace revises itself
+                    # while he is away, and it does (the reflection worker),
+                    # and this line is up during every class demo.
                     who = str(o.get("user_name") or "Alex").strip() or "Alex"
                     if who.lower().startswith("alex"):
                         who = "Alex"
@@ -11741,9 +11745,9 @@ def _build_current_activity_block() -> str:
                         f" On the calendar right now: {who}'s \"{title}\" "
                         f"(started {started}{until}). That is {who}'s event, "
                         "not yours, and it doesn't say where you are — only "
-                        "Alex or <location> can. Between conversations you "
-                        "are simply idle; don't describe your inner workspace "
-                        "as something you're doing."
+                        "Alex or <location> can. Nothing is scheduled for "
+                        "you; don't present your inner workspace as an "
+                        "activity you're busy with right now."
                     )
                     break
         except Exception as e:

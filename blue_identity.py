@@ -977,12 +977,16 @@ _SELF_INTRO_REPLY_RE = re.compile(
 )
 # "I don't have personal tastes or feelings, so I don't have a favorite" was
 # the required answer to "what's your favorite music?" once it was quoted.
+# "As an AI" counts only when a denial follows: bare, it also opened the long
+# reading reflections ("As an AI, I am part of this infrastructure" on Noble,
+# "As an AI, I am constantly navigating…" on Vygotsky), 17 of its 77 hits in
+# the last 5,000 rows, and a memory block must still be able to quote those.
 _FLAT_SELF_DENIAL_RE = re.compile(
     r"\bI (?:don['’]?t|do not) (?:really )?have (?:any )?"
     r"(?:personal |real |genuine )?(?:tastes?|preferences?|feelings?|"
     r"emotions?|opinions?|favou?rites?|a favou?rite|consciousness|"
     r"subjective experiences?|likes)\b"
-    r"|\bas an AI\b"
+    r"|\bas an AI\b[^.!?\n]{0,40}?\bI (?:don['’]?t|do not|can['’]?t|cannot)\b"
     r"|\bI(?:['’]m| am) (?:just )?(?:an AI|a language model|a program)\b",
     re.IGNORECASE,
 )
@@ -1000,7 +1004,8 @@ def is_self_introduction_reply(reply: str) -> bool:
 
 
 def is_flat_self_denial(reply: str) -> bool:
-    """"I don't have personal tastes", "as an AI", "I'm just a program"."""
+    """"I don't have personal tastes", "As an AI, I don't…", "I'm just a
+    program"."""
     return bool(_FLAT_SELF_DENIAL_RE.search(reply or ""))
 
 
@@ -1050,18 +1055,39 @@ don very really hey hello okay yes yeah well let blue hexia casper caspar pico
 picoh
 """.split())
 _ADDRESSES_ROBOT_RE = re.compile(r"\b(?:you|your|yourself|u)\b", re.IGNORECASE)
+# Politeness frames: "can you tell me what Sarah Matthews said…" asks about
+# Sarah Matthews, not about the robot.
+_REQUEST_FRAME_RE = re.compile(
+    r"\b(?:can|could|would|will) (?:you|u)(?: please)?\b"
+    r"|\bdo you know\b|\btell me\b",
+    re.IGNORECASE,
+)
+# Spellings of one thing: "chat gpt" / "ChatGPT", "favourite" / "favorite".
+# Three letters before "our" leave your/four/hour/tour alone.
+_CHATGPT_RE = re.compile(r"\bchat[\s-]*gpt\b")
+_BRITISH_OUR_RE = re.compile(r"(?<=[a-z]{3})our(?=(?:ite|ites|ed|ing|ful|able|s)?\b)")
 
 
 def _reask_terms(text: str) -> set:
+    text = _CHATGPT_RE.sub("chatgpt", (text or "").lower())
+    text = _BRITISH_OUR_RE.sub("or", text)
     terms = set()
-    for word in re.findall(r"[a-z0-9]+", (text or "").lower()):
+    for word in re.findall(r"[a-z0-9]+", text):
         if len(word) < 3 or word in _REASK_STOPWORDS:
             continue
         # Crude stem, so "different" meets "differ" and "ideas" meets "idea".
-        for suffix in ("ence", "ent", "s"):
+        # The plural goes first, so "students" and "student" stem alike.
+        if word.endswith("sses"):
+            word = word[:-2]
+        elif word.endswith("s") and not word.endswith("ss") and len(word) >= 4:
+            word = word[:-1]
+        for suffix in ("ence", "ent"):
             if word.endswith(suffix) and len(word) - len(suffix) >= 3:
                 word = word[:-len(suffix)]
                 break
+        # Again after the stem: "whats" is "what".
+        if word in _REASK_STOPWORDS:
+            continue
         terms.add(word)
     return terms
 
@@ -1070,13 +1096,15 @@ def is_reask(old_user_text: str, live_user_text: str) -> bool:
     """True when an old question put to the robot is the live one again.
 
     "how are you different from chat gpt?" (09-15) and "how do you differ
-    from Chat GPT?" (today): quoted, the old answer is re-said word for word.
-    The old text must address the robot, so a topical callback ("What did
-    Sarah Matthews say about the AI lab?" against "Sarah Matthews lab") keeps
-    its factual answer.
+    from ChatGPT?" (today): quoted, the old answer is re-said word for word.
+    The old text must address the robot once its politeness frame is gone,
+    so a topical callback ("Can you tell me what Sarah Matthews said about
+    the AI lab?" against "What did Sarah Matthews say about the AI lab?")
+    keeps its factual answer.
     """
     live = _reask_terms(live_user_text)
-    if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_user_text or ""):
+    old_unframed = _REQUEST_FRAME_RE.sub(" ", old_user_text or "")
+    if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_unframed):
         return False
     return len(live & _reask_terms(old_user_text)) / len(live) >= 0.6
 
@@ -1086,7 +1114,10 @@ def is_reask(old_user_text: str, live_user_text: str) -> bool:
 # first draft of this caught 3 of the 9 real recall questions from 2026-07-31
 # (the incident behind <earlier_answers>), so it is deliberately wide — and it
 # only ever KEEPS a quote, never removes one. A miss would take away the
-# source and invite invention; a false hit costs one quoted line.
+# source and invite invention; a false hit costs one quoted line. "Do you
+# remember…" is the commonest phrasing of all ("Do you remember what that
+# meeting was about?", 07-31; "do you remember who I was meeting with this
+# morning?", 08-12), and "what did I tell you" asks for the same thing.
 _RECALL_CUE_RE = re.compile(
     r"\b(?:your|those|these|the) (?:\w+ ){0,2}(?:ideas?|suggestions?|points?|"
     r"draft|list|plan|outline|proposal)\b"
@@ -1095,11 +1126,15 @@ _RECALL_CUE_RE = re.compile(
     r"|\bwhat (?:were|was) (?:they|those|the \w+)\b"
     r"|\bwhat (?:they|those) (?:were|was)\b"
     r"|\bwhat (?:exactly |else )?(?:do )?you remember about\b"
+    r"|\b(?:do|did|can) (?:you|u) (?:still )?(?:remember|recall)\b"
+    r"|\bremember (?:what|who|when|where|how) (?:i|you|u|we)\b"
     r"|\bremind me (?:of |what )"
     r"|\b(?:say|tell me|go over|run through|read) (?:that|it|them|those) "
     r"(?:again|back)\b"
-    r"|\bwhat did (?:you|we) (?:say|tell(?: me)?|decide|come up with|"
+    r"|\bwhat did (?:you|u|we|i) (?:say|tell(?: you| me)?|decide|come up with|"
     r"talk about|discuss)\b"
+    r"|\bwhat (?:was|were) your (?:\w+ ){0,2}(?:answers?|repl(?:y|ies)|"
+    r"responses?)\b"
     r"|\brecap\b"
     r"|\b(?:earlier|last time|yesterday|last (?:week|night)|this morning),? you\b",
     re.IGNORECASE,

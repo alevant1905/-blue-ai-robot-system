@@ -8,6 +8,10 @@ paragraphs ("Wait, I should also check…", the 99,666-char 2026-09-23 runaway)
 and closing menus ("…, or are we calling it a night completely?").
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 import blue.utils
@@ -189,6 +193,52 @@ def test_a_hedged_list_answer_is_not_runaway():
         "3. Log every step it takes and compare runs."
     )
     assert not is_runaway_text(reply)
+
+
+@pytest.mark.parametrize("reply", [
+    "A lab budget has three parts: hardware, licences and staff time.\n\n"
+    "Let's assume a room of twenty workstations at $2,000 each.",
+    "Two options for week 3: Toscano on agents, or Noble on search.\n\n"
+    "I'll go with Toscano for week 3, since it sets up the agent lab.",
+])
+def test_a_teaching_opener_does_not_make_a_reply_runaway(reply):
+    """Runaway drops the whole row from recall; the opener only trims a quote.
+
+    "what was that lab budget you worked out?" needs this reply as a source.
+    """
+    assert not is_runaway_text(reply)
+    assert quotable_reply(reply) == reply.split("\n\n")[0]
+
+
+def test_the_runaway_check_does_not_import_the_blue_package():
+    """An offline script must not start the live memory system.
+
+    `import blue.server.runaway` runs blue/__init__ -> blue.memory, which
+    opens the real ChromaDB through the data junction. The child process
+    refuses any blue.* import, so a regression fails here instead of doing
+    that.
+    """
+    script = (
+        "import sys\n"
+        "tried = []\n"
+        "class NoBlue:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'blue' or name.startswith('blue.'):\n"
+        "            tried.append(name)\n"
+        "            raise ImportError('blocked: ' + name)\n"
+        "sys.meta_path.insert(0, NoBlue())\n"
+        "from blue_reply_text import is_runaway_text\n"
+        "looping = 'Clover is a TA.\\n\\n' + ('Also, she runs the Tuesday "
+        "tutorial and marks the weekly reflections for every section. ') * 8\n"
+        "assert is_runaway_text(looping), tried\n"
+        "assert not is_runaway_text('Clover is a TA for CS101.')\n"
+        "assert not tried, tried\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
 
 
 def test_quotable_reply_applies_all_three():

@@ -190,6 +190,18 @@ def test_an_event_in_progress_belongs_to_alex_and_does_not_place_blue(monkeypatc
     assert "started" in block and "not yours" in block
     assert "You're in the middle of" not in block
     assert "this conversation with Alex" in block
+    assert "Nothing is scheduled for you" in block
+
+
+def test_the_event_line_does_not_deny_between_conversation_activity(monkeypatch):
+    """<j_space> says the workspace revises itself while Blue is away, and the
+    reflection worker really does. "Between conversations you are simply
+    idle" contradicted it during every class demo, when students ask "do you
+    think between conversations?"."""
+    block = _activity_block(monkeypatch, [_lecture()])
+    assert "idle" not in block
+    assert "between conversations" not in block.lower()
+    assert "don't present your inner workspace as an activity" in block
 
 
 @pytest.mark.parametrize("user_name, owner", [

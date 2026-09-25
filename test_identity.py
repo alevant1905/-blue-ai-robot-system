@@ -1741,3 +1741,88 @@ def test_a_topical_callback_is_not_a_reask():
                         "Sarah Matthews lab")
     assert not is_reask("how are you different from chat gpt?",
                         "what's on for today?")
+
+
+# --- review fixes: the predicates were too wide on replies, too narrow on
+# recall, and blind to politeness frames and spelling ------------------------
+
+from blue_identity import _reask_terms
+
+
+@pytest.mark.parametrize("reply", [
+    # Openings of long reading reflections (Noble; Vygotsky/Ilyenkov). A memory
+    # block must still quote these: "what did you say about Noble's argument?"
+    "As an AI, I am part of this infrastructure. Noble's point is that search "
+    "ranks by commercial interest, not by relevance.",
+    "Reflection: As an AI, I am constantly navigating this ambiguity between "
+    "the tool and the mediator Vygotsky describes.",
+])
+def test_as_an_ai_without_a_denial_is_not_a_flat_self_denial(reply):
+    assert not is_flat_self_denial(reply)
+    assert not reply_wording_withheld("what did you think of the reading?", reply)
+
+
+@pytest.mark.parametrize("reply", [
+    "As an AI, I don't have personal beliefs about that.",
+    "As an AI language model, I can't have a favourite song.",
+    "As an AI, I do not experience music the way you do.",
+])
+def test_as_an_ai_followed_by_a_denial_still_is(reply):
+    assert is_flat_self_denial(reply)
+
+
+@pytest.mark.parametrize("message", [
+    "Do you remember what that meeting was about?",           # 07-31
+    "do you remember who I was meeting with this morning?",   # 08-12
+    "what did I tell you about the house?",
+    "what did u say about the lab",
+    "what was your answer about chat gpt last time?",
+    "remember what I said about Toscano?",
+    "can you recall what you told the class on wednesday?",
+])
+def test_remember_style_questions_ask_for_recall(message):
+    assert asks_for_recall([message])
+
+
+@pytest.mark.parametrize("old, live", [
+    ("What were some of your ideas for that meeting? Do you remember?",
+     "do you remember who I was meeting with this morning?"),
+    ("how are you different from chat gpt?",
+     "what did you tell me last week about how you're different from chat gpt?"),
+])
+def test_a_recall_question_that_looks_like_a_reask_keeps_its_quote(old, live):
+    """The quote is withheld only for is_reask AND NOT asks_for_recall."""
+    assert not is_reask(old, live) or asks_for_recall([live])
+
+
+@pytest.mark.parametrize("old, live", [
+    ("Can you tell me what Sarah Matthews said about the AI lab?",
+     "What did Sarah Matthews say about the AI lab?"),
+    ("can you tell me when Emmy's birthday is?", "when is Emmy's birthday?"),
+    ("can you introduce the course DH399 to the class?",
+     "tell me the class schedule for the course"),
+    ("do you know who is teaching the CS101 lab this term?",
+     "who is teaching the CS101 lab?"),
+])
+def test_a_politeness_frame_does_not_make_a_topical_question_a_reask(old, live):
+    assert not is_reask(old, live)
+
+
+@pytest.mark.parametrize("old, live", [
+    ("how are you different from chat gpt?", "how do you differ from ChatGPT?"),
+    ("how do you differ from ChatGPT?", "how are you different from chat gpt?"),
+    ("can you tell me how you're different from ChatGPT?",
+     "how do you differ from chat-gpt?"),
+    ("what's your favorite music?", "whats your favourite music"),
+    ("whats your favourite music", "what's your favorite music?"),
+])
+def test_a_reask_survives_spelling_and_frames(old, live):
+    assert is_reask(old, live)
+
+
+def test_reask_terms_stem_singular_and_plural_alike():
+    assert _reask_terms("students assignments classes differences") == (
+        _reask_terms("student assignment class different"))
+    # "our" words with fewer than three letters in front are left alone.
+    assert _reask_terms("your four hours") == {"four", "hour"}
+    assert _reask_terms("colours neighbour") == _reask_terms("color neighbor")

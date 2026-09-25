@@ -15,12 +15,16 @@ again. Three kinds of debris travel with them:
 
 Stdlib only and at the repo top level on purpose: blue_memory_improved imports
 this, and importing anything under blue/ runs blue/__init__ → blue.memory →
-blue_memory_improved, which is a cycle.
+blue_memory_improved, which is a cycle (and, outside the server, starts the
+live memory system).
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
+import sys
 
 # ================================================================================
 # INSTRUCTION-BLOCK CITATIONS
@@ -183,17 +187,44 @@ def strip_closing_asks(text: str) -> str:
 # ================================================================================
 
 _RUNAWAY_CHARS = 8000
+_cut_repeats = None
+
+
+def _load_cut_repeats():
+    """blue.server.runaway.cut_repeats, without importing the blue package.
+
+    `import blue.server.runaway` runs blue/__init__, which starts the memory
+    system against the live data folder — in an offline script, that is a
+    write to the real ChromaDB. runaway.py itself is stdlib only, so when the
+    server hasn't already loaded it, load the file directly.
+    """
+    global _cut_repeats
+    if _cut_repeats is None:
+        mod = sys.modules.get("blue.server.runaway")
+        if mod is None:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "blue", "server", "runaway.py")
+            spec = importlib.util.spec_from_file_location(
+                "_blue_reply_text_runaway", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        _cut_repeats = mod.cut_repeats
+    return _cut_repeats
 
 
 def is_runaway_text(text: str) -> bool:
-    """A stored reply too broken to quote: huge, self-talking or looping."""
+    """A stored reply too broken to quote: huge, self-talking or looping.
+
+    Self-talk here is the live pattern only: "Let's assume…" or "I'll go
+    with…" opens a worked example, and a teaching reply that uses one is
+    still worth recalling. quotable_reply trims those paragraphs instead.
+    """
     if not text or not isinstance(text, str):
         return False
-    if len(text) > _RUNAWAY_CHARS or cut_self_talk(text, live=False) != text:
+    if len(text) > _RUNAWAY_CHARS or cut_self_talk(text) != text:
         return True
     try:
-        # Lazy: blue.* pulls in blue_memory_improved, which imports this.
-        from blue.server.runaway import cut_repeats
+        cut_repeats = _load_cut_repeats()
     except Exception:
         return False
     return cut_repeats(text) != text
