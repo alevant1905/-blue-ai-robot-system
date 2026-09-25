@@ -42,6 +42,12 @@ from blue_identity import (
     is_social_checkin,
 )
 
+
+def _now() -> datetime:
+    """Naive local now: stored timestamps are naive local. A seam for tests."""
+    return datetime.now()
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -1928,7 +1934,7 @@ class EnhancedMemorySystem:
                 filtered.append(mem)
 
             if filtered:
-                now_dt = datetime.now()
+                now_dt = _now()
                 memory_lines = []
                 for mem in filtered:
                     sim_pct = int(mem["similarity"] * 100)
@@ -2049,7 +2055,7 @@ class EnhancedMemorySystem:
             return bool(probe) and any(probe in lv for lv in _live)
         recent = [r for r in recent if not _already_in_thread(r.get("content"))]
         if recent:
-            now = datetime.now()
+            now = _now()
             history_lines = []
             for r in recent:
                 role = r["role"].upper()
@@ -2649,7 +2655,7 @@ class EnhancedMemorySystem:
             ts = datetime.fromisoformat(ts_iso)
         except (ValueError, TypeError):
             return ""
-        now = now or datetime.now()
+        now = now or _now()
         secs = (now - ts).total_seconds()
         if secs < 60:
             return "just now"
@@ -2660,7 +2666,9 @@ class EnhancedMemorySystem:
         if hrs < 24:
             h = int(round(hrs))
             return "an hour ago" if h == 1 else f"{h} hours ago"
-        days = int(hrs // 24)
+        # Calendar days, not 24-hour buckets: a Wednesday afternoon line read
+        # "yesterday" on Friday morning (43 hours).
+        days = max(1, (now.date() - ts.date()).days)
         if days == 1:
             return "yesterday"
         if days < 14:

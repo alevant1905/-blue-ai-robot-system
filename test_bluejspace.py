@@ -1210,3 +1210,26 @@ def test_the_models_own_roster_is_hidden_after_a_non_family_question(continuity_
     jspace = route.jspace_context_block("blue")
     assert "Black Goldendoodle" not in jspace
     assert "answered from the household facts" in jspace
+
+
+# Ages are calendar days, not 24-hour buckets. From Friday 08:33 a Wednesday
+# 13:15 exchange (43 hours) was labelled "yesterday", and Blue said "I
+# remember you telling me about her yesterday" (2026-09-25 harness).
+
+@pytest.mark.parametrize("now, stamp, age", [
+    ((2026, 9, 25, 8, 33), "2026-09-23T17:15:00+00:00", "2 days ago (Wednesday)"),
+    ((2026, 9, 25, 8, 33), "2026-09-24T11:00:00+00:00", "yesterday"),
+    ((2026, 9, 25, 8, 33), "2026-09-25T03:33:00+00:00", "9 hours ago"),
+    ((2026, 9, 25, 8, 33), "2026-09-16T17:15:00+00:00", "9 days ago"),
+    # Across the 2026-11-01 switch to EST: 00:30 EDT is still that day.
+    ((2026, 11, 2, 8, 0), "2026-11-01T04:30:00+00:00", "yesterday"),
+    ((2026, 11, 2, 8, 0), "2026-10-31T04:30:00+00:00", "2 days ago (Saturday)"),
+])
+def test_ages_count_calendar_days(continuity_module, monkeypatch, now, stamp, age):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    toronto = ZoneInfo("America/Toronto")
+    monkeypatch.setattr(continuity_module, "_LOCAL_TZ", toronto)
+    monkeypatch.setattr(continuity_module, "_now",
+                        lambda: datetime(*now, tzinfo=toronto))
+    assert continuity_module._age_text(stamp) == age

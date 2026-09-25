@@ -266,19 +266,35 @@ def _parse_time(value: str) -> Optional[datetime]:
         return None
 
 
+# Seams so tests can pin the clock and the zone; None is the system's zone.
+_LOCAL_TZ = None
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _age_text(value: str) -> str:
     then = _parse_time(value)
     if not then:
         return "at an unknown time"
-    seconds = max(0, int((datetime.now(timezone.utc) - then).total_seconds()))
+    now = _now()
+    seconds = max(0, int((now - then).total_seconds()))
     if seconds < 60:
         return "just now"
     if seconds < 3600:
         return f"{seconds // 60} minutes ago"
     if seconds < 86400:
         return f"{seconds // 3600} hours ago"
-    days = seconds // 86400
-    return "yesterday" if days == 1 else f"{days} days ago"
+    # Calendar days, not 24-hour buckets: seen from Friday 08:33, a
+    # Wednesday 13:15 exchange (43 hours) was labelled "yesterday", and Blue
+    # told Alex "I remember you telling me about her yesterday" (3/4 replays;
+    # 0/4 as "2 days ago (Wednesday)", 2026-09-25).
+    local_then = then.astimezone(_LOCAL_TZ)
+    days = max(1, (now.astimezone(_LOCAL_TZ).date() - local_then.date()).days)
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago ({local_then:%A})" if days < 7 else f"{days} days ago"
 
 
 def _salience_for_exchange(user_text: str, tools: List[Dict[str, Any]]) -> float:

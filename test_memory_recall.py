@@ -275,3 +275,19 @@ def test_recalled_days_returns_the_coherent_older_house_exchange(tmp_path):
     assert "feel excited" in block
     assert "tomorrow 8pm" in block
     assert block.count("examine your memory") == 0
+
+
+# Ages are calendar days, not 24-hour buckets (stored timestamps are naive
+# local): a Wednesday 13:15 line read "yesterday" on Friday at 08:33.
+
+@pytest.mark.parametrize("now, stamp, age", [
+    ((2026, 9, 25, 8, 33), "2026-09-23T13:15:00", "2 days ago"),
+    ((2026, 9, 25, 8, 33), "2026-09-24T07:00:00", "yesterday"),
+    ((2026, 9, 25, 8, 33), "2026-09-24T23:33:00", "9 hours ago"),
+    ((2026, 11, 2, 8, 0), "2026-11-01T00:30:00", "yesterday"),
+    ((2026, 11, 2, 8, 0), "2026-10-31T00:30:00", "2 days ago"),
+])
+def test_memory_ages_count_calendar_days(monkeypatch, now, stamp, age):
+    import blue_memory_improved as bmi
+    monkeypatch.setattr(bmi, "_now", lambda: datetime(*now))
+    assert EnhancedMemorySystem._humanize_age(stamp) == age
