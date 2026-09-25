@@ -238,3 +238,46 @@ def test_an_ambiguous_turn_is_never_the_zero_llm_shortcut(chat):
     chat.ask(msg)
     assert chat.model.main, "the model was asked"
     assert "<known_facts>" in chat.model.system_prompt
+
+
+# ---- evening: his own wrong answer had become a belief -------------------------------
+
+def _one_course_library(monkeypatch, tmp_path, day):
+    from datetime import date
+    doc = tmp_path / "DH399_AL_2026F.docx"
+    doc.write_text("x")
+    label = f"{day.strftime('%B')} {day.day}"
+    monkeypatch.setattr(bt, "load_document_index", lambda: {"documents": [
+        {"folder": "DH399", "filename": "DH399_AL_2026F.docx", "filepath": str(doc)}]})
+    monkeypatch.setattr(bt, "_syllabus_file_text", lambda fp: (
+        f"Grading\nClass Schedule\n{label}: What is under the hood of an AI agent?\n"
+        "Readings: Pasquinelli ch. 1\nAI Lab 2: How to turn your laptop into an AI workstation\n"))
+
+
+def test_a_day_question_gets_the_syllabus_row_not_memory(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+    _one_course_library(monkeypatch, tmp_path, date.today() + timedelta(days=1))
+    note = bt._syllabus_day_note([{"role": "user", "content": "what do we have tomorrow"}])
+    assert "What is under the hood" in note and "AI Lab 2" in note
+    assert "override anything in your memory" in note
+    # the corrections that followed keep the day
+    thread = [{"role": "user", "content": "what do we have tomorrow"},
+              {"role": "assistant", "content": "AI Lab 5: Building your own agents."},
+              {"role": "user", "content": "its not lab 5"}]
+    assert "What is under the hood" in bt._syllabus_day_note(thread)
+    assert bt._syllabus_day_note([{"role": "user", "content": "play some jazz please"}]) == ""
+
+
+def test_a_weekday_is_a_day():
+    from datetime import date
+    assert bt._day_of("whats on friday").weekday() == 4
+    assert bt._day_of("what's on today") == date.today()
+    assert bt._day_of("play some jazz") is None
+
+
+def test_the_day_note_reaches_the_model(chat, monkeypatch, tmp_path):
+    from datetime import date, timedelta
+    _one_course_library(monkeypatch, tmp_path, date.today() + timedelta(days=1))
+    chat.ask("what do we have tomorrow")
+    assert "<syllabus_day>" in chat.model.system_prompt
+    assert chat.model.system_prompt.rstrip().endswith("No emoji."), "the style note stays last"

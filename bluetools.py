@@ -5095,6 +5095,98 @@ _DATED_ROW_RE = re.compile(
     re.I | re.M)
 
 
+_SYLLABUS_TEXT_CACHE: Dict[str, Tuple[float, str]] = {}
+
+
+def _syllabus_file_text(fp: str) -> str:
+    """A syllabus file's text, re-read only when the file changes."""
+    try:
+        mtime = os.path.getmtime(fp)
+    except OSError:
+        return ""
+    hit = _SYLLABUS_TEXT_CACHE.get(fp)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        text = extract_text_from_file(fp) or ""
+    except Exception:
+        text = ""
+    _SYLLABUS_TEXT_CACHE[fp] = (mtime, text)
+    return text
+
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
+             "saturday", "sunday")
+_DAY_FOLLOWUP_RE = re.compile(
+    r"\b(?:lab|labs|topic|reading|readings|class|session|lecture|syllabus|"
+    r"assigned|week|schedule)\b|\bnot\b|\bwrong\b|\bsure\b", re.I)
+
+
+def _day_of(text: str):
+    """The date a message asks about: tomorrow, a date, or a weekday."""
+    from datetime import date as _date, timedelta as _td
+    target = _schedule_target_date(text)
+    if target:
+        return target
+    low = (text or "").lower()
+    if re.search(r"\btoday\b|\btonight\b", low):
+        return _date.today()
+    for i, name in enumerate(_WEEKDAYS):
+        if re.search(rf"\b{name}\b", low):
+            ahead = (i - _date.today().weekday()) % 7
+            return _date.today() + _td(days=ahead)
+    return None
+
+
+def _syllabus_day_note(conversation_messages) -> str:
+    """The course syllabus rows for the day the user is asking about.
+
+    Blue answered "what do we have tomorrow" from a belief his own wrong
+    reply had become ("AI Lab 5", 0.95) and never looked (2026-09-24). The
+    rows come straight from the files, for every course that meets that day,
+    and override memory. A short follow-up ("its not lab 5", "what lab #?")
+    keeps the day of the question before it.
+    """
+    users = [m.get("content") for m in (conversation_messages or [])
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    if not users:
+        return ""
+    newest = _intent_text(users[-1])
+    target = _day_of(newest)
+    if target is None and (len(newest) <= 60 or _DAY_FOLLOWUP_RE.search(newest)):
+        for earlier in reversed(users[-4:-1]):
+            target = _day_of(_intent_text(earlier))
+            if target:
+                break
+    if target is None:
+        return ""
+    try:
+        index = load_document_index()
+        docs = index.get("documents", []) if isinstance(index, dict) else []
+    except Exception:
+        return ""
+    rows = []
+    for d in [d for d in docs if _looks_like_syllabus_entry(d)][:8]:
+        fp = d.get("filepath", "")
+        if not fp or not os.path.exists(fp):
+            continue
+        txt = _syllabus_file_text(fp)
+        heading = _SCHEDULE_HEADING_RE.search(txt)
+        if not heading:
+            continue
+        row = _syllabus_rows_for_date(txt[heading.start():heading.start() + 12000], target)
+        if row:
+            rows.append(f"[{d.get('filename', 'syllabus')}] {row.strip()[:1500]}")
+    if not rows:
+        return ""
+    day = f"{target.strftime('%A, %B')} {target.day}, {target.year}"
+    return ("\n<syllabus_day>\nThe user is asking about " + day + ". These rows "
+            "come straight from the course syllabus files. They are authoritative: "
+            "they override anything in your memory, your workspace or your earlier "
+            "replies, which have been wrong about this. Answer from them.\n"
+            + "\n\n".join(rows) + "\n</syllabus_day>\n")
+
+
 def _named_syllabus(d) -> bool:
     fn = (d.get('filename') or '').lower()
     return ('syllab' in fn or 'syllab' in (d.get('folder') or '').lower()
@@ -12817,7 +12909,17 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
             f"arrives in another language or mixes languages.\n"
         )
         tail_notes.append(lang_note)
-    elif not language and isinstance(system_msg, dict):
+    # The syllabus rows for the day being asked about, ahead of the notes
+    # after it (the style note stays last).
+    try:
+        _day_note = _syllabus_day_note(conversation_messages)
+    except Exception as _day_e:
+        _day_note = ""
+        log.warning(f"[SYLLABUS] day note failed: {_day_e}")
+    if _day_note and isinstance(system_msg, dict):
+        print("   [SYLLABUS] pinned the syllabus rows for the day asked about")
+        tail_notes.insert(0, _day_note)
+    if not language and isinstance(system_msg, dict):
         # Auto. The memory blocks quote earlier turns, so after one Russian
         # exchange an English "hi blue" was answered in Russian (2026-09-24).
         _newest = next((m.get("content") for m in reversed(conversation_messages)
