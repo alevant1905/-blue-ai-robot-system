@@ -2167,6 +2167,7 @@ class LMStudioClient:
         temperature: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
         should_cancel: Optional[Any] = None,
+        reasoning_effort: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """One chat completion against the local model.
@@ -2179,6 +2180,11 @@ class LMStudioClient:
         It is declared here rather than left to **kwargs because everything
         in kwargs is sent to LM Studio as a payload field, and a function is
         not JSON.
+
+        ``reasoning_effort`` ("none", "medium") is sent as that request field
+        and is declared for the same reason: callers pass it by name, and a
+        model that refuses it is asked again without it (see
+        _reasoning_refused). None sends nothing — the model's own default.
         """
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -2199,6 +2205,8 @@ class LMStudioClient:
             payload.update(extra)
         if kwargs:
             payload.update(kwargs)
+        if reasoning_effort and not _reasoning_field_refused():
+            payload["reasoning_effort"] = reasoning_effort
 
         if should_cancel is not None:
             # Background priority: this call exists to be interrupted, so it
@@ -2240,6 +2248,10 @@ class LMStudioClient:
             except requests.exceptions.HTTPError as e:
                 # Don't retry on 4xx errors (client errors)
                 if e.response.status_code < 500:
+                    if ("reasoning_effort" in payload
+                            and _reasoning_refused(e.response.text)):
+                        payload.pop("reasoning_effort", None)
+                        continue
                     return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
                 last_error = e
                 wait_time = 2 ** attempt
@@ -2269,6 +2281,7 @@ def _raw_call_llm(
     temperature: Optional[float] = None,
     extra: Optional[Dict[str, Any]] = None,
     tools_override: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
     """Raw LLM transport: always uses local LM Studio, no post-processing.
@@ -2280,6 +2293,8 @@ def _raw_call_llm(
     tools_override: when provided, this exact tool list is sent instead of
     the global TOOLS array (used by the email auto-reply to expose only a
     restricted, read-only subset). Takes precedence over include_tools.
+
+    reasoning_effort: the request field, by name (see LMStudioClient.chat).
     """
     # Nudge if a specific tool is required
     if force_tool:
@@ -2311,6 +2326,7 @@ def _raw_call_llm(
             max_tokens=max_tokens,
             temperature=temperature,
             extra=extra,
+            reasoning_effort=reasoning_effort,
             **kwargs
         )
     except Exception as e:
@@ -2326,6 +2342,7 @@ def call_llm(
     temperature: Optional[float] = None,
     extra: Optional[Dict[str, Any]] = None,
     tools_override: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: Optional[str] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
     """Public LLM entrypoint: `_raw_call_llm` plus conversational polishing.
@@ -2343,6 +2360,7 @@ def call_llm(
         temperature=temperature,
         extra=extra,
         tools_override=tools_override,
+        reasoning_effort=reasoning_effort,
         **kwargs
     )
 
@@ -9769,6 +9787,9 @@ _LM_BUDGET_FALLBACK = 6500
 _LM_BUDGET_CTX_SHARE = 0.7      # Leave room for the reply
 _LM_BUDGET_TTL_SEC = 300
 _lm_budget_cache = {"value": None, "at": 0.0}
+# The loaded model's id, read on the same /api/v0/models call (no call of its
+# own): a reasoning_effort refusal is remembered per model.
+_lm_loaded_model = {"id": None}
 
 
 def _detect_lm_context_size() -> Optional[int]:
@@ -9783,6 +9804,7 @@ def _detect_lm_context_size() -> Optional[int]:
         r.raise_for_status()
         for m in r.json().get("data", []):
             if m.get("state") == "loaded":
+                _lm_loaded_model["id"] = m.get("id") or _lm_loaded_model["id"]
                 ctx = m.get("loaded_context_length") or m.get("max_context_length")
                 if isinstance(ctx, int) and ctx > 0:
                     return ctx
@@ -10356,12 +10378,19 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
     writing instead of calling, and the stream is closed with finish_reason
     "length" rather than left to run to the 8,192-token cap. The "auto" retry
     of a long-argument tool uses it too, with its words still shown.
+
+    The token counts come in a last chunk of their own, and only when asked
+    for (stream_options.include_usage, checked against LM Studio 2026-10-05):
+    the [LM] log line needs them on streamed turns too.
     """
-    payload = {**payload, "stream": True}
+    payload = {**payload, "stream": True,
+               "stream_options": {"include_usage": True}}
     parts: List[str] = []
     tool_calls: Dict[int, Dict[str, Any]] = {}
     finish_reason = None
     prose_chars = 0
+    model_id = None
+    usage = None
     with llm_slot(foreground=True):
         with requests.post(LM_STUDIO_URL, json=payload,
                            timeout=timeout, stream=True) as response:
@@ -10382,6 +10411,8 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
                     chunk = json.loads(body)
                 except ValueError:
                     continue
+                model_id = chunk.get("model") or model_id
+                usage = chunk.get("usage") or usage
                 choice = (chunk.get("choices") or [{}])[0]
                 finish_reason = choice.get("finish_reason") or finish_reason
                 delta = choice.get("delta") or {}
@@ -10425,8 +10456,13 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
     message: Dict[str, Any] = {"role": "assistant", "content": "".join(parts)}
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    return {"choices": [{"message": message,
-                         "finish_reason": finish_reason or "stop"}]}
+    result: Dict[str, Any] = {"choices": [{"message": message,
+                                           "finish_reason": finish_reason or "stop"}]}
+    if model_id:
+        result["model"] = model_id
+    if usage:
+        result["usage"] = usage
+    return result
 
 
 # What the model may still reach for on a turn where the selector found no
@@ -10800,8 +10836,46 @@ def _chat_max_tokens() -> int:
         return 2048
 
 
+from blue.server import thinking as _thinking
+
+# Whether the model thinks first is decided per chat turn
+# (blue/server/thinking.py) and sent as `reasoning_effort`. Checked against
+# the loaded qwen3.8-27b on 2026-10-05: "none" gave 0 reasoning tokens on a
+# greeting (0.6 s); "medium" reasoned on a real question (49 and 72 tokens,
+# blocking and streamed) where the same question with no field drew none. With
+# no field, all 116 harness calls that morning had reasoned.
+_REASONING_EFFORT = {_thinking.THINK_OFF: "none", _thinking.THINK_ON: "medium"}
+# Loaded models that refused the field, each named once in the log; it is not
+# sent to them again.
+_REASONING_REFUSED_BY: set = set()
+
+
+def _reasoning_field_refused() -> bool:
+    return _lm_loaded_model["id"] in _REASONING_REFUSED_BY
+
+
+def _thinking_allowance(payload) -> int:
+    """Room for the reasoning when this request asks for some."""
+    effort = payload.get("reasoning_effort")
+    return _thinking.THINKING_ALLOWANCE_TOKENS if effort and effort != "none" else 0
+
+
+def _reasoning_refused(body) -> bool:
+    """True when LM Studio's error is about reasoning_effort: the model is
+    remembered and the caller asks again without the field."""
+    if "reasoning_effort" not in (body or ""):
+        return False
+    _model = _lm_loaded_model["id"]
+    if _model not in _REASONING_REFUSED_BY:
+        _REASONING_REFUSED_BY.add(_model)
+        print(f"   [THINKING] LM Studio refused reasoning_effort for "
+              f"{_model or 'the loaded model'} — no longer sending it: "
+              f"{str(body)[:160]}")
+    return True
+
+
 def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
-                       tool_scope, force_choice="required"):
+                       tool_scope, force_choice="required", thinking=None):
     """Assemble the request body: the turn, the tools it may use, and a trim
     to fit the model's input budget.
 
@@ -10811,6 +10885,12 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     `force_tool` narrows the tools to that one; `force_choice` is its
     tool_choice. "required" forces the call; "auto" is the loop's one retry
     after a forced call came back as words, where words are a fair answer.
+
+    `thinking` is the turn's decision (blue/server/thinking.py), sent as
+    reasoning_effort. Thinking on gets THINKING_ALLOWANCE_TOKENS on top of
+    the cap: the reasoning is generated inside max_tokens, and on 10-05 it
+    took all 2,048 of a reading report's. None sends no field (Panel and the
+    other callers that have not been decided yet keep the model default).
     """
     # Final-pass normalization for strict chat templates (Qwen et al.).
     # Ensures: leading systems, alternating user/assistant, starts with user
@@ -10838,6 +10918,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
     }
+    _effort = _REASONING_EFFORT.get(thinking)
+    if _effort and not _reasoning_field_refused():
+        payload["reasoning_effort"] = _effort
+        payload["max_tokens"] += _thinking_allowance(payload)
 
     if include_tools:
         # CRITICAL FIX: After iteration 1, filter out "memory/organization" tools that cause loops
@@ -10910,6 +10994,68 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
 # Why the last chat model call on this thread failed, for the honest
 # out-of-character reply (model_unavailable_reply). None after a success.
 _LM_FAILURE = threading.local()
+
+# What this thread's chat turn asked of the model: the thinking decision and
+# each call's token counts, for the [LM] line beside [TIMING]. Where a slow
+# reply's time went was invisible: on 10-05, 81% of generated tokens were
+# hidden reasoning and nothing in the server log said so.
+_LM_TURN = threading.local()
+# The model that answered the last turn, to name a change once (a reload
+# switched the model's thinking default on 10-05 with nothing in the log).
+_LM_MODEL_SEEN = {"id": None, "warned": set()}
+
+
+def _lm_turn_reset(thinking=None):
+    _LM_TURN.thinking = thinking
+    _LM_TURN.calls = []
+
+
+def _lm_turn_note(result, payload) -> None:
+    """Record one chat call's model id and token counts for this turn."""
+    usage = (result or {}).get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    model = (result or {}).get("model") or _lm_loaded_model["id"]
+    calls = getattr(_LM_TURN, "calls", None)
+    if calls is None:
+        calls = _LM_TURN.calls = []
+    calls.append({
+        "model": model,
+        "effort": payload.get("reasoning_effort"),
+        "prompt": usage.get("prompt_tokens"),
+        "cached": cached,
+        "reasoning": details.get("reasoning_tokens"),
+        "completion": usage.get("completion_tokens"),
+    })
+    seen = _LM_MODEL_SEEN["id"]
+    if model and seen and model != seen and model not in _LM_MODEL_SEEN["warned"]:
+        _LM_MODEL_SEEN["warned"].add(model)
+        print(f"   [MODEL] WARNING: the loaded model changed: {seen} -> {model}. "
+              "Its thinking default and speed may differ.")
+    if model:
+        _LM_MODEL_SEEN["id"] = model
+
+
+def _lm_turn_summary() -> str:
+    """One log line: model, thinking decision and token counts of this turn's
+    chat calls. Empty when the turn made none."""
+    calls = getattr(_LM_TURN, "calls", None) or []
+    if not calls:
+        return ""
+
+    def total(key):
+        values = [c[key] for c in calls if isinstance(c.get(key), int)]
+        return f"{sum(values)}t" if values else "?"
+
+    models = ", ".join(dict.fromkeys(c["model"] or "?" for c in calls))
+    thinking = getattr(_LM_TURN, "thinking", None) or "default"
+    efforts = ", ".join(dict.fromkeys(c["effort"] or "-" for c in calls))
+    cached = (f" (cached {total('cached')})"
+              if any(isinstance(c.get("cached"), int) for c in calls) else "")
+    return (f"   [LM] model {models}, thinking {thinking} (sent {efforts}), "
+            f"{len(calls)} call{'s' if len(calls) != 1 else ''}: "
+            f"prompt {total('prompt')}{cached}, reasoning {total('reasoning')}, "
+            f"completion {total('completion')}")
 
 
 def _classify_lm_failure(e, body):
@@ -11067,7 +11213,9 @@ def _lm_studio_recover(e, payload):
 
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
                    on_token=None, tool_scope: str = "full",
-                   force_choice: str = "required") -> Dict:
+                   force_choice: str = "required", thinking: Optional[str] = None) -> Dict:
+    """One chat call. `thinking` is the turn's decision (see
+    _lm_studio_payload); None leaves the model's default."""
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
     # the model will call the right tool. We only add text hints for tools where
@@ -11100,7 +11248,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
 
     payload = _lm_studio_payload(
         messages, include_tools=include_tools, force_tool=force_tool,
-        iteration=iteration, tool_scope=tool_scope, force_choice=force_choice)
+        iteration=iteration, tool_scope=tool_scope, force_choice=force_choice,
+        thinking=thinking)
     # The "auto" retry after a forced note or document came back as words may
     # still make the call, body and all, and 2,048 tokens cut that off
     # mid-JSON. Streamed, it gets the forced call's cap and its stop on prose
@@ -11111,11 +11260,9 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                        and force_choice == "auto"
                        and force_tool in _LONG_ARGUMENT_TOOLS)
     if _long_retry:
-        payload["max_tokens"] = _LONG_ARGUMENT_MAX_TOKENS
+        payload["max_tokens"] = _LONG_ARGUMENT_MAX_TOKENS + _thinking_allowance(payload)
 
-    _LM_FAILURE.kind = None
-    _LM_FAILURE.streamed = on_token is not None
-    try:
+    def _send():
         if on_token is not None:
             # Each call starts the draft afresh (tool lead-ins, retries).
             _reset = getattr(on_token, "reset", None)
@@ -11128,15 +11275,29 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 # A forced call's answer is the call. Any text it writes is a
                 # failure the loop deals with, never a draft to show: on 10-05
                 # the reminder self-argument streamed into the preview.
-                result = _stream_from_model(
+                return _stream_from_model(
                     payload, None, prose_limit=_FORCED_STREAM_ABORT_CHARS)
-            elif _long_retry:
-                result = _stream_from_model(
+            if _long_retry:
+                return _stream_from_model(
                     payload, on_token, prose_limit=_FORCED_STREAM_ABORT_CHARS)
-            else:
-                result = _stream_from_model(payload, on_token)
-        else:
-            result = _post_to_model(payload)
+            return _stream_from_model(payload, on_token)
+        return _post_to_model(payload)
+
+    _LM_FAILURE.kind = None
+    _LM_FAILURE.streamed = on_token is not None
+    try:
+        try:
+            result = _send()
+        except requests.exceptions.HTTPError as e:
+            # A model that has no reasoning switch may refuse the field: the
+            # turn is asked again without it, once, and not sent it again.
+            if not ("reasoning_effort" in payload and _reasoning_refused(
+                    getattr(getattr(e, "response", None), "text", ""))):
+                raise
+            _allowance = _thinking_allowance(payload)
+            payload.pop("reasoning_effort", None)
+            payload["max_tokens"] -= _allowance
+            result = _send()
     except Exception as e:
         return _lm_studio_recover(e, payload)
     # An HTTP 200 carrying {"error": ...} or no usable message is a failure
@@ -11153,6 +11314,10 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         _LM_FAILURE.dump = ""
         print(f"[ERROR] LM Studio returned no usable message: {str(result)[:200]}")
         return None
+    try:
+        _lm_turn_note(result, payload)
+    except Exception as e:
+        log.warning(f"[LM] could not record the call's usage: {e}")
     return result
 
 
@@ -13099,11 +13264,16 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
         pass
     return conversation_messages
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None, heard: bool = False) -> Dict:
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None, heard: bool = False, decide_thinking: bool = False) -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page). `focus` carries the
     chat Context panel's library picks ({"docs": [...], "folders": [...]}),
-    scoping Blue's document awareness and searches for this turn."""
+    scoping Blue's document awareness and searches for this turn.
+
+    `decide_thinking` (the chat page) decides per turn whether the model
+    thinks first (blue/server/thinking.py). Without it nothing is sent and
+    the model keeps its own default — Panel calls this too, and is a
+    separate change."""
     global _ACTIVE_CHAT_ROBOT, _ACTIVE_FOCUS_DOCS, _ACTIVE_FOCUS_FOLDERS
     _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
     # Set the library-focus globals up front — build_dynamic_system_message and
@@ -13123,12 +13293,37 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
 
     last_user_message = messages[-1].get("content", "") if messages else ""
+    _lm_turn_reset()
 
     _self_reply, _identity_kind = _chat_self_context(
         conversation_messages, last_user_message, robot=robot,
         user_name=user_name)
     if _self_reply is not None:
         return _self_reply
+
+    # Whether the model thinks first: decided again below once the selector
+    # has named a forced tool, which settles it either way. The dated recall
+    # turn_context pins into the turn is not something the user pasted.
+    _turn_raw = re.sub(
+        r'<dated_episode_recall\b[^>]*>.*?</dated_episode_recall>', ' ',
+        _get_text_content(messages[-1]) if messages else "",
+        flags=re.I | re.S).strip()
+    _turn_words = _intent_text(_turn_raw)
+    _turn_prev = next((_get_text_content(m) for m in reversed(messages[:-1])
+                       if m.get("role") == "assistant"), "")
+
+    def _decide_thinking(forced_tool=None, greeting=False):
+        if not decide_thinking:
+            return None
+        return _thinking.thinking_for_turn(
+            _turn_words, voice=heard,
+            kid=(user_name or "").strip() in _CHAT_ONLY_USERS,
+            is_greeting=greeting, identity_kind=_identity_kind,
+            forced_tool=forced_tool,
+            # An attachment, or a paste the intent text dropped.
+            has_attachment=("[attached document:" in _turn_raw.lower()
+                            or len(_turn_raw) - len(_turn_words) > 500),
+            prev_reply=_turn_prev)
 
     conversation_messages = _chat_purge_stale_camera(
         conversation_messages, last_user_message)
@@ -13158,7 +13353,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     )
     if _is_simple_greeting:
         print(f"   [FAST] Simple greeting detected - skipping tool selection")
-        response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+        _thinking_now = _LM_TURN.thinking = _decide_thinking(greeting=True)
+        response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
+                                  thinking=_thinking_now)
         if response:
             return response
         return model_unavailable_reply(robot, user_name)
@@ -13195,6 +13392,8 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     improved_force_tool = _choice.force_tool
     improved_tool_args = _choice.tool_args
     is_greeting = _choice.is_greeting
+    _thinking_now = _LM_TURN.thinking = _decide_thinking(
+        forced_tool=improved_force_tool, greeting=is_greeting)
 
     # ================================================================================
     # FAST EXECUTION: Execute tool directly, then ONE LLM call to format response.
@@ -13210,6 +13409,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _direct, pending_force_tool = _tool_pipeline.direct_execute(
         _DIRECT_EXEC_TOOLS, conversation_messages, improved_force_tool,
         improved_tool_args, last_user_message, robot,
+        thinking=_thinking_now,
     )
     if _direct is not None:
         return _direct
@@ -13250,7 +13450,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _looped = _tool_pipeline.run_tool_loop(
         _detect_msg, _identity_kind, conversation_messages, improved_force_tool,
         improved_tool_args, is_greeting, last_user_message, max_iterations,
-        on_token, user_name, pending_force_tool,
+        on_token, user_name, pending_force_tool, thinking=_thinking_now,
     )
     if _looped is not None:
         return _looped
@@ -15855,6 +16055,7 @@ def chat_completions():
 
         # Process with tools (pre-check result passed to avoid double selector run)
         import time as _t_llm
+        _lm_turn_reset()
         _llm_t0 = _t_llm.time()
         if _grounded_reply:
             print("   [GROUNDING] Answering canonical household/identity/J-space fact without tools")
@@ -15872,11 +16073,15 @@ def chat_completions():
                 language=language,
                 focus=focus,
                 on_token=_stream_routes.token_sink(_stream_id),
+                decide_thinking=True,
             )
             # The draft is done; the output checks may still replace it.
             _stream_routes.mark_phase(_stream_id, "checking")
         print(f"   [TIMING] reply generated in {_t_llm.time() - _llm_t0:.2f}s"
               f"{' (zero-LLM)' if _is_zero_llm else ''}")
+        _lm_line = _lm_turn_summary()
+        if _lm_line:
+            print(_lm_line)
 
         # SAVE ASSISTANT RESPONSE TO DATABASE
         if response:

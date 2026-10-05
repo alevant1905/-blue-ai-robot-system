@@ -866,8 +866,12 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                 _retry_msgs.insert(0, {"role": "system", "content": _persona})
             # Unpolished: the polisher compared a regeneration with the reply
             # it replaces (appended just above) and cut it to two sentences.
+            # Never thinking: a rewrite against a pinned note. On 10-05 two
+            # retries came back empty, reasoning having used all 500 and all
+            # 900 tokens, and the canned fallbacks shipped.
             _redo = bt._raw_call_llm(_retry_msgs, include_tools=False,
-                                     temperature=0.8, max_tokens=max_tokens)
+                                     temperature=0.8, max_tokens=max_tokens,
+                                     reasoning_effort="none")
             _t = ""
             try:
                 _t = (((_redo or {}).get("choices") or [{}])[0]

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import bluetools as bt
 from blue_reply_text import reads_as_deliberation
+from blue.server.thinking import THINK_OFF
 
 
 def _missing_required_args(tool_name: str, tool_args: Dict[str, Any]) -> List[str]:
@@ -128,8 +129,12 @@ def template_response(tool_name, tool_args, tool_result):
 
 
 def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_tool,
-                   improved_tool_args, last_user_message, robot):
+                   improved_tool_args, last_user_message, robot, *, thinking=None):
     """The fast path. Returns (response, pending_force_tool).
+
+    `thinking` is the turn's decision for bt.call_lm_studio. The two
+    retries below (an answer that denied a read or dodged the results) are
+    guard retries and never think; with no decision they send nothing.
 
     `response` is a finished turn, or None to fall through to the loop.
     `pending_force_tool` is the one piece of state that crosses over: when the
@@ -217,7 +222,9 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
         "content": answer_guard
     })
     # Single LLM call just to format the response
-    response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+    response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
+                                 thinking=thinking)
+    _retry_thinking = THINK_OFF if thinking else None
     if response:
         content = response["choices"][0]["message"].get("content", "")
         self_reflection_issue = None
@@ -267,7 +274,8 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                 )},
             ]
             retry = bt.call_lm_studio(
-                clean_messages, include_tools=False, force_tool=None, iteration=1)
+                clean_messages, include_tools=False, force_tool=None, iteration=1,
+                thinking=_retry_thinking)
             if retry:
                 retry_content = retry["choices"][0]["message"].get("content", "")
                 retry_identity_issue = None
@@ -327,7 +335,8 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                     "to look it up, and do not tell the user to check a website.]"
                 ),
             })
-            retry = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1)
+            retry = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
+                                      thinking=_retry_thinking)
             if retry:
                 return retry, pending_force_tool
 
@@ -1201,8 +1210,10 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
 def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                   improved_force_tool, improved_tool_args, is_greeting,
                   last_user_message, max_iterations, on_token, user_name,
-                  pending_force_tool=None):
+                  pending_force_tool=None, *, thinking=None):
     """Offer the tools, run what the model asks for, then make it answer.
+
+    `thinking` is the turn's decision, passed to every call of the loop.
 
     Returns a finished response, or None if the loop ran out of iterations
     without producing one (the caller supplies the fallback, as before).
@@ -1263,7 +1274,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 "content": "[Respond now using the tool results above. No more tool calls.]"
             })
             response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
-                                      on_token=on_token)
+                                      on_token=on_token, thinking=thinking)
             if not response:
                 # Tools ran this turn; say which, since the answer is lost.
                 _ran = sorted({
@@ -1286,6 +1297,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 iteration=iteration,
                 on_token=on_token,
                 force_choice="auto",
+                thinking=thinking,
             )
         else:
             _include_tools = not (_identity_kind and not force_tool)
@@ -1299,6 +1311,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 on_token=on_token,
                 tool_scope=("reflex" if _conversational_turn and not force_tool
                             else "full"),
+                thinking=thinking,
             )
 
         if not response:
