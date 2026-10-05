@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import bluetools as bt
-from blue_identity import _CORRECTION_ACK_RE
+from blue_identity import _CORRECTION_ACK_RE, MISSING_VOCABULARY_ISSUES
 
 # A pattern that cannot match anything, used as a safe default so a context
 # built without one makes its guard decline instead of raising on None.
@@ -61,6 +61,9 @@ class ReplyContext:
     identity_sentence_broken: Callable[[str], Any] = lambda text: False
     denied_recalled_evidence: Any = None
     recalled_days_evidence: str = ""
+    # The <remembered_days> label of the one past day the question asked
+    # about ("Yesterday"), "" when it named none.
+    recalled_day: str = ""
     person_ages: Optional[Dict[str, Any]] = None
     household_roster: Optional[List[str]] = None
     dropped_roster: Optional[List[str]] = None
@@ -145,9 +148,11 @@ def guard_denied_recall(ctx) -> Optional[str]:
         # conversation the excerpt shows was recorded (for a question about
         # one day, on that day: turn_completion._no_record_that_day), which
         # is false, and the fallback repeats only Alex's own lines, naming a
-        # paste instead of reading it back.
+        # paste instead of reading it back — from the day asked about, when
+        # one was.
         _recall_fallback = bt.recalled_evidence_fallback(
-            _recalled_days_evidence, user_name=user_name)
+            _recalled_days_evidence, user_name=user_name,
+            day_label=ctx.recalled_day)
         if _recall_fallback:
             final_content = _recall_fallback
             print("   [MEMORY] recall retry still denied the record — using grounded excerpt fallback")
@@ -163,13 +168,13 @@ _SALVAGEABLE_IDENTITY_KINDS = {
 }
 
 # A draft with only these is short of the self-description's vocabulary (no
-# J-space or continuity words, no name, no robot role, no anchor) and says
-# nothing false. When its retry comes back empty it is sent: a canned
-# paragraph that ignores the question is worse than an answer missing a word.
-_INCOMPLETE_ONLY_ISSUES = {
-    "missing_continuity", "missing_jspace", "missing_name",
-    "missing_robot_role", "missing_grounding",
-}
+# J-space or continuity words, no robot role, no anchor) and says nothing
+# false. When its retry comes back empty it is sent: a canned paragraph that
+# ignores the question is worse than an answer missing a word. Not a missing
+# name: to "who are you?" or "introduce yourself" the name is the answer, and
+# the canned reply answers exactly that ("I'm a helpful assistant, happy to
+# chat!" is no answer to keep).
+_INCOMPLETE_ONLY_ISSUES = MISSING_VOCABULARY_ISSUES
 
 
 def guard_identity(ctx) -> Optional[str]:

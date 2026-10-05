@@ -14,6 +14,7 @@ friends) came with it — they are only used here.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any, Dict, List
 
 import bluetools as bt
@@ -730,6 +731,33 @@ def _repeat_requested(text, earlier=(), messages=None, reply=""):
     return _rehearsed_source(reply, messages, lenient=bool(_SELF_INTRO_ASK_RE.search(t)))
 
 
+def _past_day_asked(question):
+    """The past day a recall question asks about, or None.
+
+    Never today: <remembered_days> holds no rows from today (those are the
+    thread itself), so its excerpt is never from today and "not from today"
+    proves nothing. A question about today is judged as before.
+    """
+    day = bt.recall_day_asked(
+        bt._intent_text(question) if isinstance(question, str) else "")
+    if day is None or day >= date.today():
+        return None
+    return day
+
+
+def _recalled_day_label(question):
+    """The <remembered_days> label of the past day asked about ("Yesterday",
+    "3 days ago (Friday)"), or "": the excerpt fallback answers from that
+    day's lines, not from whichever day the block lists first."""
+    day = _past_day_asked(question)
+    if day is None:
+        return ""
+    try:
+        return bt.memory_system._friendly_day_label(day.isoformat())
+    except Exception:
+        return ""
+
+
 def _no_record_that_day(question, evidence, *, robot, user_name):
     """Why a reply saying it has no record of the day asked about is honest,
     or "" when it may be a false denial.
@@ -742,8 +770,7 @@ def _no_record_that_day(question, evidence, *, robot, user_name):
     the July excerpt. A question about one day is denied falsely only when
     that day has a conversation on record and the excerpt is from it.
     """
-    day = bt.recall_day_asked(
-        bt._intent_text(question) if isinstance(question, str) else "")
+    day = _past_day_asked(question)
     if day is None:
         return ""
     try:
@@ -1055,6 +1082,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             _recalled_days_evidence
             and bt.is_recorded_recall_denial(final_content)
         )
+        _recalled_day = ""
         if _denied_recalled_evidence:
             _honest = _no_record_that_day(
                 last_user_msg, _recalled_days_evidence,
@@ -1062,6 +1090,8 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             if _honest:
                 print(f"   [MEMORY] 'no record' of the day asked about is honest — {_honest}")
                 _denied_recalled_evidence = False
+            else:
+                _recalled_day = _recalled_day_label(last_user_msg)
 
         _person_ages = bt._canonical_person_ages()
         _wrong_ages = (bt._misstated_ages(final_content, _person_ages)
@@ -1126,6 +1156,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             identity_sentence_broken=_identity_sentence_broken,
             denied_recalled_evidence=_denied_recalled_evidence,
             recalled_days_evidence=_recalled_days_evidence,
+            recalled_day=_recalled_day,
             person_ages=_person_ages,
             household_roster=_household_roster,
             dropped_roster=_dropped_roster,

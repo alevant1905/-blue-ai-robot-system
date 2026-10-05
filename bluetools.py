@@ -89,6 +89,7 @@ from blue_identity import (
     identity_grounding_note,
     identity_repeats_recent_reply,
     identity_repetition_kind,
+    identity_history_problem,
     identity_reply_topics,
     identity_request_kind,
     identity_response_problem,
@@ -15712,13 +15713,13 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
                 dropped_wrong_name += 1
                 continue
 
-        # 3) Wrong self-identity (see docstring).
-        if identity_response_problem(
+        # 3) Wrong self-identity (see docstring). Missing vocabulary is not
+        # wrong: a draft short only of it ships when its retry is empty.
+        if identity_history_problem(
             content,
             _expected_robot_name,
             other_names=_other_robot_names,
             request_kind=identity_request_kind(previous_user_text),
-            request_text=previous_user_text,
         ):
             _drop_previous_user()
             dropped_wrong_identity += 1

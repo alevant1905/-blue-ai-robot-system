@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from blue_identity import (
+    identity_history_problem,
     identity_request_kind,
     identity_response_problem,
     _BIRTHDATE_KEY_RE,
@@ -2628,12 +2629,13 @@ class EnhancedMemorySystem:
                     # "I'm having trouble connecting." filled 5 of 8 lines of
                     # <recent_history> during the 2026-08-19 outage.
                     or is_failure_placeholder(content)
-                    or bool(identity_response_problem(
+                    # Only what is false: an answer short of J-space or
+                    # continuity words is still what Blue said.
+                    or bool(identity_history_problem(
                         content,
                         expected_robot_name,
                         other_names=other_robot_names,
                         request_kind=identity_request_kind(previous_user_text),
-                        request_text=previous_user_text,
                     ))
                 )
                 if toxic:

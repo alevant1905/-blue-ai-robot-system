@@ -29,6 +29,7 @@ import bluetools as bt  # before blue.server.*: the package imports it
 from blue.server import reply_guards
 from blue.server import turn_completion as tc
 from blue_identity import (
+    identity_history_problem,
     identity_request_kind,
     identity_response_problem,
     is_casual_catch_up,
@@ -103,9 +104,30 @@ def make_ctx(reply, **overrides):
     "anything new with you?",
     "what's been going on with you, Casper?",
     "whats new",                                  # 9535, Casper
+    # The openers and tails people use, as _SELF_STATE_REQUEST_RE learned
+    # them ("Good morning, Blue. How are you doing?", 07-15).
+    "Good morning Hexia, what have you been up to?",
+    "so, what have you been up to these days?",
+    "what have you been up to this weekend?",
+    "what have you been up to all week?",
+    "what have you been up to since yesterday?",
+    "what have you been up to since I last saw you?",
+    "What have you been doing while I was away?",
+    "what have you been doing while I was at work?",
+    "Yo Blue, what have you been up to?",
+    "Alright Blue, what have you been up to?",
+    "Hey Kasper, what have you been up to?",       # STT's Casper (8567)
+    "how have you been, what have you been up to?",
+    "how are you? what have you been up to lately?",
 ])
 def test_a_casual_catch_up_is_recognised(text):
     assert is_casual_catch_up(text)
+
+
+def test_kasper_is_casper():
+    """8567, "How's it going, Kasper?", classified as nothing: speech-to-text
+    spells Casper with a K."""
+    assert identity_request_kind("How's it going, Kasper?") == "self_state"
 
 
 @pytest.mark.parametrize("text", [
@@ -115,6 +137,8 @@ def test_a_casual_catch_up_is_recognised(text):
     "have you learned anything new today",
     "what's new in AI?",
     "what's going on?",
+    "Good morning Blue, what have you been doing with my calendar?",
+    "what have you been up to? tell me how your J-space changed",
 ])
 def test_a_real_question_about_change_is_not_a_catch_up(text):
     assert not is_casual_catch_up(text)
@@ -147,32 +171,67 @@ def test_the_validator_reads_the_catch_up_from_the_question():
 
 
 # An answer let through live must not be judged again and dropped: from the
-# page thread, from <recent_history>, or as a "bug episode" in J-space.
+# page thread, from <recent_history>, or as a "bug episode" in J-space. That
+# covers every draft guard_identity keeps on an empty retry, not only the
+# catch-ups: missing vocabulary is no fault in a reply already sent.
 
-def test_the_catch_up_answer_stays_in_the_page_thread():
-    thread = [{"role": "user", "content": "what have you been up to?"},
-              {"role": "assistant", "content": HEXIA_DRAFT},
+CHANGE_QUESTION = "how have you changed over time?"
+CHANGE_DRAFT = ("I've gotten more careful about checking the calendar before I "
+                "answer — you corrected me twice last week, and it stuck.")
+KEPT = [("what have you been up to?", HEXIA_DRAFT),
+        (CHANGE_QUESTION, CHANGE_DRAFT)]
+
+
+@pytest.mark.parametrize("question, answer", KEPT)
+def test_a_kept_answer_stays_in_the_page_thread(question, answer):
+    thread = [{"role": "user", "content": question},
+              {"role": "assistant", "content": answer},
               {"role": "user", "content": "ha, fair enough"}]
     kept = bt._sanitize_inbound_messages(thread, robot="hexia")
     assert [m.get("content") for m in kept] == [m["content"] for m in thread]
 
 
-def test_the_catch_up_answer_stays_in_recent_history(tmp_path):
+@pytest.mark.parametrize("question, answer", KEPT)
+def test_a_kept_answer_stays_in_recent_history(tmp_path, question, answer):
     memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
-    memory.log_conversation("Alex", "user", "what have you been up to?", robot="hexia")
-    memory.log_conversation("Alex", "assistant", HEXIA_DRAFT, robot="hexia")
+    memory.log_conversation("Alex", "user", question, robot="hexia")
+    memory.log_conversation("Alex", "assistant", answer, robot="hexia")
     history = memory._get_relevant_recent_history("Alex", "ha, fair enough",
                                                   robot="hexia")
-    assert [m["content"] for m in history] == ["what have you been up to?", HEXIA_DRAFT]
+    assert [m["content"] for m in history] == [question, answer]
 
 
-def test_the_catch_up_answer_is_no_bug_episode(continuity_module):
-    continuity_module.note_exchange("hexia", "what have you been up to?",
-                                    HEXIA_DRAFT, user_name="Alex")
+@pytest.mark.parametrize("question, answer", KEPT)
+def test_a_kept_answer_is_no_bug_episode(continuity_module, question, answer):
+    continuity_module.note_exchange("hexia", question, answer, user_name="Alex")
     hub = continuity_module.HUB["hexia"]
     episode = hub._episode_for_prompt(hub.store.list_episodes()[0])
     assert "bug episode" not in episode["summary"]
-    assert episode["details"]["reply"] == HEXIA_DRAFT
+    assert episode["details"]["reply"] == answer
+
+
+def test_history_still_drops_what_is_false():
+    # A missing name is a wrong answer to "who are you?": Casper's stale
+    # "I am Pico" (8336), a generic assistant.
+    assert identity_history_problem(
+        "I am Pico, the robot companion built by Alex Levant.", "Casper",
+        other_names=["Blue", "Hexia"], request_kind="identity") == "missing_name"
+    assert identity_history_problem(
+        "I'm a helpful assistant, happy to chat!", "Blue",
+        request_kind="identity") == "missing_name"
+    # The validator stops at its first problem; behind the missing words
+    # here is a denial of the recorded episodes.
+    denial = ("I have no episodic memories of how I started, so I cannot "
+              "say how I have changed.")
+    assert identity_response_problem(
+        denial, "Hexia", request_kind="evolution") == "missing_continuity"
+    assert identity_history_problem(
+        denial, "Hexia", request_kind="evolution") == "denies_recorded_episodes"
+    thread = [{"role": "user", "content": CHANGE_QUESTION},
+              {"role": "assistant", "content": denial},
+              {"role": "user", "content": "hm"}]
+    assert [m.get("content") for m in bt._sanitize_inbound_messages(
+        thread, robot="hexia")] == ["hm"]
 
 
 # --------------------------------------------------------------------------
@@ -188,14 +247,27 @@ def test_an_empty_retry_keeps_a_draft_that_was_only_incomplete():
     assert ctx.response["choices"][0]["message"]["content"] == HEXIA_DRAFT
 
 
-@pytest.mark.parametrize("issue", ["missing_name", "missing_robot_role",
-                                   "missing_grounding", "missing_jspace"])
+@pytest.mark.parametrize("issue", ["missing_robot_role", "missing_grounding",
+                                   "missing_jspace", "missing_continuity"])
 def test_every_incomplete_only_issue_keeps_the_draft(issue):
-    draft = "I'm the little robot head on Alex's desk, and I help with his research."
+    draft = "I'm Blue, the little head on Alex's desk, and I help with his research."
     ctx = make_ctx(draft, identity_issue=issue, identity_kind="introduction",
                    identity_name="Blue", robot="blue",
                    identity_broken=lambda t: None if t else "empty")
     assert reply_guards.guard_identity(ctx) is None
+
+
+def test_a_nameless_answer_to_who_are_you_is_not_kept():
+    """To "who are you?" the name is the answer, and the canned reply gives
+    exactly that: "I'm a helpful assistant" is not kept over it."""
+    draft = "I'm a helpful assistant, happy to chat!"
+    ctx = make_ctx(draft, identity_issue="missing_name", identity_kind="identity",
+                   identity_name="Blue", robot="blue",
+                   last_user_msg="who are you?",
+                   messages=[{"role": "user", "content": "who are you?"}],
+                   identity_broken=lambda t: "empty" if not t else "missing_name")
+    out = reply_guards.guard_identity(ctx)
+    assert out and out != draft and "Blue" in out
 
 
 def test_a_missing_word_does_not_hide_a_replay():
@@ -263,6 +335,22 @@ MONDAY = datetime.date(2026, 10, 5)
     ("what did we talk about yesterday or friday?", None),
     ("what did we talk about last week?", None),
     ("do you remember what we talked about with autogpt?", None),
+    ("Yesterday, what did we talk about?", datetime.date(2026, 10, 4)),
+    ("what were we talking about yesterday", datetime.date(2026, 10, 4)),
+    ("what did I tell you on Friday about the syllabus?", datetime.date(2026, 10, 2)),
+    ("yesterday's conversation, what was it about?", datetime.date(2026, 10, 4)),
+    # A day done or met on is dated by the excerpt too (8093, 8107, 9021).
+    ("what did you do yesterday", datetime.date(2026, 10, 4)),
+    ("do you remember where I was yesterday?", datetime.date(2026, 10, 4)),
+    # Only a day that dates the conversation: not one in another sentence,
+    # a coming day, a possessive or an attribute (the 10-05 review).
+    ("do you remember what we talked about with autogpt? I want to try it today", None),
+    ("do you remember what we talked about for next Monday's lecture?", None),
+    ("do you remember what we discussed about my Friday class?", None),
+    ("what did we talk about regarding Wednesday's seminar?", None),
+    ("do you remember what we're doing on Friday?", None),
+    ("what did we say we'd do on Friday?", None),
+    ("I told you I have class on Friday", None),
 ])
 def test_the_day_asked_about(text, expected):
     assert recall_day_asked(text, today=MONDAY) == expected
@@ -310,6 +398,18 @@ def test_an_excerpt_from_another_day_proves_nothing_about_this_one(monkeypatch):
     assert why.startswith("the excerpt is not from")
 
 
+def test_today_is_never_the_day_checked(monkeypatch):
+    """<remembered_days> holds no rows from today, so "the excerpt is not from
+    today" proves nothing: a question about today is judged as before."""
+    monkeypatch.setattr(bt, "ENHANCED_MEMORY_AVAILABLE", True)
+    monkeypatch.setattr(bt, "memory_system", _Days(talked=()))
+    for question in ("what did we talk about this morning?",
+                     "what did we talk about earlier today?"):
+        assert tc._no_record_that_day(question, excerpt("Monday Jul 13"),
+                                      robot="blue", user_name="Alex") == ""
+        assert tc._recalled_day_label(question) == ""
+
+
 def test_a_denied_day_that_was_recorded_is_still_judged(monkeypatch):
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     monkeypatch.setattr(bt, "ENHANCED_MEMORY_AVAILABLE", True)
@@ -344,6 +444,31 @@ def test_the_fallback_names_an_attachment():
     assert 'You shared the document "DH399_AL_2026F.docx".' in reply
     assert "Week 1" not in reply
     assert 'You later said: "thanks".' in reply
+
+
+TWO_DAYS = (
+    "<remembered_days>\n"
+    "- Monday Jul 13:\n"
+    "  Alex: lets compare autogpt with langchain\n"
+    "  Blue: Sure.\n"
+    "- Yesterday:\n"
+    "  Alex: we bought the house\n"
+    "  Blue: Congratulations!\n"
+    "</remembered_days>")
+
+
+def test_the_fallback_answers_from_the_day_asked_about():
+    """Labelled with the first day while quoting both days' lines, a question
+    about yesterday, listed second, was answered "I found the recorded
+    exchange from Monday Jul 13"."""
+    reply = recalled_evidence_fallback(TWO_DAYS, day_label="Yesterday")
+    assert reply.startswith("I found the recorded exchange from yesterday.")
+    assert "we bought the house" in reply and "autogpt" not in reply
+    # No day asked about: one day's lines, under that day's label.
+    reply = recalled_evidence_fallback(TWO_DAYS)
+    assert reply.startswith("I found the recorded exchange from Monday Jul 13.")
+    assert "autogpt" in reply and "house" not in reply
+    assert recalled_evidence_fallback(TWO_DAYS, day_label="2 days ago (Saturday)") is None
 
 
 def test_the_fallback_says_yesterday_in_lower_case():
@@ -392,17 +517,59 @@ def test_hexia_s_catch_up_draft_ships(chat, robot):
     assert stored == [HEXIA_DRAFT]
 
 
+def test_good_morning_catch_up_draft_ships(chat):
+    """"Good morning Hexia, …" slipped past the hey/hi/hello-only opener: two
+    model calls, and the J-space-worded retry went out."""
+    chat.model.queue(HEXIA_DRAFT, "I've been carrying our J-space episodes forward.")
+    reply = reply_of(chat.ask("Good morning Hexia, what have you been up to?",
+                              robot="hexia"))
+
+    assert len(chat.model.payloads) == 1, "a casual answer was regenerated"
+    assert reply == HEXIA_DRAFT
+
+
 def test_an_incomplete_answer_about_change_ships_when_the_retry_is_empty(chat):
     """Not a catch-up, so the grounding is still demanded and the retry runs;
     it comes back empty and the draft is kept over the canned paragraph."""
-    draft = ("I've gotten more careful about checking the calendar before I "
-             "answer — you corrected me twice last week, and it stuck.")
-    chat.model.queue(draft, "")
-    reply = reply_of(chat.ask("how have you changed over time?", robot="hexia"))
+    chat.model.queue(CHANGE_DRAFT, "")
+    reply = reply_of(chat.ask(CHANGE_QUESTION, robot="hexia"))
 
     assert len(chat.model.payloads) == 2, "the guard did not regenerate"
-    assert reply == draft
+    assert reply == CHANGE_DRAFT
     assert HEXIA_CANNED not in reply
+
+
+def test_a_kept_draft_is_in_the_next_turn(chat):
+    """The draft kept on turn 1 is what the model sees itself having said on
+    turn 2. Judged again for its missing words, it and its question were
+    dropped ("[SANITIZE] Dropped … 1 wrong-identity"), and the payload was
+    just the system prompt and "really? say more about the calendar thing"."""
+    chat.model.queue(CHANGE_DRAFT, "")
+    assert reply_of(chat.ask(CHANGE_QUESTION, robot="hexia")) == CHANGE_DRAFT
+    turn_two = len(chat.model.payloads)
+
+    chat.model.queue("Sure — it started when you caught me on a date.")
+    chat.client.post("/v1/chat/completions", json={
+        "robot": "hexia",
+        "messages": [
+            {"role": "user", "content": CHANGE_QUESTION},
+            {"role": "assistant", "content": CHANGE_DRAFT},
+            {"role": "user", "content": "really? say more about the calendar thing"},
+        ],
+    })
+
+    sent = [str(m.get("content")) for m in chat.model.payloads[turn_two]["messages"]]
+    assert CHANGE_DRAFT in sent, "the kept draft was erased from the thread"
+    assert CHANGE_QUESTION in sent
+
+
+def test_a_nameless_who_are_you_still_gets_the_canned_reply(chat):
+    draft = "I'm a helpful assistant, happy to chat!"
+    chat.model.queue(draft, "")
+    reply = reply_of(chat.ask("who are you?"))
+
+    assert len(chat.model.payloads) == 2, "the guard did not regenerate"
+    assert reply != draft and "Blue" in reply
 
 
 def test_a_replayed_self_description_still_gets_the_fallback(chat):
@@ -450,6 +617,49 @@ def test_recall_thread_draft_ships(chat, remembered):
     assert "Princeton" not in reply
     assert not any(RECALL_NOTE in str(p["messages"][-1].get("content"))
                    for p in chat.model.payloads), "the honest draft was regenerated"
+
+
+AUTOGPT_BLOCK = (
+    "<remembered_days>\nPast conversation excerpts:\n- 3 days ago (Friday):\n"
+    "  Alex: I want to look at autogpt for the DH399 agent assignment\n"
+    "  Blue: AutoGPT chains model calls toward a goal.\n"
+    "  Alex: lets compare it with langchain next time\n</remembered_days>")
+
+
+@pytest.mark.parametrize("question", [
+    "do you remember what we talked about with autogpt?",
+    "do you remember what we talked about with autogpt? I want to try it today",
+    "do you remember what we talked about with autogpt for next Monday's lecture?",
+    "do you remember what we discussed about autogpt for my Friday class?",
+])
+def test_a_day_that_does_not_date_the_talk_keeps_the_guard(chat, remembered, question):
+    """"I want to try it today" switched the recall guard off: today was taken
+    for the day asked about, and today's rows are never in the excerpt."""
+    today = datetime.date.today()
+    remembered["block"] = AUTOGPT_BLOCK
+    remembered["talked"] = {today.isoformat(),
+                            (today - datetime.timedelta(days=3)).isoformat()}
+    chat.model.queue("I don't have a record of that conversation about autogpt — "
+                     "could you fill me in?",
+                     "We talked about AutoGPT for the DH399 agent assignment.")
+    reply = reply_of(chat.ask(question))
+
+    assert any(RECALL_NOTE in str(p["messages"][-1].get("content"))
+               for p in chat.model.payloads), "a false denial shipped unjudged"
+    assert "AutoGPT" in reply
+
+
+def test_a_recorded_day_listed_second_is_the_one_answered(chat, remembered):
+    """Yesterday was recorded and comes second in the excerpt: the fallback
+    answers from yesterday, not from the July day listed first."""
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    remembered["block"] = TWO_DAYS
+    remembered["talked"] = {yesterday}
+    chat.model.queue(RECALL_DRAFT, "")
+    reply = reply_of(chat.ask("what did we talk about yesterday?"))
+
+    assert reply.startswith("I found the recorded exchange from yesterday.")
+    assert "we bought the house" in reply and "autogpt" not in reply
 
 
 def test_a_recorded_day_denied_falls_back_without_the_paste(chat, remembered):

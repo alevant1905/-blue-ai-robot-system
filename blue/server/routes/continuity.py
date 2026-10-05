@@ -28,8 +28,8 @@ from blue.llm_coordinator import (
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
+    identity_history_problem,
     identity_request_kind,
-    identity_response_problem,
     is_family_overview_request,
     canonical_family_reply_kind,
     is_failure_placeholder,
@@ -884,12 +884,13 @@ class RobotContinuity:
             ]
         except Exception:
             others = ["Hexia" if self.robot == "blue" else "Blue"]
-        issue = identity_response_problem(
+        # A reply short only of J-space or continuity words is no reply
+        # error: it may have shipped because its retry came back empty.
+        issue = identity_history_problem(
             reply,
             self.name,
             other_names=others,
             request_kind=identity_request_kind(user_text),
-            request_text=user_text,
         )
         if issue:
             return (

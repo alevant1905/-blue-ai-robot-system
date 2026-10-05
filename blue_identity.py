@@ -15,7 +15,8 @@ _INTRODUCTION_RE = re.compile(
     r"\bintroduction\b",
     re.IGNORECASE,
 )
-_ROBOT_NAME_ALT = r"(?:blue|hexia|casper|caspar|pico|picoh)"
+# "kasper" is how speech-to-text spells Casper ("How's it going, Kasper?").
+_ROBOT_NAME_ALT = r"(?:blue|hexia|casper|caspar|kasper|pico|picoh)"
 _SELF_STATE_REQUEST_RE = re.compile(
     # "Good morning, Blue. How are you doing?" slipped past the old
     # hey/hi/hello-only prefix and drew generic assistant-speak ("I'm doing
@@ -971,16 +972,26 @@ def is_social_checkin(text: str) -> bool:
 # describing your J-space so literally"). Demanding them threw away Hexia's
 # "Honestly? Mostly waiting for you to say hi again…" for missing_continuity
 # on 2026-10-05, and the canned J-space paragraph went out instead.
+# Openers as _SELF_STATE_REQUEST_RE learned them: "Good morning Hexia, what
+# have you been up to?" slipped past a hey/hi/hello-only prefix, as "Good
+# morning, Blue. How are you doing?" had on 07-15.
 _CATCH_UP_RE = re.compile(
-    r"^\s*(?:(?:and|so|ok(?:ay)?|well|hey|hi|hello)[,.! ]+)*"
+    r"^\s*(?:(?:and|so|ok(?:ay)?|well|hey|hi|hello|yo|alright|all right"
+    r"|good (?:morning|afternoon|evening)|morning|afternoon|evening"
+    r"|how (?:are you|have you been)(?: doing)?|how(?:['’]s| is) it going)"
+    r"[,.!? ]+(?:" + _ROBOT_NAME_ALT + r"[,.!? ]+)?)*"
     r"(?:" + _ROBOT_NAME_ALT + r"[,.! ]+)?"
     r"(?:what(?:['’]?ve| have)? you been (?:up to|doing)"
     r"|(?:have you )?been up to (?:anything|much)(?: (?:fun|good|interesting))?"
     r"|what(?:['’]?s| is| has)(?: been)? new(?: with you)?"
     r"|anything new(?: with you)?"
     r"|what(?:['’]?s| is| has)(?: been)? (?:going on|happening) with you)"
-    r"(?:\s+(?:lately|recently|today|all day|this (?:week|morning|afternoon|evening)"
-    r"|since (?:we|i) (?:last )?(?:talked|spoke)))?"
+    r"(?:\s+(?:lately|recently|these days|today|tonight|all (?:day|week)"
+    r"|this (?:past )?(?:week|weekend|morning|afternoon|evening)"
+    r"|over the weekend|since yesterday|since (?:the )?last time"
+    r"|since (?:we|i) (?:last )?(?:talked|spoke|chatted)"
+    r"|since i (?:last )?saw you"
+    r"|while i (?:was|were) (?:away|out|gone|at work|at school|teaching)))?"
     r"(?:[,.! ]+" + _ROBOT_NAME_ALT + r")?\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
@@ -1324,9 +1335,9 @@ def identity_response_problem(
     request_text is the message answered, where the caller has it. A casual
     catch-up ("what have you been up to?") skips the same checks: it is
     evolution for the context it pins and a check-in for what the answer
-    says. Every judge of a reply passes it — the live check, the page
-    thread, <recent_history>, the J-space episodes — or an answer let
-    through live is dropped from the history afterwards.
+    says. Only the live check needs it: the page thread, <recent_history>
+    and the J-space episodes judge a reply already sent with
+    identity_history_problem, which never demands the vocabulary.
     """
     reply = (text or "").strip()
     if not reply:
@@ -1447,6 +1458,44 @@ def identity_response_problem(
             return "missing_grounding"
 
     return None
+
+
+# The validator's verdicts that only say a reply is short of the
+# self-description's vocabulary: no J-space or continuity words, no robot
+# role, no anchor. Nothing in such a reply is false. Not missing_name: a
+# nameless answer to "who are you?" ("I'm your assistant, here to help",
+# Hexia's "Blue!", Casper's "I am Pico") is a wrong one.
+MISSING_VOCABULARY_ISSUES = frozenset({
+    "missing_continuity", "missing_jspace", "missing_robot_role",
+    "missing_grounding",
+})
+
+
+def identity_history_problem(
+    text: str,
+    expected_name: str,
+    other_names: Iterable[str] = (),
+    request_kind: Optional[str] = None,
+) -> Optional[str]:
+    """Why a reply already sent must not stand in the robot's history, or None.
+
+    The page thread, <recent_history> and the J-space episodes judge Blue's
+    own past turns. Only what is false or wrong in one drops it or labels it
+    a bug episode; missing vocabulary does not. guard_identity ships a draft
+    short only of vocabulary when its retry comes back empty. Judged by
+    identity_response_problem alone, Hexia's kept answer to "how have you
+    changed over time?" went, with its question, from the next turn's
+    thread and from <recent_history>, and J-space kept it as "a reply error
+    (missing_continuity)". The validator stops at its first problem, so a
+    reply short of vocabulary is judged once more for what may hide behind.
+    """
+    problem = identity_response_problem(
+        text, expected_name, other_names=other_names, request_kind=request_kind)
+    if problem in MISSING_VOCABULARY_ISSUES:
+        problem = identity_response_problem(
+            text, expected_name, other_names=other_names,
+            request_kind=request_kind, completeness=False)
+    return problem
 
 
 def strip_drifted_sentences(text: str, is_broken, whole_is_broken=None,
@@ -2119,27 +2168,109 @@ def is_recorded_recall_denial(text: str) -> bool:
 
 _WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday",
                   "saturday", "sunday")
+# A day named in a message. A possessive names a thing on that day ("Friday's
+# seminar", "yesterday's class"), not the day of a conversation, unless the
+# thing is the conversation ("yesterday's chat").
 _RECALL_DAY_RE = re.compile(
-    r"\b(?P<before>the day before yesterday)\b"
-    r"|\b(?P<yesterday>yesterday|last night)\b"
-    r"|\b(?P<today>today|tonight|this (?:morning|afternoon|evening))\b"
-    r"|\b(?P<weekday>" + "|".join(_WEEKDAY_NAMES) + r")\b",
+    r"\b(?:(?P<before>the day before yesterday)"
+    r"|(?P<yesterday>yesterday|last night)"
+    r"|(?P<today>(?:earlier )?today|tonight|this (?:morning|afternoon|evening))"
+    r"|(?:(?:on|last) )?(?P<weekday>" + "|".join(_WEEKDAY_NAMES) + r"))\b"
+    r"(?P<possessive>['’]s\b"
+    r"(?P<talk>\s+(?:conversation|convo|chat|talk|discussion)\b)?)?",
+    re.IGNORECASE,
+)
+# What a day can date in a recall question: a conversation ("what did we
+# talk about", "you told me", "our conversation") or something done or met
+# on that day ("what did you do", "where was I", "how was your day") — the
+# excerpt from that day is the evidence for either. Present tense only after
+# "did": "tell me what's on Friday" asks about Friday, not about a day past.
+_RECALL_VERB_RE = re.compile(
+    r"\b(?:talked|discussed|said|told|chatted|spoke|mentioned|happened"
+    r"|remember(?! to\b)|recall"
+    r"|did (?:we|you|i|it)"
+    r"|(?:what|where) (?:we|you|i) (?:did|were|was)"
+    r"|(?:were|was)(?: (?:we|you|i))? "
+    r"(?:talking|discussing|saying|telling|chatting|speaking)"
+    r"|how was (?:your|our|my) day"
+    r"|conversation|convo|discussion|(?:our|the|that) (?:talk|chat))\b",
+    re.IGNORECASE,
+)
+# Between the verb and the day, these start another clause or point ahead,
+# so the day belongs to it: "I told you I have class on Friday", "what did we
+# say we'd do on Friday", "do you remember what we're doing on Friday",
+# "what did we talk about for Monday".
+_OTHER_CLAUSE_GAP_RE = re.compile(
+    r"\b(?:have|has|had|am|is|are|will|would|shall|should|need|needs|want|"
+    r"wants|going|gonna|doing|happening|coming|plan|planned|next|for|until|"
+    r"till|by)\b|['’](?:d|ll|re|s)\b",
+    re.IGNORECASE,
+)
+# "my Friday class", "next Monday's lecture", "the Wednesday seminar".
+_DAY_DETERMINERS = {
+    "next", "this", "coming", "every", "each", "my", "our", "your", "his",
+    "her", "their", "the", "a", "an", "that",
+}
+_CLAUSE_OPENERS_RE = re.compile(
+    r"(?:\s*\b(?:and|so|but|ok(?:ay)?|well|hey|hi|now|also|remember|"
+    + _ROBOT_NAME_ALT[3:-1] + r")\b[\s,]*)*\s*",
+    re.IGNORECASE,
+)
+_ELLIPTICAL_OPENERS_RE = re.compile(
+    r"\s*(?:(?:and|so|but|ok(?:ay)?|what about|how about)[\s,]+)?",
     re.IGNORECASE,
 )
 
 
+def _day_dates_the_talk(text: str, match) -> bool:
+    """Does this day mention date the conversation asked about?"""
+    if match.group("possessive"):
+        return bool(match.group("talk"))
+    start, end = match.start(), match.end()
+    # "and the day before yesterday?", "what about Friday?" — a follow-up
+    # that is nothing but the day.
+    if (_ELLIPTICAL_OPENERS_RE.fullmatch(text[:start])
+            and not text[end:].strip(" \t?.!")):
+        return True
+    clause_start = max(text.rfind(ch, 0, start) for ch in ",.;:!?\n") + 1
+    before = text[clause_start:start]
+    words_before = before.split()
+    if words_before and words_before[-1].lower() in _DAY_DETERMINERS:
+        return False
+    # "what did we talk about yesterday", "what did I tell you on Friday".
+    verbs = list(_RECALL_VERB_RE.finditer(before))
+    if verbs:
+        gap = before[verbs[-1].end():]
+        if len(gap.split()) <= 6 and not _OTHER_CLAUSE_GAP_RE.search(gap):
+            return True
+    # "Yesterday you said…", "On Friday, we talked about…" — the day opens
+    # the clause and the verb follows at once.
+    if _CLAUSE_OPENERS_RE.fullmatch(before):
+        after = re.split(r"[.;:!?\n]", text[end:], maxsplit=1)[0]
+        verb = _RECALL_VERB_RE.search(after)
+        if verb and len(after[:verb.start()].replace(",", " ").split()) <= 3:
+            return True
+    return False
+
+
 def recall_day_asked(text: str, today=None):
-    """The one past day a recall question is about, as a date, or None.
+    """The one day a recall question asks about, as a date, or None.
 
     "what did we talk about yesterday?" is yesterday; "…on Friday" is the
-    most recent Friday before today. None for no day, or for two ("yesterday
-    or friday"). Python does the calendar arithmetic, never the model.
+    most recent Friday before today. Only a day that dates what the question
+    recalls counts — the remembered-days excerpt is dated by when we TALKED —
+    so not "I want to try it today" after the question, "my Friday class" or
+    "next Monday's lecture". None for no such day, or for two ("yesterday or
+    friday"). Python does the calendar arithmetic, never the model.
     """
     from datetime import date, timedelta
 
     current = today or date.today()
+    text = text or ""
     days = set()
-    for match in _RECALL_DAY_RE.finditer(text or ""):
+    for match in _RECALL_DAY_RE.finditer(text):
+        if not _day_dates_the_talk(text, match):
+            continue
         if match.group("before"):
             days.add(current - timedelta(days=2))
         elif match.group("yesterday"):
@@ -2180,6 +2311,7 @@ def _recorded_line_as_said(item: str, first: bool) -> str:
 def recalled_evidence_fallback(
     evidence: str,
     user_name: str = "Alex",
+    day_label: str = "",
 ) -> Optional[str]:
     """Render a minimal truthful answer from a <remembered_days> excerpt.
 
@@ -2187,22 +2319,36 @@ def recalled_evidence_fallback(
     recorded exchange. Only the user's own stored lines are repeated, so an
     old assistant error cannot be promoted to fact, and a pasted document or
     an attachment is named, never read back.
+
+    The lines come from one day of the excerpt: day_label's when the
+    question asked about one ("Yesterday"), else the first day with a line
+    of the user's. Labelled with the first day while quoting every day's
+    lines, a question about yesterday, listed second, was answered "I found
+    the recorded exchange from Monday Jul 13…".
     """
     block = str(evidence or "")
     if not block.strip():
         return None
-    label_match = re.search(r"(?m)^- ([^:\n]+):\s*$", block)
-    label = label_match.group(1).strip() if label_match else "an earlier conversation"
+    parts = re.split(r"(?m)^- ([^:\n]+):\s*$", block)
+    days = [(parts[index].strip(), parts[index + 1])
+            for index in range(1, len(parts) - 1, 2)]
+    if not days:
+        days = [("an earlier conversation", block)]
+    if day_label:
+        days = [day for day in days if day[0] == day_label]
+    speaker = re.escape((user_name or "Alex").strip())
+    for label, lines in days:
+        statements = [
+            re.sub(r"\s+", " ", match).strip()
+            for match in re.findall(rf"(?m)^\s{{2}}{speaker}:\s*(.+)$", lines)
+        ]
+        statements = list(dict.fromkeys(item for item in statements if item))[:3]
+        if statements:
+            break
+    else:
+        return None
     if label == "Yesterday":
         label = "yesterday"
-    speaker = re.escape((user_name or "Alex").strip())
-    statements = [
-        re.sub(r"\s+", " ", match).strip()
-        for match in re.findall(rf"(?m)^\s{{2}}{speaker}:\s*(.+)$", block)
-    ]
-    statements = list(dict.fromkeys(item for item in statements if item))[:3]
-    if not statements:
-        return None
     rendered = [_recorded_line_as_said(item, first=index == 0)
                 for index, item in enumerate(statements)]
     return (
@@ -2911,6 +3057,7 @@ __all__ = [
     "identity_repeats_recent_reply",
     "identity_repetition_kind",
     "identity_reply_topics",
+    "identity_history_problem",
     "identity_request_kind",
     "identity_response_problem",
     "is_recorded_recall_denial",
@@ -2926,6 +3073,7 @@ __all__ = [
     "is_failure_placeholder",
     "is_social_checkin",
     "is_user_identity_request",
+    "MISSING_VOCABULARY_ISSUES",
     "MODEL_ERROR_PREFIX",
     "self_state_focus_hint",
     "self_state_readout",
