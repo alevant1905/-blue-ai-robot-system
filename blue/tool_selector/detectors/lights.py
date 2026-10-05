@@ -74,6 +74,19 @@ class LightsDetector(BaseDetector):
         re.IGNORECASE,
     )
 
+    # Asking how light behaves is a science question. On the kids' page "why
+    # is the sky blue? explain how light scatters" turned the bulbs blue on
+    # the zero-LLM path (S2 review, 2026-10-05), and "how does light make a
+    # rainbow" picks the rainbow scene. A lighting verb still acts: "how do I
+    # turn on the lights".
+    _EXPLANATION_RE = re.compile(
+        r"\b(?:why|how)\s+(?:is|are|does|do|did|was|were|can|could|would)\b"
+        r"|\bhow\s+come\b|\bexplain\b|\bwhat\s+(?:makes|causes|made|caused)\b",
+        re.IGNORECASE,
+    )
+    _LIGHTING_VERBS = ['turn', 'switch', 'set', 'change', 'dim', 'brighten',
+                       'adjust']
+
     def detect(
         self,
         message: str,
@@ -93,6 +106,9 @@ class LightsDetector(BaseDetector):
         if self._RETROSPECTIVE_RE.search(msg_lower):
             return intents
         if self._NO_ACTION_RE.search(msg_lower):
+            return intents
+        if (self._EXPLANATION_RE.search(msg_lower)
+                and not has_any_word(self._LIGHTING_VERBS, msg_lower)):
             return intents
 
         # Detect control intent

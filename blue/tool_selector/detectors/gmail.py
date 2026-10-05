@@ -8,6 +8,7 @@ Detects:
 """
 
 import re
+from functools import lru_cache
 from typing import Dict, List, Optional
 
 from .base import BaseDetector
@@ -42,6 +43,81 @@ _SEND_NEGATED_RE = re.compile(
 _SEND_ASKED_ABOUT_RE = re.compile(
     r"^\s*(?:(?:blue|so|and|hey)[,\s]+)*(?:did|have|has|why\s+did|when\s+did|"
     r"who\s+did|what\s+did|where\s+did)\b[^.!?]{0,60}\bsen[dt]\b")
+
+
+# Email tools act on Alex's real inbox, so they need a request addressed to
+# Blue, not a sentence about email. "i'm thinking of having my DH399 students
+# build an agent that reads the news and emails them a digest" read the inbox
+# at 0.80 on "read" + "email" (harness, 2026-10-05), and "It summarizes news
+# and sends the newsfeed by email to me", Alex describing his autoGPT, forced
+# send_gmail at 0.95 on "email to" (live, 2026-09-27). A verb is asked for
+# when it opens its clause ("check your e-mail"), follows a request frame
+# ("can you…", "I want you to…", "go ahead and…"), or is joined by "and" to a
+# verb that does ("check your e-mail and reply…", "draft and send").
+_READ_VERBS = ("check", "read", "show", "see", "look", "open")
+_SEND_VERBS = ("send", "email", "compose", "write", "draft", "resend",
+               "forward")
+_REPLY_VERBS = ("reply", "respond", "answer", "write")
+_FOLLOWUP_ASKS = ("go ahead", "do it", "try it", "try again", "retry",
+                  "go on then")
+
+# A literal address ends a clause too: "the address is x@y.ca I want you to
+# send…" arrives without a full stop.
+_CLAUSE_BREAK_RE = re.compile(
+    r"[.!?;:]+(?=\s|$)|,|\s[-–—]+\s|\S+@\S+\.[a-z]{2,}")
+_PREAMBLE_RE = re.compile(
+    r"^(?:(?:blue|ok(?:ay)?|yes|yeah|yep|sure|please|now|so|and|then|hey|hi"
+    r"|also|great|good|cool|alright|right|well|oh|no|just|immediately)\b\s*)+")
+_REQUEST_FRAME_RE = re.compile(
+    r"^(?:(?:can|could|would|will)\s+you"
+    r"|i(?:\s+(?:want|need|wanted|would\s+like)|'?d\s+like)(?:\s+you)?\s+to"
+    r"|you\s+(?:can|could|should|need\s+to|have\s+to|must|just)"
+    r"|go\s+ahead(?:\s+and)?|let\s+me|let'?s|help\s+me|please)\b\s*")
+# First words that make a clause a statement rather than an instruction.
+_NOT_AN_IMPERATIVE = frozenset("""
+i i'm im i'll i've i'd you you're you've he she it it's its they we we're
+that this these those there here the a an my your his her our their what
+who which when where why how if because since someone everyone nobody
+people students agent
+""".split())
+
+
+def _peel_request(clause: str) -> str:
+    """The clause with its greeting, politeness and request frame removed."""
+    text = clause.strip()
+    while True:
+        peeled = _REQUEST_FRAME_RE.sub("", _PREAMBLE_RE.sub("", text), count=1)
+        peeled = peeled.strip()
+        if peeled == text:
+            return text
+        text = peeled
+
+
+def _opens_with_imperative(clause: str) -> bool:
+    words = re.findall(r"[a-z']+", _peel_request(clause))
+    return bool(words) and words[0] not in _NOT_AN_IMPERATIVE
+
+
+@lru_cache(maxsize=32)
+def _verbs_re(verbs: tuple) -> "re.Pattern":
+    return re.compile(r"\b(?:" + "|".join(re.escape(v) for v in verbs) + r")\b")
+
+
+def asks_blue_to(msg_lower: str, verbs) -> bool:
+    """True if one of `verbs` (base form, whole words) is asked of Blue."""
+    text = (msg_lower or "").replace("’", "'")
+    for clause in _CLAUSE_BREAK_RE.split(text):
+        for m in _verbs_re(tuple(verbs)).finditer(clause):
+            before = _peel_request(clause[:m.start()])
+            # "…you're hallucinating now do it immediately" — a spoken
+            # run-on whose "now" starts the instruction.
+            if not before or re.search(r"\bnow$", before):
+                return True
+            joined = re.search(r"\band(?:\s+then)?$", before)
+            if joined and _opens_with_imperative(before[:joined.start()]):
+                return True
+    return False
+
 
 class GmailDetector(BaseDetector):
     """Detects Gmail/email-related intents."""
@@ -122,6 +198,12 @@ class GmailDetector(BaseDetector):
             reasons.append("reduced: send/reply detected")
 
         if confidence <= 0:
+            return None
+        # "any new email?" asks without a verb; everything else needs one
+        # that Blue is asked to do.
+        noun_only = any(s in msg_lower for s in
+                        ('any new email', 'unread email', 'recent email'))
+        if not noun_only and not asks_blue_to(msg_lower, _READ_VERBS):
             return None
 
         return ToolIntent(
@@ -217,6 +299,9 @@ class GmailDetector(BaseDetector):
 
         if confidence <= 0:
             return None
+        if not (asks_blue_to(msg_lower, _SEND_VERBS)
+                or asks_blue_to(msg_lower, _FOLLOWUP_ASKS)):
+            return None
 
         return ToolIntent(
             tool_name='send_gmail',
@@ -260,6 +345,8 @@ class GmailDetector(BaseDetector):
                 reasons.append("reply verb + email context")
 
         if confidence <= 0:
+            return None
+        if not asks_blue_to(msg_lower, _REPLY_VERBS):
             return None
 
         return ToolIntent(

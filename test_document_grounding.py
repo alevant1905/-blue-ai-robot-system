@@ -94,6 +94,69 @@ def test_document_followups_carry_the_recent_file(
         message, messages) == "read Noble_Introduction.pdf"
 
 
+# "try again, simpler" asked for the last answer reworded, and searched the
+# library for a PDF resolved out of Blue's own example prose (harness
+# followup_tellmore[3], 2026-10-05).
+
+AIME = "July_16-_AIME_Think_Tank_Consortium_Draft_Report.pdf"
+
+
+@pytest.fixture
+def aime_library(monkeypatch):
+    monkeypatch.setattr(bt, "load_document_index", lambda: {"documents": [
+        {"filename": AIME, "folder": "AI"},
+        {"filename": "Noble_Introduction.pdf", "folder": "CMDS4740"},
+    ]})
+
+
+AGENT_THREAD = [
+    {"role": "user", "content": "explain what an AI agent is in simple terms"},
+    {"role": "assistant", "content": (
+        "An agent wraps a model in a loop: it can write a draft email, think "
+        "about a step, check the AIME think tank consortium draft report, and "
+        "keep going until the task is done.")},
+]
+
+
+@pytest.mark.parametrize("message", [
+    "try again, simpler",
+    "try again in plain english",
+    "try again, like i'm five",
+])
+def test_a_request_to_reword_is_not_a_document_retry(aime_library, message):
+    """Even right after the user named the report: the summary is in the
+    thread already, and the ask is to say it differently."""
+    messages = [
+        {"role": "user", "content": "summarize the AIME think tank consortium draft report"},
+        {"role": "assistant", "content": "It recommends a shared, local AI lab."},
+        {"role": "user", "content": message},
+    ]
+    assert bt._document_followup_query(message, messages) is None
+
+
+def test_blue_s_prose_naming_a_title_is_not_a_document_to_retry(aime_library):
+    messages = AGENT_THREAD + [{"role": "user", "content": "try again"}]
+    assert bt._document_followup_query("try again", messages) is None
+
+
+def test_a_file_blue_could_not_open_is_still_retried(aime_library):
+    messages = [
+        {"role": "user", "content": "what does the consortium report recommend?"},
+        {"role": "assistant", "content": f"I couldn't open {AIME}."},
+        {"role": "user", "content": "try again"},
+    ]
+    assert bt._document_followup_query("try again", messages) == f"read {AIME}"
+
+
+def test_a_report_the_user_named_is_still_retried(aime_library):
+    messages = [
+        {"role": "user", "content": "read the AIME think tank consortium draft report"},
+        {"role": "assistant", "content": "I can't access that right now."},
+        {"role": "user", "content": "try again"},
+    ]
+    assert bt._document_followup_query("try again", messages) == f"read {AIME}"
+
+
 def test_this_course_followup_uses_recent_syllabus_folder(
         monkeypatch, noble_record):
     syllabus = {

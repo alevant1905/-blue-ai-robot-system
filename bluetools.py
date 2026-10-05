@@ -12115,6 +12115,17 @@ _DOCUMENT_FOLLOWUP_RE = re.compile(
 )
 
 
+# "try again, simpler" asks for the last answer reworded. It resolved to a
+# PDF found in Blue's own example prose and searched the library instead
+# (harness followup_tellmore[3], 2026-10-05).
+_REWORDING_RE = re.compile(
+    r"\b(?:simpler|shorter|more simply|plainer|in plain(?:er)? (?:words|english)"
+    r"|differently|in other words|another way|less jargon"
+    r"|like i'?m (?:five|5|a kid))\b", re.I)
+# Blue's own words name a document only when they give its file name.
+_NAMED_FILE_RE = re.compile(r"\w\.(?:pdf|docx?|txt|md|pptx?)\b", re.I)
+
+
 def _messages_before_current(messages: List[Dict], current: str) -> List[Dict]:
     """Conversation prefix before the live user message."""
     prior = list(messages or [])
@@ -12137,6 +12148,8 @@ def _document_followup_query(message: str,
     """
     if not _DOCUMENT_FOLLOWUP_RE.search(message or ""):
         return None
+    if _REWORDING_RE.search(message or ""):
+        return None
     prior = _messages_before_current(messages, message)
     seen = 0
     for msg in reversed(prior):
@@ -12146,7 +12159,9 @@ def _document_followup_query(message: str,
         if not isinstance(content, str) or not content.strip():
             continue
         seen += 1
-        doc = _resolve_document_entry(content)
+        doc = (_resolve_document_entry(content)
+               if msg.get("role") == "user" or _NAMED_FILE_RE.search(content)
+               else None)
         if doc:
             return f"read {doc.get('filename')}"
         if seen >= 12:
@@ -12656,6 +12671,12 @@ class _ChatToolChoice:
     is_greeting: bool = False
 
 
+_GREETING_WORDS_RE = re.compile(
+    r"\b(?:hello|hi|hey|good (?:morning|afternoon|evening)|how are you"
+    r"|how's it going|what's up|sup|greetings|nice to see you"
+    r"|good to see you)\b")
+
+
 def _chat_choose_tool(conversation_messages, last_user_message, *,
                       correction, user_name, pre_selection):
     """Decide which tool, if any, this turn needs before the model is asked."""
@@ -12804,11 +12825,10 @@ def _chat_choose_tool(conversation_messages, last_user_message, *,
             else:
                 print(f"   [SELECTOR] Keeping priority tool: {improved_force_tool}")
 
-            # Detect if it's a greeting/conversational message
-            greeting_patterns = ['hello', 'hi ', 'hey', 'good morning', 'good afternoon', 'good evening',
-                                'how are you', 'how\'s it going', 'what\'s up', 'sup', 'greetings',
-                                'nice to see you', 'good to see you']
-            is_greeting = any(pattern in _detect_low for pattern in greeting_patterns)
+            # Detect if it's a greeting/conversational message. Whole words:
+            # "hey" inside "t-HEY live in waterloo" made 8 of 757 messages
+            # since Aug 1 "greetings".
+            is_greeting = bool(_GREETING_WORDS_RE.search(_detect_low))
 
     # ===== TOOL NAME NORMALIZATION =====
     # Safety net: map any legacy/incorrect tool names to correct ones.

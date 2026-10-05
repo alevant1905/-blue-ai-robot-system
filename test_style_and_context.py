@@ -45,9 +45,20 @@ def library(monkeypatch):
     "casper, i plan to take you to my class cs101 on friday.",
     "good. we are on our way to dh399",
     "dh201 actually starts on sept 16 not sept 9",
+    # Introducing someone (harness camera_face[1], 2026-10-05).
+    "that's clover, she's a ta for cs101",
+    "this is sam, he's one of the tas in dh201",
+    "clover is a ta for cs101",
 ])
 def test_a_course_code_in_passing_is_not_a_document_request(library, message):
     assert library._library_match(message) is None
+
+
+def test_a_course_introduced_by_name_is_not_a_person():
+    """"this is dh399" introduces a course; it routes as it did before."""
+    from blue.tool_selector.detectors.documents import _PERSON_INTRO_RE
+    assert not _PERSON_INTRO_RE.search("this is dh399, it's about ai agents")
+    assert _PERSON_INTRO_RE.search("that's clover, she's a ta for cs101")
 
 
 @pytest.mark.parametrize("message", [
@@ -59,6 +70,7 @@ def test_a_course_code_in_passing_is_not_a_document_request(library, message):
     "what is dh201 about?",
     "how is dh201 graded",
     "who are the TAs for cs101",
+    "list the tas for cs101",
     "what topics does dh399 cover",
     "tell the class what cs101 is about",
 ])

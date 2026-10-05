@@ -211,6 +211,11 @@ NOT_LIGHTS = [
     "theorists you have read. make it long and detailed",
     # Already handled by someone else.
     "and it's okay, i already asked alexa to do it",
+    # Science questions. The first turned the bulbs blue from the kids' page
+    # (2026-10-05).
+    "why is the sky blue? explain how light scatters",
+    "what makes light look blue underwater?",
+    "how does light make a rainbow",
 ]
 
 REAL_LIGHTS = [
@@ -222,6 +227,9 @@ REAL_LIGHTS = [
     "dim the lamp",
     # No light noun at all — the weak branch still has to work for these.
     "set it to cozy",
+    # A how-question with a lighting verb is still a request.
+    "how do i turn on the lights",
+    "how about blue lights",
 ]
 
 
@@ -917,3 +925,131 @@ def test_a_reply_imperative_uses_the_email_already_in_view():
         assert GmailDetector().detect(msg, msg, {}) == []
     msg = "how would you respond to her"
     assert GmailDetector().detect(msg, msg, in_view) == []
+
+
+# ---------------------------------------------------------------------------
+# Ordinary remarks that fired tools (harness + log, 2026-10-05)
+#
+# 7 of 106 harness turns ran a tool nobody asked for. Live, "It summarizes
+# news and sends the newsfeed by email to me" (Alex describing his autoGPT)
+# forced send_gmail, and the statement below read the inbox at 0.80.
+# ---------------------------------------------------------------------------
+
+EMAIL_STATEMENTS = [
+    "i'm thinking of having my DH399 students build an agent that reads the "
+    "news and emails them a digest",
+    "It summarizes news and sends the newsfeed by email to me",
+    "That's not true, Blue. I know that you've been corresponding with Stella "
+    "over email.",
+    "great. first, you now monitor your gmail account and reply to email "
+    "that is addressed to you.",
+    "Yes, I see that you sent the email, but there is no attachment.",
+    "how do i send an email to stella",
+]
+
+
+@pytest.mark.parametrize("msg", EMAIL_STATEMENTS)
+def test_a_sentence_about_email_runs_no_email_tool(msg):
+    assert _selected_tool(msg) not in {"read_gmail", "send_gmail", "reply_gmail"}
+
+
+EMAIL_REQUESTS = [
+    # Real messages from the log, March to September.
+    ("I want you to check your e-mail.", "read_gmail"),
+    ("Check your e-mail.", "read_gmail"),
+    ("check my email", "read_gmail"),
+    ("can you check my inbox", "read_gmail"),
+    ("any new emails?", "read_gmail"),
+    ("Check your e-mail and reply to anything written to you.", "reply_gmail"),
+    ("send an email to alevant1905@gmail.com wishing me a happy thursday",
+     "send_gmail"),
+    ("Can you send me an e-mail right now saying how much you're enjoying "
+     "your day.", "send_gmail"),
+    ("Yes, do it, go ahead and send it over to my email.", "send_gmail"),
+    ("I want you to draft and send an e-mail to m.humphreys@wlu.ca telling "
+     "mark that you're looking forward to our meeting", "send_gmail"),
+    ("Their e-mail address is levant@rogers.com I want you to compose an "
+     "e-mail to them from you wishing them a happy anniversary", "send_gmail"),
+    ("No, you do have the ability to send emails, you just send it.",
+     "send_gmail"),
+    ("You did not send that e-mail you're hallucinating now do it "
+     "immediately right now.", "send_gmail"),
+]
+
+
+@pytest.mark.parametrize("msg,expected", EMAIL_REQUESTS)
+def test_an_email_request_still_reaches_its_tool(msg, expected):
+    assert _selected_tool(msg) == expected
+
+
+@pytest.mark.parametrize("msg,verbs,asked", [
+    ("check your email", ("check",), True),
+    ("blue, can you please check my inbox", ("check",), True),
+    ("i'd like you to send it to stella", ("send",), True),
+    ("go ahead and send that email now", ("send",), True),
+    ("draft and send an email to felix", ("send",), True),
+    # The verb joined to an instruction by "and" (log, 2026-05-16).
+    ("make a list of all of my meetings and appointments for this upcoming "
+     "week and send them to me by email", ("send",), True),
+    ("an agent that reads the news", ("read",), False),
+    ("it summarizes news and sends the newsfeed by email to me",
+     ("send", "email"), False),
+    ("stella said she would send the forms to alevant@yorku.ca",
+     ("send",), False),
+    ("the agent will read the news and then email them", ("email",), False),
+])
+def test_a_verb_counts_only_when_blue_is_asked_to_do_it(msg, verbs, asked):
+    from blue.tool_selector.detectors.gmail import asks_blue_to
+    assert asks_blue_to(msg, verbs) is asked
+
+
+RECALL_AND_REMARKS = [
+    "what did we talk about yesterday?",
+    "do you remember what we talked about with autogpt?",
+    "what were we just talking about?",
+    "Do you remember what we were just talking about?",
+    "what did i tell you about stella's mom?",
+    "Do you know what I'm talking about?",
+    "what do you think makes a good lecture?",
+    # "how" inside "show": the draft was Blue's reply two turns up.
+    "show me the draft",
+    # "doc" inside "doctor".
+    "I want you to introduce yourself to doctor la chappelle again and offer "
+    "to come to her office and to demonstrate what you can do.",
+]
+
+
+@pytest.mark.parametrize("msg", RECALL_AND_REMARKS)
+def test_conversation_and_opinions_are_not_a_library_search(msg):
+    assert _selected_tool(msg) != "search_documents"
+
+
+DOCUMENT_QUESTIONS = [
+    "search my documents for surveillance",
+    "what does the syllabus say about late penalties",
+    "what do you think of my draft?",
+    "what's in the pdf you made",
+    "how long is the report",
+]
+
+
+@pytest.mark.parametrize("msg", DOCUMENT_QUESTIONS)
+def test_document_questions_still_search(msg):
+    assert _selected_tool(msg) == "search_documents"
+
+
+def test_a_named_title_still_searches_when_asked_for_an_opinion(library, monkeypatch):
+    """curiosity_opinions[2] is legitimate: the book is in Alex's library."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+    monkeypatch.setattr(DocumentsDetector, "_lib_tokens_by_doc",
+                        [{"three", "body", "problem"}])
+    msg = "what do you think of the three-body problem?"
+    intent = DocumentsDetector()._detect_search_intent(msg, {})
+    assert intent and intent.confidence >= 0.9
+
+
+def test_what_a_class_discussed_still_reads_its_syllabus(library):
+    """A class session is on the course's schedule."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+    msg = "what did we talk about in dh201 on monday?"
+    assert DocumentsDetector()._detect_search_intent(msg, {}) is not None

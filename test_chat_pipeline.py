@@ -673,6 +673,49 @@ def test_a_turn_the_selector_has_an_opinion_about_still_acts(chat):
             "a turn with detected intent was handed the conversational subset"
 
 
+def test_a_greeting_to_the_class_is_offered_the_reflex_set_only(chat):
+    """class_demo_voice[1] was offered all 54 schemas: ~19.7k prompt tokens
+    against ~13k on reflex-set turns (2026-10-05 harness)."""
+    bt.process_with_tools([{"role": "user", "content": (
+        "we're in front of the DH399 class right now. do you want to say "
+        "hello to everyone?")}], user_name="Alex")
+
+    offered = _tool_names(chat.model.main[-1])
+    assert offered, "the device tools stay available"
+    assert offered <= bt._REFLEX_TOOL_NAMES
+
+
+@pytest.mark.parametrize("text,greeting", [
+    ("they live in waterloo", False),
+    ("these are first year students. they might not follow your jargon.", False),
+    ("hey blue", True),
+    ("good morning", True),
+    ("do you want to say hello to everyone?", True),
+])
+def test_a_greeting_is_matched_as_whole_words(text, greeting):
+    assert bool(bt._GREETING_WORDS_RE.search(text)) is greeting
+
+
+def test_a_plan_about_an_email_agent_reads_no_inbox(chat):
+    """topic_development[0] fast-executed read_gmail with max_results 10;
+    live, that is Alex's real inbox."""
+    chat.ask("i'm thinking of having my DH399 students build an agent that "
+             "reads the news and emails them a digest")
+
+    ran = {call["tool"] for call in chat.executed}
+    assert not ran & {"read_gmail", "send_gmail", "reply_gmail"}, ran
+
+
+def test_a_science_question_on_the_kids_page_leaves_the_lights_alone(
+        chat, monkeypatch):
+    """It ran control_lights color blue on the zero-LLM path (S2 review)."""
+    monkeypatch.setattr(bt, "_identify_user_from_request", lambda: "Vilda")
+    chat.ask("why is the sky blue? explain how light scatters")
+
+    assert not any(call["tool"] == "control_lights" for call in chat.executed)
+    assert chat.model.main, "the question reaches the model"
+
+
 def test_a_forced_tool_survives_reflex_scope(chat):
     """force_tool wins. The retry that turns a phantom claim into a real
     action passes through here, and must still see the tool it forces —

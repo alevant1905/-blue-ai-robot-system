@@ -215,6 +215,66 @@ _NAMING_STATEMENT_RE = re.compile(
     re.I,
 )
 
+# Introducing someone. "that's Clover, she's a TA for CS101" fast-executed a
+# CS101 syllabus search (folder name, 0.90) in both 2026-10-05 harness runs,
+# and the reply was written from "No matching passages". A question about the
+# course ("who are the TAs for cs101") still searches.
+_PERSON_INTRO_RE = re.compile(
+    r"\b(?:that'?s|thats|that is|this is|meet)\s+(?!it\b|not\b|what\b|the\b|a\b"
+    r"|an\b|my\b|our\b|how\b|why\b|all\b|right\b|true\b|correct\b)"
+    r"[a-z][a-z'\-]{1,20}(?:\s+[a-z][a-z'\-]{1,20})?\s*[,.;!-]*\s*"
+    r"(?:she|he|they)(?:'s|\s+is|\s+are|\s+was)\b"
+    r"|^[a-z]+ is (?:a|an|the|one of the) (?:new )?tas?\b",
+    re.I,
+)
+
+# Asking what was said in an earlier conversation. The memory blocks and the
+# shared_recall grounding answer these; the library cannot. "do you remember
+# what we talked about with autogpt?" and "what did we talk about
+# yesterday?" fast-executed a library search on "talk", which is a document
+# noun here (harness, 2026-10-05).
+_CONVERSATION_RECALL_RE = re.compile(
+    r"\bwhat\s+(?:did|have|had|were|was)\s+(?:we|you\s+and\s+i)\s+"
+    r"(?:just\s+|already\s+|last\s+|ever\s+)?"
+    r"(?:talk|discuss|chat|say|said|decide)\w*"
+    r"|\b(?:remember|recall)\s+(?:what|when|how|where|why|whether)\s+"
+    r"(?:we|i|you)\s+(?:just\s+|already\s+|last\s+)?"
+    r"(?:talk|discuss|chat|said|say|told|tell|decid|mention)\w*"
+    r"|\bwhat\s+did\s+i\s+(?:just\s+)?(?:say|tell|mention|ask)\w*",
+    re.I,
+)
+# ...but what a class talked about is on its syllabus: "what did we talk
+# about in dh201 on monday" routes as it did before.
+_COURSE_MENTION_RE = re.compile(
+    r"\b(?:class|classes|course|courses|lecture|lectures|seminar|syllab\w*"
+    r"|readings?)\b|\b[a-z]{2,5}\s?\d{3,4}[a-z]?\b", re.I)
+
+# Asking for Blue's opinion. "what do you think makes a good lecture?"
+# searched the library at 0.75 on "lecture" (harness short_acks[0]); the
+# answer is his view, not a file. A named title, author or folder still
+# searches ("what do you think of The Three-Body Problem?"), and so does a
+# document pointed at ("what do you think of my draft").
+_OPINION_QUESTION_RE = re.compile(
+    r"\bwhat\s+do\s+you\s+(?:think|reckon|feel|make\s+of|believe)\b"
+    r"|\bwhat(?:'s|\s+is|\s+are)\s+your\s+(?:take|thoughts?|opinion|views?"
+    r"|sense|impression)\b"
+    r"|\bhow\s+do\s+you\s+feel\b|\bdo\s+you\s+(?:think|believe|agree)\b"
+    r"|\bin\s+your\s+(?:opinion|view)\b",
+    re.I,
+)
+
+# The document nouns a what/how question has to contain, as whole words:
+# "talk" inside "talked", "doc" inside "doctor" and "how" inside "show" each
+# made an ordinary sentence a "question about document".
+_DOC_NOUNS = (r"document|file|pdf|contract|syllab(?:us|i)|report|assignment"
+              r"|essay|paper|note|docx|doc|library|script|cv|cover\s+letter"
+              r"|dossier|invitation|talk|lecture|manuscript|draft")
+_QUESTION_DOC_NOUN_RE = re.compile(
+    r"\b(?:" + _DOC_NOUNS + r")s?\b|\.(?:pdf|docx|txt|md)\b", re.I)
+_POINTED_DOCUMENT_RE = re.compile(
+    r"\b(?:my|our|your|this|that|these|those|the)\s+(?:[\w'-]+\s+){0,2}?"
+    r"(?:" + _DOC_NOUNS + r")s?\b", re.I)
+
 
 def _tokens_are_near(tokens, msg_lower: str) -> bool:
     """True when at least two of `tokens` occur close together in the message."""
@@ -372,6 +432,10 @@ class DocumentsDetector(BaseDetector):
         # folder, so "my first name is Alex my last name is Levant" matched a
         # library document at 0.90. Stating a name is never a search.
         if _NAMING_STATEMENT_RE.search(msg_lower):
+            return None
+        if (_PERSON_INTRO_RE.search(msg_lower)
+                and not _DOCUMENT_FRAME_RE.search(msg_lower)
+                and not _COURSE_QUESTION_RE.search(msg_lower)):
             return None
         # Interacting with a person who happens to be an author is not a
         # library query — unless the message also frames a document.
@@ -552,8 +616,18 @@ class DocumentsDetector(BaseDetector):
                 confidence = 0.75
                 reasons.append("search + possessive (implicit docs)")
 
-        # Questions about documents (what/how questions)
-        if ('what' in msg_lower or 'how' in msg_lower) and any(n in msg_lower for n in doc_nouns):
+        # What was said earlier is conversation recall, not the library —
+        # unless the documents are asked for outright.
+        if (confidence < 0.90 and _CONVERSATION_RECALL_RE.search(msg_lower)
+                and not _COURSE_MENTION_RE.search(msg_lower)):
+            return None
+
+        # Questions about documents (what/how questions). An opinion question
+        # counts only when it points at a document.
+        if (has_any_word(['what', 'whats', 'how'], msg_lower)
+                and _QUESTION_DOC_NOUN_RE.search(msg_lower)
+                and not (_OPINION_QUESTION_RE.search(msg_lower)
+                         and not _POINTED_DOCUMENT_RE.search(msg_lower))):
             # If already detected via list_signals, don't double-apply
             if confidence < 0.80:
                 confidence = max(confidence, 0.75)

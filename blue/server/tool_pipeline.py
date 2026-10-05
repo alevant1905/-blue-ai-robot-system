@@ -1251,6 +1251,10 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
             elif is_greeting:
                 print("   [SKIP] Greeting detected - no tool needed")
                 force_tool = None
+                # A greeting is a conversational turn too: "do you want to
+                # say hello to everyone?" was offered all 54 schemas, ~19.7k
+                # prompt tokens against ~13k with the reflex set.
+                _conversational_turn = True
             else:
                 print("   [ALLOW] No clear tool intent - letting model decide")
                 # Let it decide from the reflex set rather than all 53
