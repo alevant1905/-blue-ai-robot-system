@@ -11055,7 +11055,44 @@ def _lm_turn_summary() -> str:
     return (f"   [LM] model {models}, thinking {thinking} (sent {efforts}), "
             f"{len(calls)} call{'s' if len(calls) != 1 else ''}: "
             f"prompt {total('prompt')}{cached}, reasoning {total('reasoning')}, "
-            f"completion {total('completion')}")
+            f"completion {total('completion')}"
+            + _lm_ignored_none([c for c in calls if c["effort"] == "none"]))
+
+
+def _lm_ignored_none(calls) -> str:
+    """A warning when calls sent reasoning_effort "none" and reasoned anyway —
+    the switch this whole decision rests on stopped working."""
+    spent = sum(c["reasoning"] for c in calls if isinstance(c.get("reasoning"), int))
+    return (f" — WARNING: reasoned {spent}t though sent none" if spent else "")
+
+
+def _lm_retry_line(result, effort) -> str:
+    """The [LM] line for one guard regeneration (turn_completion._regen_once).
+
+    Those go through _raw_call_llm and bt._LM.chat, not call_lm_studio, and
+    run after the turn's [LM] line is printed — yet they are the calls that
+    came back empty on 10-05, reasoning having used all 500 and all 900
+    tokens. Says what the retry sent and spent, and whether it came back
+    with nothing."""
+    result = result if isinstance(result, dict) else {}
+    if result.get("error"):
+        return f"   [LM] retry (sent {effort or '-'}) failed: {str(result['error'])[:160]}"
+    usage = result.get("usage") or {}
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    choice = (result.get("choices") or [{}])[0] or {}
+    content = ((choice.get("message") or {}).get("content") or "").strip()
+
+    def count(value):
+        return f"{value}t" if isinstance(value, int) else "?"
+
+    line = (f"   [LM] retry (sent {effort or '-'}): prompt "
+            f"{count(usage.get('prompt_tokens'))}, reasoning {count(reasoning)}, "
+            f"completion {count(usage.get('completion_tokens'))}, "
+            f"finish {choice.get('finish_reason') or '?'}"
+            + ("" if content else ", EMPTY reply"))
+    if effort == "none":
+        line += _lm_ignored_none([{"reasoning": reasoning}])
+    return line
 
 
 def _classify_lm_failure(e, body):

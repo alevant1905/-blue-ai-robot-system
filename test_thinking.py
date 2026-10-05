@@ -77,6 +77,24 @@ NO_THINKING = [
     ("can you tell me a story about a dog", {"kid": True, "voice": True}),
     # the selector's greeting flag counts on a few words only
     ("sushi is great", {"is_greeting": True}),
+    # ...and on a message that asks nothing
+    ("hi blue", {"is_greeting": True}),
+    ("hey there", {"is_greeting": True}),
+    ("thanks!", {"is_greeting": True}),
+    ("thanks for the help", {"is_greeting": True}),
+    # agreeing is not arguing
+    ("i agree", {}), ("i think so", {}), ("i guess so", {}), ("i guess", {}),
+    ("i agree with you", {}),
+    ("thanks! that's what i thought", {}),
+    ("that's not bad", {}),
+    # "again" in news is not a redo
+    ("we are celebrating athenas birthday again tomorrow with her friends", {}),  # 9179
+    # a name with no comma, before a statement, stays a statement
+    ("blue is great", {"voice": True}),
+    ("hexia can see you", {"voice": True}),
+    # needing a rest is not a request
+    ("i need a nap", {"voice": True}),
+    ("i'd like that", {}),                    # no offer on the table
 ]
 
 THINKING = [
@@ -124,6 +142,37 @@ THINKING = [
     ("sure", {"prev_reply": "Want me to sketch a lesson plan around it?"}),
     # the selector's flag is a substring match: "they" has "hey" in it
     ("which theory is better, and why do they disagree?", {"is_greeting": True}),
+    ("are they conscious?", {"is_greeting": True}),
+    ("why do they disagree?", {"is_greeting": True}),
+    ("what is supervised learning?", {"is_greeting": True}),   # "sup"
+    ("explain supervised learning", {"is_greeting": True}),
+    # the greeting fast path flags any short message opening on hi or hey
+    ("hey blue, what's RAG?", {"is_greeting": True}),
+    ("hey, that's wrong", {"is_greeting": True}),
+    # a correction is one spoken or typed
+    ("the calendar is still not updated", {"voice": True}),   # 9471
+    ("its not lab 5", {"voice": True}),                       # 10021
+    ("dh201 actually starts on sept 16 not sept 9", {"voice": True}),  # 9485
+    ("you're still getting Athena's age wrong.", {"voice": True}),     # 9239
+    ("I said I'm working on my courses again.", {}),          # 9103
+    ("I said I'm working on my courses again.", {"voice": True}),
+    # a redo
+    ("i want to hear it again", {}),                          # 9683
+    ("huh check the syllabus again", {"voice": True}),        # 9941
+    # the robot's name spoken without a comma
+    ("blue what do you think about the reading", {"voice": True}),
+    ("Hexia what do you think of the new syllabus", {"voice": True}),
+    ("ok blue tell me about agents", {"voice": True}),
+    # requests worded as statements
+    ("Hey Blue, I was wondering if you could help me plan the dh399 lecture", {}),
+    ("I'd like a lesson plan for friday", {}),
+    ("any thoughts on the reading", {}),
+    ("curious what you think of the three body problem", {}),
+    ("yes please draft it", {}),
+    ("i'd like that", {"prev_reply": "I could draft it now if you'd like."}),
+    # markdown around the question
+    ("**what** do you think", {}),
+    ("> what do you think of this quote", {}),
 ]
 
 
@@ -195,6 +244,49 @@ def test_the_chat_page_sends_the_decision(chat):
     chat.ask('[Attached document: notes.pdf]\n"""\n'
              + "- a point about lectures\n" * 60
              + '"""\nwhat do you make of these notes?')
+    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+
+
+@pytest.fixture
+def greeting_flags(monkeypatch):
+    """The is_greeting each decision was made with, to show a test reached
+    the flag it is about."""
+    flags = []
+    real = bt._thinking.thinking_for_turn
+
+    def spy(text, **kwargs):
+        flags.append(kwargs.get("is_greeting"))
+        return real(text, **kwargs)
+
+    monkeypatch.setattr(bt._thinking, "thinking_for_turn", spy)
+    return flags
+
+
+@pytest.mark.parametrize("text", [
+    "are they conscious?",              # the selector: "hey" in "they"
+    "why do they disagree?",
+    "what is supervised learning?",     # the selector: "sup"
+    "hey blue, what's RAG?",            # the greeting fast path
+])
+def test_a_question_carrying_the_greeting_flag_still_thinks(chat, greeting_flags, text):
+    chat.ask(text)
+    if not greeting_flags or greeting_flags[-1] is not True:
+        pytest.skip("routed to a tool, so no greeting flag (live library?)")
+    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+
+
+@pytest.mark.parametrize("text", ["hi blue", "hey there", "thanks!"])
+def test_a_greeting_still_does_not(chat, greeting_flags, text):
+    chat.ask(text)
+    assert greeting_flags[-1] is True
+    assert chat.model.main[-1]["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize("text", ["the calendar is still not updated", "its not lab 5"])
+def test_a_spoken_correction_thinks_like_a_typed_one(chat, text):
+    chat.ask(text, voice=True)
+    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    chat.ask(text)
     assert chat.model.main[-1]["reasoning_effort"] == "medium"
 
 
@@ -376,6 +468,54 @@ def test_the_turn_logs_model_thinking_and_tokens(chat, capsys):
 
     assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent medium), 1 call: "
             "prompt 10440t, reasoning 120t, completion 300t") in out
+
+
+def test_a_guard_retry_logs_what_it_sent_and_spent(chat, capsys):
+    """The regenerations go through _raw_call_llm and bt._LM.chat, after the
+    turn's [LM] line — and they are the calls that came back empty on 10-05."""
+    chat.model.queue(
+        "I don't have any record of your family, Alex.",
+        {"model": "qwen/qwen3.8-27b",
+         "usage": {"prompt_tokens": 5000, "completion_tokens": 20,
+                   "completion_tokens_details": {"reasoning_tokens": 0}},
+         "choices": [{"message": {"role": "assistant", "content":
+                                  "Athena, Emmy and Vilda — and Stella, of course."},
+                      "finish_reason": "stop"}]})
+    chat.ask("do you remember our family?")
+    out = capsys.readouterr().out
+
+    assert ("[LM] retry (sent none): prompt 5000t, reasoning 0t, "
+            "completion 20t, finish stop") in out
+    assert "WARNING" not in out.split("[LM] retry", 1)[1].splitlines()[0]
+
+
+def test_a_retry_that_reasons_anyway_or_comes_back_empty_is_named():
+    spent = {"usage": {"prompt_tokens": 4000, "completion_tokens": 900,
+                       "completion_tokens_details": {"reasoning_tokens": 900}},
+             "choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+    line = bt._lm_retry_line(spent, "none")
+    assert "reasoning 900t" in line and "finish length" in line
+    assert "EMPTY reply" in line
+    assert "WARNING: reasoned 900t though sent none" in line
+
+    assert "failed: HTTP 400" in bt._lm_retry_line({"error": "HTTP 400: bad"}, "none")
+    assert "(sent -)" in bt._lm_retry_line({"choices": []}, None)
+
+
+def test_the_turn_line_warns_when_none_was_ignored():
+    bt._lm_turn_reset()
+    bt._LM_TURN.thinking = THINK_OFF
+    bt._lm_turn_note({"model": "m", "usage": {
+        "prompt_tokens": 100, "completion_tokens": 300,
+        "completion_tokens_details": {"reasoning_tokens": 250}}},
+        {"reasoning_effort": "none"})
+    assert "WARNING: reasoned 250t though sent none" in bt._lm_turn_summary()
+
+    bt._lm_turn_reset()
+    bt._lm_turn_note({"model": "m", "usage": {
+        "completion_tokens_details": {"reasoning_tokens": 250}}},
+        {"reasoning_effort": "medium"})
+    assert "WARNING" not in bt._lm_turn_summary()
 
 
 def test_a_model_change_is_named_once(monkeypatch, capsys):

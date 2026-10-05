@@ -60,6 +60,17 @@ _GREETING_PREFIX_RE = re.compile(
 _NAME_ONLY_RE = re.compile(r"^(?:" + _NAMES + r"[\s,.!?]*)+$")
 _LEADING_NAME_RE = re.compile(r"^(?:" + _NAMES + r"\s*[,.!]+\s*)+")
 _TRAILING_NAME_RE = re.compile(r",\s*" + _NAMES + r"\s*(?=[.!?]*$)")
+# A name spoken with no comma after it: "blue what do you think…", "ok blue
+# tell me about agents". Only dropped before an opener a statement about him
+# can't continue with — "blue is great" and "hexia can see you" stay
+# statements, and "blue tells" would need the -s.
+_SPOKEN_NAME_RE = re.compile(
+    r"^" + _NAMES + r"\s+(?=(?:what|what's|whats|when|where|who|why|how|which"
+    r"|(?:do|does|did|can|could|would|will|are|have|should) (?:you|u)"
+    r"|tell|explain|describe|give|show|help|write|draft|summari[sz]e|compare"
+    r"|plan|list|read|find|search|check|look|remind|let'?s|please)\b)")
+# Markdown around the words: "**what** do you think", "> what do you…".
+_MARKDOWN_RE = re.compile(r"(?m)^[ \t]*(?:>+|[-•]|#{1,6})[ \t]+|\*{1,3}|_{2,3}")
 
 # "how are you", "what have you been up to", "can you hear me": check-ins whose
 # answer is a line, not an essay — in any of the household languages.
@@ -103,6 +114,10 @@ _ACK_WORDS = (
     r"|see (?:you|ya)"
     r"|later|so true|sh+|love it|yay|oops|sorry|my bad|that helps"
     r"|that(?:'s| is) (?:great|good|nice|fine|cool|right|it|true|funny|fair)"
+    # Agreeing is not arguing: "i agree", "i think so", "not bad".
+    r"|i (?:totally |completely |fully )?agree(?: with (?:you|that))?"
+    r"|i (?:think|guess|suppose|hope) so|i guess|that'?s what i thought"
+    r"|(?:that'?s |that is )?not bad"
     r"|indeed|agreed|cheers|noted|understood|will do|same|me too|not sure"
     r"|i don'?t know|dunno|maybe|better|much better|beautiful|brilliant"
     r"|huh|what|pardon|eh)"
@@ -116,11 +131,18 @@ _CONTINUE_RE = re.compile(
     r"|say more|and then|what else|what more|try (?:it |that )?again|again"
     r"|one more time|do it|go ahead|redo|finish|keep talking|elaborate"
     r"|expand|go deeper|let'?s (?:try|do) (?:it|that) again|do the whole thing)\b")
-_AGAIN_RE = re.compile(r"\b(?:again|one more time|repeat (?:it|that))\b")
+# "say that again but shorter" asks for a redo; "we're celebrating her
+# birthday again tomorrow" (conversation_log 9179) is news.
+_AGAIN_RE = re.compile(
+    r"\b(?:say|do|try|tell|explain|read|write|answer|give|show|run|start"
+    r"|repeat|redo|rewrite|summari[sz]e|describe|go over|introduce|check|look"
+    r"|hear|play|sing)\b[^.?!]{0,40}\bagain\b"
+    r"|\b(?:one more time|repeat (?:it|that))\b|\bwrong again\b")
 # A bare yes is an ack — unless it accepts something Blue just offered to do.
 _ACCEPT_RE = re.compile(
     r"^(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|go ahead|do it|go for it"
-    r"|sure thing|why not|let'?s do it|sounds good)"
+    r"|sure thing|why not|let'?s do it|sounds good|please do"
+    r"|i'?d (?:like|love) (?:that|it)|that would be (?:great|nice|good|helpful))"
     r"(?:[\s,.!]+(?:please|thanks|do it|go ahead|yes))*[\s.!]*$")
 _OFFER_RE = re.compile(
     r"\b(?:want me to|shall i|should i|would you like me to|like me to"
@@ -132,8 +154,8 @@ _TAG_QUESTION_RE = re.compile(
     r"[,\s]+(?:right|you know(?: that)?|isn't it|ain't it|huh|eh|no|yeah"
     r"|ok(?:ay)?)\s*\?+\s*$")
 _FILLER_PREFIX_RE = re.compile(
-    r"^(?:(?:ok(?:ay)?|so|well|and|but|oh|um+|uh+|yeah|alright|all right|now"
-    r"|then|great|good|cool|fine|sure|please)\b[\s,.!]*)+")
+    r"^(?:(?:ok(?:ay)?|so|well|and|but|oh|ooh|ah|huh|um+|uh+|hm+|yeah|yes|yep"
+    r"|yup|alright|all right|now|then|great|good|cool|fine|sure|please)\b[\s,.!]*)+")
 _PRONOUN = (r"(?:you|u|i|we|it|they|he|she|this|that|there|these|those|my|your"
             r"|our|the|a|an|any|anyone|blue|hexia|casper)")
 _QUESTION_START_RE = re.compile(
@@ -152,6 +174,20 @@ _REQUEST_START_RE = re.compile(
     r"|generate|build|design|propose|develop|teach|remind|add|update|save|try|use"
     r"|send|email|open|play|zoom|correct|double check|let'?s|let me|i want you"
     r"|i'?d like you|i need you|could you|can you|would you|will you|please)\b")
+# A request worded as a statement, anywhere in the message: "I was
+# wondering if you could help me plan the lecture", "I'd like a lesson plan
+# for friday", "any thoughts on the reading". "I need a nap" is not one.
+_INDIRECT_REQUEST_RE = re.compile(
+    r"\b(?:i was|i'?m|just) wondering (?:if|whether|what|how|why)\b"
+    r"|\b(?:i'?d|i would) (?:like|love|appreciate)\b(?! (?:that|it|this)\b)"
+    r"|\bi (?:want|need) (?:you to|your|help|some help|to (?:know|understand"
+    r"|figure|plan|write|learn|prepare))\b"
+    r"|\bi (?:want|need) (?:a|an|some|the)(?: \w+)? (?:plan|draft|list|summary"
+    r"|outline|lesson|lecture|quiz|rubric|email|letter|reply|review|story|poem"
+    r"|idea|ideas|suggestions?|title|description|paragraph|script|schedule"
+    r"|report|presentation|questions?|examples?|explanation|translation)\b"
+    r"|\bhelp me\b|\b(?:any|your) (?:thoughts|ideas|suggestions|advice|take)\b"
+    r"|\bcurious (?:what|how|why|whether|if|about)\b")
 # A short statement that argues rather than reports.
 _DISCUSSION_RE = re.compile(
     r"\b(?:i think|i thought|i wonder|i'?m (?:not )?(?:so )?sure|i believe"
@@ -163,6 +199,8 @@ _DISCUSSION_RE = re.compile(
 _CORRECTION_RE = re.compile(
     r"^(?:no|nope|wrong|incorrect)\b[\s,.!]+\S"
     r"|^(?:wrong|incorrect)\b"
+    # Saying it twice: "I said I'm working on my courses again" (9103).
+    r"|^i (?:just |already )?(?:said|meant|asked)\b"
     r"|\b(?:that'?s|thats|it'?s|its|that is|it is) (?:not|wrong|incorrect|outdated)\b"
     r"|\bnot (?:right|correct|true|accurate)\b"
     r"|\b(?:you'?re|youre|you are) (?:wrong|mistaken|confused|still)\b"
@@ -189,6 +227,7 @@ SHORT_REPLY_WORDS = 12
 
 def _normalise(text: str) -> str:
     text = (text or "").replace("’", "'").replace("‘", "'")
+    text = _MARKDOWN_RE.sub("", text)
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
@@ -198,10 +237,11 @@ def _asks_something(text: str) -> bool:
     Any sentence counts: "it looks fine. tell me her birthday" asks.
     """
     untagged = _TAG_QUESTION_RE.sub("", text)
-    if "?" in untagged:
+    if "?" in untagged or _INDIRECT_REQUEST_RE.search(text):
         return True
     for sentence in re.split(r"(?<=[.!;])\s+", text):
         bare = _FILLER_PREFIX_RE.sub("", sentence.strip())
+        bare = _SPOKEN_NAME_RE.sub("", bare)
         if _QUESTION_START_RE.match(bare) or _REQUEST_START_RE.match(bare):
             return True
     return False
@@ -217,8 +257,10 @@ def thinking_for_turn(text: str, *, voice: bool = False, kid: bool = False,
 
     `text` is the user's own words (attachments stripped). `voice` means the
     words were spoken — the chat page's voice turns, not Panel's brevity
-    flag. `is_greeting` is the selector's flag, which matches substrings
-    ("hey" in "they"), so it only counts on a message of a few words.
+    flag. `is_greeting` is the selector's flag or the greeting fast path's,
+    and both match loosely ("hey" in "they", "sup" in "supervised", any
+    short message opening on "hi"), so it only counts on a message of a few
+    words that asks nothing.
     `prev_reply` is Blue's previous reply: "sure" after "want me to draft
     it?" is the go-ahead for real work, not an acknowledgement.
     """
@@ -256,15 +298,21 @@ def thinking_for_turn(text: str, *, voice: bool = False, kid: bool = False,
         return THINK_OFF
     if _CLASS_GREETING_RE.search(rest):
         return THINK_OFF
-    if is_greeting and words <= 4:
+    asks = _asks_something(rest)
+    # Being told he got it wrong is the same turn spoken, typed or opened on
+    # "hey": "the calendar is still not updated", "its not lab 5".
+    if _CORRECTION_RE.search(rest):
+        return THINK_ON
+    # "are they conscious?", "what is supervised learning?" and "hey blue,
+    # what's RAG?" all carried the greeting flag.
+    if is_greeting and words <= 4 and not asks:
         return THINK_OFF
     if _AGAIN_RE.search(rest):
         return THINK_ON
-    asks = _asks_something(rest)
     if voice and words <= VOICE_SMALL_TALK_WORDS:
         if not asks or _SMALL_TALK_Q_RE.search(rest):
             return THINK_OFF
         return THINK_ON
-    if asks or _CORRECTION_RE.search(rest) or _DISCUSSION_RE.search(rest):
+    if asks or _DISCUSSION_RE.search(rest):
         return THINK_ON
     return THINK_OFF if words <= SHORT_REPLY_WORDS else THINK_ON

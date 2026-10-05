@@ -872,6 +872,12 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             _redo = bt._raw_call_llm(_retry_msgs, include_tools=False,
                                      temperature=0.8, max_tokens=max_tokens,
                                      reasoning_effort="none")
+            # The turn's [LM] line is already out and never saw this call.
+            try:
+                print(bt._lm_retry_line(
+                    _redo, None if bt._reasoning_field_refused() else "none"))
+            except Exception as e:
+                bt.log.warning(f"[LM] could not log the retry's usage: {e}")
             _t = ""
             try:
                 _t = (((_redo or {}).get("choices") or [{}])[0]
