@@ -534,6 +534,15 @@ def test_a_face_claim_is_removed_unless_the_person_has_a_photo_end_to_end(
     assert "recognize Felix next time" in text
 
 
+def test_photo_advice_and_a_stored_description_survive_end_to_end(chat, collecting):
+    """What the prompt asks Blue to say about a face is not itself a claim."""
+    reply = ("She is. I've stored her appearance as short dark hair with bangs. "
+             "Add a reference photo on my Visual Memory page so I can recognize "
+             "her next time.")
+    chat.model.queue(reply)
+    assert reply_of(chat.ask("clover is great with the students")) == reply
+
+
 # --------------------------------------------------------------------------
 # The transport the pipeline actually uses
 # --------------------------------------------------------------------------

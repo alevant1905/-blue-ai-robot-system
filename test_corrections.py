@@ -285,6 +285,105 @@ def test_a_saved_description_is_a_claim_when_asked_to_remember_a_look():
     assert "saved a description" not in out
 
 
+def test_a_saved_description_stands_after_a_remember_person():
+    """09-23 itself: remember_person ran at 13:14:58, and it keeps a
+    description (its `appearance`). Nothing there promises a face."""
+    reply = ("I can’t store photos directly, but I’ve saved a description of "
+             "Clover so I can match her when you bring her up again: short dark "
+             "hair with bangs.")
+    out = scrub(reply, [], user_text="I want you to remember what she looks like",
+                recent={"remember_person"})
+    assert out == reply
+
+
+# The advice the prompt now asks for (U06): how a photo gets on file.
+PHOTO_ADVICE = [
+    "Add a reference photo on my Visual Memory page so I can recognize her next time.",
+    "Snap a picture of her for my Visual Memory page so I'll recognize her next time.",
+    "Take her photo on my Visual Memory page so that I can identify her automatically.",
+    "I'd suggest you pop a photo of her into my Visual Memory page, so I can "
+    "recognize her next time.",
+]
+
+
+@pytest.mark.parametrize("advice", PHOTO_ADVICE)
+def test_advice_on_adding_a_photo_is_kept(advice):
+    reply = f"Nice to meet you, Clover! {advice}"
+    assert scrub(reply, [], user_text=CLOVER_INTRO) == reply
+    # A remember_person this turn changes nothing.
+    stored = [{"name": "remember_person", "success": True}]
+    assert scrub(reply, stored, user_text=CLOVER_INTRO) == reply
+
+
+@pytest.mark.parametrize("claim", [
+    "I'll add her photo to my visual memory so I'll recognize her next time.",
+    "I've added her to my Visual Memory page, so I'll recognize her next time.",
+    "Let me snap a picture of her so I'll recognize her next time.",
+    "I went ahead and put her photo on file, so I'll recognize her next time.",
+])
+def test_blue_doing_the_adding_is_still_a_claim(claim):
+    assert scrub(f"Nice to meet you, Clover. {claim}", [],
+                 user_text=CLOVER_INTRO) == "Nice to meet you, Clover."
+
+
+@pytest.mark.parametrize("user, reply, outcomes, recent", [
+    # remember_person keeps a description: saying so is true.
+    ("this is clover, short dark hair and round glasses — remember her",
+     "Saved! I've stored her appearance — short dark hair and round glasses — "
+     "along with her role as your CS101 TA.",
+     [{"name": "remember_person", "success": True}], ()),
+    ("this is clover, she's my TA — remember her",
+     "I've recorded Clover's look and role in my visual memory.",
+     [{"name": "remember_person", "success": True}], ()),
+    # Recall of that description.
+    ("what does clover look like?",
+     "I've stored her appearance as short dark hair with bangs.", [], ()),
+    # The camera's photo: email_snapshot's failure result says to report it.
+    ("take a picture and email it to me",
+     "I've saved the photo locally, but the email failed to send.",
+     [{"name": "email_snapshot", "success": False}], ()),
+    ("can you see me?",
+     "I just captured a picture: you're at your desk.",
+     [{"name": "capture_camera", "success": True}], ()),
+    ("did you save it?", "Yes, I've saved your photo with the camera captures.",
+     [], {"capture_camera"}),
+    # Features of a thing, not a face.
+    ("here are the agent frameworks we use",
+     "I've stored the key features of each framework in the comparison table.",
+     [], ()),
+])
+def test_a_true_stored_look_or_photo_is_kept(user, reply, outcomes, recent):
+    assert scrub(reply, outcomes, user_text=user, recent=recent) == reply
+
+
+def test_a_stored_look_is_a_face_claim_beside_a_promise_of_recognition():
+    """03-21; and someone's photo with no camera tool is still judged."""
+    for reply in ("I've stored their appearance and relationship details in my "
+                  "memory for future recognition.",
+                  "I've saved her photo to my visual memory."):
+        out = scrub(reply, [{"name": "remember_person", "success": True}],
+                    user_text=CLOVER_INTRO)
+        assert out.startswith("I can't recognise a face until a reference photo")
+
+
+def test_only_the_claims_subject_is_backed_by_a_reference_photo():
+    """Alex is addressed by name constantly; once his own photo is back on
+    file, his name in a sentence must not back a claim about Clover."""
+    for claim in ("Got it, Alex — I've saved her features so I'll recognize "
+                  "Clover next time.",
+                  "Got it, Alex — I've saved her features so I'll recognize her "
+                  "next time."):
+        out = scrub(f"She's great with the students. {claim}", [],
+                    user_text=CLOVER_INTRO, enrolled_names={"Alex"})
+        assert out == "She's great with the students."
+    felix = "I've kept Felix's photo, so I'll recognize Felix next time."
+    assert scrub(felix, [], user_text=CLOVER_INTRO, enrolled_names={"Felix"}) == felix
+    assert scrub(felix, [], user_text=CLOVER_INTRO,
+                 enrolled_names={"Alex"}) != felix
+    assert scrub("I'll recognize Felix next time", [], user_text=CLOVER_INTRO,
+                 enrolled_names={"Felix"}) == "I'll recognize Felix next time"
+
+
 # (user, reply) from conversation_log 9814, 9822, 9836, 9846, 9920: plain
 # statements, no place was written, and the save check never judged them.
 _IN_YOUR_OFFICE = (
