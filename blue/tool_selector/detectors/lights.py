@@ -78,14 +78,23 @@ class LightsDetector(BaseDetector):
     # is the sky blue? explain how light scatters" turned the bulbs blue on
     # the zero-LLM path (S2 review, 2026-10-05), and "how does light make a
     # rainbow" picks the rainbow scene. A lighting verb still acts: "how do I
-    # turn on the lights".
+    # turn on the lights", "how do i make the lights blue".
+    #
+    # Judged per sentence, and only that sentence is set aside: "lights off.
+    # how was your day?" and "why is it so dark in here? lights on please"
+    # are a command beside a question, and lost the command when one why/how
+    # anywhere cancelled the whole message (S4 review).
     _EXPLANATION_RE = re.compile(
         r"\b(?:why|how)\s+(?:is|are|does|do|did|was|were|can|could|would)\b"
         r"|\bhow\s+come\b|\bexplain\b|\bwhat\s+(?:makes|causes|made|caused)\b",
         re.IGNORECASE,
     )
-    _LIGHTING_VERBS = ['turn', 'switch', 'set', 'change', 'dim', 'brighten',
-                       'adjust']
+    _LIGHTING_VERB_RE = re.compile(
+        r"\b(?:turn|switch|set|change|dim|brighten|adjust)\b"
+        r"|\bmake\s+(?:the\s+|all\s+(?:the\s+)?|my\s+)?(?:lights?|lamps?|bulbs?)\b",
+        re.IGNORECASE,
+    )
+    _SENTENCE_BREAK_RE = re.compile(r"[.!?;,\n]+")
 
     def detect(
         self,
@@ -107,8 +116,8 @@ class LightsDetector(BaseDetector):
             return intents
         if self._NO_ACTION_RE.search(msg_lower):
             return intents
-        if (self._EXPLANATION_RE.search(msg_lower)
-                and not has_any_word(self._LIGHTING_VERBS, msg_lower)):
+        msg_lower = self._without_light_questions(msg_lower)
+        if not msg_lower:
             return intents
 
         # Detect control intent
@@ -117,6 +126,15 @@ class LightsDetector(BaseDetector):
             intents.append(control_intent)
 
         return intents
+
+    def _without_light_questions(self, msg_lower: str) -> str:
+        """The message less its why/how questions that ask for no change."""
+        sentences = [s.strip() for s in self._SENTENCE_BREAK_RE.split(msg_lower)
+                     if s.strip()]
+        kept = [s for s in sentences
+                if not (self._EXPLANATION_RE.search(s)
+                        and not self._LIGHTING_VERB_RE.search(s))]
+        return msg_lower if len(kept) == len(sentences) else ". ".join(kept)
 
     def _is_light_adjective(self, msg_lower: str) -> bool:
         """Check if 'light' is used as adjective."""

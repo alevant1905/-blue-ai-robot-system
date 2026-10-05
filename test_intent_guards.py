@@ -229,7 +229,12 @@ REAL_LIGHTS = [
     "set it to cozy",
     # A how-question with a lighting verb is still a request.
     "how do i turn on the lights",
+    "how do i make the lights blue",
     "how about blue lights",
+    # A command beside a question: the question is set aside, not the
+    # command (S4 review).
+    "lights off. how was your day?",
+    "why is it so dark in here? lights on please",
 ]
 
 
@@ -945,11 +950,21 @@ EMAIL_STATEMENTS = [
     "that is addressed to you.",
     "Yes, I see that you sent the email, but there is no attachment.",
     "how do i send an email to stella",
+    # Describing an agent, with a verb joined by "and" (S4 review).
+    "so basically the agent will check email and reply to the email from "
+    "students",
+    "imagine an agent that could check your email and reply to the important "
+    "ones",
+    "think about an assistant that would check your email and respond to the "
+    "email from parents",
+    # "now" after a subject is a statement.
+    "my students now check their email on their phones",
+    "students now read their email during class",
 ]
 
 
 @pytest.mark.parametrize("msg", EMAIL_STATEMENTS)
-def test_a_sentence_about_email_runs_no_email_tool(msg):
+def test_a_sentence_about_email_runs_no_email_tool(library, msg):
     assert _selected_tool(msg) not in {"read_gmail", "send_gmail", "reply_gmail"}
 
 
@@ -974,11 +989,24 @@ EMAIL_REQUESTS = [
      "send_gmail"),
     ("You did not send that e-mail you're hallucinating now do it "
      "immediately right now.", "send_gmail"),
+    # A reply asked for with the noun. These went to send_gmail, a new
+    # email instead of a threaded reply (S4 review).
+    ("send a reply to stella's email", "reply_gmail"),
+    ("compose a reply to the email from felix", "reply_gmail"),
+    ("can you send a quick reply to felix's email", "reply_gmail"),
+    # Fillers, "can u", and a new line between two sentences.
+    ("go check my email", "read_gmail"),
+    ("can you pls check my email", "read_gmail"),
+    ("can u check my email", "read_gmail"),
+    ("i like it\nsend an email to stella with the summary", "send_gmail"),
+    ("would you mind sending an email to stella saying hi", "send_gmail"),
+    ("i was wondering if you could send an email to stella", "send_gmail"),
+    ("sounds good send an email to stella", "send_gmail"),
 ]
 
 
 @pytest.mark.parametrize("msg,expected", EMAIL_REQUESTS)
-def test_an_email_request_still_reaches_its_tool(msg, expected):
+def test_an_email_request_still_reaches_its_tool(library, msg, expected):
     assert _selected_tool(msg) == expected
 
 
@@ -997,10 +1025,28 @@ def test_an_email_request_still_reaches_its_tool(msg, expected):
     ("stella said she would send the forms to alevant@yorku.ca",
      ("send",), False),
     ("the agent will read the news and then email them", ("email",), False),
+    ("so basically the agent will check email and reply to them",
+     ("reply",), False),
+    ("picture a bot that could read my email and reply to stella",
+     ("reply",), False),
+    ("find the email that stella sent and reply to it", ("reply",), True),
+    ("see if you can find the email from stella and reply to it",
+     ("reply",), True),
+    ("check if stella will be there and reply to her email", ("reply",),
+     True),
+    ("my students now check their email on their phones", ("check",), False),
 ])
 def test_a_verb_counts_only_when_blue_is_asked_to_do_it(msg, verbs, asked):
     from blue.tool_selector.detectors.gmail import asks_blue_to
     assert asks_blue_to(msg, verbs) is asked
+
+
+def test_a_spoken_now_starts_only_a_follow_up():
+    """Log 367: "…you're hallucinating now do it immediately right now"."""
+    from blue.tool_selector.detectors.gmail import asks_blue_to
+    msg = "you did not send that email you're hallucinating now do it"
+    assert asks_blue_to(msg, ("do it",), after_now=True)
+    assert not asks_blue_to(msg, ("do it",))
 
 
 RECALL_AND_REMARKS = [
@@ -1011,6 +1057,10 @@ RECALL_AND_REMARKS = [
     "what did i tell you about stella's mom?",
     "Do you know what I'm talking about?",
     "what do you think makes a good lecture?",
+    # The coursework words asked an opinion too (S4 review).
+    "what do you think makes a good assignment?",
+    "what do you think about homework for first year students?",
+    "what's your take on weekly readings?",
     # "how" inside "show": the draft was Blue's reply two turns up.
     "show me the draft",
     # "doc" inside "doctor".
@@ -1020,7 +1070,7 @@ RECALL_AND_REMARKS = [
 
 
 @pytest.mark.parametrize("msg", RECALL_AND_REMARKS)
-def test_conversation_and_opinions_are_not_a_library_search(msg):
+def test_conversation_and_opinions_are_not_a_library_search(library, msg):
     assert _selected_tool(msg) != "search_documents"
 
 
@@ -1030,11 +1080,20 @@ DOCUMENT_QUESTIONS = [
     "what do you think of my draft?",
     "what's in the pdf you made",
     "how long is the report",
+    # Recall that names a document reads it: Alex's talks, papers and CV
+    # are in the library (S4 review).
+    "what did i say about ilyenkov in my research talk?",
+    "what did i say in my cv about teaching",
+    "what did i mention in my cover letter",
+    # An opinion on this course's material, or on what is due, is the
+    # syllabus.
+    "what do you think of the readings for tomorrow?",
+    "what do you think is due this week?",
 ]
 
 
 @pytest.mark.parametrize("msg", DOCUMENT_QUESTIONS)
-def test_document_questions_still_search(msg):
+def test_document_questions_still_search(library, msg):
     assert _selected_tool(msg) == "search_documents"
 
 

@@ -716,6 +716,22 @@ def test_a_science_question_on_the_kids_page_leaves_the_lights_alone(
     assert chat.model.main, "the question reaches the model"
 
 
+def test_a_command_beside_a_question_still_drives_the_lights(chat):
+    """It ran on the zero-LLM path at a37bce1, then went to the model with
+    the reflex set and ran nothing (S4 review)."""
+    chat.ask("lights off. how was your day?")
+
+    assert any(call["tool"] == "control_lights" for call in chat.executed)
+
+
+def test_a_reply_asked_for_with_the_noun_is_a_threaded_reply(chat):
+    """It forced send_gmail: Felix would have got a new email (S4 review)."""
+    chat.ask("compose a reply to the email from felix")
+
+    assert chat.model.main[0].get("tool_choice") == "required"
+    assert _tool_names(chat.model.main[0]) == {"reply_gmail"}
+
+
 def test_a_forced_tool_survives_reflex_scope(chat):
     """force_tool wins. The retry that turns a phantom claim into a real
     action passes through here, and must still see the tool it forces —

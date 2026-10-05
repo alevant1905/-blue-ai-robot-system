@@ -274,6 +274,17 @@ _QUESTION_DOC_NOUN_RE = re.compile(
 _POINTED_DOCUMENT_RE = re.compile(
     r"\b(?:my|our|your|this|that|these|those|the)\s+(?:[\w'-]+\s+){0,2}?"
     r"(?:" + _DOC_NOUNS + r")s?\b", re.I)
+# The same for an opinion on coursework: "what do you think makes a good
+# assignment?" asks his view (S4 review), while "what do you think of the
+# readings for tomorrow?" and "what do you think is due this week?" ask what
+# the syllabus says.
+_POINTED_COURSEWORK_RE = re.compile(
+    r"\b(?:my|our|your|this|that|these|those|the)\s+(?:[\w'-]+\s+){0,2}?"
+    r"(?:readings?|homework|assignments?|coursework|syllab(?:us|i)|course"
+    r"|class|lecture|seminar)\b"
+    r"|\bdue\b(?!\s+to\b)"
+    r"|\b(?:today|tonight|tomorrow|(?:this|next)\s+week|monday|tuesday"
+    r"|wednesday|thursday|friday|saturday|sunday)\b", re.I)
 
 
 def _tokens_are_near(tokens, msg_lower: str) -> bool:
@@ -617,16 +628,20 @@ class DocumentsDetector(BaseDetector):
                 reasons.append("search + possessive (implicit docs)")
 
         # What was said earlier is conversation recall, not the library —
-        # unless the documents are asked for outright.
+        # unless the documents are asked for outright, or one is named: "what
+        # did i say about ilyenkov in my research talk?" reads the talk.
         if (confidence < 0.90 and _CONVERSATION_RECALL_RE.search(msg_lower)
-                and not _COURSE_MENTION_RE.search(msg_lower)):
+                and not _COURSE_MENTION_RE.search(msg_lower)
+                and not _DOCUMENT_FRAME_RE.search(msg_lower)
+                and not _POINTED_DOCUMENT_RE.search(msg_lower)):
             return None
 
         # Questions about documents (what/how questions). An opinion question
         # counts only when it points at a document.
+        opinion = bool(_OPINION_QUESTION_RE.search(msg_lower))
         if (has_any_word(['what', 'whats', 'how'], msg_lower)
                 and _QUESTION_DOC_NOUN_RE.search(msg_lower)
-                and not (_OPINION_QUESTION_RE.search(msg_lower)
+                and not (opinion
                          and not _POINTED_DOCUMENT_RE.search(msg_lower))):
             # If already detected via list_signals, don't double-apply
             if confidence < 0.80:
@@ -634,7 +649,9 @@ class DocumentsDetector(BaseDetector):
                 reasons.append("question about document")
 
         # Academic course/reading queries → the syllabus & course docs.
-        if confidence < 0.8 and _COURSE_RE.search(msg_lower):
+        if (confidence < 0.8 and _COURSE_RE.search(msg_lower)
+                and not (opinion
+                         and not _POINTED_COURSEWORK_RE.search(msg_lower))):
             confidence = max(confidence, 0.8)
             reasons.append("course/reading query")
 

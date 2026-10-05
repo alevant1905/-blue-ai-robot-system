@@ -60,26 +60,54 @@ _SEND_VERBS = ("send", "email", "compose", "write", "draft", "resend",
 _REPLY_VERBS = ("reply", "respond", "answer", "write")
 _FOLLOWUP_ASKS = ("go ahead", "do it", "try it", "try again", "retry",
                   "go on then")
+# A reply asked for with the noun: "send a reply to stella's email", "compose
+# a reply to the email from felix". Read only as a verb, these lost
+# reply_gmail to send_gmail, and Felix would get a new email instead of a
+# threaded reply (S4 review).
+_REPLY_ASK_RE = re.compile(
+    r"\b(?:" + "|".join(_REPLY_VERBS) + r")\b"
+    r"|\b(?:send|draft|compose|write|shoot)\s+(?:[a-z']+\s+)?an?\s+"
+    r"(?:[a-z]+\s+)?(?:reply|response)\b")
 
 # A literal address ends a clause too: "the address is x@y.ca I want you to
-# send…" arrives without a full stop.
+# send…" arrives without a full stop. So does a new line: "i like it" and
+# "send an email to stella…" on two lines are two sentences.
 _CLAUSE_BREAK_RE = re.compile(
-    r"[.!?;:]+(?=\s|$)|,|\s[-–—]+\s|\S+@\S+\.[a-z]{2,}")
+    r"[.!?;:]+(?=\s|$)|,|\n|\s[-–—]+\s|\S+@\S+\.[a-z]{2,}")
+# Greetings, acknowledgements and the fillers that come before a verb:
+# "sounds good send…", "can you pls check…", "blue go check your email".
 _PREAMBLE_RE = re.compile(
-    r"^(?:(?:blue|ok(?:ay)?|yes|yeah|yep|sure|please|now|so|and|then|hey|hi"
-    r"|also|great|good|cool|alright|right|well|oh|no|just|immediately)\b\s*)+")
+    r"^(?:(?:blue|ok(?:ay)?|yes|yeah|yep|sure|please|pls|plz|now|so|and|then"
+    r"|hey|hi|also|great|good|cool|alright|right|well|oh|no|just|immediately"
+    r"|thanks|thank\s+you|perfect|sounds\s+good|awesome|nice|maybe|actually"
+    r"|quickly|kindly|go(?!\s+(?:ahead|on)\b))\b\s*)+")
 _REQUEST_FRAME_RE = re.compile(
-    r"^(?:(?:can|could|would|will)\s+you"
+    r"^(?:(?:can|could|would|will)\s+(?:you|u)"
+    r"|do\s+you\s+think(?=\s+(?:you|u)\b)"
+    r"|i\s+(?:was\s+)?wonder(?:ing)?\s+if\s+(?:you|u)\s+(?:could|can|would|might)"
+    r"|would\s+it\s+be\s+possible\s+(?:for\s+(?:you|u)\s+)?to"
+    r"|is\s+it\s+possible\s+for\s+(?:you|u)\s+to"
     r"|i(?:\s+(?:want|need|wanted|would\s+like)|'?d\s+like)(?:\s+you)?\s+to"
     r"|you\s+(?:can|could|should|need\s+to|have\s+to|must|just)"
     r"|go\s+ahead(?:\s+and)?|let\s+me|let'?s|help\s+me|please)\b\s*")
+# "would you mind sending…" asks with the -ing form.
+_MIND_FRAME_RE = re.compile(r"\b(?:would|do)\s+(?:you|u)\s+mind\s+$")
 # First words that make a clause a statement rather than an instruction.
 _NOT_AN_IMPERATIVE = frozenset("""
 i i'm im i'll i've i'd you you're you've he she it it's its they we we're
 that this these those there here the a an my your his her our their what
 who which when where why how if because since someone everyone nobody
-people students agent
+people students agent agents
 """.split())
+# A modal makes a clause a description, not an instruction: "so basically
+# the agent will check email and reply…", "imagine an agent that could check
+# your email and reply…" (S4 review). Not after "you" ("see if you can find
+# the email from stella and reply to it"), and not in a clause that opens
+# with an email verb ("check if stella will be there and email her").
+_MODAL_RE = re.compile(
+    r"(?<!\byou )\b(?:will|would|could|can|should|might|may)\b"
+    r"|\b[a-z]+'(?:ll|d)\b")
+_EMAIL_VERBS = frozenset(_READ_VERBS + _SEND_VERBS + _REPLY_VERBS)
 
 
 def _peel_request(clause: str) -> str:
@@ -94,8 +122,11 @@ def _peel_request(clause: str) -> str:
 
 
 def _opens_with_imperative(clause: str) -> bool:
-    words = re.findall(r"[a-z']+", _peel_request(clause))
-    return bool(words) and words[0] not in _NOT_AN_IMPERATIVE
+    text = _peel_request(clause)
+    words = re.findall(r"[a-z']+", text)
+    if not words or words[0] in _NOT_AN_IMPERATIVE:
+        return False
+    return words[0] in _EMAIL_VERBS or not _MODAL_RE.search(text)
 
 
 @lru_cache(maxsize=32)
@@ -103,18 +134,41 @@ def _verbs_re(verbs: tuple) -> "re.Pattern":
     return re.compile(r"\b(?:" + "|".join(re.escape(v) for v in verbs) + r")\b")
 
 
-def asks_blue_to(msg_lower: str, verbs) -> bool:
-    """True if one of `verbs` (base form, whole words) is asked of Blue."""
+@lru_cache(maxsize=32)
+def _gerunds_re(verbs: tuple) -> Optional["re.Pattern"]:
+    forms = [(v[:-1] if v.endswith("e") and not v.endswith("ee") else v) + "ing"
+             for v in verbs if " " not in v]
+    return re.compile(r"\b(?:" + "|".join(forms) + r")\b") if forms else None
+
+
+def asks_blue_to(msg_lower: str, verbs, after_now: bool = False) -> bool:
+    """True if one of `verbs` is asked of Blue.
+
+    `verbs` is a tuple of base forms (whole words) or a compiled pattern.
+    `after_now` also takes a verb that follows a spoken "now" — for the
+    follow-up asks only.
+    """
     text = (msg_lower or "").replace("’", "'")
+    if isinstance(verbs, re.Pattern):
+        pattern, gerunds = verbs, None
+    else:
+        pattern, gerunds = _verbs_re(tuple(verbs)), _gerunds_re(tuple(verbs))
     for clause in _CLAUSE_BREAK_RE.split(text):
-        for m in _verbs_re(tuple(verbs)).finditer(clause):
+        for m in pattern.finditer(clause):
             before = _peel_request(clause[:m.start()])
+            if not before:
+                return True
             # "…you're hallucinating now do it immediately" — a spoken
-            # run-on whose "now" starts the instruction.
-            if not before or re.search(r"\bnow$", before):
+            # run-on whose "now" starts the instruction. "my students now
+            # check their email on their phones" is a statement.
+            if after_now and re.search(r"\bnow$", before):
                 return True
             joined = re.search(r"\band(?:\s+then)?$", before)
             if joined and _opens_with_imperative(before[:joined.start()]):
+                return True
+        for m in (gerunds.finditer(clause) if gerunds else ()):
+            mind = _MIND_FRAME_RE.search(clause[:m.start()])
+            if mind and not _peel_request(clause[:mind.start()]):
                 return True
     return False
 
@@ -300,7 +354,7 @@ class GmailDetector(BaseDetector):
         if confidence <= 0:
             return None
         if not (asks_blue_to(msg_lower, _SEND_VERBS)
-                or asks_blue_to(msg_lower, _FOLLOWUP_ASKS)):
+                or asks_blue_to(msg_lower, _FOLLOWUP_ASKS, after_now=True)):
             return None
 
         return ToolIntent(
@@ -346,7 +400,7 @@ class GmailDetector(BaseDetector):
 
         if confidence <= 0:
             return None
-        if not asks_blue_to(msg_lower, _REPLY_VERBS):
+        if not asks_blue_to(msg_lower, _REPLY_ASK_RE):
             return None
 
         return ToolIntent(
