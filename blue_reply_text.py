@@ -13,6 +13,10 @@ again. Three kinds of debris travel with them:
 - closing asks: "Do you want me to dim the hallway lights…, or are we calling
   it a night completely?" — quoted, an old menu becomes the next reply's menu.
 
+The first two also clean the live reply before it is shown, spoken or stored
+(turn_completion.finish, with the narrower live self-talk pattern), so the
+debris is not made in the first place.
+
 Two more judge a reply before it goes out at all: strip_reasoning_tags drops a
 reasoning pass that leaked into the text ("…</think>"), and
 reads_as_deliberation spots a forced tool call that wrote the model arguing

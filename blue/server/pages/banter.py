@@ -322,8 +322,10 @@ ROBOT_IDS.forEach(id=>{
 if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=buildVoicePickers;
 buildVoicePickers();loadVoices();
 
+// Bracketed tags ([known_facts], [DH399_AL_2026F.docx]) are never read
+// aloud, as on the chat page.
 function cleanSpeech(text){
-  return String(text||'').replace(/[*_`#]/g,'').replace(/\s+/g,' ').trim();
+  return String(text||'').replace(/\s*\[[^\[\]]{1,60}\]/g,'').replace(/[*_`#]/g,'').replace(/\s+/g,' ').trim();
 }
 function lipFrames(text,rate){
   const words=(text.match(/[^\s]+/g)||[]),frames=[],scale=1/(rate||1);

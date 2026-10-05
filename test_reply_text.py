@@ -8,7 +8,9 @@ paragraphs ("Wait, I should also check…", the 99,666-char 2026-09-23 runaway)
 and closing menus ("…, or are we calling it a night completely?").
 """
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -104,6 +106,35 @@ def test_a_teaching_opener_is_cut_only_when_quoting_from_memory():
     assert cut_self_talk(reply) == reply
     assert cut_self_talk(reply, live=False) == (
         "A lab budget has three parts: hardware, licences and staff time.")
+
+
+# --- spoken on the panel and banter pages ------------------------------------
+
+def _clean_speech(page):
+    """The page's own cleanSpeech, run in node."""
+    start = page.index("function cleanSpeech(")
+    end = page.index("\nfunction ", start + 1)
+    return page[start:end]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.parametrize("page_name", ["panel", "banter"])
+@pytest.mark.parametrize("text, spoken", [
+    ("Nori is a lab mix [known_facts].", "Nori is a lab mix."),
+    ("It's on the syllabus [DH399_AL_2026F.docx], week 3.",
+     "It's on the syllabus, week 3."),
+    ("**Plain** words stay.", "Plain words stay."),
+])
+def test_bracketed_tags_are_not_read_aloud(page_name, text, spoken):
+    from blue.server.pages.banter import BANTER_HTML
+    from blue.server.pages.panel import PANEL_HTML
+
+    page = {"panel": PANEL_HTML, "banter": BANTER_HTML}[page_name]
+    script = _clean_speech(page) + (
+        "\nprocess.stdout.write(JSON.stringify(cleanSpeech(%s)));" % json.dumps(text))
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                         timeout=30, check=True).stdout
+    assert json.loads(out) == spoken
 
 
 # --- leaked reasoning --------------------------------------------------------

@@ -19,7 +19,7 @@ from typing import Any, Dict, List
 import bluetools as bt
 from blue.server import runaway as _runaway
 from blue_identity import _ASKS_OR_GREETS_RE, _USER_CORRECTION_CUE_RE
-from blue_reply_text import strip_reasoning_tags
+from blue_reply_text import cut_self_talk, strip_block_citations, strip_reasoning_tags
 
 
 # Compiled once. These were rebuilt on every single turn, and living inside
@@ -1206,6 +1206,21 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
     except Exception as e:
         bt.log.warning(f"[RUNAWAY] trim failed: {e}")
 
+    # Prompt-block citations ("…Scarborough [known_facts].") and a later
+    # paragraph that talks to itself ("Wait, I should also check…", "One
+    # more thing: …") go before the guards, the speech queue and the stored
+    # history see them. A tagged reply in the thread was copied: 3 of 3
+    # samples carried tags with one in the history, 0 of 3 with it removed.
+    try:
+        _clean = cut_self_talk(strip_block_citations(final_content), live=True)
+        if _clean != final_content:
+            print(f"   [HYGIENE] cut {len(final_content or '') - len(_clean or '')} "
+                  f"chars of block tags / self-talk")
+            final_content = _clean
+            response["choices"][0]["message"]["content"] = final_content
+    except Exception as e:
+        bt.log.warning(f"[HYGIENE] reply cleanup failed: {e}")
+
     # A template (a device confirmation, the kids' decline) is not model
     # output, and repeating it is correct.
     _templated = bool(isinstance(response, dict)
@@ -1234,8 +1249,9 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
     except Exception as e:
         bt.log.warning(f"[STYLE] filler strip failed: {e}")
 
-    # A guard's regeneration can bring reasoning back, so strip it once more.
-    _unthought = strip_reasoning_tags(final_content)
+    # A guard's regeneration can bring reasoning and block tags back, so
+    # strip them once more (both are idempotent).
+    _unthought = strip_block_citations(strip_reasoning_tags(final_content))
     if _unthought != final_content:
         final_content = _unthought
         response["choices"][0]["message"]["content"] = final_content

@@ -302,7 +302,9 @@ async function acknowledge(id){
   if(!DRIVES_SERVER_HEADS)return;
   try{await fetch('/panel/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({robot:id})});}catch(e){}
 }
-function cleanSpeech(text){return String(text||'').replace(/[*_`#]/g,'').replace(/\s+/g,' ').trim();}
+// Bracketed tags ([known_facts], [DH399_AL_2026F.docx]) are never read
+// aloud, as on the chat page.
+function cleanSpeech(text){return String(text||'').replace(/\s*\[[^\[\]]{1,60}\]/g,'').replace(/[*_`#]/g,'').replace(/\s+/g,' ').trim();}
 function normalizedSpeech(text){return String(text||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();}
 function armRobotEcho(text){lastRobotSpeech=normalizedSpeech(text);echoGuardUntil=Date.now()+60000;}
 function isLikelyRobotEcho(text){

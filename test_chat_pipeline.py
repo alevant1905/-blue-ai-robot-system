@@ -216,6 +216,44 @@ def test_leaked_reasoning_is_neither_shown_nor_stored(chat):
     assert stored == [reply]
 
 
+def test_a_block_tag_is_never_shown_even_from_a_regeneration(chat):
+    """Regenerations run after the first cleanup, so the tag is stripped again
+    at the end. A tagged reply in the thread was copied by the next turn in
+    3 of 3 samples."""
+    chat.model.queue(
+        "I don't have any record of your family, Alex.",
+        "Athena, Emmy and Vilda [known_facts].",
+    )
+    reply = reply_of(chat.ask("do you remember our family?"))
+
+    assert "Athena" in reply
+    assert "[known_facts]" not in reply
+
+
+def test_a_self_talk_paragraph_is_cut_before_it_is_shown(chat):
+    from test_reply_text import CAMERA_FACE_RAMBLE
+
+    chat.model.queue(CAMERA_FACE_RAMBLE)
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert reply.startswith("I have noted her name and role")
+    for later in ("Wait, I should", "One more thing", "10am in SB216"):
+        assert later not in reply
+    stored = [k.get("content") for _a, k in chat.saved if k.get("role") == "assistant"]
+    assert stored == [reply]
+
+
+def test_a_wait_inside_a_code_fence_is_kept(chat):
+    script = ("Here is the demo script:\n\n"
+              "```\nROBOT: Hello.\n\nWait, I should introduce myself first.\n```\n\n"
+              "Paste it into the slide notes.")
+    chat.model.queue(script)
+    reply = reply_of(chat.ask("write me a two-line robot demo script"))
+
+    assert "Wait, I should introduce myself first." in reply
+    assert "Paste it into the slide notes." in reply
+
+
 # --------------------------------------------------------------------------
 # What the model is actually shown
 # --------------------------------------------------------------------------
