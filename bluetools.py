@@ -16012,6 +16012,7 @@ def chat_completions():
                     max_lines=9,
                     include_humans=True,
                     include_robots=True,
+                    chat_turn=True,
                 )
                 if _conversation_block:
                     print("   [CONTINUITY] ✓ Injecting human + robot conversation memory")

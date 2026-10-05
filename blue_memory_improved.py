@@ -247,6 +247,22 @@ def _topic_terms(text: Optional[str]) -> Set[str]:
     }
 
 
+def _searched_text(text: Optional[str], chat_turn: bool) -> str:
+    """What a recall search reads of a user's text.
+
+    On a chat turn, a message is what Alex typed or pasted, so a bulk paste
+    searches by bulk_paste_recall_words, never by the document. Everyone
+    else's query is assembled from several pieces and passes
+    BULK_PASTE_MIN_CHARS without being a paste: the email auto-reply's
+    subject and 2,000-character body, the panel's topic and last four lines
+    cut at 2,200, a duet's topic and last two lines. Read as pastes, they
+    searched by nothing, and an email quoting Blue's 07-29 Laurier reply got
+    no <remembered_days> and no <earlier_answers>."""
+    if chat_turn:
+        return bulk_paste_recall_words(text or "")
+    return text or ""
+
+
 # Rhythm learning: mine conversation_log for behavioural patterns (which kinds
 # of request cluster at which time of day). Pure counting — never LLM-guessed.
 RHYTHM_WINDOW_DAYS = 30              # How far back the rhythm miner looks
@@ -1879,14 +1895,19 @@ class EnhancedMemorySystem:
         """
         return True
 
-    def build_context(self, messages: list, user_name: str = "Alex", robot: str = "blue") -> List[Dict[str, str]]:
+    def build_context(self, messages: list, user_name: str = "Alex", robot: str = "blue",
+                      chat_turn: bool = False) -> List[Dict[str, str]]:
         """Build context messages to inject, combining core facts, semantic
         search, and recent (truly recent) conversation history.
 
         Order matters: core facts go in first because they're the most
         reliable signal — name, family, location, allergies, preferences.
         Semantic memories layer on top for topical relevance. Recent
-        history is added last and only when fresh enough to be useful."""
+        history is added last and only when fresh enough to be useful.
+
+        `chat_turn` is set by the chat route only: there a long user message
+        is a pasted document, and recall searches by the words beside it
+        (_searched_text). The email auto-reply's anchor is not a chat turn."""
         context_parts: List[Dict[str, str]] = []
 
         # Get the user's current message for semantic search
@@ -2003,7 +2024,7 @@ class EnhancedMemorySystem:
         #     relevance to the current message, reaching past the by-date window.
         if user_msg:
             recalled_block = self._build_recalled_days_block(
-                user_msg, robot=robot, messages=messages)
+                user_msg, robot=robot, messages=messages, chat_turn=chat_turn)
             if recalled_block:
                 context_parts.append({
                     "role": "system",
@@ -2015,7 +2036,7 @@ class EnhancedMemorySystem:
         #     actually wrote about it, which is what "what were your ideas?"
         #     is asking for.
         past_answers_block = self._build_past_answers_block(
-            messages, user_msg, robot=robot)
+            messages, user_msg, robot=robot, chat_turn=chat_turn)
         if past_answers_block:
             context_parts.append({
                 "role": "system",
@@ -3610,6 +3631,7 @@ class EnhancedMemorySystem:
         user_msg: str,
         robot: str = "blue",
         messages: Optional[List[Dict[str, Any]]] = None,
+        chat_turn: bool = False,
     ) -> str:
         """Retrieve coherent older exchanges from one robot's chat log.
 
@@ -3618,6 +3640,10 @@ class EnhancedMemorySystem:
         one clipped row without its follow-ups. For autobiographical recall,
         past user statements are the reliable anchors; the nearby turns then
         reconstruct what was actually discussed.
+
+        `chat_turn`: `user_msg` and `messages` are a chat page's turns, where
+        a pasted document searches by the words beside it (_searched_text).
+        The panel and the duet pass their own assembled query and leave it off.
         """
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
@@ -3628,9 +3654,9 @@ class EnhancedMemorySystem:
             "recall", "record", "records", "remember", "remembered",
             "told",
         }
-        # A pasted document searches with the words said around it, never its
-        # own (blue_identity.BULK_PASTE_MIN_CHARS).
-        query_terms = (_topic_terms(bulk_paste_recall_words(user_msg))
+        # On a chat turn a pasted document searches with the words said around
+        # it, never its own (_searched_text, BULK_PASTE_MIN_CHARS).
+        query_terms = (_topic_terms(_searched_text(user_msg, chat_turn))
                        - recall_scaffolding)
         live_texts: Set[str] = set()
         # Pull the subject from preceding user turns for anaphoric asks such as
@@ -3646,7 +3672,7 @@ class EnhancedMemorySystem:
             if normalized:
                 live_texts.add(normalized)
             if message.get("role") == "user":
-                query_terms |= (_topic_terms(bulk_paste_recall_words(content)[:600])
+                query_terms |= (_topic_terms(_searched_text(content, chat_turn)[:600])
                                 - recall_scaffolding)
         if not query_terms:
             return ""
@@ -3728,6 +3754,7 @@ class EnhancedMemorySystem:
                 anchor_time = None
 
             excerpt: List[str] = []
+            pasted_text = ""
             # Six turns cover an assertion, Blue's reply, and two follow-ups.
             # A day boundary or 20-minute gap marks a different conversation.
             for row in rows[anchor_index:anchor_index + 6]:
@@ -3741,6 +3768,9 @@ class EnhancedMemorySystem:
                     except (TypeError, ValueError):
                         pass
                 content = re.sub(r"\s+", " ", row["content"] or "").strip()
+                pasted = row["role"] == "user" and is_bulk_paste(row["content"])
+                if pasted:
+                    pasted_text = content.lower()
                 if content.lower() in live_texts:
                     continue
                 speaker = (
@@ -3749,11 +3779,19 @@ class EnhancedMemorySystem:
                 )
                 # Named in one line, never read back: this excerpt is what
                 # the recall guard's fallback answers from.
-                if row["role"] == "user" and is_bulk_paste(row["content"]):
+                if pasted:
                     excerpt.append(f"  {bulk_paste_stub(row['content'], speaker)}")
                     continue
                 if len(content) < 4 or content.startswith(("{", "[", "```")):
                     continue
+                # A reply that reads the paste back is the document again: 10
+                # logged replies by 10-05, most "Playing " and the whole of it
+                # (2887, the Three-Body Problem attachment, 8,103 characters).
+                # Its opening found in the paste matches those 10 and no other.
+                if row["role"] == "assistant" and pasted_text:
+                    opening = re.sub(r"^playing\s+", "", content.lower())[:120]
+                    if len(opening) >= 40 and opening in pasted_text:
+                        continue
                 if row["role"] == "assistant" and (
                         self._is_assistant_refusal(content)
                         or is_failure_placeholder(content)
@@ -3795,7 +3833,7 @@ class EnhancedMemorySystem:
     # ------------------------------------------------------- Blue's own answers
 
     def _topic_query_terms(self, messages: List[Dict[str, Any]],
-                           user_msg: str) -> Set[str]:
+                           user_msg: str, chat_turn: bool = False) -> Set[str]:
         """Terms describing what the conversation is currently about.
 
         Drawn from the last few turns on BOTH sides, not just the live message,
@@ -3805,9 +3843,10 @@ class EnhancedMemorySystem:
         four ideas for the Laurier University meeting on my mind"), which is
         exactly the thread back to the answer he is being asked about.
         """
-        # A pasted document is searched by the words said around it: its
-        # first 600 characters are the document's, not the conversation's.
-        terms = _topic_terms(bulk_paste_recall_words(user_msg))
+        # On a chat turn a pasted document is searched by the words said
+        # around it: its first 600 characters are the document's, not the
+        # conversation's (_searched_text).
+        terms = _topic_terms(_searched_text(user_msg, chat_turn))
         recent = [m for m in (messages or [])
                   if isinstance(m, dict)
                   and m.get("role") in {"user", "assistant"}
@@ -3815,7 +3854,7 @@ class EnhancedMemorySystem:
         for m in recent[-PAST_ANSWER_TOPIC_TURNS:]:
             text = m["content"]
             if m["role"] == "user":
-                text = bulk_paste_recall_words(text)
+                text = _searched_text(text, chat_turn)
             terms |= _topic_terms(text[:600])
         return terms
 
@@ -3917,7 +3956,8 @@ class EnhancedMemorySystem:
 
     def _build_past_answers_block(self, messages: List[Dict[str, Any]],
                                   user_msg: str,
-                                  robot: str = "blue") -> str:
+                                  robot: str = "blue",
+                                  chat_turn: bool = False) -> str:
         """Surface this robot's own earlier substantive answers on this topic.
 
         The day-recap blocks say THAT something was discussed; this says WHAT
@@ -3933,7 +3973,8 @@ class EnhancedMemorySystem:
                 or contextual_identity_request_kind(user_msg, messages)):
             return ""
         try:
-            terms = self._topic_query_terms(messages, user_msg)
+            terms = self._topic_query_terms(messages, user_msg,
+                                            chat_turn=chat_turn)
             hits = self._search_past_answers(terms, robot=robot)
         except Exception:
             return ""

@@ -49,7 +49,10 @@ def build(messages: List[Dict[str, Any]], *, _grounded_reply, _self_request_kind
         if bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system:
             should_inject = bt.memory_system.should_inject_context(messages)
             if should_inject:
-                historical_context = bt.memory_system.build_context(messages, user_name=user_name, robot=robot)
+                # A chat turn: a long message here is a pasted document, and
+                # recall searches by the words beside it, not by its text.
+                historical_context = bt.memory_system.build_context(
+                    messages, user_name=user_name, robot=robot, chat_turn=True)
                 # Library focus active: drop the cross-conversation
                 # SEMANTIC recall blocks so a past chat about a different
                 # course/topic can't bleed into a focused conversation.

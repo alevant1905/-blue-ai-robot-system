@@ -1324,6 +1324,7 @@ class RobotContinuity:
         include_humans: bool = True,
         include_robots: bool = True,
         include_banter_wording: bool = True,
+        chat_turn: bool = False,
     ) -> str:
         """Return a compact, retrieved slice of this robot's own conversations.
 
@@ -1337,6 +1338,11 @@ class RobotContinuity:
         Every row comes from this robot's private continuity store.  That keeps
         awareness broad without making Blue claim Hexia's unwitnessed chat (or
         vice versa) as a first-person memory.
+
+        ``chat_turn``: ``query`` is the user's chat message, where a long one
+        is a pasted document and searches by the words beside it. The panel,
+        duet and banter queries join a topic and several transcript lines and
+        can pass 2,000 characters without being a paste; they leave it off.
         """
         try:
             exchanges = self.store.list_episodes(limit=1200, kind="exchange")
@@ -1387,11 +1393,13 @@ class RobotContinuity:
             "their", "them", "then", "there", "these", "they", "this", "what",
             "when", "where", "which", "with", "would", "your", "you", "were",
         }
-        # A pasted document searches by the words said around it, and a
-        # recorded one is found the same way, never by its own text.
+        # A document pasted into chat searches by the words said around it,
+        # and a recorded one is found the same way, never by its own text. A
+        # panel's 2,200-character query searched by nothing when read as one.
+        searched = (bulk_paste_recall_words(query or "") if chat_turn
+                    else (query or ""))
         query_terms = {
-            token for token in re.findall(
-                r"[a-z0-9]+", bulk_paste_recall_words(query or "").lower())
+            token for token in re.findall(r"[a-z0-9]+", searched.lower())
             if len(token) >= 3 and token not in stop
         }
 
@@ -2115,8 +2123,12 @@ def conversation_memory_block(
     include_humans: bool = True,
     include_robots: bool = True,
     include_banter_wording: bool = True,
+    chat_turn: bool = False,
 ) -> str:
-    """A query-aware slice of a robot's own human and robot conversations."""
+    """A query-aware slice of a robot's own human and robot conversations.
+
+    ``chat_turn`` is for the chat route alone; see
+    RobotContinuity.conversation_memory_block."""
     hub = _hub(robot)
     if not hub:
         return ""
@@ -2126,6 +2138,7 @@ def conversation_memory_block(
         include_humans=include_humans,
         include_robots=include_robots,
         include_banter_wording=include_banter_wording,
+        chat_turn=chat_turn,
     )
 
 
