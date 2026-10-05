@@ -314,17 +314,27 @@ _FACE_STORED_RE = re.compile(
     r"|(?:\w+\s+){0,2}?(?:face|facial features))\b", re.I)
 # A photo only as someone's, or a reference photo: "I've saved the photo
 # locally, but the email failed" and "I just captured a picture: you're at
-# your desk" are the camera.
+# your desk" are the camera. Not someone's photo of something: "I've saved
+# your picture of Biscuit to the shared folder".
 _PHOTO_STORED_RE = re.compile(
-    _FACE_SAVED + r"(?:" + _FACE_WHOSE + r"(?:\w+\s+)?|(?:a|the)\s+reference\s+)"
-    r"(?:photo|picture|image)\b", re.I)
+    _FACE_SAVED + r"(?:" + _FACE_WHOSE + r"(?:\w+\s+)?(?:photo|picture|image)\b(?!\s+of\b)"
+    r"|(?:a|the)\s+reference\s+(?:photo|picture|image)\b)", re.I)
 # A look or appearance is what remember_person keeps ("I've stored her
 # appearance — short dark hair and round glasses"); it is a face claim only
-# beside a promise of recognition ("… for future recognition", 03-21).
+# when it is someone's and the sentence promises to recognize them ("… for
+# future recognition", 03-21). "I've saved the assignment description, so I
+# can help you identify the key requirements" is no face, and "I've saved her
+# description, but I can't identify people from a description alone" is the
+# honest answer.
 _LOOK_STORED_RE = re.compile(
-    _FACE_SAVED + r"(?:" + _FACE_WHOSE + r")?(?:\w+\s+){0,2}?"
+    _FACE_SAVED + _FACE_WHOSE + r"(?:\w+\s+){0,2}?"
     r"(?:look|appearance|description)\b", re.I)
-_RECOGNITION_RE = re.compile(r"\brecogni(?:[sz]|tion)|\bidentify\b|\bby (?:face|sight)\b", re.I)
+_RECOGNITION_PROMISE_RE = re.compile(
+    r"\bfor (?:(?:future|later|face|facial)\s+)?recognition\b"
+    r"|\b(?:to|helps? me|lets? me)\s+(?:recogni[sz]e|identify|spot)\s+"
+    r"(?:her|him|them|(?-i:[A-Z][a-z]+))\b", re.I)
+# "… but I won't be able to recognize her by face".
+_NEGATION_RE = re.compile(r"\b(?:not|never|cannot|unable)\b|n['’]t\b", re.I)
 # Not "match" or "again": "so I can match her when you bring her up again" is
 # about conversation, not the camera.
 _FACE_PROMISE_RE = re.compile(
@@ -334,31 +344,50 @@ _FACE_PROMISE_RE = re.compile(
     r"\b(?:next time|in the future|automatically|by face|by sight)", re.I)
 _FACE_CLAIM_RES = (_FACE_STORED_RE, _PHOTO_STORED_RE, _LOOK_STORED_RE, _FACE_PROMISE_RE)
 _FACE_PRONOUNS = {"her", "his", "their", "your", "him", "them"}
-# The honest version: the photo is still to come, or was added by someone.
-# "to recognize her face automatically in the future, I need a clear
-# reference photo" / "the reference photo you added for him".
+# The honest version: the photo is still to come, or is an upload. "To
+# recognize her face automatically in the future, I need a clear reference
+# photo"; "I've saved his photo with the rest of your uploads". It makes a
+# promise or someone's photo honest, never a face, features or reference
+# photo Blue says he has saved: "I've saved her features, and once you add a
+# photo I'll recognize her" is still a claim.
 _FACE_COND_RE = re.compile(
     r"\bupload|\benrol"
     r"|\b(?:need|needs|require[sd]?|without|until|getting|get)\b[^.!?]{0,40}"
     r"\b(?:photo|picture|image)"
-    r"|\b(?:once|if|after)\b[^.!?]{0,60}\b(?:add|give|send|share)\b|\?\s*$"
-    r"|\bphoto (?:you|he|she|alex|they) (?:added|uploaded)\b", re.I)
+    r"|\b(?:once|if|after)\b[^.!?]{0,60}\b(?:add|give|send|share)\b", re.I)
+# Or no claim at all: a question, or a photo someone else added ("the
+# reference photo you added for him").
+_FACE_ASIDE_RE = re.compile(
+    r"\?\s*$|\bphoto (?:you|he|she|alex|they) (?:added|uploaded)\b", re.I)
 # Or telling the user how to add one, which the prompt asks for: "Add a
 # reference photo on my Visual Memory page so I can recognize her next time",
-# "Snap a picture of her for my Visual Memory page". Advice only when the
-# clause has no subject or "you" as its last one: "I'll add her photo", "let
-# me snap her picture" and "I've put her on my Visual Memory page, so I'll
-# recognize her" are Blue saying he did it.
+# "Snap a picture of her for my Visual Memory page", "I'd suggest adding a
+# reference photo of her". Advice only when the clause has no subject or "you"
+# as its last one, once a suggestion ("I'd suggest", "we could") is set
+# aside: "I'll add her photo", "let me snap her picture" and "I've put her on
+# my Visual Memory page, so I'll recognize her" are Blue saying he did it.
+# The -ing form only after a suggestion: "Thanks for sharing her photo, so
+# I'll recognize her" is not advice.
 _PHOTO_ADVICE_RE = re.compile(
-    r"\b(?:add|take|snap|pop|grab|put|send|share|use|open|(?:go|head) (?:over )?to)\b"
-    r"[^.!?]{0,40}\b(?:photo|picture|image|selfie|visual memory page)\b", re.I)
+    r"(?:\b(?:add|take|snap|pop|grab|put|drop|send|share|upload|use|open"
+    r"|(?:go|head) (?:over )?to)"
+    r"|\b(?:try|consider|suggest|recommend|about|mind)\s+(?P<ing>adding|taking"
+    r"|snapping|popping|grabbing|putting|dropping|sending|sharing|uploading"
+    r"|using|opening))\b"
+    r"[^.!?]{0,40}?\b(?:photo|picture|image|selfie|visual memory page)\b", re.I)
+_SUGGESTS_RE = re.compile(
+    r"\b(?:i(?:['’]d| would)?\s+(?:suggest|recommend|advise)"
+    r"|we\s+(?:can|could|should|might|may))\b", re.I)
 _CLAUSE_BREAK_RE = re.compile(r"[,;:(—–]|\s-\s")
 _CLAUSE_SUBJECT_RE = re.compile(r"\b(?:i|we|you|he|she|they|let me)\b", re.I)
 # Only a face-enrolment tool backs a face claim. None exists in chat yet.
 _FACE_WRITE_TOOLS = {"remember_face"}
 # The camera's own photo is no face on file: "I've saved your photo" after a
-# capture is true.
+# capture is true. A capture is never a reference photo, though, and puts
+# no photo in visual memory: "I've saved a reference photo of Clover from the
+# camera" is the claim the fallback corrects.
 _CAMERA_TOOLS = {"capture_camera", "email_snapshot", "take_screenshot"}
+_NOT_A_CAPTURE_RE = re.compile(r"\breference\b|\bvisual memory\b", re.I)
 _FACE_FALLBACK = ("I can't recognise a face until a reference photo is added "
                   "on my Visual Memory page.")
 # "I've updated my location context: I'm currently based in your office at
@@ -420,34 +449,68 @@ def _claims(pattern, sentence):
     return next(_claim_matches(pattern, sentence), None) is not None
 
 
-def _photo_advice(sentence):
-    """`sentence` tells the user how to add a photo, rather than saying Blue
-    has one: the last subject before the advice in its clause is "you", or
-    there is none (an imperative)."""
+def _first_advice(sentence):
+    """Where `sentence` first tells the user how to add a photo, rather than
+    saying Blue has one (None: it never does). The last subject before the
+    advice in its clause is "you", or there is none (an imperative)."""
     for m in _PHOTO_ADVICE_RE.finditer(sentence):
-        clause = _CLAUSE_BREAK_RE.split(sentence[:m.start()])[-1]
-        subjects = _CLAUSE_SUBJECT_RE.findall(clause)
+        verb = m.start("ing") if m.group("ing") else m.start()
+        clause = _CLAUSE_BREAK_RE.split(sentence[:verb])[-1]
+        subjects = _CLAUSE_SUBJECT_RE.findall(_SUGGESTS_RE.sub(" ", clause))
         if not subjects or subjects[-1].lower() == "you":
-            return True
-    return False
+            return m.start()
+    return None
 
 
-def _face_claim(sentence, enrolled_names=(), camera=False):
+def _camera_photo(m, sentence, camera):
+    """`m`, a _PHOTO_STORED_RE match, is the camera's own picture: someone's
+    photo after a camera tool ran this turn, or "your photo" after one in the
+    last half hour ("did you save it?" → "I've saved your photo")."""
+    who = (m.group("who") or "").lower()
+    if not camera or not who or _NOT_A_CAPTURE_RE.search(sentence):
+        return False
+    return camera == "turn" or who == "your"
+
+
+def _face_claim(sentence, enrolled_names=(), camera=""):
     """`sentence` says a face is on file, or promises to recognize someone,
     and nothing makes it true.
 
     True of it only when its subjects all have a reference photo: "I've
     saved his photo, so I'll recognize Felix next time" with Felix enrolled.
     A name elsewhere in the sentence ("Got it, Alex — …") backs nothing.
-    `camera`: a camera tool ran, so someone's photo is the capture.
+    `camera`: "turn" when a camera tool ran this turn, "recent" when one
+    succeeded in the last half hour; its photo is the capture.
+
+    A photo still to come or advice on adding one makes a promise honest
+    ("Add a reference photo … so I can recognize her next time"), never what
+    Blue says he has done: "I've saved her features so I'll recognize her
+    next time; feel free to add a photo too" is still a claim.
     """
-    patterns = [_FACE_STORED_RE, _FACE_PROMISE_RE]
-    if not camera:
-        patterns.append(_PHOTO_STORED_RE)
-    if _RECOGNITION_RE.search(sentence):
-        patterns.append(_LOOK_STORED_RE)
-    found = [m for p in patterns for m in _claim_matches(p, sentence)]
-    if not found or _FACE_COND_RE.search(sentence) or _photo_advice(sentence):
+    advice = _first_advice(sentence)
+
+    def advised(m):
+        return advice is not None and m.start() > advice
+
+    def promised(m):
+        clause = _CLAUSE_BREAK_RE.split(sentence[:m.start()])[-1]
+        return not advised(m) and not _NEGATION_RE.search(clause)
+
+    conditional = bool(_FACE_COND_RE.search(sentence))
+    found = list(_claim_matches(_FACE_STORED_RE, sentence))
+    # Someone's photo may be an upload or the camera's; a reference photo
+    # Blue says he saved never is.
+    found += [m for m in _claim_matches(_PHOTO_STORED_RE, sentence)
+              if not (m.group("who") and conditional)
+              and not _camera_photo(m, sentence, camera)]
+    if not conditional:
+        promises = [m for m in _claim_matches(_FACE_PROMISE_RE, sentence)
+                    if not advised(m)]
+        found += promises
+        if promises or any(promised(m) for m in
+                           _RECOGNITION_PROMISE_RE.finditer(sentence)):
+            found += list(_claim_matches(_LOOK_STORED_RE, sentence))
+    if not found or _FACE_ASIDE_RE.search(sentence):
         return False
     named = {m.group("who").lower() for m in found if m.group("who")} - _FACE_PRONOUNS
     enrolled = {str(n).lower() for n in enrolled_names or () if n}
@@ -498,10 +561,10 @@ def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=(),
     never a face (09-23, "that's Clover, she's a TA" → "I've saved her
     features … so I should be able to recognize Clover next time"). Its
     description is true, though: "I've stored her appearance" is judged as a
-    face claim only beside a promise of recognition. Kept: a photo still to
-    come or advice on adding one ("Add a reference photo on my Visual Memory
-    page so I can recognize her next time"), and someone's photo after a
-    camera tool.
+    face claim only beside a promise to recognize her. Kept: a promise that
+    rests on a photo still to come or on advice to add one ("Add a reference
+    photo on my Visual Memory page so I can recognize her next time"), and
+    someone's photo after a camera tool, which is never a reference photo.
     """
     if outcomes is None or not reply:
         return reply
@@ -509,7 +572,10 @@ def _scrub_unbacked_write_claims(reply, outcomes, user_text="", recent=(),
     succeeded = this_turn | set(recent or ())
     # Run this turn, not only succeeded: a failed email_snapshot still saved
     # its photo. Or earlier: "did you save it?" → "I've saved your photo".
-    camera = bool(({o.get("name") for o in outcomes} | succeeded) & _CAMERA_TOOLS)
+    if {o.get("name") for o in outcomes} & _CAMERA_TOOLS:
+        camera = "turn"
+    else:
+        camera = "recent" if set(recent or ()) & _CAMERA_TOOLS else ""
     user = user_text or ""
     checks = []
     # The face check goes first: "remember what she looks like" answered

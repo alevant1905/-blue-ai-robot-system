@@ -303,6 +303,12 @@ PHOTO_ADVICE = [
     "Take her photo on my Visual Memory page so that I can identify her automatically.",
     "I'd suggest you pop a photo of her into my Visual Memory page, so I can "
     "recognize her next time.",
+    # The -ing and suggestion forms the model writes as often.
+    "I'd suggest adding a reference photo of her so I can recognize her next time.",
+    "Try adding her photo to my Visual Memory page so I can recognize her next time.",
+    "Drop a photo of her on my Visual Memory page so I can recognize her next time.",
+    "We could add a reference photo to my Visual Memory page so I can "
+    "recognize her next time.",
 ]
 
 
@@ -320,9 +326,30 @@ def test_advice_on_adding_a_photo_is_kept(advice):
     "I've added her to my Visual Memory page, so I'll recognize her next time.",
     "Let me snap a picture of her so I'll recognize her next time.",
     "I went ahead and put her photo on file, so I'll recognize her next time.",
+    "We've added her photo to my visual memory, so I'll recognize her next time.",
+    "Thanks for sharing her photo, so I'll recognize her next time.",
 ])
 def test_blue_doing_the_adding_is_still_a_claim(claim):
     assert scrub(f"Nice to meet you, Clover. {claim}", [],
+                 user_text=CLOVER_INTRO) == "Nice to meet you, Clover."
+
+
+@pytest.mark.parametrize("claim", [
+    "I've saved her face to my visual memory, so I'll recognize her next time "
+    "— you can also add a reference photo on my Visual Memory page.",
+    "I've saved her features so I'll recognize her next time; feel free to add "
+    "a photo too.",
+    "Got it — I've saved her features, and if you snap a photo of her for my "
+    "Visual Memory page, I'll recognize her automatically.",
+    "I've saved her features, and once you add a photo, I'll recognize her "
+    "automatically.",
+])
+def test_advice_beside_a_saved_face_does_not_excuse_it(claim):
+    """Advice, or a photo still to come, makes a promise honest, never a face
+    Blue says he has already saved. The prompt asks him to mention the photo,
+    so a slip that adds advice to the claim is the likely form."""
+    stored = [{"name": "remember_person", "success": True}]
+    assert scrub(f"Nice to meet you, Clover. {claim}", stored,
                  user_text=CLOVER_INTRO) == "Nice to meet you, Clover."
 
 
@@ -351,6 +378,28 @@ def test_blue_doing_the_adding_is_still_a_claim(claim):
     ("here are the agent frameworks we use",
      "I've stored the key features of each framework in the comparison table.",
      [], ()),
+    # Someone's picture of something, and an upload.
+    ("here's my cat", "I've saved your picture of Biscuit to the shared folder.",
+     [], ()),
+    ("here's a photo of my dad", "I've saved his photo with the rest of your uploads.",
+     [], ()),
+    # A description that is not a person's, beside "identify".
+    ("here's the assignment brief for DH399",
+     "Got it. I've saved the assignment description, so I can help you "
+     "identify the key requirements.", [], ()),
+    # remember_person's description, with an honest word on recognition.
+    (CLOVER_INTRO,
+     "Nice to meet Clover! I've saved her description, but I can't identify "
+     "people from a description alone.",
+     [{"name": "remember_person", "success": True}], ()),
+    (CLOVER_INTRO,
+     "I've stored her appearance as short dark hair, but I can't recognize her "
+     "by sight yet.",
+     [{"name": "remember_person", "success": True}], ()),
+    (CLOVER_INTRO,
+     "Nice to meet Clover! I've stored her name, role and appearance, but I "
+     "won't be able to recognize her by face — that takes a reference photo.",
+     [{"name": "remember_person", "success": True}], ()),
 ])
 def test_a_true_stored_look_or_photo_is_kept(user, reply, outcomes, recent):
     assert scrub(reply, outcomes, user_text=user, recent=recent) == reply
@@ -360,10 +409,45 @@ def test_a_stored_look_is_a_face_claim_beside_a_promise_of_recognition():
     """03-21; and someone's photo with no camera tool is still judged."""
     for reply in ("I've stored their appearance and relationship details in my "
                   "memory for future recognition.",
+                  "I've stored her appearance to help me recognize her next time.",
                   "I've saved her photo to my visual memory."):
         out = scrub(reply, [{"name": "remember_person", "success": True}],
                     user_text=CLOVER_INTRO)
         assert out.startswith("I can't recognise a face until a reference photo")
+
+
+# The harness's camera_face scenario: a capture, then a request to enrol.
+REMEMBER_HER_LOOK = "remember what she looks like so next time you recognize her"
+
+
+@pytest.mark.parametrize("reply", [
+    "I've saved a reference photo of Clover from the camera.",
+    "Done — I've stored a reference photo of her from what I just saw, so I "
+    "can match her when she's back.",
+    "I've captured her picture and saved it as a reference.",
+    "Got it! I've saved her photo to my visual memory.",
+])
+def test_a_capture_is_never_a_reference_photo(reply):
+    """A camera tool backs "I've saved your photo", never a reference photo
+    or one in visual memory: a capture enrols nobody."""
+    stored = [{"name": "remember_person", "success": True}]
+    camera = [{"name": "capture_camera", "success": True}]
+    for outcomes, recent in ((stored, {"capture_camera"}), (stored + camera, ())):
+        out = scrub(reply, outcomes, user_text=REMEMBER_HER_LOOK, recent=recent)
+        assert out.startswith("I can't recognise a face until a reference photo")
+
+
+def test_an_earlier_capture_backs_only_your_photo():
+    """Half an hour on, "did you save it?" is about the user's own picture;
+    anyone else's photo is judged again."""
+    mine = "Yes, I've saved your photo with the camera captures."
+    assert scrub(mine, [], user_text="did you save it?",
+                 recent={"capture_camera"}) == mine
+    hers = "Got it! I've saved her photo."
+    assert scrub(hers, [], user_text=REMEMBER_HER_LOOK,
+                 recent={"capture_camera"}).startswith("I can't recognise a face")
+    assert scrub(hers, [{"name": "capture_camera", "success": True}],
+                 user_text="take a picture of her") == hers
 
 
 def test_only_the_claims_subject_is_backed_by_a_reference_photo():
@@ -380,8 +464,11 @@ def test_only_the_claims_subject_is_backed_by_a_reference_photo():
     assert scrub(felix, [], user_text=CLOVER_INTRO, enrolled_names={"Felix"}) == felix
     assert scrub(felix, [], user_text=CLOVER_INTRO,
                  enrolled_names={"Alex"}) != felix
-    assert scrub("I'll recognize Felix next time", [], user_text=CLOVER_INTRO,
-                 enrolled_names={"Felix"}) == "I'll recognize Felix next time"
+    promise = "Thanks, so I'll recognize Felix next time."
+    assert scrub(promise, [], user_text=CLOVER_INTRO,
+                 enrolled_names={"Felix"}) == promise
+    assert scrub(promise, [], user_text=CLOVER_INTRO,
+                 enrolled_names={"Alex"}) != promise
 
 
 # (user, reply) from conversation_log 9814, 9822, 9836, 9846, 9920: plain
