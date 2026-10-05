@@ -10354,7 +10354,8 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
     ``prose_limit`` is for a forced call, whose answer is the call: once that
     many characters of text have come with no call started, the model is
     writing instead of calling, and the stream is closed with finish_reason
-    "length" rather than left to run to the 8,192-token cap.
+    "length" rather than left to run to the 8,192-token cap. The "auto" retry
+    of a long-argument tool uses it too, with its words still shown.
     """
     payload = {**payload, "stream": True}
     parts: List[str] = []
@@ -10778,6 +10779,7 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
 
 _LONG_ARGUMENT_TOOLS = {"create_document", "create_note", "update_note",
                         "send_gmail", "reply_gmail", "write_file"}
+_LONG_ARGUMENT_MAX_TOKENS = 8192
 
 # A forced call (tool_choice "required") that writes text has failed: its
 # answer was supposed to be the call. Such text is never shipped longer than
@@ -10827,9 +10829,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         # A forced document, note or email carries its whole body in the
         # tool arguments; 2048 tokens would cut the JSON off mid-document.
         # Not on the "auto" retry: that one follows a forced call that wrote
-        # words instead, and words are what it is likely to write again.
-        "max_tokens": (8192 if (force_tool in _LONG_ARGUMENT_TOOLS
-                                and force_choice == "required")
+        # words instead, and words are what it is likely to write again
+        # (call_lm_studio gives it back to a streamed retry, which it stops).
+        "max_tokens": (_LONG_ARGUMENT_MAX_TOKENS if (force_tool in _LONG_ARGUMENT_TOOLS
+                                                     and force_choice == "required")
                        else _chat_max_tokens()),
         "stream": False,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
@@ -11098,6 +11101,17 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
     payload = _lm_studio_payload(
         messages, include_tools=include_tools, force_tool=force_tool,
         iteration=iteration, tool_scope=tool_scope, force_choice=force_choice)
+    # The "auto" retry after a forced note or document came back as words may
+    # still make the call, body and all, and 2,048 tokens cut that off
+    # mid-JSON. Streamed, it gets the forced call's cap and its stop on prose
+    # (still shown: words are a fair answer here, but not 8,192 tokens of
+    # them). A blocking call can't be stopped early, so it keeps the normal
+    # cap.
+    _long_retry = bool(on_token is not None and include_tools
+                       and force_choice == "auto"
+                       and force_tool in _LONG_ARGUMENT_TOOLS)
+    if _long_retry:
+        payload["max_tokens"] = _LONG_ARGUMENT_MAX_TOKENS
 
     _LM_FAILURE.kind = None
     _LM_FAILURE.streamed = on_token is not None
@@ -11116,6 +11130,9 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 # the reminder self-argument streamed into the preview.
                 result = _stream_from_model(
                     payload, None, prose_limit=_FORCED_STREAM_ABORT_CHARS)
+            elif _long_retry:
+                result = _stream_from_model(
+                    payload, on_token, prose_limit=_FORCED_STREAM_ABORT_CHARS)
             else:
                 result = _stream_from_model(payload, on_token)
         else:

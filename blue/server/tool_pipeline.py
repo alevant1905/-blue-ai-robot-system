@@ -438,9 +438,11 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
 #   create_reminder  a plain "remind me to X" with no time in it is set for
 #                    about an hour from now and the time is said (Alex's
 #                    default: pick and state a time); a request that names
-#                    nothing to remind about gets one short question.
+#                    nothing to remind about gets one short question. A time,
+#                    or a "that" from the turn before, goes to the retry.
 #   anything else    one retry with tool_choice "auto" and a note, then an
-#                    honest line if the retry's words are no better.
+#                    honest line if the retry's words are no better, or if
+#                    they say the work was done without a call.
 
 # Mail is not offered again on the retry. The forced call already declined to
 # send, and a second chance to send mail should come from the user.
@@ -494,6 +496,157 @@ def _replace_reply(response, text):
     response["blue_templated"] = True
 
 
+# A retry that says the forced tool's work is done. The forced call declined,
+# and a retry that makes no call has done nothing either. "Got it — I'll
+# remind you at 3 PM to call your mom." was shipped and stored with nothing
+# in the calendar: detect_hallucinated_action knows mail, lights, music and
+# documents, and no reminder (review of c41250f). One pattern per kind of
+# write, matched sentence by sentence (_retry_claims).
+_DID = (r"\bi(?:['’]ve| have| just)?\s+(?:just\s+|now\s+|also\s+|already\s+"
+        r"|(?:gone|went) ahead and\s+)?")
+_WILL = (r"\b(?:i['’]ll|i will|i['’]m going to|i am going to|let me)\s+"
+         r"(?:go ahead and\s+|be sure to\s+|make sure to\s+|definitely\s+)?")
+_DONE_OPENER = (r"^\s*(?:all set|you['’]re (?:all )?set|done|sorted|consider it done"
+                r"|set|saved|added|booked|scheduled)\s*(?:[!.,:;—–-]|$)")
+_THEM = r"\s+(?:it|that|this|them|those|these|the|your)\b"
+_RETRY_CLAIM_RES = {
+    "reminder": re.compile(
+        _DONE_OPENER
+        + r"|^\s*(?:set|scheduled|booked)\s+for\b"
+        + r"|" + _WILL + r"(?:remind|ping|nudge|alert|notify|buzz)\s+you\b"
+        + r"|" + _WILL + r"(?:set|add|create|schedule|put|pop|book)\b[^.!?]{0,30}"
+                         r"\b(?:reminders?|calendar|alarm)\b"
+        + r"|" + _DID + r"(?:set|added|created|scheduled|saved|put|booked|logged"
+                        r"|entered|popped|made|updated)\b[^.!?]{0,30}"
+                        r"\b(?:reminders?|calendar|alarm|schedule)\b"
+        + r"|\b(?:added|saved|scheduled|booked|logged|put)\b[^.!?]{0,30}"
+          r"\b(?:to|on|in(?:to)?)\s+(?:the |your |my )?(?:calendar|reminders|schedule)\b"
+        + r"|\breminders?(?:['’]s| is| has been| was| are| have been)?\s+(?:now\s+|all\s+)?"
+          r"(?:set|saved|created|added|scheduled|booked|in place|locked in)\b"
+        # "Emmy's dentist appointment is set for 11:00 AM" (2295), "That's set."
+        # Not "it was set up to test…" (2588), a reminder described.
+        + r"|\b(?:(?:appointment|event|meeting)(?:['’]s| is| has been| was)"
+          r"|(?:it|that)(?:['’]s| is| has been))\s+"
+          r"(?:now\s+|all\s+)?(?:set|scheduled|booked|locked in)\b"
+        + r"|\b(?:it['’]s|that['’]s|it is|that is|it['’]ll be|you['’]re)\s+(?:now\s+|all\s+)?"
+          r"(?:on|in) (?:the |your |my )?(?:calendar|reminders|schedule)\b"
+        + r"|\byou['’]ll (?:get|receive|have|hear)\s+(?:a |the |your |my )?"
+          r"(?:reminder|ping|nudge|notification|alert|heads[- ]up)\b",
+        re.I),
+    "reminder_change": re.compile(
+        _DONE_OPENER
+        + r"|" + _DID + r"(?:moved|rescheduled|pushed|shifted|changed|updated"
+                        r"|cancel+ed|deleted|removed|cleared|dropped|marked|completed"
+                        r"|checked off|ticked off|crossed off|ended)" + _THEM
+        + r"|" + _WILL + r"(?:move|reschedule|push|shift|change|update|cancel"
+                         r"|delete|remove|clear|mark|complete|check off|tick off"
+                         r"|cross off|end)" + _THEM
+        + r"|\b(?:reminders?|event|appointment|it|that)(?:['’]s| is| has been| was"
+          r"| are| have been)\s+(?:now\s+|all\s+)?(?:moved|rescheduled|pushed"
+          r"|cancel+ed|deleted|removed|cleared|marked|done|completed?|gone"
+          r"|off (?:the|your) (?:list|calendar))\b",
+        re.I),
+    "note": re.compile(
+        _DONE_OPENER
+        + r"|" + _DID + r"(?:saved|created|added|jotted|noted|written|stored|filed|put"
+                        r"|updated|appended|made|started)\b[^.!?]{0,30}"
+                        r"\b(?:notes?|document|doc|file|notebook)\b"
+        + r"|" + _WILL + r"(?:save|create|add|jot|write|store|file|put|update|append"
+                         r"|make)\b[^.!?]{0,30}\b(?:notes?|document|doc|file|notebook)\b"
+        + r"|\b(?:saved|added|stored|jotted|filed|appended)\b[^.!?]{0,30}"
+          r"\b(?:as|to|in(?:to)?)\s+(?:a |an |the |your |my )?(?:notes?|document|doc|file"
+          r"|notebook)\b"
+        + r"|\b(?:notes?|document|doc|file)(?:['’]s| is| has been| was| are| have been)"
+          r"\s+(?:now\s+)?(?:saved|created|updated|added|ready|done|written|stored)\b",
+        re.I),
+    "contact": re.compile(
+        _DONE_OPENER
+        + r"|" + _DID + r"(?:added|saved|stored|put|updated|entered)\b[^.!?]{0,40}"
+                        r"\b(?:contacts?|address book|phone book)\b"
+        + r"|" + _WILL + r"(?:add|save|store|put|update|enter)\b[^.!?]{0,40}"
+                         r"\b(?:contacts?|address book|phone book)\b"
+        + r"|\b(?:added|saved|stored)\b[^.!?]{0,40}\b(?:to|in(?:to)?)\s+"
+          r"(?:the |your |my )?(?:contacts|address book|phone book)\b"
+        + r"|\bcontact(?:['’]s| is| has been| was)\s+(?:now\s+)?(?:saved|added|created"
+          r"|updated)\b",
+        re.I),
+    # Past tense only. A statement can force remember_person ("that's Clover,
+    # she's a TA"), and "I'll remember that" may come true: the background
+    # extractor keeps facts from statements after the reply.
+    "memory": re.compile(
+        _DID + r"(?:saved|stored|added|remembered|recorded|logged|filed|put|updated"
+               r"|memori[sz]ed|locked|committed)\b[^.!?]{0,40}"
+               r"\b(?:memory|memories|records?|people|contacts?|places?|profile)\b"
+        + r"|\b(?:saved|stored|added|filed|logged)\b[^.!?]{0,30}\b(?:to|in(?:to)?)\s+"
+          r"(?:the |your |my )?(?:memory|memories|records|people|places|contacts)\b",
+        re.I),
+}
+_RETRY_CLAIM_KIND = {
+    "create_reminder": "reminder",
+    "reschedule_reminder": "reminder_change", "cancel_reminder": "reminder_change",
+    "complete_reminder": "reminder_change",
+    "create_note": "note", "update_note": "note", "create_document": "note",
+    "add_contact": "contact",
+    "remember_fact": "memory", "remember_person": "memory",
+    "remember_place": "memory",
+}
+# Not a claim: a question ("Should I set a reminder for 3 PM?", "What time
+# should I remind you?"), an offer that waits on the user ("Tell me the day
+# and I'll set it", "Once you tell me the day, I'll remind you", "… if you'd
+# like"), a denial in the same clause ("No reminder is set yet"), or recall
+# ("Here is what I have stored in my memory", "As I noted in my notes").
+_QUESTION_RE = re.compile(
+    r"^\W*(?:do|does|did|should|shall|can|could|would|will|want|is|are|was|were"
+    r"|have|has|what|when|which|where|how|who)\b[^?]*\?\s*$", re.I)
+_MODAL_BEFORE_RE = re.compile(
+    r"\b(?:should|shall|can|could|may|might|would|me to|you to|like to|want to)\s*$",
+    re.I)
+_WAITS_BEFORE_RE = re.compile(
+    r"\b(?:if|once|as soon as|whenever|when|after|until)\s+you\b"
+    r"|\b(?:tell|give|send|let)\s+me\b|\bsay the word\b", re.I)
+_WAITS_AFTER_RE = re.compile(
+    r"^[^.!?]*\b(?:if|once|as soon as|when|after)\s+you(?:['’]d)?\s+"
+    r"(?:tell|give|let me know|say|confirm|pick|choose|send|share|decide|want"
+    r"|like|would like)\b", re.I)
+_DENIAL_RE = re.compile(r"\b(?:not|never|no|nothing|cannot|unable)\b|n['’]t\b", re.I)
+_RECALL_BEFORE_RE = re.compile(
+    r"\b(?:what|all|everything|anything|only|which|as)\s*$", re.I)
+_CLAUSE_RE = re.compile(r"[,;:(—–]|\s-\s")
+
+
+def _says_done(pattern, sentence) -> bool:
+    if _QUESTION_RE.match(sentence):
+        return False
+    for m in pattern.finditer(sentence):
+        before, after = sentence[:m.start()], sentence[m.end():]
+        if (_MODAL_BEFORE_RE.search(before) or _WAITS_BEFORE_RE.search(before)
+                or _RECALL_BEFORE_RE.search(before)
+                or _WAITS_AFTER_RE.match(after)
+                or _DENIAL_RE.search(_CLAUSE_RE.split(before)[-1])):
+            continue
+        return True
+    return False
+
+
+def _retry_claims(text, tool):
+    """Split a retry's words into (kept, claimed): `claimed` are the sentences
+    that say `tool`'s work is done. Kept keeps its own whitespace, so the
+    paragraph breaks survive. A tool whose claims are not judged here (mail
+    has bt.detect_hallucinated_action) claims nothing."""
+    pattern = _RETRY_CLAIM_RES.get(_RETRY_CLAIM_KIND.get(tool))
+    text = (text or "").strip()
+    if pattern is None or not text:
+        return text, []
+    parts = re.split(r"(?<=[.!?])(\s+)", text)
+    kept, claimed = [], []
+    for sentence, gap in zip(parts[0::2], parts[1::2] + [""]):
+        if _says_done(pattern, sentence):
+            claimed.append(sentence)
+        else:
+            kept.append(sentence + gap)
+    return "".join(kept).strip(), claimed
+
+
 # "remind me to call the dentist" -> ("to", "call the dentist"). Only a
 # message that IS the request: one buried in a longer message goes to the
 # retry, which can read the rest of it.
@@ -506,31 +659,53 @@ _REMINDER_ASK_RE = re.compile(
     r"|(?:don['’]?t|do not) let me forget\s+(?:(?P<c3>to)\s+)?(?P<t3>.+)"
     r"|remember\s+(?P<c4>to)\s+(?P<t4>.+))$",
     re.I | re.S)
-# A request with nothing in it to be reminded of.
+# A request with nothing in it to be reminded of. Not "remind me about that":
+# that leans on the turn before, which the retry can read and this can't.
 _BARE_REMINDER_RE = re.compile(
     r"^\s*(?:(?:hey|hi|ok(?:ay)?|so|oh|and|um+|blue|hexia|casper)\b[,!\s]*)*"
     r"(?:please\s+)?(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
     r"(?:remind me|(?:set|make|add|create|give)(?: me)?(?: a)? reminder)"
-    r"(?:\s+(?:about|of|to do|for)?\s*(?:it|that|this|something))?"
+    r"(?:\s+(?:about|of|to do|for)?\s*something)?"
     r"(?:\s+(?:please|for me))?[\s.!?]*$",
     re.I)
-# Any hint of when — a clock, a day, "later", "before class", "every". Then
-# the time is the user's to give and is not picked here (Phase 3's U16 will
-# anchor reminders to classes); the retry gets the message instead.
+# Any hint of when, and any word that could anchor one. Then the time is the
+# user's to give and is not picked here (Phase 3's U16 will anchor reminders
+# to classes); the retry gets the message instead. Deliberately wide: a miss
+# sets "take my meds at nine" for 3:15 PM (review of c41250f), while a false
+# hit only costs the retry — "turn on the porch light" goes to the model, as
+# every reminder did before c41250f.
 _REMINDER_TIME_CUE_RE = re.compile(
     r"\d"
-    r"|\b(?:today|tonight|tonite|tomorrow|tmrw|noon|midnight|later|soon|asap"
-    r"|morning|afternoon|evening|overnight|weekend"
+    # a clock in words: "at nine", "four thirty", "half past", "five o'clock",
+    # "this pm"
+    r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    r"|fifteen|twenty|thirty|forty|fifty|half|quarter|o['’]?clock|[ap]\.?m"
+    # a day or a date, misspelt too ("tomorow", "tmr")
+    r"|today|tonight|tonite|2nite|tomm?orr?ow|tmrw?|2morr?ow|2moro|noon|midnight"
     r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
-    r"|january|february|april|june|july|august|september|october|november"
-    r"|december|before|after|until|till|when|whenever|once|every|daily"
-    r"|weekly|monthly|minutes?|hours?|days?|weeks?|months?"
-    r"|a (?:bit|while|moment|sec))\b",
+    r"|mon|tues?|wed|thu|thurs?|fri|sat|sun|weekend"
+    r"|january|february|march|april|may|june|july|august|september|october"
+    r"|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec"
+    # a part of the day, a meal, a class, a deadline
+    r"|morning|afternoon|evening|night|overnight|eod|eow|eom|cob|first thing"
+    r"|end of|breakfast|brunch|lunch(?:time)?|dinner(?:time)?|supper|bedtime"
+    r"|class(?:es)?|lecture|seminar|meeting|office hours|semester|term"
+    r"|holidays?|vacation|christmas|thanksgiving|easter"
+    # a word that anchors one: "at lunch", "by Friday", "in March", "on the
+    # way home", "next time", "this pm", "in a few", "after work"
+    r"|at|by|around|till|til|until|before|after|on|in|during|within|from|past"
+    r"|next|this|later|soon|asap|shortly|when|whenever|while|once|every"
+    r"|daily|weekly|monthly|minutes?|mins?|hours?|hrs?|days?|weeks?|months?"
+    r"|years?|a (?:bit|while|moment|sec|second))\b",
     re.I)
 _VAGUE_REMINDER_WORDS = {
     "it", "that", "this", "them", "those", "these", "something", "stuff",
     "thing", "things", "so", "do", "the", "a", "an", "to", "about", "me", "of",
 }
+# "remind me to do that", "… to call him": what or who the turn before was
+# about, which the retry can read.
+_ANAPHORA = {"it", "that", "this", "them", "those", "these", "him", "her",
+             "there"}
 _SECOND_PERSON = [
     (r"\bI am\b", "you are"), (r"\bI was\b", "you were"),
     (r"\bI['’]m\b", "you're"), (r"\bI['’]ve\b", "you've"),
@@ -551,8 +726,9 @@ def _reminder_ask(user_text: str):
     """What a plain reminder request asks to be reminded of.
 
     (connector, title) for "remind me to call the dentist"; ("", "") for a
-    request that names nothing ("set a reminder", "remind me about it"); None
-    when this is not a plain request with no time in it.
+    request that names nothing ("set a reminder", "remind me about
+    something"); None when this is not a plain request with no time in it,
+    or it leans on the conversation ("remind me about that").
     """
     text = (user_text or "").strip()
     if not text or "\n" in text or _REMINDER_TIME_CUE_RE.search(text):
@@ -577,6 +753,8 @@ def _reminder_ask(user_text: str):
     if re.search(r"[.!?;]\s+\S", title) or len(title) > 100 or len(title.split()) > 12:
         return None
     words = set(re.findall(r"[a-z']+", title.lower()))
+    if words & _ANAPHORA:
+        return None
     if not words - _VAGUE_REMINDER_WORDS:
         return ("", "")
     return ("about" if connector == "for" else connector, title)
@@ -804,6 +982,25 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
             print(f"   [FORCE] {_tool}: {len(content or '')} chars came back that "
                   f"are not a reply (finish_reason={_finish}) — honest line instead")
             _replace_reply(response, _forced_tool_honest_line(_tool))
+            return False, None
+
+    # The retry made no call, so whatever it says was done was not. A
+    # reminder, note, document or contact was asked for in so many words, and
+    # what is left beside the claim ("Sure thing! … Say hi to her for me!")
+    # still reads as done: the honest line replaces it all. A memory tool can
+    # be forced by a statement, so there only the claim goes and a real reply
+    # around it stays ("Nice to meet Clover!").
+    if repairs.retried_tool and not force_tool:
+        _tool = repairs.retried_tool
+        _kept, _claimed = _retry_claims(content, _tool)
+        if _claimed:
+            from blue.server.turn_completion import _substantive
+            print(f"   [FORCE] retry after a failed forced {_tool} says it was "
+                  f"done with no call ({_claimed[0][:80]!r}) — not shipping that")
+            if _RETRY_CLAIM_KIND.get(_tool) == "memory" and _substantive(_kept):
+                response["choices"][0]["message"]["content"] = _kept
+            else:
+                _replace_reply(response, _forced_tool_honest_line(_tool))
             return False, None
 
     # The model claimed it has no live/real-time access, or told the

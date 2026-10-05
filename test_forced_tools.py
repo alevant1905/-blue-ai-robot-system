@@ -261,6 +261,52 @@ def test_a_reminder_with_a_time_gets_one_retry_where_words_are_allowed(chat):
     assert reply == "Set — I'll remind you to call your mom at 3 PM today."
 
 
+# Each was shipped and stored as Blue's reply after the forced call declined,
+# with no call on the retry and nothing in the calendar (review of c41250f).
+# detect_hallucinated_action knows no reminder, so none was scrubbed.
+REMINDER_CLAIMS = [
+    "Done — I've set a reminder for 3 PM to call your mom.",
+    "Got it — I'll remind you at 3 PM to call your mom.",
+    "Reminder set for 3 PM: call your mom.",
+    "I've set a reminder to call your mom at 3 PM today.",
+    "All set! I'll ping you at 3 to call your mom.",
+    "Done, I've added that to your calendar for 3 PM.",
+]
+HONEST_REMINDER = ("I didn't act on that, so no reminder was set; say it again "
+                   "if you'd like me to.")
+
+
+@pytest.mark.parametrize("claim", REMINDER_CLAIMS)
+def test_a_retry_that_says_the_reminder_is_set_is_not_shipped(chat, claim):
+    chat.model.queue(_raw(REMINDER_RAW, "length"), claim)
+
+    reply = reply_of(chat.ask("remind me to call my mom at 3pm"))
+
+    assert chat.executed == []
+    assert reply == HONEST_REMINDER
+    assert _assistant_rows(chat.saved) == [reply]
+    assert len(chat.model.main) == 2, "the claim was given another pass"
+
+
+def test_a_spelled_out_time_is_not_replaced_by_a_picked_one(chat, monkeypatch):
+    """"at nine" is a time: it goes to the retry, not to a 15:15 reminder."""
+    executed = []
+    monkeypatch.setattr(bt, "execute_tool", _calendar(executed))
+    monkeypatch.setattr(tool_pipeline, "datetime", _FixedClock)
+    chat.model.queue(
+        _raw(REMINDER_RAW, "length"),
+        tool_call("create_reminder", user_name="Alex", title="Take my meds",
+                  when="today at 9pm"),
+        "Set — I'll remind you to take your meds at 9 PM.",
+    )
+
+    reply = reply_of(chat.ask("remind me to take my meds at nine"))
+
+    assert chat.model.main[1]["tool_choice"] == "auto"
+    assert [c["args"]["when"] for c in executed] == ["today at 9pm"]
+    assert "3:15" not in reply
+
+
 def test_a_forced_call_streams_no_draft(chat):
     """The preview showed the reminder self-argument as it was written."""
     from blue.server.routes import stream as stream_routes
@@ -357,9 +403,109 @@ def test_a_retry_that_claims_the_send_is_scrubbed_not_forced(loop):
     assert "emailed you" not in content_of(result)
 
 
+@pytest.mark.parametrize("answer", [
+    "What time should I remind you to call your mom?",
+    "Should I set a reminder for 3 PM today, or did you mean tomorrow?",
+    "Do you want the reminder set for 3 PM today?",
+    "I haven't set it yet — is 3 PM today right?",
+    "No reminder is set yet; which day did you mean?",
+    "Tell me which day and I'll set the reminder.",
+    "Once you tell me the day, I'll remind you at 3 PM.",
+    "I can set a reminder for 3 PM if you'd like.",
+])
+def test_a_retry_that_asks_or_offers_still_ships(loop, answer):
+    loop.model.queued = [_raw(REMINDER_RAW, "length"), answer]
+
+    result = loop.forced("remind me to call my mom at 3pm", "create_reminder")
+
+    assert content_of(result) == answer
+    assert loop.executed == []
+
+
+@pytest.mark.parametrize("tool, text, claim, honest", [
+    ("create_note", "make a note of my lecture ideas",
+     "Saved your lecture ideas as a note.",
+     "I didn't act on that, so no note was saved; say it again if you'd like me to."),
+    ("create_document", "write up my lecture ideas as a document",
+     "I've created the document with your lecture ideas.",
+     "I didn't act on that, so no document was saved; say it again if you'd like me to."),
+    # reschedule and cancel need no arguments, so they never get here; a
+    # reminder_id is required to complete one.
+    ("complete_reminder", "mark the dentist reminder done",
+     "I've marked the dentist reminder as done.",
+     "I didn't act on that, so no reminder was changed; say it again if you'd like me to."),
+    ("complete_reminder", "mark the dentist reminder done",
+     "Done. That reminder is completed.",
+     "I didn't act on that, so no reminder was changed; say it again if you'd like me to."),
+    ("add_contact", "add Mark to my contacts, mark@example.org",
+     "Got it — I've added Mark to your contacts.",
+     "I didn't act on that, so nothing was saved; say it again if you'd like me to."),
+])
+def test_a_retry_that_claims_a_write_gets_the_honest_line(loop, tool, text, claim, honest):
+    loop.model.queued = ["Let me think about how best to do this.", claim]
+
+    result = loop.forced(text, tool)
+
+    assert loop.executed == []
+    assert content_of(result) == honest
+
+
+def test_a_reminder_about_that_is_left_to_the_retry(loop):
+    """"remind me about that" leans on the turn before, which the retry can
+    read; the fixed question can't (review of c41250f)."""
+    loop.model.queued = [_raw(REMINDER_RAW, "length"),
+                         "Sure — when should I remind you about the dentist?"]
+
+    result = loop.forced("remind me about that", "create_reminder")
+
+    assert len(loop.calls) == 2
+    assert loop.calls[1]["tool_choice"] == "auto"
+    assert content_of(result) == "Sure — when should I remind you about the dentist?"
+    assert loop.executed == []
+
+
+def test_a_memory_claim_on_a_retry_loses_only_the_claim(loop):
+    """A statement can force remember_person ("that's Clover, she's a TA"). The
+    claim of a save goes; the rest of a real reply stays."""
+    loop.model.queued = ["Let me think about who this is.",
+                         "Nice to meet Clover! I've added her to my memory as "
+                         "a TA for CS101."]
+
+    result = loop.forced("that's Clover, she's a TA for CS101", "remember_person")
+
+    assert loop.executed == []
+    assert content_of(result) == "Nice to meet Clover!"
+
+
+@pytest.mark.parametrize("tool, text, claims", [
+    # From the log: replies that set a reminder (each followed a real call).
+    ("create_reminder", "Reminder set for 9:15 AM, Dr. Levant.", True),
+    ("create_reminder", "I'll remind you in 2 minutes to test that email reminder.", True),
+    ("create_reminder", "Got it, Dr. Levant! I've updated the schedule for this "
+                        "Friday specifically.", True),
+    ("create_reminder", "Emmy's dentist appointment is set for 11:00 AM.", True),
+    ("create_reminder", "Let me add that to your calendar right away.", True),
+    ("create_reminder", "You'll get a ping at 3.", True),
+    # Not claims.
+    ("create_reminder", 'That usually means it was set up to test how I handle '
+                        'scheduling.', False),
+    ("create_reminder", "Got it — no reminder then.", False),
+    ("create_reminder", "Want me to put it on your calendar?", False),
+    ("create_reminder", "I'll remind you at 3 PM if you'd like.", False),
+    ("remember_person", "Here is what I have stored in my memory, Doctor Levant.", False),
+    ("create_note", "As I noted in my notes on Engeström's work, it is distributed.", False),
+    ("complete_reminder", "I'll drop the caveats about that.", False),
+    ("complete_reminder", "But inside, it's shifted.", False),
+    ("send_gmail", "Done — I've emailed you the digest.", False),   # mail: not here
+])
+def test_what_a_retry_claims(tool, text, claims):
+    assert bool(tool_pipeline._retry_claims(text, tool)[1]) is claims
+
+
 def test_a_long_argument_tool_is_retried_at_the_normal_cap(loop):
     """The 8,192-token cap is for the forced call's arguments, not for the
-    words a retry is likely to write."""
+    words a retry is likely to write: a blocking retry can't be stopped once
+    it is only writing, so it gets the normal cap."""
     loop.model.queued = [
         _raw("Sure! Here's a draft of the note.\n\nActually, wait — let me "
              "make sure I'm not missing anything.", "stop"),
@@ -440,7 +586,8 @@ def test_a_call_written_as_text_is_still_run(loop):
     ("set a reminder", ("", "")),
     ("remind me", ("", "")),
     ("can you set me a reminder?", ("", "")),
-    ("remind me to do that", ("", "")),
+    ("remind me about something", ("", "")),
+    ("set a reminder please", ("", "")),
 ])
 def test_what_a_plain_reminder_request_asks_for(text, ask):
     assert tool_pipeline._reminder_ask(text) == ask
@@ -457,6 +604,36 @@ def test_what_a_plain_reminder_request_asks_for(text, ask):
     "set a reminder for 3pm",
     "remind me to email Dr. Smith. Also, what's the weather?",
     "I was thinking we could remind me to call",
+    # A time in words, or anything that anchors one (review of c41250f: each
+    # of these got a picked time about an hour out).
+    "remind me to take my meds at nine",
+    "remind me to call mom at lunch",
+    "remind me to call mom at three",
+    "remind me to stretch at four thirty",
+    "remind me to call mom at five o'clock",
+    "remind me to leave at half past nine",
+    "remind me to take my pills at dinner",
+    "remind me to read to the kids at bedtime",
+    "remind me to bring the cord to class",
+    "remind me to ask about it in class",
+    "remind me to renew my passport in March",
+    "remind me to renew my passport in may",
+    "remind me to send the grades by eod",
+    "remind me to call the bank first thing",
+    "remind me to call the dentist this pm",
+    "remind me to ask him next time",
+    "remind me to check the oven in a few",
+    "remind me to call the dentist tomorow",
+    "remind me to call the dentist tommorrow",
+    "remind me to call the dentist tmr",
+    "remind me to call the dentist at the end of the day",
+    "remind me to call the dentist after work",
+    "remind me to email the TA on Wed",
+    # Leaning on the conversation: the retry can read what "that" is.
+    "remind me to do that",
+    "remind me about that",
+    "set a reminder for it",
+    "remind me to email her",
 ])
 def test_a_time_or_anything_unplain_is_left_to_the_retry(text):
     assert tool_pipeline._reminder_ask(text) is None
@@ -601,6 +778,30 @@ def test_call_lm_studio_streams_a_forced_call_without_a_draft(monkeypatch):
                       force_choice="auto")
     assert used["on_token"] == seen.append and used["prose_limit"] is None
     assert used["tool_choice"] == "auto"
+
+
+def test_a_streamed_long_argument_retry_has_room_for_the_call(monkeypatch):
+    """The auto retry of a forced note may still make the call, body and all
+    (review of c41250f: at 2,048 tokens it was cut off). Streamed, it gets the
+    forced call's cap and its stop on prose; its words are still shown."""
+    seen, used = [], {}
+
+    def stream(payload, on_token, timeout=120, prose_limit=None):
+        used.update(on_token=on_token, prose_limit=prose_limit,
+                    max_tokens=payload.get("max_tokens"),
+                    tool_choice=payload.get("tool_choice"))
+        return _raw("Saved.")
+
+    monkeypatch.setattr(bt, "_stream_from_model", stream)
+
+    bt.call_lm_studio([{"role": "user", "content": "make a note of my lecture ideas"}],
+                      force_tool="create_note", on_token=seen.append,
+                      force_choice="auto")
+
+    assert used == {"on_token": seen.append,
+                    "prose_limit": bt._FORCED_STREAM_ABORT_CHARS,
+                    "max_tokens": bt._LONG_ARGUMENT_MAX_TOKENS,
+                    "tool_choice": "auto"}
 
 
 # --------------------------------------------------------------------------
