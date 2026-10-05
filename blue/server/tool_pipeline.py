@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import re
 import json
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import bluetools as bt
+from blue_reply_text import reads_as_deliberation
 
 
 def _missing_required_args(tool_name: str, tool_args: Dict[str, Any]) -> List[str]:
@@ -421,6 +423,259 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
     return None, pending_force_tool
 
 
+# ================================================================================
+# A FORCED CALL THAT CAME BACK AS WORDS
+# ================================================================================
+# tool_choice "required" does not guarantee a call. "remind me to call the
+# dentist" (2026-10-05 harness) forced create_reminder, and the model wrote
+# 6,976 characters deciding which question to ask: "Hmm, that's two
+# questions", "Final answer:" again and again, three "</think>" tags. All of
+# it was the reply. On 09-27 "It summarizes news and sends the newsfeed by
+# email to me" forced send_gmail, which shipped 3,020 characters of "Wait —",
+# "Actually, I shouldn't assume" and three self-introductions. With no
+# arguments from the selector there was nothing to run instead, so the words
+# went out. Now they never do:
+#   create_reminder  a plain "remind me to X" with no time in it is set for
+#                    about an hour from now and the time is said (Alex's
+#                    default: pick and state a time); a request that names
+#                    nothing to remind about gets one short question.
+#   anything else    one retry with tool_choice "auto" and a note, then an
+#                    honest line if the retry's words are no better.
+
+# Mail is not offered again on the retry. The forced call already declined to
+# send, and a second chance to send mail should come from the user.
+_OUTWARD_TOOLS = {"send_gmail", "reply_gmail", "email_snapshot"}
+
+# What did not happen, for the honest line.
+_FORCED_TOOL_UNDONE = {
+    "send_gmail": "nothing was sent",
+    "reply_gmail": "nothing was sent",
+    "email_snapshot": "no photo was taken or sent",
+    "create_reminder": "no reminder was set",
+    "cancel_reminder": "no reminder was changed",
+    "reschedule_reminder": "no reminder was changed",
+    "complete_reminder": "no reminder was changed",
+    "remember_fact": "nothing was saved",
+    "remember_person": "nothing was saved",
+    "remember_place": "nothing was saved",
+    "add_contact": "nothing was saved",
+    "create_note": "no note was saved",
+    "update_note": "no note was changed",
+    "create_document": "no document was saved",
+}
+
+_REMINDER_QUESTION = "What should I remind you about, and when?"
+
+
+def _forced_tool_honest_line(tool: str) -> str:
+    """One true sentence for a forced tool that never ran. It has to fit a
+    request ("remind me…") and a statement the selector misread as one."""
+    undone = _FORCED_TOOL_UNDONE.get(tool, "nothing was done")
+    return f"I didn't act on that, so {undone}; say it again if you'd like me to."
+
+
+def _forced_prose_unshippable(text, finish_reason, *, forced) -> bool:
+    """Words that must not be the reply: empty, cut at the token cap, arguing
+    with itself, or, from a forced call itself (whose answer was supposed to
+    be a call), longer than a short reply."""
+    text = (text or "").strip()
+    return (not text
+            or finish_reason == "length"
+            or (forced and len(text) > bt._FORCED_PROSE_MAX_CHARS)
+            or reads_as_deliberation(text))
+
+
+def _replace_reply(response, text):
+    """Make `text` the turn's reply. It is a template, not the model's
+    words, so the replay nets must not regenerate it through the model."""
+    choice = response["choices"][0]
+    choice["message"] = {"role": "assistant", "content": text}
+    choice["finish_reason"] = "stop"
+    response["blue_templated"] = True
+
+
+# "remind me to call the dentist" -> ("to", "call the dentist"). Only a
+# message that IS the request: one buried in a longer message goes to the
+# retry, which can read the rest of it.
+_REMINDER_ASK_RE = re.compile(
+    r"^\s*(?:(?:hey|hi|ok(?:ay)?|so|oh|and|um+|blue|hexia|casper)\b[,!\s]*)*"
+    r"(?:please\s+)?(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
+    r"(?:remind me\s+(?P<c1>to|that)\s+(?P<t1>.+)"
+    r"|(?:set|make|add|create|give)(?: me)?(?: a)? reminder\s+"
+    r"(?P<c2>to|that|about|for)\s+(?P<t2>.+)"
+    r"|(?:don['’]?t|do not) let me forget\s+(?:(?P<c3>to)\s+)?(?P<t3>.+)"
+    r"|remember\s+(?P<c4>to)\s+(?P<t4>.+))$",
+    re.I | re.S)
+# A request with nothing in it to be reminded of.
+_BARE_REMINDER_RE = re.compile(
+    r"^\s*(?:(?:hey|hi|ok(?:ay)?|so|oh|and|um+|blue|hexia|casper)\b[,!\s]*)*"
+    r"(?:please\s+)?(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
+    r"(?:remind me|(?:set|make|add|create|give)(?: me)?(?: a)? reminder)"
+    r"(?:\s+(?:about|of|to do|for)?\s*(?:it|that|this|something))?"
+    r"(?:\s+(?:please|for me))?[\s.!?]*$",
+    re.I)
+# Any hint of when — a clock, a day, "later", "before class", "every". Then
+# the time is the user's to give and is not picked here (Phase 3's U16 will
+# anchor reminders to classes); the retry gets the message instead.
+_REMINDER_TIME_CUE_RE = re.compile(
+    r"\d"
+    r"|\b(?:today|tonight|tonite|tomorrow|tmrw|noon|midnight|later|soon|asap"
+    r"|morning|afternoon|evening|overnight|weekend"
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    r"|january|february|april|june|july|august|september|october|november"
+    r"|december|before|after|until|till|when|whenever|once|every|daily"
+    r"|weekly|monthly|minutes?|hours?|days?|weeks?|months?"
+    r"|a (?:bit|while|moment|sec))\b",
+    re.I)
+_VAGUE_REMINDER_WORDS = {
+    "it", "that", "this", "them", "those", "these", "something", "stuff",
+    "thing", "things", "so", "do", "the", "a", "an", "to", "about", "me", "of",
+}
+_SECOND_PERSON = [
+    (r"\bI am\b", "you are"), (r"\bI was\b", "you were"),
+    (r"\bI['’]m\b", "you're"), (r"\bI['’]ve\b", "you've"),
+    (r"\bI['’]ll\b", "you'll"), (r"\bI['’]d\b", "you'd"),
+    (r"\bmyself\b", "yourself"), (r"\bmine\b", "yours"),
+    (r"\bmy\b", "your"), (r"\bme\b", "you"), (r"\bI\b", "you"),
+]
+
+
+def _second_person(phrase: str) -> str:
+    """The user's "call my mom" said back to them: "call your mom"."""
+    for pattern, repl in _SECOND_PERSON:
+        phrase = re.sub(pattern, repl, phrase, flags=re.I)
+    return phrase
+
+
+def _reminder_ask(user_text: str):
+    """What a plain reminder request asks to be reminded of.
+
+    (connector, title) for "remind me to call the dentist"; ("", "") for a
+    request that names nothing ("set a reminder", "remind me about it"); None
+    when this is not a plain request with no time in it.
+    """
+    text = (user_text or "").strip()
+    if not text or "\n" in text or _REMINDER_TIME_CUE_RE.search(text):
+        return None
+    if _BARE_REMINDER_RE.match(text):
+        return ("", "")
+    m = _REMINDER_ASK_RE.match(text)
+    if not m:
+        return None
+    # "don't let me forget the milk" has no "to": remind them about it.
+    connector = (m.group("c1") or m.group("c2") or m.group("c3")
+                 or m.group("c4") or "about").lower()
+    title = m.group("t1") or m.group("t2") or m.group("t3") or m.group("t4")
+    title = title.strip().strip(".!?,;: \"'“”")
+    while True:
+        tail = re.search(r"[\s,]*\b(?:please|thanks|thank you|for me|ok(?:ay)?)$",
+                         title, re.I)
+        if not tail:
+            break
+        title = title[:tail.start()].strip().strip(".!?,;: ")
+    # Two sentences, or more than a short title: not plain.
+    if re.search(r"[.!?;]\s+\S", title) or len(title) > 100 or len(title.split()) > 12:
+        return None
+    words = set(re.findall(r"[a-z']+", title.lower()))
+    if not words - _VAGUE_REMINDER_WORDS:
+        return ("", "")
+    return ("about" if connector == "for" else connector, title)
+
+
+def _default_reminder_time(now: datetime) -> datetime:
+    """About an hour from now, rounded up to the next quarter hour. One that
+    lands overnight (10 PM to 7 AM) moves to 9 AM instead."""
+    t = now + timedelta(hours=1)
+    if t.minute % 15 or t.second or t.microsecond:
+        t += timedelta(minutes=15 - t.minute % 15)
+    t = t.replace(second=0, microsecond=0)
+    if t.hour >= 22:
+        t = (t + timedelta(days=1)).replace(hour=9, minute=0)
+    elif t.hour < 7:
+        t = t.replace(hour=9, minute=0)
+    return t
+
+
+def _reminder_fallback(user_text: str, user_name: str,
+                       now: Optional[datetime] = None) -> Optional[str]:
+    """The reply for a forced create_reminder that wrote words instead.
+
+    Sets the reminder at a picked time and says when, or asks the one
+    question; None leaves the turn to the retry. Python picks the time and
+    reads the day back from the tool's result: the model does no calendar
+    math here.
+    """
+    ask = _reminder_ask(user_text)
+    if ask is None:
+        return None
+    connector, title = ask
+    if not title:
+        print("   [FORCE] create_reminder: nothing to remind about — asking")
+        return _REMINDER_QUESTION
+    now = now or datetime.now()
+    at = _default_reminder_time(now)
+    when = f"{'today' if at.date() == now.date() else 'tomorrow'} at {at:%H:%M}"
+    args = {"user_name": user_name or "Alex",
+            "title": title[0].upper() + title[1:], "when": when}
+    print(f"   [FORCE] create_reminder with a picked time (none was given): {args}")
+    raw = bt.execute_tool("create_reminder", args)
+    try:
+        result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except ValueError:
+        result = {}
+    try:
+        set_for = datetime.fromisoformat(result["when"]) if result.get("success") else None
+    except (KeyError, TypeError, ValueError):
+        set_for = None
+    if set_for is None:
+        return ("I tried to set that reminder but it didn't save; say it again "
+                "with a time and I'll try once more.")
+    clock = set_for.strftime("%I:%M %p").lstrip("0")
+    date = f"{set_for:%A}, {set_for:%B} {set_for.day}"
+    days = (set_for.date() - now.date()).days
+    day = {0: f"today ({date})", 1: f"tomorrow ({date})"}.get(days, f"on {date}")
+    return (f"Done — I'll remind you at {clock} {day} {connector} "
+            f"{_second_person(title)}; say if you'd like a different time.")
+
+
+def _forced_call_failed(response, tool, repairs, conversation_messages,
+                        user_text, user_name):
+    """A forced call wrote words and the selector supplied no arguments.
+
+    Returns (retry, pending) like _judge_untooled_reply. The words are never
+    the reply: they are not even kept in the conversation for the retry,
+    which would only continue them.
+    """
+    content = response["choices"][0]["message"].get("content") or ""
+    print(f"   [FORCE] {tool} came back as {len(content)} chars of text — "
+          f"not shipping it")
+    if tool == "create_reminder":
+        reply = _reminder_fallback(user_text, user_name)
+        if reply is not None:
+            _replace_reply(response, reply)
+            return False, None
+    repairs.forced_retry = tool
+    if tool in _OUTWARD_TOOLS:
+        # "If they want something sent, ask for what is missing" alone made
+        # the 09-27 statement a request: "I couldn't send that email just
+        # now. Which inbox would you like it at?" (live check, 2026-10-05).
+        note = (f"[Nothing was sent: {tool} was not called. Reply to what the "
+                "user actually said, in one or two sentences. If they asked "
+                "you to send something, say it hasn't gone and ask only for "
+                "what is missing; if they were telling you something, answer "
+                "that and don't bring up sending.]")
+    else:
+        note = (f"[You were asked to call {tool} and wrote text instead, so "
+                "nothing has been done. If the user's last message asks for "
+                f"that, call {tool} now with arguments from their own words. "
+                "If it doesn't, or something it needs is missing, don't call "
+                "it: answer the user directly in one or two sentences.]")
+    conversation_messages.append({"role": "user", "content": note})
+    return True, None
+
+
+def _known_tool(name) -> bool:
+    return name in {t.get("function", {}).get("name") for t in bt.TOOLS}
 
 
 class _ReplyRepairs:
@@ -428,9 +683,13 @@ class _ReplyRepairs:
 
     Each fires at most once a turn. Without that a stubborn model and the
     loop ping-pong: it refuses, the loop forces a search, it refuses again.
+
+    `forced_retry` is a tool whose forced call wrote words, queued for the
+    one "auto" retry; `retried_tool` is that tool once the retry has run.
     """
     __slots__ = ("web_refusal", "leaked_tool", "phantom_claim",
-                 "calendar_denial", "memory_write")
+                 "calendar_denial", "memory_write", "forced_retry",
+                 "retried_tool")
 
     def __init__(self):
         self.web_refusal = False
@@ -438,6 +697,8 @@ class _ReplyRepairs:
         self.phantom_claim = False
         self.calendar_denial = False
         self.memory_write = False
+        self.forced_retry = None
+        self.retried_tool = None
 
 
 def _judge_untooled_reply(response, assistant_message, repairs, *,
@@ -485,6 +746,17 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
         if missing:
             print(f"   [SKIP] not direct-executing {correct_tool} — "
                   f"no {', '.join(missing)} was extracted")
+            # Not when this pass forced a different tool (a claim handed
+            # over from the fast path): the general check below judges that.
+            # A call written out as text is still run, by the leaked-call
+            # repair below.
+            _written = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
+            if force_tool == correct_tool and not (_written and _known_tool(_written[0])):
+                return _forced_call_failed(
+                    response, correct_tool, repairs, conversation_messages,
+                    bt._intent_text(last_user_message
+                                    if isinstance(last_user_message, str) else ""),
+                    user_name)
         else:
             print(f"   [RETRY] Direct-executing {correct_tool} with extracted params")
             tool_result = bt.execute_tool(correct_tool, tool_args)
@@ -507,8 +779,7 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
     # Parse it and run it for real; the next iteration composes the
     # answer from the actual result.
     _leaked = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
-    if _leaked and _leaked[0] in {
-            t.get("function", {}).get("name") for t in bt.TOOLS}:
+    if _leaked and _known_tool(_leaked[0]):
         repairs.leaked_tool = True
         _lk_name, _lk_args = _leaked
         print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
@@ -522,6 +793,18 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
         conversation_messages.append({"role": "tool", "tool_call_id": "leaked",
                                       "name": _lk_name, "content": tool_result})
         return True, pending
+
+    # Words from a forced call (the remember_fact re-ask, a claimed action
+    # being forced through) or from the one retry after a forced call wrote
+    # words: they go out only if they read as a reply.
+    if force_tool or repairs.retried_tool:
+        _finish = ((response.get("choices") or [{}])[0] or {}).get("finish_reason")
+        if _forced_prose_unshippable(content, _finish, forced=bool(force_tool)):
+            _tool = force_tool or repairs.retried_tool
+            print(f"   [FORCE] {_tool}: {len(content or '')} chars came back that "
+                  f"are not a reply (finish_reason={_finish}) — honest line instead")
+            _replace_reply(response, _forced_tool_honest_line(_tool))
+            return False, None
 
     # The model claimed it has no live/real-time access, or told the
     # user to go check a website — but web_search exists precisely for
@@ -626,6 +909,14 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
             m.get("role") == "tool" and m.get("name") == "email_snapshot"
             for m in conversation_messages):
         hallucinated_tool = None
+    if hallucinated_tool and not force_tool and repairs.retried_tool:
+        # The forced call declined to do this a moment ago, so the claim is
+        # invented, and the retry is no second chance to act.
+        print(f"   [WARN] retry after a failed forced {repairs.retried_tool} "
+              f"claims {hallucinated_tool} — scrubbing the claim")
+        cleaned = bt._scrub_action_claim_sentences(content, hallucinated_tool)
+        response["choices"][0]["message"]["content"] = cleaned
+        return False, None
     if hallucinated_tool and not force_tool:
         # The force-retry below turns the claim into a REAL action —
         # only right when the user actually asked for one. A claim
@@ -752,10 +1043,19 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
         # Carry over a force_tool set by the previous iteration's hallucination
         # detector — this MUST run with tools enabled, otherwise the retry is
         # pointless. Bypasses the no-tools cap below.
+        retry_tool = None
         if pending_force_tool:
             force_tool = pending_force_tool
             pending_force_tool = None
             print(f"   [HALLUCINATION-RETRY] Forcing {force_tool} with tools enabled")
+        # A forced call wrote words instead of calling: one more try, where
+        # words are a fair answer (_forced_call_failed queued it).
+        elif repairs.forced_retry:
+            retry_tool = repairs.retried_tool = repairs.forced_retry
+            repairs.forced_retry = None
+            print(f"   [FORCE-RETRY] {retry_tool} not called — asking once more"
+                  + (" without tools" if retry_tool in _OUTWARD_TOOLS
+                     else " with tool_choice auto"))
         # After iteration 1, force text-only responses (no tools) to avoid
         # extra LLM round-trips — UNLESS we'bt.re retrying a hallucinated action,
         # in which case the whole point is to actually call the tool.
@@ -780,18 +1080,29 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                     tool_ran=", ".join(_ran) or None)
             return response
 
-        _include_tools = not (_identity_kind and not force_tool)
-        if not _include_tools and iteration == 1:
-            print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
-        response = bt.call_lm_studio(
-            conversation_messages,
-            include_tools=_include_tools,
-            force_tool=force_tool,
-            iteration=iteration,
-            on_token=on_token,
-            tool_scope=("reflex" if _conversational_turn and not force_tool
-                        else "full"),
-        )
+        if retry_tool:
+            _offer = retry_tool not in _OUTWARD_TOOLS
+            response = bt.call_lm_studio(
+                conversation_messages,
+                include_tools=_offer,
+                force_tool=retry_tool if _offer else None,
+                iteration=iteration,
+                on_token=on_token,
+                force_choice="auto",
+            )
+        else:
+            _include_tools = not (_identity_kind and not force_tool)
+            if not _include_tools and iteration == 1:
+                print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
+            response = bt.call_lm_studio(
+                conversation_messages,
+                include_tools=_include_tools,
+                force_tool=force_tool,
+                iteration=iteration,
+                on_token=on_token,
+                tool_scope=("reflex" if _conversational_turn and not force_tool
+                            else "full"),
+            )
 
         if not response:
             return bt.model_unavailable_reply(bt._ACTIVE_CHAT_ROBOT, user_name)

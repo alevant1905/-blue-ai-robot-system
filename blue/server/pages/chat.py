@@ -677,6 +677,20 @@ CHAT_HTML = """
         // drift, dropped family members, wrong ages and verbatim replays —
         // guards that regenerate the reply outright. The preview is what the
         // model said; the POST is what Blue actually says.
+        // What of the streamed text is a draft worth showing. Reasoning that
+        // leaked into it is not: only what follows the last "</think>", and
+        // nothing from an unclosed "<think>" on. A tool call the model wrote
+        // as text is not words to show either.
+        function draftText(shown) {
+            let text = shown || '';
+            const close = text.lastIndexOf('</think>');
+            if (close >= 0) text = text.slice(close + '</think>'.length);
+            const open = text.indexOf('<think>');
+            if (open >= 0) text = text.slice(0, open);
+            const cut = text.search(/<tool_call>|<function=/);
+            return (cut >= 0 ? text.slice(0, cut) : text).trim();
+        }
+
         function startReplyPreview(streamId, bubbleEl) {
             if (typeof EventSource === 'undefined' || !bubbleEl) return null;
             let source = null, shown = '', live = true;
@@ -710,10 +724,15 @@ CHAT_HTML = """
                 const piece = msg.delta || '';
                 if (!piece) return;
                 shown += piece;
-                // A tool call the model wrote as text is not words to show.
-                const cut = shown.search(/<tool_call>|<function=/);
-                const visible = (cut >= 0 ? shown.slice(0, cut) : shown).trimEnd();
-                if (!visible) return;
+                const visible = draftText(shown);
+                if (!visible) {
+                    // A "</think>" can arrive after text already on show.
+                    if (bubbleEl.classList.contains('draft')) {
+                        bubbleEl.classList.remove('draft');
+                        bubbleEl.innerHTML = placeholder;
+                    }
+                    return;
+                }
                 // textContent, never innerHTML: this is unvalidated model
                 // output going straight onto the page.
                 bubbleEl.classList.add('draft');

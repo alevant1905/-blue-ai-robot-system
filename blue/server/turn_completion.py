@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 import bluetools as bt
 from blue.server import runaway as _runaway
 from blue_identity import _ASKS_OR_GREETS_RE, _USER_CORRECTION_CUE_RE
+from blue_reply_text import strip_reasoning_tags
 
 
 # Compiled once. These were rebuilt on every single turn, and living inside
@@ -873,9 +874,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                       .get("message", {}).get("content") or "").strip()
             except (AttributeError, IndexError, TypeError):
                 _t = ""
-            if "</think>" in _t:
-                _t = _t.split("</think>")[-1].strip()
-            return _t
+            return strip_reasoning_tags(_t)
 
 
         # Identity questions pull the injected self-profile out
@@ -1183,6 +1182,16 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
             "role": "assistant", "content": final_content,
         }}]}
 
+    # Reasoning that leaked into the text goes first: everything up to the
+    # last "</think>" is the model thinking, not the reply. On 2026-10-05 a
+    # reply with three "</think>" tags in it was shown, spoken and stored.
+    _unthought = strip_reasoning_tags(final_content)
+    if _unthought != final_content:
+        print(f"   [THINK] dropped {len(final_content or '') - len(_unthought or '')} "
+              f"chars of leaked reasoning")
+        final_content = _unthought
+        response["choices"][0]["message"]["content"] = final_content
+
     # A looping reply is cut before anything else sees it: the guards,
     # the speech queue and the history replayed on later turns.
     try:
@@ -1224,6 +1233,12 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
                 response["choices"][0]["message"]["content"] = final_content
     except Exception as e:
         bt.log.warning(f"[STYLE] filler strip failed: {e}")
+
+    # A guard's regeneration can bring reasoning back, so strip it once more.
+    _unthought = strip_reasoning_tags(final_content)
+    if _unthought != final_content:
+        final_content = _unthought
+        response["choices"][0]["message"]["content"] = final_content
 
     # Prepend proactive content: the once-a-day schedule briefing,
     # then any reminder alerts queued by the heartbeat thread. Done

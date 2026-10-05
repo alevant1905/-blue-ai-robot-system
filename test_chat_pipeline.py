@@ -94,7 +94,7 @@ def chat(monkeypatch):
     monkeypatch.setattr(bt, "_post_to_model",
                         lambda payload, timeout=120: model(payload, timeout, main=True))
 
-    def stream(payload, on_token, timeout=120):
+    def stream(payload, on_token, timeout=120, prose_limit=None):
         result = model(payload, timeout, main=True)
         text = result["choices"][0]["message"].get("content") or ""
         if on_token and text:
@@ -202,6 +202,18 @@ def test_a_malformed_model_response_does_not_500(chat):
 
     assert response.status_code == 200
     assert reply_of(response)
+
+
+def test_leaked_reasoning_is_neither_shown_nor_stored(chat):
+    """Everything up to the last "</think>" is the model thinking. On
+    2026-10-05 a reply with three of them was shown, spoken and saved."""
+    chat.model.queue("He wants a short answer. Keep it warm.\n</think>\n\n"
+                     "Memory is a strange thing to be made of.")
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert reply == "Memory is a strange thing to be made of."
+    stored = [k.get("content") for _a, k in chat.saved if k.get("role") == "assistant"]
+    assert stored == [reply]
 
 
 # --------------------------------------------------------------------------

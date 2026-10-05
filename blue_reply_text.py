@@ -13,6 +13,11 @@ again. Three kinds of debris travel with them:
 - closing asks: "Do you want me to dim the hallway lights…, or are we calling
   it a night completely?" — quoted, an old menu becomes the next reply's menu.
 
+Two more judge a reply before it goes out at all: strip_reasoning_tags drops a
+reasoning pass that leaked into the text ("…</think>"), and
+reads_as_deliberation spots a forced tool call that wrote the model arguing
+with itself instead of the call.
+
 Stdlib only and at the repo top level on purpose: blue_memory_improved imports
 this, and importing anything under blue/ runs blue/__init__ → blue.memory →
 blue_memory_improved, which is a cycle (and, outside the server, starts the
@@ -100,6 +105,71 @@ def cut_self_talk(text: str, live: bool = True) -> str:
         if pattern.match(text, start):
             return text[:brk.start()].rstrip()
     return text
+
+
+# ================================================================================
+# LEAKED REASONING
+# ================================================================================
+
+_THINK_CLOSE_RE = re.compile(r"</think\s*>", re.I)
+_THINK_OPEN_RE = re.compile(r"<think\s*>", re.I)
+
+
+def strip_reasoning_tags(text: str) -> str:
+    """Drop a reasoning pass that leaked into a reply's text.
+
+    Everything up to and including the LAST "</think>" is the model thinking,
+    and a stray "<think>" is removed. On 2026-10-05 a forced create_reminder
+    came back as 6,976 characters with three literal "</think>" tags in it,
+    and every character was shown. Text without the tags is returned as is.
+    """
+    if not text or not isinstance(text, str) or "think" not in text.lower():
+        return text
+    closes = list(_THINK_CLOSE_RE.finditer(text))
+    out = text[closes[-1].end():] if closes else text
+    out = _THINK_OPEN_RE.sub("", out)
+    return out.strip() if out != text else text
+
+
+# The model deciding what to say instead of saying it. All from forced tool
+# calls that came back as words: "remind me to call the dentist" (2026-10-05
+# harness: "Hmm, that's two questions. Let me clean this up.", "Final
+# answer:", "I keep second-guessing", "Sending it now for real this time")
+# and the send_gmail statement on 09-27 (conversation_log 10048: "Actually, I
+# shouldn't assume — you asked me about structure").
+_DELIBERATION_RE = re.compile(
+    r"</?think\s*>"
+    r"|\bfinal (?:final|answer|reply)\s*:"
+    r"|\bsecond[- ]guessing\b"
+    r"|\blet me (?:clean (?:this|that) up|rethink|re-?read|make sure i['’]m not)\b"
+    r"|\b(?:the|my) (?:system prompt|style (?:guide|rules)|instructions? (?:is|are|says?))\b"
+    r"|\bi(?:['’]m| am) (?:told|instructed) to\b"
+    r"|\bsending (?:it|that|this) now\b"
+    r"|\bi shouldn['’]t assume\b"
+    r"|\binternal monologue\b",
+    re.I,
+)
+# A later paragraph opening on second thoughts: "Hmm, that's two questions.",
+# "No — one question, no menu.", "Wait — you mentioned…".
+_SECOND_THOUGHT_RE = re.compile(
+    r"\s*(?:\*\*)?(?:wait|hmm+|actually|no)\s*[,.!—–-]", re.I)
+
+
+def reads_as_deliberation(text: str) -> bool:
+    """Does this text argue with itself about what to reply?
+
+    For judging the words a forced tool call wrote instead of calling, which
+    are never meant as a reply. Not for ordinary replies: a teaching answer
+    may well open its second paragraph with "Actually, ...".
+    """
+    if not text or not isinstance(text, str):
+        return False
+    if _DELIBERATION_RE.search(text) or cut_self_talk(text, live=False) != text:
+        return True
+    first_para = len(text) - len(text.lstrip())
+    return any(brk.start() > first_para
+               and _SECOND_THOUGHT_RE.match(text, brk.end())
+               for brk in _PARAGRAPH_BREAK_RE.finditer(text))
 
 
 # ================================================================================

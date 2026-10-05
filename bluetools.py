@@ -1603,6 +1603,7 @@ from blue.tool_selector import (
     integrate_with_existing_system,
 )
 from blue.utils import strip_conversational_filler, strip_pasted_block
+from blue_reply_text import strip_reasoning_tags
 
 # Direct Ohbot-family head control (this branch only — replaces the Ohbot app
 # for the head). The module is defensive: if a library isn't installed or a
@@ -6753,9 +6754,8 @@ def _llm_search_query_rewrite(original: str) -> str:
             include_tools=False, temperature=0.2, max_tokens=600)
         ch = (res or {}).get('choices') or []
         cand = ((ch[0].get('message') or {}).get('content') or '') if ch else ''
-        if '</think>' in cand:
-            cand = cand.split('</think>')[-1]
-        lines = [ln.strip().strip('"\'') for ln in cand.replace('<think>', '').strip().splitlines() if ln.strip()]
+        cand = strip_reasoning_tags(cand)
+        lines = [ln.strip().strip('"\'') for ln in cand.strip().splitlines() if ln.strip()]
         cand = lines[0] if lines else ''
         if 2 <= len(cand) <= 90:
             return cand
@@ -8921,7 +8921,9 @@ def _build_email_reply(cand: Dict[str, Any]) -> tuple:
         composition = _maybe_handle_owner_composition(body)
         if composition:
             return composition, []
-    return _generate_reply_for_email(cand), []
+    # Reasoning that leaked into the text is not part of the reply; an
+    # all-reasoning draft comes back empty and is skipped, not sent.
+    return strip_reasoning_tags(_generate_reply_for_email(cand)), []
 
 
 
@@ -10334,7 +10336,8 @@ def _post_to_model(payload: Dict, timeout: int = 120) -> Dict:
     return response.json()
 
 
-def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
+def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
+                       prose_limit: Optional[int] = None) -> Dict:
     """A streamed call, assembled into exactly what a blocking call returns.
 
     Streaming here changes only WHEN text becomes visible, never what the rest
@@ -10347,11 +10350,17 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
     ``on_token`` is called with each content delta. It is deliberately NOT
     called for tool-call deltas: a turn that ends in a tool call has no
     answer to show yet.
+
+    ``prose_limit`` is for a forced call, whose answer is the call: once that
+    many characters of text have come with no call started, the model is
+    writing instead of calling, and the stream is closed with finish_reason
+    "length" rather than left to run to the 8,192-token cap.
     """
     payload = {**payload, "stream": True}
     parts: List[str] = []
     tool_calls: Dict[int, Dict[str, Any]] = {}
     finish_reason = None
+    prose_chars = 0
     with llm_slot(foreground=True):
         with requests.post(LM_STUDIO_URL, json=payload,
                            timeout=timeout, stream=True) as response:
@@ -10386,6 +10395,17 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120) -> Dict:
                             # reply still has to be logged, guarded and stored.
                             log.warning(f"[STREAM] token sink failed: {exc}")
                             on_token = None
+                    prose_chars += len(piece)
+                    if (prose_limit is not None and prose_chars > prose_limit
+                            and not tool_calls):
+                        # A call written out as text is still a call, and the
+                        # loop runs it (parse_leaked_tool_call).
+                        _text = "".join(parts)
+                        if "<tool_call" not in _text and "<function=" not in _text:
+                            print(f"   [FORCE] forced call wrote {prose_chars} chars "
+                                  f"of text and no call — stopped")
+                            finish_reason = "length"
+                            break
                 for call in delta.get("tool_calls") or []:
                     index = call.get("index", 0)
                     slot = tool_calls.setdefault(
@@ -10759,6 +10779,16 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
 _LONG_ARGUMENT_TOOLS = {"create_document", "create_note", "update_note",
                         "send_gmail", "reply_gmail", "write_file"}
 
+# A forced call (tool_choice "required") that writes text has failed: its
+# answer was supposed to be the call. Such text is never shipped longer than
+# this (blue/server/tool_pipeline.py), and a streamed forced call is stopped
+# once it has written _FORCED_STREAM_ABORT_CHARS with no call started — the
+# extra room is for a short lead-in before a late call. On 2026-10-05 a forced
+# create_reminder wrote 6,976 characters arguing with itself; on 09-27 a
+# forced send_gmail ran 214 s and shipped 3,020.
+_FORCED_PROSE_MAX_CHARS = 600
+_FORCED_STREAM_ABORT_CHARS = 1500
+
 
 def _chat_max_tokens() -> int:
     """The reply cap for chat turns; override with BLUE_CHAT_MAX_TOKENS."""
@@ -10769,12 +10799,16 @@ def _chat_max_tokens() -> int:
 
 
 def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
-                       tool_scope):
+                       tool_scope, force_choice="required"):
     """Assemble the request body: the turn, the tools it may use, and a trim
     to fit the model's input budget.
 
     Takes `messages` by value - it normalises a local copy rather than the
     caller's list.
+
+    `force_tool` narrows the tools to that one; `force_choice` is its
+    tool_choice. "required" forces the call; "auto" is the loop's one retry
+    after a forced call came back as words, where words are a fair answer.
     """
     # Final-pass normalization for strict chat templates (Qwen et al.).
     # Ensures: leading systems, alternating user/assistant, starts with user
@@ -10792,7 +10826,10 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         # review; blue/server/runaway.py trims whatever loops inside it.
         # A forced document, note or email carries its whole body in the
         # tool arguments; 2048 tokens would cut the JSON off mid-document.
-        "max_tokens": (8192 if force_tool in _LONG_ARGUMENT_TOOLS
+        # Not on the "auto" retry: that one follows a forced call that wrote
+        # words instead, and words are what it is likely to write again.
+        "max_tokens": (8192 if (force_tool in _LONG_ARGUMENT_TOOLS
+                                and force_choice == "required")
                        else _chat_max_tokens()),
         "stream": False,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
@@ -10833,8 +10870,9 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
             forced_tools = [t for t in TOOLS if t['function']['name'] == force_tool]
             if forced_tools:
                 payload["tools"] = forced_tools
-                payload["tool_choice"] = "required"
-                print(f"   [FORCE-TOOLS] Filtered to only: {force_tool}")
+                payload["tool_choice"] = force_choice
+                print(f"   [FORCE-TOOLS] Filtered to only: {force_tool}"
+                      + ("" if force_choice == "required" else f" ({force_choice})"))
             else:
                 print(f"   [FORCE-TOOLS] WARNING: {force_tool} not found in TOOLS, falling back to auto")
                 payload["tools"] = tools_to_use
@@ -11025,12 +11063,16 @@ def _lm_studio_recover(e, payload):
     return None
 
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
-                   on_token=None, tool_scope: str = "full") -> Dict:
+                   on_token=None, tool_scope: str = "full",
+                   force_choice: str = "required") -> Dict:
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
     # the model will call the right tool. We only add text hints for tools where
     # the model needs guidance on PARAMETERS (like gmail workflows).
-    if force_tool:
+    # (It does not guarantee it: on 2026-10-05 a forced create_reminder came
+    # back as 6,976 characters of text — see tool_pipeline._forced_call_failed.)
+    _forced_call = bool(force_tool and include_tools and force_choice == "required")
+    if _forced_call:
         messages = messages.copy()
         last_msg = messages[-1]
         if last_msg.get("role") == "user":
@@ -11055,7 +11097,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
 
     payload = _lm_studio_payload(
         messages, include_tools=include_tools, force_tool=force_tool,
-        iteration=iteration, tool_scope=tool_scope)
+        iteration=iteration, tool_scope=tool_scope, force_choice=force_choice)
 
     _LM_FAILURE.kind = None
     _LM_FAILURE.streamed = on_token is not None
@@ -11068,7 +11110,14 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                     _reset()
                 except Exception:
                     pass
-            result = _stream_from_model(payload, on_token)
+            if _forced_call:
+                # A forced call's answer is the call. Any text it writes is a
+                # failure the loop deals with, never a draft to show: on 10-05
+                # the reminder self-argument streamed into the preview.
+                result = _stream_from_model(
+                    payload, None, prose_limit=_FORCED_STREAM_ABORT_CHARS)
+            else:
+                result = _stream_from_model(payload, on_token)
         else:
             result = _post_to_model(payload)
     except Exception as e:
@@ -13948,9 +13997,7 @@ def _duet_research_plan(query: str):
             include_tools=False, temperature=0.3, max_tokens=900)
         ch = (res or {}).get('choices') or []
         cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
-        if '</think>' in cand:
-            cand = cand.split('</think>')[-1]
-        for ln in cand.replace('<think>', '').strip().splitlines():
+        for ln in strip_reasoning_tags(cand).strip().splitlines():
             ln = re.sub(r'^\s*(?:\d+[\).:]|[-*•])\s*', '', ln).strip().strip('"').strip()
             if 3 <= len(ln) <= 140:
                 plans.append(ln)
@@ -14127,9 +14174,7 @@ def _wiki_subjects_for(topic: str):
             include_tools=False, temperature=0.2, max_tokens=700)
         ch = (res or {}).get('choices') or []
         cand = ((ch[0].get('message') or {}).get('content') or "") if ch else ""
-        if '</think>' in cand:
-            cand = cand.split('</think>')[-1]
-        for ln in cand.replace('<think>', '').strip().splitlines():
+        for ln in strip_reasoning_tags(cand).strip().splitlines():
             ln = re.sub(r'^\s*(?:\d+[\).:]|[-*•])\s*', '', ln).strip().strip('"').strip()
             if 2 <= len(ln) <= 90 and ln.lower() not in {s.lower() for s in subjects}:
                 subjects.append(ln)

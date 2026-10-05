@@ -20,8 +20,10 @@ from blue_reply_text import (
     cut_self_talk,
     is_runaway_text,
     quotable_reply,
+    reads_as_deliberation,
     strip_block_citations,
     strip_closing_asks,
+    strip_reasoning_tags,
 )
 
 # run1 camera_face[2] (2026-09-25 harness): one real answer, then a reminder
@@ -102,6 +104,63 @@ def test_a_teaching_opener_is_cut_only_when_quoting_from_memory():
     assert cut_self_talk(reply) == reply
     assert cut_self_talk(reply, live=False) == (
         "A lab budget has three parts: hardware, licences and staff time.")
+
+
+# --- leaked reasoning --------------------------------------------------------
+
+@pytest.mark.parametrize("raw, clean", [
+    ("<think>Alex wants a time.</think>\n\nWhat time works?", "What time works?"),
+    # The 10-05 shape: no opening tag, several closing ones. Only the text
+    # after the LAST one is the reply.
+    ("Sure — what time?\n</think>\n\nHmm, one question.\n</think>\n\n"
+     "What time should I remind you?", "What time should I remind you?"),
+    ("Here you go.<think>", "Here you go."),
+    ("All reasoning, nothing after.</think>", ""),
+    ("Mixed </THINK> case.", "case."),
+])
+def test_reasoning_before_the_last_close_tag_is_dropped(raw, clean):
+    assert strip_reasoning_tags(raw) == clean
+
+
+@pytest.mark.parametrize("text", [
+    "  A reply with no tags, spaces kept.  ",
+    "We think about this a lot.",
+    "",
+    None,
+])
+def test_text_without_tags_is_returned_as_is(text):
+    assert strip_reasoning_tags(text) is text
+
+
+# --- deliberation (forced-call words only) -----------------------------------
+
+@pytest.mark.parametrize("text", [
+    # reminder_variants[0], 2026-10-05: excerpts of the forced call's words.
+    "Sure — what time should I remind you?\n\nActually, let me just ask the one "
+    "thing I need.\n\nHmm, that's two questions. Let me clean this up.",
+    "**Final answer:**\nWhat time should I remind you to call the dentist?",
+    "...I keep second-guessing. The instruction is: ask at most one question.",
+    "Sending it now for real this time.",
+    "One simple question is cleanest.\n</think>\n\nWhen would you like it?",
+    # conversation_log 10048, 2026-09-27.
+    "That's a clean, bounded use case.\n\nWait — you mentioned sending the "
+    "newsfeed by email to yourself.",
+    "So my honest read: it works. Actually, I shouldn't assume — you asked me "
+    "about structure.",
+])
+def test_a_forced_call_arguing_with_itself_is_deliberation(text):
+    assert reads_as_deliberation(text)
+
+
+@pytest.mark.parametrize("text", [
+    "What time should I remind you to call the dentist?",
+    "No, I haven't saved that yet — what's Athena's age?",
+    "I can't send that without an address. Who should it go to?",
+    "A daily digest is a nicely bounded job for it.",
+    "",
+])
+def test_a_plain_short_answer_is_not_deliberation(text):
+    assert not reads_as_deliberation(text)
 
 
 # --- closing asks ------------------------------------------------------------
