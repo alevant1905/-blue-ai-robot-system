@@ -963,6 +963,34 @@ def is_social_checkin(text: str) -> bool:
         _BARE_GREETING_RE.search(text or ""))
 
 
+# "what have you been up to?", "anything new with you?" — catching up, asked
+# the way you would ask a friend, the whole message. They classify as
+# evolution, because the duet record and the change history pinned for that
+# kind are what answer them, but the answer is a casual human one and needs
+# no J-space or continuity words (Alex, 2026-07-15: "I don't want you to start
+# describing your J-space so literally"). Demanding them threw away Hexia's
+# "Honestly? Mostly waiting for you to say hi again…" for missing_continuity
+# on 2026-10-05, and the canned J-space paragraph went out instead.
+_CATCH_UP_RE = re.compile(
+    r"^\s*(?:(?:and|so|ok(?:ay)?|well|hey|hi|hello)[,.! ]+)*"
+    r"(?:" + _ROBOT_NAME_ALT + r"[,.! ]+)?"
+    r"(?:what(?:['’]?ve| have)? you been (?:up to|doing)"
+    r"|(?:have you )?been up to (?:anything|much)(?: (?:fun|good|interesting))?"
+    r"|what(?:['’]?s| is| has)(?: been)? new(?: with you)?"
+    r"|anything new(?: with you)?"
+    r"|what(?:['’]?s| is| has)(?: been)? (?:going on|happening) with you)"
+    r"(?:\s+(?:lately|recently|today|all day|this (?:week|morning|afternoon|evening)"
+    r"|since (?:we|i) (?:last )?(?:talked|spoke)))?"
+    r"(?:[,.! ]+" + _ROBOT_NAME_ALT + r")?\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_casual_catch_up(text: str) -> bool:
+    """True for "what have you been up to?" and its kin, asked casually."""
+    return bool(_CATCH_UP_RE.search(text or ""))
+
+
 # Replies whose wording must never be quoted back to the robot, however the
 # question was put. Keyed on the question alone, the rule missed the sources
 # Blue recited in class: identity_request_kind is None for "we're in front of
@@ -1284,6 +1312,7 @@ def identity_response_problem(
     request_kind: Optional[str] = None,
     grounding_anchors: Iterable[str] = _DEFAULT_GROUNDING_ANCHORS,
     completeness: bool = True,
+    request_text: Optional[str] = None,
 ) -> Optional[str]:
     """Return why a reply is not a valid expression of the robot's identity.
 
@@ -1291,10 +1320,19 @@ def identity_response_problem(
     no J-space or continuity words). Those judge a whole reply; one sentence
     of a good answer lacks them by nature. guard_identity uses it to decide
     which single sentences are actually false.
+
+    request_text is the message answered, where the caller has it. A casual
+    catch-up ("what have you been up to?") skips the same checks: it is
+    evolution for the context it pins and a check-in for what the answer
+    says. Every judge of a reply passes it — the live check, the page
+    thread, <recent_history>, the J-space episodes — or an answer let
+    through live is dropped from the history afterwards.
     """
     reply = (text or "").strip()
     if not reply:
         return "empty"
+    if request_kind == "evolution" and is_casual_catch_up(request_text or ""):
+        completeness = False
 
     for other_name in other_names:
         if other_name and _claims_name(reply, other_name):
@@ -2079,6 +2117,66 @@ def is_recorded_recall_denial(text: str) -> bool:
     return bool(_RECORDED_RECALL_DENIAL_RE.search(text or ""))
 
 
+_WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday",
+                  "saturday", "sunday")
+_RECALL_DAY_RE = re.compile(
+    r"\b(?P<before>the day before yesterday)\b"
+    r"|\b(?P<yesterday>yesterday|last night)\b"
+    r"|\b(?P<today>today|tonight|this (?:morning|afternoon|evening))\b"
+    r"|\b(?P<weekday>" + "|".join(_WEEKDAY_NAMES) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def recall_day_asked(text: str, today=None):
+    """The one past day a recall question is about, as a date, or None.
+
+    "what did we talk about yesterday?" is yesterday; "…on Friday" is the
+    most recent Friday before today. None for no day, or for two ("yesterday
+    or friday"). Python does the calendar arithmetic, never the model.
+    """
+    from datetime import date, timedelta
+
+    current = today or date.today()
+    days = set()
+    for match in _RECALL_DAY_RE.finditer(text or ""):
+        if match.group("before"):
+            days.add(current - timedelta(days=2))
+        elif match.group("yesterday"):
+            days.add(current - timedelta(days=1))
+        elif match.group("today"):
+            days.add(current)
+        else:
+            weekday = _WEEKDAY_NAMES.index(match.group("weekday").lower())
+            back = (current.weekday() - weekday) % 7 or 7
+            days.add(current - timedelta(days=back))
+    return days.pop() if len(days) == 1 else None
+
+
+# A recorded line this long is a paste or a document, not something said to
+# Blue: the <remembered_days> excerpt cuts every line at 420 characters, and
+# on 2026-10-05 "what did we talk about yesterday?" was answered with 420 of
+# them from a pasted Princeton talk transcript ("You said: \"Search transcript
+# Chapter 1: Introduction 0:066 secondsUh welcome uh to this event…\"").
+_LONG_RECORDED_LINE_CHARS = 400
+_ATTACHED_DOCUMENT_RE = re.compile(r"\[Attached document:\s*([^\]\n]+)\]", re.IGNORECASE)
+
+
+def _recorded_line_as_said(item: str, first: bool) -> str:
+    """One of the user's recorded lines as the fallback repeats it: quoted,
+    or, for an attachment or a paste, named in a few words."""
+    attached = _ATTACHED_DOCUMENT_RE.search(item)
+    if attached:
+        what = f'shared the document "{attached.group(1).strip()[:80]}"'
+    elif len(item) >= _LONG_RECORDED_LINE_CHARS:
+        head = item[:60].rsplit(" ", 1)[0].rstrip(" ,;:.")
+        what = f'sent a long message that starts "{head}…"'
+    else:
+        return (f'You said: "{item}".' if first
+                else f'You later said: "{item}".')
+    return f"You {what}." if first else f"Later you {what}."
+
+
 def recalled_evidence_fallback(
     evidence: str,
     user_name: str = "Alex",
@@ -2087,13 +2185,16 @@ def recalled_evidence_fallback(
 
     This is a last resort after one grounded regeneration still denies a
     recorded exchange. Only the user's own stored lines are repeated, so an
-    old assistant error cannot be promoted to fact.
+    old assistant error cannot be promoted to fact, and a pasted document or
+    an attachment is named, never read back.
     """
     block = str(evidence or "")
     if not block.strip():
         return None
     label_match = re.search(r"(?m)^- ([^:\n]+):\s*$", block)
     label = label_match.group(1).strip() if label_match else "an earlier conversation"
+    if label == "Yesterday":
+        label = "yesterday"
     speaker = re.escape((user_name or "Alex").strip())
     statements = [
         re.sub(r"\s+", " ", match).strip()
@@ -2102,8 +2203,8 @@ def recalled_evidence_fallback(
     statements = list(dict.fromkeys(item for item in statements if item))[:3]
     if not statements:
         return None
-    rendered = [f'You said: "{statements[0]}".']
-    rendered.extend(f'You later said: "{item}".' for item in statements[1:])
+    rendered = [_recorded_line_as_said(item, first=index == 0)
+                for index, item in enumerate(statements)]
     return (
         f"I found the recorded exchange from {label}. "
         + " ".join(rendered)
@@ -2821,6 +2922,7 @@ __all__ = [
     "is_family_overview_request",
     "is_jspace_presence_request",
     "is_self_state_request",
+    "is_casual_catch_up",
     "is_failure_placeholder",
     "is_social_checkin",
     "is_user_identity_request",
@@ -2830,6 +2932,7 @@ __all__ = [
     "known_household_target",
     "known_relative_target",
     "robot_relationship_targets",
+    "recall_day_asked",
     "recalled_evidence_fallback",
     "strip_drifted_sentences",
 ]

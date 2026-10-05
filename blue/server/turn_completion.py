@@ -730,6 +730,37 @@ def _repeat_requested(text, earlier=(), messages=None, reply=""):
     return _rehearsed_source(reply, messages, lenient=bool(_SELF_INTRO_ASK_RE.search(t)))
 
 
+def _no_record_that_day(question, evidence, *, robot, user_name):
+    """Why a reply saying it has no record of the day asked about is honest,
+    or "" when it may be a false denial.
+
+    <remembered_days> is retrieved by word overlap, so it is proof of the
+    exchange asked about only when it comes from the day asked about. On
+    2026-10-05 "what did we talk about yesterday?" retrieved a July 13 paste
+    on "talk" and "yesterday"; the draft said, truthfully, that the last
+    conversation had been on Friday, and the recall guard replaced it with
+    the July excerpt. A question about one day is denied falsely only when
+    that day has a conversation on record and the excerpt is from it.
+    """
+    day = bt.recall_day_asked(
+        bt._intent_text(question) if isinstance(question, str) else "")
+    if day is None:
+        return ""
+    try:
+        if not (bt.ENHANCED_MEMORY_AVAILABLE and bt.memory_system):
+            return ""
+        if not bt.memory_system.has_conversation_on(
+                day.isoformat(), robot=robot, user_name=user_name):
+            return f"nothing was said on {day.isoformat()}"
+        label = bt.memory_system._friendly_day_label(day.isoformat())
+    except Exception as e:
+        bt.log.warning(f"[MEMORY] day check failed: {e}")
+        return ""
+    if f"- {label}:" not in (evidence or ""):
+        return f"the excerpt is not from {day.isoformat()}"
+    return ""
+
+
 def _run_reply_guards(final_content, response, *, messages, robot,
                       last_user_msg, user_messages, user_name,
                       _grounded_reply, templated=False):
@@ -783,14 +814,16 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             # Cutting "Hi everyone, I'm Hexia, ..." from a requested
             # re-introduction left a nameless one, which the identity check
             # then replaced with a canned paragraph (2026-09-09).
-            _pre_kind = bt.contextual_identity_request_kind(
-                bt._intent_text(last_user_msg) if isinstance(last_user_msg, str) else "",
-                messages)
+            _pre_text = (bt._intent_text(last_user_msg)
+                         if isinstance(last_user_msg, str) else "")
+            _pre_kind = bt.contextual_identity_request_kind(_pre_text, messages)
             if _pre_kind:
                 _pre_name = bt._robot_cfg(robot)["name"]
-                if (bt.identity_response_problem(_derecycled, _pre_name, request_kind=_pre_kind)
+                if (bt.identity_response_problem(_derecycled, _pre_name, request_kind=_pre_kind,
+                                                 request_text=_pre_text)
                         and not bt.identity_response_problem(
-                            final_content, _pre_name, request_kind=_pre_kind)):
+                            final_content, _pre_name, request_kind=_pre_kind,
+                            request_text=_pre_text)):
                     print("   [ANTI-PARROT] kept the recycled lead: cutting it broke the self-description")
                     _derecycled = final_content
         if _derecycled != final_content:
@@ -930,10 +963,19 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # authority. It also catches Qwen/Alibaba-style model boilerplate
         # and nameless generic introductions, which the legacy patterns
         # above do not cover.
+        _identity_text = (bt._intent_text(last_user_msg)
+                          if isinstance(last_user_msg, str) else "")
         _identity_kind = bt.contextual_identity_request_kind(
-            bt._intent_text(last_user_msg) if isinstance(last_user_msg, str) else "",
+            _identity_text,
             messages,
         )
+        # "what have you been up to?" is evolution for the context it pins
+        # (the duet record, the change history), and a casual check-in for
+        # what the answer must say: no J-space or continuity words demanded
+        # (the validator reads that from request_text), and the plain
+        # check-in when a false answer has to be replaced.
+        _casual_checkin = bool(_identity_kind == "evolution"
+                               and bt.is_casual_catch_up(_identity_text))
         _identity_name = bt._robot_cfg(robot)["name"]
         _identity_others = [
             bt._robot_cfg(r)["name"]
@@ -951,6 +993,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                 _identity_name,
                 other_names=_identity_others,
                 request_kind=_identity_kind,
+                request_text=_identity_text,
             )
             if problem:
                 return problem
@@ -1012,6 +1055,13 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             _recalled_days_evidence
             and bt.is_recorded_recall_denial(final_content)
         )
+        if _denied_recalled_evidence:
+            _honest = _no_record_that_day(
+                last_user_msg, _recalled_days_evidence,
+                robot=robot, user_name=user_name)
+            if _honest:
+                print(f"   [MEMORY] 'no record' of the day asked about is honest — {_honest}")
+                _denied_recalled_evidence = False
 
         _person_ages = bt._canonical_person_ages()
         _wrong_ages = (bt._misstated_ages(final_content, _person_ages)
@@ -1068,6 +1118,7 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             regen_once=_regen_once,
             grounded_reply=_grounded_reply,
             identity_kind=_identity_kind,
+            casual_checkin=_casual_checkin,
             identity_name=_identity_name,
             identity_issue=_identity_issue,
             identity_topic_history=_identity_topic_history,

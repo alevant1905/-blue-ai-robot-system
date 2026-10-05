@@ -889,6 +889,7 @@ class RobotContinuity:
             self.name,
             other_names=others,
             request_kind=identity_request_kind(user_text),
+            request_text=user_text,
         )
         if issue:
             return (

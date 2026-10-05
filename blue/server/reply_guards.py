@@ -52,6 +52,8 @@ class ReplyContext:
     # What detection already worked out about this turn.
     grounded_reply: Any = None
     identity_kind: str = ""
+    # "what have you been up to?": an evolution question asked as a check-in.
+    casual_checkin: bool = False
     identity_name: str = ""
     identity_issue: str = ""
     identity_topic_history: Any = None
@@ -139,6 +141,11 @@ def guard_denied_recall(ctx) -> Optional[str]:
             and not _identity_broken(_redo_text)):
         final_content = _redo_text
     else:
+        # Even when the retry came back empty: the draft denies a
+        # conversation the excerpt shows was recorded (for a question about
+        # one day, on that day: turn_completion._no_record_that_day), which
+        # is false, and the fallback repeats only Alex's own lines, naming a
+        # paste instead of reading it back.
         _recall_fallback = bt.recalled_evidence_fallback(
             _recalled_days_evidence, user_name=user_name)
         if _recall_fallback:
@@ -153,6 +160,15 @@ def guard_denied_recall(ctx) -> Optional[str]:
 _SALVAGEABLE_IDENTITY_KINDS = {
     "identity", "identity_more", "introduction", "self_memory", "selfhood",
     "evolution", "origin", "jspace",
+}
+
+# A draft with only these is short of the self-description's vocabulary (no
+# J-space or continuity words, no name, no robot role, no anchor) and says
+# nothing false. When its retry comes back empty it is sent: a canned
+# paragraph that ignores the question is worse than an answer missing a word.
+_INCOMPLETE_ONLY_ISSUES = {
+    "missing_continuity", "missing_jspace", "missing_name",
+    "missing_robot_role", "missing_grounding",
 }
 
 
@@ -213,6 +229,19 @@ def guard_identity(ctx) -> Optional[str]:
             "the user's last message directly in your own voice.]"
         )
     _redo_text = _regen_once(_identity_retry_note)
+    if (not _redo_text and _identity_issue in _INCOMPLETE_ONLY_ISSUES
+            # The validator stops at the first problem, so a missing word
+            # can hide a replayed answer: judge the draft once more for
+            # what is false or repeated in it, the vocabulary aside.
+            and not ctx.identity_sentence_broken(final_content)):
+        # Empty: the call failed, or reasoning used the whole budget. On
+        # 2026-10-05 Hexia's "Honestly? Mostly waiting for you to say hi
+        # again…" was replaced this way by "I'm Hexia. I change as
+        # conversations and events become remembered episodes…". Declining
+        # lets the checks after this one still judge the draft.
+        print(f"   [IDENTITY] retry came back empty — keeping the draft "
+              f"({_identity_issue.replace('_', ' ')} only)")
+        return None
     # A retry whose only fault is touching the same angles as a recent
     # answer is shipped: that check comes from the repetition heuristic, not
     # the validator, and 32 of 35 identity answers it flagged since 07-13
@@ -255,11 +284,13 @@ def guard_identity(ctx) -> Optional[str]:
     elif _identity_salvage:
         final_content = _identity_salvage
         print("   [IDENTITY] retry still invalid — kept on-topic reply minus drifted sentences")
-    elif _identity_kind == "self_state":
+    elif _identity_kind == "self_state" or ctx.casual_checkin:
         # A check-in must never fall back to canonical_identity_reply: it has
         # no self_state branch, so its default is the "persistent J-space"
         # self-description — the architecture talk the check-in note forbids.
         # The template without a focus line says only mood and asks back.
+        # "What have you been up to?" is a check-in too, for every robot: its
+        # evolution paragraph was what Hexia got on 2026-10-05.
         _drives = {}
         try:
             _hub = bt._continuity_routes.HUB.get(robot)

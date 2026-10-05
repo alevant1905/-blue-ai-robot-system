@@ -2633,6 +2633,7 @@ class EnhancedMemorySystem:
                         expected_robot_name,
                         other_names=other_robot_names,
                         request_kind=identity_request_kind(previous_user_text),
+                        request_text=previous_user_text,
                     ))
                 )
                 if toxic:
@@ -3495,6 +3496,29 @@ class EnhancedMemorySystem:
             return [str(row["d"]) for row in rows if row["d"]]
         except Exception:
             return []
+
+    def has_conversation_on(self, day: str, robot: str = "blue",
+                            user_name: Optional[str] = None) -> bool:
+        """Whether the user said anything to this robot on `day` (YYYY-MM-DD).
+
+        "I don't have a record of us talking yesterday" is the truth when
+        nothing was said yesterday; the recall-denial guard asks this before
+        calling it false. True when the log can't be read, so the guard
+        judges as it did before.
+        """
+        try:
+            conn = self._conn()
+            sql = ("SELECT 1 FROM conversation_log WHERE robot = ? "
+                   "AND role = 'user' AND substr(timestamp, 1, 10) = ?")
+            args: List[Any] = [(robot or "blue"), str(day)[:10]]
+            if user_name:
+                sql += " AND lower(user_name) = lower(?)"
+                args.append(user_name)
+            row = conn.execute(sql + " LIMIT 1", args).fetchone()
+            conn.close()
+            return row is not None
+        except Exception:
+            return True
 
     def _build_session_history_block(self, robot: str = "blue") -> str:
         """Recent human-chat continuity, namespaced to one robot.

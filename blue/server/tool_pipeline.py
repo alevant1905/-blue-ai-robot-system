@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import bluetools as bt
-from blue_reply_text import reads_as_deliberation
+from blue_reply_text import reads_as_deliberation, strip_reasoning_tags
 from blue.server.thinking import THINK_OFF
 
 
@@ -337,7 +337,9 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
             })
             retry = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
                                       thinking=_retry_thinking)
-            if retry:
+            # An empty retry is no answer: keep the first one, as when the
+            # call fails outright, rather than send nothing.
+            if retry and _reply_text(retry):
                 return retry, pending_force_tool
 
         # COMPOUND-REQUEST HALLUCINATION GUARD:
@@ -494,6 +496,16 @@ def _forced_prose_unshippable(text, finish_reason, *, forced) -> bool:
             or finish_reason == "length"
             or (forced and len(text) > bt._FORCED_PROSE_MAX_CHARS)
             or reads_as_deliberation(text))
+
+
+def _reply_text(response) -> str:
+    """The words of a model response, "" when it has none (a malformed
+    response, an error, or reasoning that used the whole budget)."""
+    try:
+        message = (response.get("choices") or [{}])[0].get("message") or {}
+        return strip_reasoning_tags((message.get("content") or "").strip())
+    except (AttributeError, IndexError, TypeError):
+        return ""
 
 
 def _replace_reply(response, text):

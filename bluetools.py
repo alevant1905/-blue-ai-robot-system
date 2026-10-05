@@ -92,6 +92,7 @@ from blue_identity import (
     identity_reply_topics,
     identity_request_kind,
     identity_response_problem,
+    is_casual_catch_up,
     is_family_overview_request,
     is_jspace_presence_request,
     is_phantom_correction_ack,
@@ -99,6 +100,7 @@ from blue_identity import (
     is_recorded_recall_denial,
     is_self_state_request,
     is_social_checkin,
+    recall_day_asked,
     recalled_evidence_fallback,
     self_state_focus_hint,
     self_state_readout,
@@ -15716,6 +15718,7 @@ def _sanitize_inbound_messages(messages: list, robot: str = "blue") -> list:
             _expected_robot_name,
             other_names=_other_robot_names,
             request_kind=identity_request_kind(previous_user_text),
+            request_text=previous_user_text,
         ):
             _drop_previous_user()
             dropped_wrong_identity += 1
