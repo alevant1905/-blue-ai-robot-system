@@ -28,8 +28,11 @@ from blue.llm_coordinator import (
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
+    bulk_paste_recall_words,
+    bulk_paste_stub,
     identity_history_problem,
     identity_request_kind,
+    is_bulk_paste,
     is_family_overview_request,
     canonical_family_reply_kind,
     is_failure_placeholder,
@@ -159,6 +162,36 @@ def _is_failure_exchange(episode: Dict[str, Any]) -> bool:
     if episode.get("kind") != "exchange":
         return False
     return is_failure_placeholder((episode.get("details") or {}).get("reply") or "")
+
+
+# What note_exchange keeps of the user's words for the reflection worker.
+_USER_TEXT_KEEP = 5000
+
+
+def _pasted_stub(episode: Dict[str, Any], who: str = "") -> str:
+    """A document a person pasted into chat, as the memory blocks name it, or
+    "" for anything else (words said, a duet or banter line).
+
+    An exchange's summary quoted the first 360 characters of whatever the
+    user sent, so an attached Reigeluth and Castelle chapter ("[Attached
+    document: …] CHAPTER 3 What Kind of Learning Is Machine Learning?…")
+    rode in <j_space> on 112 of 116 harness prompts (2026-10-05). Exchanges
+    recorded since carry the stub; older ones keep only the first 5,000
+    characters, so their length is left out.
+    """
+    if (episode.get("kind") != "exchange"
+            or str(episode.get("source") or "chat") != "chat"):
+        return ""
+    details = episode.get("details") or {}
+    stored = str(details.get("user_text_stub") or "")
+    if stored:
+        return stored
+    text = str(details.get("user_text") or "")
+    if not is_bulk_paste(text):
+        return ""
+    who = who or (episode.get("participants") or ["Someone"])[0]
+    shortened = len(text) >= _USER_TEXT_KEEP - 3 and text.endswith("...")
+    return bulk_paste_stub(text, who, chars=0 if shortened else None)
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -857,6 +890,13 @@ class RobotContinuity:
         reply = str(details.get("reply") or "")
         if not user_text or not reply:
             return summary, ""
+        # A pasted document is named, never quoted: older summaries quote it.
+        heard = _pasted_stub(episode)
+        if heard:
+            reply_preview = re.sub(r"\s+", " ", reply).strip()
+            summary = f"{heard} {self.name} replied: {_clip(reply_preview, 180)}"
+        else:
+            heard = user_text
         # A refusal to read a document that is demonstrably present remains in
         # the audit trail, but must never teach the reflection model that Blue
         # lacks PDF extraction or that an invented path is real.
@@ -870,7 +910,7 @@ class RobotContinuity:
                     and doc and path):
                 return (
                     f"{self.name} produced a false local-document access refusal "
-                    f"while answering {_clip(user_text, 280)!r}; preserve this as "
+                    f"while answering {_clip(heard, 280)!r}; preserve this as "
                     "a bug episode, not as evidence about file presence, PDF "
                     "capability, identity, memory, or architecture.",
                     "false_document_refusal",
@@ -895,14 +935,14 @@ class RobotContinuity:
         if issue:
             return (
                 f"{self.name} produced a reply error ({issue}) while answering "
-                f"{_clip(user_text, 280)!r}; preserve this as a bug episode, not "
+                f"{_clip(heard, 280)!r}; preserve this as a bug episode, not "
                 "as evidence about identity, memory, or architecture.",
                 issue,
             )
         if is_family_overview_request(user_text) or known_household_target(user_text):
             return (
                 f"{self.name} answered a canonical household relationship question "
-                f"({_clip(user_text, 280)!r}); the household facts, not this reply "
+                f"({_clip(heard, 280)!r}); the household facts, not this reply "
                 "record, are authoritative.",
                 "canonical_household_query",
             )
@@ -1203,22 +1243,24 @@ class RobotContinuity:
             summary, _ = self._episode_context_summary(item)
             details = item.get("details") or {}
             heard = str(details.get("user_text") or "").strip()
-            if item.get("kind") == "exchange" and _wording_omitted(heard):
+            who = (item.get("participants") or ["Someone"])[0]
+            pasted = _pasted_stub(item, who)
+            if (item.get("kind") == "exchange" and _wording_omitted(
+                    bulk_paste_recall_words(heard) if pasted else heard)):
                 # The summary quotes "Blue replied: …"; for a check-in that
                 # quote is only a pattern to copy. Reflection input keeps it.
-                who = (item.get("participants") or ["Someone"])[0]
+                said = pasted or f"{who} said '{_clip(heard, 80)}'"
                 summary = (
-                    f"{who} said "
-                    f"'{_clip(heard, 80)}'; your reply wording is omitted so it "
+                    f"{said}; your reply wording is omitted so it "
                     "is never reused."
                 )
             elif (item.get("kind") == "exchange"
                   and canonical_family_reply_kind(str(details.get("reply") or ""))):
                 # Keyed on the REPLY, so the model's own copy of the roster
                 # is covered too (it was re-quoted on 2026-08-19 22:22).
-                who = (item.get("participants") or ["Someone"])[0]
+                asked = pasted or f"'{_clip(heard, 80)}'"
                 summary = (
-                    f"{who} asked about the family ('{_clip(heard, 80)}'); you "
+                    f"{who} asked about the family ({asked}); you "
                     "answered from the household facts (wording omitted)."
                 )
             episode_lines.append(
@@ -1345,8 +1387,11 @@ class RobotContinuity:
             "their", "them", "then", "there", "these", "they", "this", "what",
             "when", "where", "which", "with", "would", "your", "you", "were",
         }
+        # A pasted document searches by the words said around it, and a
+        # recorded one is found the same way, never by its own text.
         query_terms = {
-            token for token in re.findall(r"[a-z0-9]+", (query or "").lower())
+            token for token in re.findall(
+                r"[a-z0-9]+", bulk_paste_recall_words(query or "").lower())
             if len(token) >= 3 and token not in stop
         }
 
@@ -1391,9 +1436,12 @@ class RobotContinuity:
             ranked = []
             for index, episode in enumerate(eligible):
                 details = episode.get("details") or {}
+                user_text = str(details.get("user_text") or "")
+                pasted = bool(_pasted_stub(episode))
                 haystack = " ".join((
-                    str(episode.get("summary") or ""),
-                    str(details.get("user_text") or ""),
+                    # Older summaries quote the first 360 characters of it.
+                    "" if pasted else str(episode.get("summary") or ""),
+                    bulk_paste_recall_words(user_text) if pasted else user_text,
                     str(details.get("reply") or ""),
                     " ".join(counterparts(episode)),
                 )).lower()
@@ -1456,7 +1504,12 @@ class RobotContinuity:
             details = episode.get("details") or {}
             heard = re.sub(r"\s+", " ", str(details.get("user_text") or "")).strip()
             replied = re.sub(r"\s+", " ", str(details.get("reply") or "")).strip()
-            if not heard:
+            pasted = _pasted_stub(episode, partner)
+            if pasted:
+                # What was asked, for the check-in test below; the line
+                # itself shows the stub.
+                heard = bulk_paste_recall_words(str(details.get("user_text") or ""))
+            elif not heard:
                 heard = str(episode.get("summary") or "").strip()
 
             # Old replies are evidence of what was said, not current truth. Do
@@ -1483,9 +1536,10 @@ class RobotContinuity:
                 if replied and canonical_family_reply_kind(replied) else
                 f" You replied: {_clip(replied, 180)}" if replied else ""
             )
+            said = pasted or f"{partner} said: {_clip(heard, 260)}"
             lines.append(
                 f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; {kind} with "
-                f"{partner}] {partner} said: {_clip(heard, 260)}{reply_part}"
+                f"{partner}] {said}{reply_part}"
             )
 
         if not lines:
@@ -1591,9 +1645,12 @@ class RobotContinuity:
                 re.I,
             ):
                 continue
+            heard = str(details.get("user_text") or "")
             haystack = " ".join([
                 summary,
-                str(details.get("user_text") or ""),
+                # A pasted document is found by what was said around it.
+                bulk_paste_recall_words(heard) if _pasted_stub(episode)
+                else heard,
                 reply,
                 str(details.get("scene_description") or ""),
                 str(details.get("location") or ""),
@@ -1677,6 +1734,11 @@ class RobotContinuity:
         user_preview = re.sub(r"\s+", " ", user_text or "").strip()
         reply_preview = re.sub(r"\s+", " ", reply or "").strip()
         name = self.name
+        # A pasted document is named in the summary; the reflection worker
+        # still reads its first 5,000 characters from details.
+        pasted = (bulk_paste_stub(user_text, user_name)
+                  if source == "chat" else "")
+        heard = pasted or f"{user_name} asked: {_clip(user_preview, 360)}"
         exchange = self.store.append_episode(
             kind="exchange",
             source=source,
@@ -1684,12 +1746,10 @@ class RobotContinuity:
             # into the robot's own system prompt via <j_space>, and long
             # verbatim quotes of past replies are parrot bait (the chat replay
             # bug). The full reply lives in details for the reflection worker.
-            summary=(
-                f"{user_name} asked: {_clip(user_preview, 360)} "
-                f"{name} replied: {_clip(reply_preview, 180)}"
-            ),
+            summary=f"{heard} {name} replied: {_clip(reply_preview, 180)}",
             details={
-                "user_text": _clip(user_text, 5000),
+                "user_text": _clip(user_text, _USER_TEXT_KEEP),
+                **({"user_text_stub": pasted} if pasted else {}),
                 "reply": _clip(reply, 5000),
                 "tool_count": len(tools),
                 **(_safe_json(extra_details) if isinstance(extra_details, dict) else {}),

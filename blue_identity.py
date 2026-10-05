@@ -2292,10 +2292,117 @@ def recall_day_asked(text: str, today=None):
 _LONG_RECORDED_LINE_CHARS = 400
 _ATTACHED_DOCUMENT_RE = re.compile(r"\[Attached document:\s*([^\]\n]+)\]", re.IGNORECASE)
 
+# A user turn carrying an attachment, or longer than this, is a document
+# handed over, not something said. Alex's 07-13 paste of a Princeton event
+# transcript (conversation_log 6893/6894, 99.5k characters each) shares two
+# words with almost any question, so it out-ranked every real exchange: it sat
+# in <remembered_days> as the "POSITIVE MATCH for the current question" on 53
+# of 103 harness turns (2026-10-05) and came back as what "we talked about
+# yesterday". Of the 5,056 user turns logged by 10-05, 53 are bulk pastes by
+# this rule: 31 attachments and 22 pastes of 2,575 characters or more. The
+# four between 1,000 and 2,000 (pasted minutes and course descriptions,
+# 1,712-1,902) stay quoted, cut at 420 like any line.
+BULK_PASTE_MIN_CHARS = 2000
+_PASTE_LABEL_CHARS = 60
+_PASTE_ASK_CHARS = 120
+# The chat page sends an attachment as '[Attached document: name]' and the
+# text between triple quotes; the user's own words sit before or after it.
+_ATTACHMENT_BLOCK_RE = re.compile(
+    r'\[attached document:[^\]]*\]\s*""".*?"""', re.IGNORECASE | re.DOTALL)
+# The stub as bulk_paste_stub writes it, after the speaker's name.
+_PASTE_STUB_RE = re.compile(
+    r"shared (?P<what>a long document|a document|\d+ documents)(?:, first)?: "
+    r"'(?P<label>.*?)'(?: \((?P<chars>[\d,]+) chars\))?"
+    r"(?:, saying: \"(?P<ask>.*)\")?$")
+
+
+def is_bulk_paste(text) -> bool:
+    """A document handed over rather than something said: an attachment, or
+    a message longer than BULK_PASTE_MIN_CHARS."""
+    if not isinstance(text, str):
+        return False
+    return bool(_ATTACHED_DOCUMENT_RE.search(text)
+                or len(text.strip()) > BULK_PASTE_MIN_CHARS)
+
+
+def _clip_at_word(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+
+
+def _bulk_paste_parts(text: str):
+    """(document names, opening line, the user's own words) of a bulk paste.
+
+    Only an attachment separates the user's words from the document; a long
+    paste has no marker, and strip_pasted_block's guess at its framing was
+    'Sync to video time' for the Princeton transcript — a line of the video
+    page's own text. Its opening line stands for it instead.
+    """
+    names = list(dict.fromkeys(
+        name.strip() for name in _ATTACHED_DOCUMENT_RE.findall(text)))
+    if not names:
+        first = next((line for line in text.splitlines() if line.strip()), "")
+        return [], _clip_at_word(first, _PASTE_LABEL_CHARS), ""
+    own = _ATTACHMENT_BLOCK_RE.sub(" ", text)
+    # Unclosed quoting: only what precedes the attachment is the user's.
+    own = re.split(r"\[attached document:", own, flags=re.IGNORECASE)[0]
+    return names, "", _clip_at_word(own, _PASTE_ASK_CHARS)
+
+
+def bulk_paste_stub(text, speaker: str = "Alex",
+                    chars: Optional[int] = None) -> str:
+    """One line standing for a bulk paste in a memory block, or "" when the
+    text is not one: "Alex shared a long document: 'hers the transcript:'
+    (99,544 chars)". An attachment is named, with the user's own words
+    beside it: "Alex shared a document: 'DH399 AL 2026F.pdf' (8,077 chars),
+    saying: "summarize"". Nothing of the document itself is quoted beyond its
+    first line or its name.
+
+    `chars` is the original length when `text` is a stored, shortened copy;
+    0 leaves the length out.
+    """
+    if not is_bulk_paste(text):
+        return ""
+    names, opening, ask = _bulk_paste_parts(text)
+    who = (speaker or "The user").strip()
+    length = len(text) if chars is None else chars
+    size = f" ({length:,} chars)" if length else ""
+    if not names:
+        return f"{who} shared a long document: '{opening}'{size}"
+    label = _clip_at_word(names[0], _PASTE_LABEL_CHARS)
+    what = ("a document" if len(names) == 1
+            else f"{len(names)} documents, first")
+    stub = f"{who} shared {what}: '{label}'{size}"
+    return stub + (f', saying: "{ask}"' if ask else "")
+
+
+def bulk_paste_recall_words(text) -> str:
+    """What a recall search may match a bulk paste on: an attachment's name
+    and the user's own words beside it, never the document's text. A long
+    paste offers nothing, since nothing marks where the user's words end:
+    the opening line of 07-15's pasted blog post was the post's own "this
+    post Yesterday's big AI news…". Ordinary text comes back unchanged."""
+    if not is_bulk_paste(text):
+        return text if isinstance(text, str) else ""
+    names, _, ask = _bulk_paste_parts(text)
+    return " ".join(part for part in (*names, ask) if part)
+
 
 def _recorded_line_as_said(item: str, first: bool) -> str:
     """One of the user's recorded lines as the fallback repeats it: quoted,
     or, for an attachment or a paste, named in a few words."""
+    stub = _PASTE_STUB_RE.match(item)
+    if stub:
+        label = stub.group("label").rstrip("…").rstrip(" ,;:.")
+        if stub.group("what") == "a long document":
+            what = f'sent a long message that starts "{label}…"'
+        else:
+            what = f'shared the document "{label}"'
+            if stub.group("ask"):
+                what += f' and said: "{stub.group("ask")}"'
+        return f"You {what}." if first else f"Later you {what}."
     attached = _ATTACHED_DOCUMENT_RE.search(item)
     if attached:
         what = f'shared the document "{attached.group(1).strip()[:80]}"'
@@ -2338,9 +2445,12 @@ def recalled_evidence_fallback(
         days = [day for day in days if day[0] == day_label]
     speaker = re.escape((user_name or "Alex").strip())
     for label, lines in days:
+        # "  Alex: …" lines, and the stub of a paste ("  Alex shared a long
+        # document: …"), which _recorded_line_as_said names.
         statements = [
             re.sub(r"\s+", " ", match).strip()
-            for match in re.findall(rf"(?m)^\s{{2}}{speaker}:\s*(.+)$", lines)
+            for match in re.findall(
+                rf"(?m)^\s{{2}}{speaker}(?::\s*|\s+(?=shared ))(.+)$", lines)
         ]
         statements = list(dict.fromkeys(item for item in statements if item))[:3]
         if statements:

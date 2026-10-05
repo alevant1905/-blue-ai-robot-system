@@ -35,8 +35,11 @@ from blue_identity import (
     identity_response_problem,
     _BIRTHDATE_KEY_RE,
     age_on,
+    bulk_paste_recall_words,
+    bulk_paste_stub,
     derive_ages,
     contextual_identity_request_kind,
+    is_bulk_paste,
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
@@ -2060,7 +2063,9 @@ class EnhancedMemorySystem:
             history_lines = []
             for r in recent:
                 role = r["role"].upper()
-                content = (r["content"] or "")[:240]
+                stub = (bulk_paste_stub(r["content"], user_name)
+                        if r["role"] == "user" else "")
+                content = stub or (r["content"] or "")[:240]
                 age = self._humanize_age(r.get("ts"), now)
                 prefix = f"[{age}] " if age else ""
                 history_lines.append(f"{prefix}{role}: {content}")
@@ -2611,12 +2616,16 @@ class EnhancedMemorySystem:
             content = (r["content"] or "").strip()
             if not content or len(content) < 4:
                 continue
-            if content.startswith(("{", "[", "```")):
+            # A pasted document stays, rendered as its stub (build_context).
+            if (content.startswith(("{", "[", "```"))
+                    and not (r["role"] == "user" and is_bulk_paste(content))):
                 continue
             if r["role"] == "assistant":
                 previous_user_text = ""
                 if out and out[-1].get("role") == "user":
-                    previous_user_text = out[-1].get("content", "") or ""
+                    # What was asked, not the document it came with.
+                    previous_user_text = bulk_paste_recall_words(
+                        out[-1].get("content", "") or "")
                 toxic = (
                     is_family_overview_request(previous_user_text)
                     or self._is_assistant_refusal(content)
@@ -3249,7 +3258,7 @@ class EnhancedMemorySystem:
         try:
             conn = self._conn()
             rows = conn.execute(
-                "SELECT role, content FROM conversation_log "
+                "SELECT role, content, user_name FROM conversation_log "
                 "WHERE substr(timestamp, 1, 10) = ? ORDER BY id ASC",
                 (session_date,),
             ).fetchall()
@@ -3261,6 +3270,12 @@ class EnhancedMemorySystem:
         for r in rows:
             content = (r["content"] or "").strip()
             if not content or len(content) < 4:
+                continue
+            # The recap is a summary of what was said; a pasted document is
+            # named, not summarised as if it had been said.
+            if r["role"] == "user" and is_bulk_paste(content):
+                lines.append("USER: " + bulk_paste_stub(
+                    content, r["user_name"] or "The user"))
                 continue
             if content.startswith(("{", "[", "```")):
                 continue
@@ -3549,9 +3564,12 @@ class EnhancedMemorySystem:
                 snippets: List[str] = []
                 for row in reversed(rows):
                     content = re.sub(r"\s+", " ", row["content"] or "").strip()
+                    speaker = (row["user_name"] or "the user").strip()
+                    if is_bulk_paste(row["content"]):
+                        snippets.append(bulk_paste_stub(row["content"], speaker))
+                        continue
                     if len(content) < 4 or content.startswith(("{", "[", "```")):
                         continue
-                    speaker = (row["user_name"] or "the user").strip()
                     snippets.append(f"{speaker}: {content[:120]}")
                 if snippets:
                     lines.append(
@@ -3610,7 +3628,10 @@ class EnhancedMemorySystem:
             "recall", "record", "records", "remember", "remembered",
             "told",
         }
-        query_terms = _topic_terms(user_msg) - recall_scaffolding
+        # A pasted document searches with the words said around it, never its
+        # own (blue_identity.BULK_PASTE_MIN_CHARS).
+        query_terms = (_topic_terms(bulk_paste_recall_words(user_msg))
+                       - recall_scaffolding)
         live_texts: Set[str] = set()
         # Pull the subject from preceding user turns for anaphoric asks such as
         # "what exactly do you remember about it?" Do not learn search terms
@@ -3625,7 +3646,8 @@ class EnhancedMemorySystem:
             if normalized:
                 live_texts.add(normalized)
             if message.get("role") == "user":
-                query_terms |= _topic_terms(content[:600]) - recall_scaffolding
+                query_terms |= (_topic_terms(bulk_paste_recall_words(content)[:600])
+                                - recall_scaffolding)
         if not query_terms:
             return ""
 
@@ -3653,7 +3675,15 @@ class EnhancedMemorySystem:
             if row["role"] != "user":
                 continue
             content = re.sub(r"\s+", " ", row["content"] or "").strip()
-            if len(content) < 4 or content.startswith(("{", "[", "```")):
+            # A pasted document is never an anchor: by its own words the 07-13
+            # transcript matched nearly any question in two terms or more. An
+            # attachment never was one (those rows start with "["); anchored
+            # by the words beside it, as tried on the logged turns, "CS101A
+            # Levant 2026F.pdf" and "introduce yourself and the course" pulled
+            # a class introduction for "search for alex levant online". Inside
+            # another anchor's excerpt it is named in one line, below.
+            if (len(content) < 4 or content.startswith(("{", "[", "```"))
+                    or is_bulk_paste(row["content"])):
                 continue
             if content.lower() in live_texts:
                 continue
@@ -3711,8 +3741,18 @@ class EnhancedMemorySystem:
                     except (TypeError, ValueError):
                         pass
                 content = re.sub(r"\s+", " ", row["content"] or "").strip()
-                if (len(content) < 4 or content.startswith(("{", "[", "```"))
-                        or content.lower() in live_texts):
+                if content.lower() in live_texts:
+                    continue
+                speaker = (
+                    expected_name if row["role"] == "assistant"
+                    else (row["user_name"] or "The user")
+                )
+                # Named in one line, never read back: this excerpt is what
+                # the recall guard's fallback answers from.
+                if row["role"] == "user" and is_bulk_paste(row["content"]):
+                    excerpt.append(f"  {bulk_paste_stub(row['content'], speaker)}")
+                    continue
+                if len(content) < 4 or content.startswith(("{", "[", "```")):
                     continue
                 if row["role"] == "assistant" and (
                         self._is_assistant_refusal(content)
@@ -3721,10 +3761,6 @@ class EnhancedMemorySystem:
                         or bool(identity_response_problem(
                             content, expected_name, other_names=other_names))):
                     continue
-                speaker = (
-                    expected_name if row["role"] == "assistant"
-                    else (row["user_name"] or "The user")
-                )
                 excerpt.append(f"  {speaker}: {content[:420]}")
             if excerpt:
                 lines.append(
@@ -3769,13 +3805,18 @@ class EnhancedMemorySystem:
         four ideas for the Laurier University meeting on my mind"), which is
         exactly the thread back to the answer he is being asked about.
         """
-        terms = _topic_terms(user_msg)
+        # A pasted document is searched by the words said around it: its
+        # first 600 characters are the document's, not the conversation's.
+        terms = _topic_terms(bulk_paste_recall_words(user_msg))
         recent = [m for m in (messages or [])
                   if isinstance(m, dict)
                   and m.get("role") in {"user", "assistant"}
                   and isinstance(m.get("content"), str)]
         for m in recent[-PAST_ANSWER_TOPIC_TURNS:]:
-            terms |= _topic_terms(m["content"][:600])
+            text = m["content"]
+            if m["role"] == "user":
+                text = bulk_paste_recall_words(text)
+            terms |= _topic_terms(text[:600])
         return terms
 
     def _substantive_answer_corpus(
