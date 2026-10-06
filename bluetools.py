@@ -13128,19 +13128,28 @@ def _chat_purge_stale_camera(conversation_messages, last_user_message):
     return conversation_messages
 
 
-def _identity_audience_for_turn(identity_kind, user_text, messages, *,
-                                user_name):
-    """(audience, class_topic) for identity_grounding_note: ("class", today's
-    syllabus topic or "") when an introduction or a "tell them about
-    yourself" speaks to Alex's class, else (None, "").
+def _identity_class_audience(identity_kind, user_text, messages, *,
+                             user_name):
+    """"class" when an introduction or a "tell them about yourself" speaks
+    to Alex's class, else None. _speaking_to_alex asks the same, so a turn
+    the AUDIENCE line answers for the class never also says Alex is "you".
 
     Never on the kids' page: Vilda's "say hi to my class" is her class, not
     Alex's first-year students in the room."""
     if identity_kind not in ("introduction", "identity", "identity_more"):
-        return None, ""
+        return None
     if (user_name or "").strip() in _CHAT_ONLY_USERS:
-        return None, ""
-    audience = class_audience(user_text, messages)
+        return None
+    return class_audience(user_text, messages)
+
+
+def _identity_audience_for_turn(identity_kind, user_text, messages, *,
+                                user_name):
+    """(audience, class_topic) for identity_grounding_note: ("class", today's
+    syllabus topic or "") when an introduction or a "tell them about
+    yourself" speaks to Alex's class, else (None, "")."""
+    audience = _identity_class_audience(identity_kind, user_text, messages,
+                                        user_name=user_name)
     if not audience:
         return None, ""
     # The user's own words: the live turn may carry pinned recall blocks by
@@ -13336,30 +13345,49 @@ def _user_message_text(message) -> str:
 
 # A class in the room, listening: "we're in front of the DH399 class right
 # now", "say hi to the students", "can you tell the students a bit about
-# yourself?", "introduce yourself to the class". Not a class talked about
-# ("the students seemed bored", "do you want to come to class with me?",
-# "what would you say to a student who…") and not the user's own telling
-# ("what should I tell the students?").
+# yourself?", "introduce yourself to the class", and as logged: "Actually,
+# blue, you're speaking to the class right now." (the York class, 07-16),
+# "lets pretend we are in front of a class", "introduce the course to the
+# class right now" (Hexia and Casper, 09-09), "present your reading report
+# to the class" (10-02), "Blue, introduce yourself and the course,
+# CMDS4740, the class" (06-22). Not a class talked about ("the students
+# seemed bored", "do you want to come to class with me?", "what would you
+# say to a student who…") and not the user's own telling ("what should I
+# tell the students?").
 _CLASS_IN_ROOM_RE = re.compile(
-    r"\bin front of (?:the|my|your|his|our|all (?:the|my|your|his|our)) "
+    r"\bin front of (?:the|my|your|his|our|an?|all (?:the|my|your|his|our)) "
     r"(?:\w+ )?(?:class(?:room)?|students|lecture|audience)\b"
     r"|\b(?:say(?:ing)? (?:hi|hello|hey|good (?:morning|afternoon))"
-    r"|introduce yourself|wave|talk|speak)\b[^.?!\n]{0,30}?\bto "
-    r"(?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
+    r"|introduc(?:e|ing)|wav(?:e|ing)|talk(?:ing)?|speak(?:ing)?"
+    r"|present(?:ing)?)\b[^.?!\n]{0,30}?\bto "
+    r"(?:the|my|our|these|an?|all (?:the|my|our)) (?:\w+ )?"
     r"(?:class|students|audience)\b"
+    r"|\bintroduc(?:e|ing) yourself\b[^.?!\n]{0,40}?\b(?:the|my|our|these) "
+    r"(?:\w+ )?(?:class|students|audience)\b"
+    # "introduce the class to CMDS4740", said a minute before 5028.
+    r"|\bintroduc(?:e|ing) (?:the|my|our|this) (?:class|students|audience) to\b"
     r"|\btell (?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
     r"(?:class|students|audience)\b"
     r"|\b(?:we|you)(?:['’]re| are) (?:now )?(?:in|at) (?:the |my )?(?:\w+ )?"
     r"(?:class(?:room)?|lecture(?: hall)?)\b"
     r"(?! later| tomorrow| next| this (?:afternoon|evening)| on\b)"
     r"|\b(?:the )?(?:class|students|audience) (?:is|are) (?:here|listening"
-    r"|watching|waiting|in the room)\b",
+    r"|watching|waiting|in the room)\b"
+    r"|\b(?:class|students)[,.!]* (?:meet|this is) "
+    r"(?:blue|hexia|casper|kasper|pico)\b",
     re.I)
-# "what should I tell the students": the user is the one telling them.
+# "what should I tell the students": the user is the one telling them. The
+# words just before the match, as _GREETING_BY_USER_RE reads them: "can I get
+# you to say hi to the students?" and "Could I ask you to introduce yourself
+# to the class?" ask it of him.
 _USER_TELLS_RE = re.compile(
-    r"\b(?:should|shall|do|can|could|will|would|might|must) i\b"
-    r"|\bi(?:['’]ll| will| need to| have to| want to| am going to|['’]m going to)\b"
-    r"|\bhow (?:to|do i|should i|would i|can i)\b|\bwhat (?:to|do i|should i)\b",
+    r"(?:\b(?:should|shall|do|can|could|will|would|might|must|may) i"
+    r"|\bi(?:['’]ll| will| need to| have to| want to| am going to"
+    r"|['’]m going to| am gonna|['’]m gonna)"
+    r"|\bhow (?:to|do i|should i|would i|can i)"
+    r"|\bwhat (?:to|do i|should i)"
+    r"|\blet me"
+    r")\s+(?:(?:just|quickly|first|also|now|then|go|still)\s+)?$",
     re.I)
 
 
@@ -13370,7 +13398,7 @@ def _class_in_the_room(conversation_messages, window=8) -> bool:
              if isinstance(m, dict) and m.get("role") == "user"]
     for text in users[-window:]:
         for match in _CLASS_IN_ROOM_RE.finditer(text):
-            if not _USER_TELLS_RE.search(text[max(0, match.start() - 30):match.start()]):
+            if not _USER_TELLS_RE.search(text[:match.start()]):
                 return True
     return False
 
@@ -13380,10 +13408,24 @@ def _speaking_to_alex(conversation_messages, user_name) -> bool:
 
     Then the Alex that the prompt names in the third person (EMBODIMENT,
     the self-profile, the J-space IDENTITY line) is "you" to him. In front
-    of a class he stays "Alex": "the hardware Alex built" is right there."""
+    of a class he stays "Alex": "the hardware Alex built" is right there.
+
+    A turn that the identity note answers for the class (its "AUDIENCE:
+    These are Alex's students, live in the room") is a class turn here
+    too, by the same test: "students, meet Blue. Blue, who are you?" had
+    both that line and "Alex is the one talking with you now" (P2-5
+    review)."""
     speaker = (user_name or "Alex").strip() or "Alex"
     if speaker.casefold() != "alex":
         return False
+    live = next((m for m in reversed(conversation_messages or [])
+                 if isinstance(m, dict) and m.get("role") == "user"), None)
+    if live is not None:
+        text = _user_message_text(live)
+        kind = contextual_identity_request_kind(text, conversation_messages)
+        if _identity_class_audience(kind, text, conversation_messages,
+                                    user_name=user_name):
+            return False
     return not _class_in_the_room(conversation_messages)
 
 

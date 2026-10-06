@@ -240,7 +240,8 @@ def _chat_text(texts, user="Alex", robot="blue", system=None):
 @pytest.mark.parametrize("robot", ["blue", "hexia", "pico"])
 def test_embodiment_tells_him_alex_is_you(profile, robot):
     """"a harness that Alex built", "I'm in Alex's office", said to Alex
-    (10-05 harness): 8 of 15 replies on four turns before, 0 of 12 after."""
+    (10-05 harness): on the same four payloads, 6 of 16 replies before and
+    0 of 12 after."""
     text = _chat_text(["where are you right now?"], robot=robot)
     assert "Alex is the one talking with you now" in text
     assert "you built me" in text[text.index("[This is your own perspective"):]
@@ -275,6 +276,21 @@ def test_the_embodiment_text_is_the_same_on_every_turn_to_alex(profile):
     "imagine you're in front of my class and introduce yourself",
     "we're in class now",
     "the students are listening",
+    # logged, and missed before the P2-5 review
+    "Actually, blue, you're speaking to the class right now.",  # 8077, York
+    "Blue, introduce yourself and the course, CMDS4740, the class",  # 5028
+    "introduce the class to CMDS4740",  # 5026, a minute before it
+    "forget it. lets start over. introduce the course to the class right now",  # 9687
+    "no its okay. i want you to introduce the course to the class right now",  # 9711
+    "hi blue, lets pretend we are in front of a class. i want you to "
+    "introduce yourself",  # 8655
+    "present your reading report to the class",  # 10097
+    "introduce yourself to an audience",  # 6591
+    "you're talking to my students now",
+    "students, meet Blue. Blue, who are you?",
+    # asked of him, not the user's own telling
+    "can I get you to say hi to the students?",
+    "Could I ask you to introduce yourself to the class?",
 ])
 def test_a_class_in_the_room(text):
     assert bt._class_in_the_room([{"role": "user", "content": text}])
@@ -285,11 +301,57 @@ def test_a_class_in_the_room(text):
     "do you want to come to class with me today?",
     "what would you say to a student who thinks AI will do all the work for them?",
     "what should I tell the students about the midterm?",
+    "what should I tell the students?",
     "we're in class tomorrow at ten",
     "i'm keeping you here for teaching this year",
+    "how do I introduce myself to the class?",
+    "should I say hi to the class?",
+    "I need to talk to my students about the midterm",
+    # 7633, the morning before the York class
+    "I want to introduce you to the class so they can see an alternative type of AI.",
+    "we were talking about the students yesterday",
 ])
 def test_a_class_talked_about_is_not_in_the_room(text):
     assert not bt._class_in_the_room([{"role": "user", "content": text}])
+
+
+from test_chat_pipeline import chat  # noqa: E402,F401  (fixture)
+
+
+@pytest.mark.parametrize("text", [
+    "who are you? the students want to know",
+    "students, meet Blue. Blue, who are you?",
+    "can I get you to say hi to the students?",
+    "Blue, introduce yourself and the course, CMDS4740, the class",
+])
+def test_a_turn_answered_for_the_class_is_never_said_to_alex(chat, monkeypatch, text):
+    """P2-5 review: one payload carried both "AUDIENCE: These are Alex's
+    students, live in the room" and "Alex is the one talking with you now:
+    to him, say you built me". Whether the identity note answers the class
+    is now also what decides it."""
+    monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
+    chat.ask(text)
+    payload = chat.model.main[0]["messages"]
+    pinned = [m["content"] for m in payload if m.get("role") == "user"][-1]
+    assert "AUDIENCE: These are Alex's students" in pinned
+    assert "Alex is the one talking with you now" not in payload[0]["content"]
+
+
+def test_alex_asking_who_blue_is_hears_you(chat):
+    chat.ask("who are you, really?")
+    payload = chat.model.main[0]["messages"]
+    pinned = [m["content"] for m in payload if m.get("role") == "user"][-1]
+    assert "[IDENTITY GROUNDING" in pinned and "AUDIENCE:" not in pinned
+    assert "Alex is the one talking with you now" in payload[0]["content"]
+
+
+def test_the_class_the_identity_note_answers_is_a_class_here_too():
+    """"who are you? the students want to know" names no room, but the
+    identity note answers it for the class, so he is not told Alex is "you"."""
+    msgs = [{"role": "user", "content": "who are you? the students want to know"}]
+    assert not bt._class_in_the_room(msgs)
+    assert not bt._speaking_to_alex(msgs, "Alex")
+    assert bt._speaking_to_alex([{"role": "user", "content": "who are you?"}], "Alex")
 
 
 def test_the_class_stays_for_eight_turns():
