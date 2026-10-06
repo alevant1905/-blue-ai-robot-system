@@ -1688,6 +1688,33 @@ def test_self_introductions_are_recognised_from_the_reply(reply):
     assert reply_wording_withheld("do you want to say hello?", reply)
 
 
+@pytest.mark.parametrize("reply", [
+    # 04-01 (544), quoted in <earlier_answers> for "do you want to say hello
+    # to everyone?" once the 09-16 greeting was left out.
+    "\n\nAlright! *waves from across the room* \n\"Hey everyone! 👋 Blue "
+    "here—your friendly AI assistant for CS101 at Wilfrid Laurier University!",
+    # 04-01 (446) and 03-30 (188): a blank line first, and "hey".
+    "\n\nHi everyone! I'm Blue — your friendly home robot assistant created by "
+    "Alex.",
+    "Hey everyone! 👋 I’m **Blue**, your friendly home robot assistant.",
+    "Here’s my intro:\n\nI’m Blue — a friendly home robot assistant created by "
+    "Alex.",
+    "Hey! ✨ It’s Hexia here. Just finished reorganizing the dust bunnies.",
+])
+def test_self_introductions_after_a_lead_in(reply):
+    assert is_self_introduction_reply(reply)
+
+
+@pytest.mark.parametrize("reply", [
+    # The greeting is not the opening: a long first line is content.
+    "The difference is material and political, not just technical, and the "
+    "students in DH201 should hear it that way.\nI'm Blue, and I run locally.",
+    "The blue here is darker than the swatch you showed me.",
+])
+def test_a_later_name_is_not_a_self_introduction(reply):
+    assert not is_self_introduction_reply(reply)
+
+
 def test_an_ordinary_reply_is_not_a_self_introduction():
     reply = ("That sounds peaceful. Nori picking up on the calm is classic—that "
              "dog knows when to just *be*.")
@@ -1716,6 +1743,13 @@ def test_questions_about_the_robot_withhold_the_reply_wording():
     "how do you differ from Chat GPT?",
     "what is your earliest memory?",
     "what's your favorite music?",
+    # Their answers were quoted as "your own work" (07-14, 07-16, 07-17).
+    "Maybe you can tell me the story of you, the story of blue how you became "
+    "who you are.",
+    "how do you differ",
+    "drawing only on the following texts by ilyenkov, write a detailed long "
+    "essay about who you are compared to a human",
+    "tell them about your journey",
 ])
 def test_self_description_requests(message):
     assert is_self_description_request(message)
@@ -1723,6 +1757,7 @@ def test_self_description_requests(message):
 
 def test_a_comparison_of_courses_is_not_a_self_description():
     assert not is_self_description_request("how is DH399 different from DH201?")
+    assert not is_self_description_request("do you know who you are talking to?")
 
 
 def test_the_chatgpt_comparison_stays_out_of_the_identity_fallback():

@@ -35,6 +35,7 @@ from blue_identity import (
     identity_response_problem,
     _BIRTHDATE_KEY_RE,
     age_on,
+    asks_for_recall,
     bulk_paste_recall_words,
     bulk_paste_stub,
     derive_ages,
@@ -43,9 +44,17 @@ from blue_identity import (
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
+    is_flat_self_denial,
+    is_reask,
+    is_self_description_request,
+    is_self_introduction_reply,
     is_social_checkin,
+    reply_wording_withheld,
 )
-from blue_reply_text import cut_self_talk, is_runaway_text, reads_as_deliberation
+from blue_reply_text import (
+    cut_self_talk, is_runaway_text, quotable_reply, reads_as_deliberation,
+    written_tool_calls,
+)
 
 
 def _now() -> datetime:
@@ -196,6 +205,23 @@ PAST_ANSWER_MIN_TERM_HITS = 2        # Distinct query terms an answer must conta
 PAST_ANSWER_SETTLE_HOURS = 6         # Newer than this is still in <recent_history>
 PAST_ANSWER_RARE_DF_RATIO = 0.15     # A term in more answers than this proves nothing
 PAST_ANSWER_MIN_SCORE = 8.0          # Summed IDF a match must clear (tuned below)
+PAST_ANSWER_LIMIT = 2                # Answers quoted in <earlier_answers>
+
+# Answers that are not work to recall, only wording to say again. A family
+# rundown ("**Stella** (your partner)… **Emmy & Athena (10 years old)**…")
+# names the household; an answer that names four or more of the partner,
+# the children, the pet and the employer is one of those.
+OWNER_DOSSIER_MIN_NAMES = 4
+_OWNER_DOSSIER_KEYS = (
+    "partner_name", "daughter_name", "son_name", "child_name",
+    "children_names", "pet_name", "dog_name", "cat_name", "employer",
+)
+# "# I Am Blue: A Post-Material Autobiography" and its kin.
+_AUTOBIOGRAPHY_RE = re.compile(
+    r"^\s*#+\s*I Am (?:Blue|Hexia|Casper)\b", re.IGNORECASE)
+# Questions about who the robot is: <remembered_days> matches their words
+# against old answers to the same question, which are only wording.
+_RECALLED_DAYS_SKIP_KINDS = frozenset({"introduction", "identity", "identity_more"})
 
 # Grounding: before model-authored content is written to a database, check that
 # it came from somewhere. Asked to recall four ideas it could no longer find,
@@ -262,6 +288,51 @@ def _searched_text(text: Optional[str], chat_turn: bool) -> str:
     if chat_turn:
         return bulk_paste_recall_words(text or "")
     return text or ""
+
+
+def _asks_what_he_said_about_himself(intents: List[str]) -> bool:
+    """A recall ask about the robot himself, in the last two user turns:
+    "what did you tell me last week about how you're different from chat
+    gpt?". Only that keeps an old answer about himself. "what do you
+    remember about me?" is a recall cue too, and with it the 07-17 essay
+    "about who you are compared to a human" came back for "what else?"
+    (10-05 harness)."""
+    recent = intents[-2:]
+    return (asks_for_recall(recent)
+            and any(is_self_description_request(text) for text in recent))
+
+
+def _user_intents(messages: Optional[List[Dict[str, Any]]], user_msg: str,
+                  chat_turn: bool) -> List[str]:
+    """The user's own words, turn by turn, ending with the live message."""
+    said = [
+        m["content"] for m in (messages or [])
+        if isinstance(m, dict) and m.get("role") == "user"
+        and isinstance(m.get("content"), str)
+    ]
+    live = user_msg if isinstance(user_msg, str) else ""
+    if said and said[-1] == live:
+        said.pop()
+    return [_searched_text(text, chat_turn) for text in said + [live]]
+
+
+# One past reply is quoted once, across <remembered_days> and
+# <earlier_answers>. The same answer is the same quote, as
+# <conversation_memory> judges it: its first ten words, and nine in ten of
+# its words.
+def _quote_key(text: str) -> Tuple[str, frozenset]:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return " ".join(words[:10]), frozenset(words)
+
+
+def _quoted_before(key: Tuple[str, frozenset],
+                   seen: List[Tuple[str, frozenset]]) -> bool:
+    opening, vocabulary = key
+    return bool(opening) and any(
+        opening == seen_opening
+        and len(vocabulary & seen_vocabulary)
+        >= 0.9 * len(vocabulary | seen_vocabulary)
+        for seen_opening, seen_vocabulary in seen)
 
 
 # Rhythm learning: mine conversation_log for behavioural patterns (which kinds
@@ -2021,23 +2092,34 @@ class EnhancedMemorySystem:
                 "content": session_block,
             })
 
-        # 2b-ii) Long-term recall — an older day-recap pulled back by semantic
-        #     relevance to the current message, reaching past the by-date window.
-        if user_msg:
+        # 2b-iii first: Blue's OWN earlier answers on this topic. The recap
+        #     blocks record that a subject came up; this carries what he
+        #     actually wrote about it, which is what "what were your ideas?"
+        #     is asking for. Built before <remembered_days>, which it follows
+        #     in the prompt, so an answer both find is quoted here, whole,
+        #     and the day excerpt says it was quoted elsewhere. Both quoted
+        #     the 09-16 class greeting in full for "do you want to say hello
+        #     to everyone?" (10-05 harness).
+        quoted_keys: List[Tuple[str, frozenset]] = []
+        past_answers_block = self._build_past_answers_block(
+            messages, user_msg, robot=robot, chat_turn=chat_turn,
+            seen=quoted_keys)
+
+        # 2b-ii) Long-term recall — older exchanges pulled back by the words
+        #     they share with the current conversation. Not for a check-in or
+        #     a question about who he is (_skips_recalled_days): there the
+        #     excerpt is an old answer to the same question.
+        if user_msg and not self._skips_recalled_days(
+                messages, user_msg, chat_turn):
             recalled_block = self._build_recalled_days_block(
-                user_msg, robot=robot, messages=messages, chat_turn=chat_turn)
+                user_msg, robot=robot, messages=messages, chat_turn=chat_turn,
+                quote_policy=True, seen=quoted_keys)
             if recalled_block:
                 context_parts.append({
                     "role": "system",
                     "content": recalled_block,
                 })
 
-        # 2b-iii) Blue's OWN earlier answers on this topic, verbatim. The recap
-        #     blocks above record that a subject came up; this carries what he
-        #     actually wrote about it, which is what "what were your ideas?"
-        #     is asking for.
-        past_answers_block = self._build_past_answers_block(
-            messages, user_msg, robot=robot, chat_turn=chat_turn)
         if past_answers_block:
             context_parts.append({
                 "role": "system",
@@ -2087,6 +2169,10 @@ class EnhancedMemorySystem:
                 role = r["role"].upper()
                 stub = (bulk_paste_stub(r["content"], user_name)
                         if r["role"] == "user" else "")
+                if r.get("wording_withheld"):
+                    # The exchange stays, so the thread reads on; the words
+                    # of a self-introduction or a check-in answer do not.
+                    stub = "(answered)"
                 content = stub or (r["content"] or "")[:240]
                 age = self._humanize_age(r.get("ts"), now)
                 prefix = f"[{age}] " if age else ""
@@ -2097,7 +2183,8 @@ class EnhancedMemorySystem:
                 "content": (
                     "<recent_history>\n"
                     "Earlier turns, each tagged with how long ago it was said "
-                    "(compare against the current time in <now>):\n"
+                    "(compare against the current time in <now>). ASSISTANT "
+                    "lines are things you already said — don't re-say them:\n"
                     + "\n".join(history_lines) +
                     "\n\nNote: statements about what the user is doing right then "
                     "(\"I'm out for a walk\", \"making dinner\") were only true "
@@ -2604,6 +2691,9 @@ class EnhancedMemorySystem:
           - Blue refusal/uncertainty responses ("I don't have that yet…") —
             these anchor the next turn on past failure even when the facts
             block has the real answer.
+          - Runaway replies (huge, self-talking or looping).
+        A reply whose wording is never quoted (reply_wording_withheld) stays,
+        marked "wording_withheld", and build_context shows it as "(answered)".
         Returns oldest-first so the LLM sees a chronological flow."""
         try:
             cutoff = (datetime.now() - timedelta(hours=RECENT_HISTORY_HOURS)).isoformat()
@@ -2668,10 +2758,19 @@ class EnhancedMemorySystem:
                         other_names=other_robot_names,
                         request_kind=identity_request_kind(previous_user_text),
                     ))
+                    # Too broken to quote: huge, self-talking or looping.
+                    or is_runaway_text(content)
                 )
                 if toxic:
                     if out and out[-1].get("role") == "user":
                         out.pop()
+                    continue
+                # Said, and kept, but not quoted: a self-introduction, a
+                # flat self-denial, the answer to a check-in or to a question
+                # about himself (blue_identity.reply_wording_withheld).
+                if reply_wording_withheld(previous_user_text, content):
+                    out.append({"role": r["role"], "content": content,
+                                "ts": r["timestamp"], "wording_withheld": True})
                     continue
             out.append({"role": r["role"], "content": content,
                         "ts": r["timestamp"]})
@@ -3627,12 +3726,32 @@ class EnhancedMemorySystem:
             "\n</earlier_sessions>"
         )
 
+    @staticmethod
+    def _skips_recalled_days(messages: Optional[List[Dict[str, Any]]],
+                             user_msg: str, chat_turn: bool = False) -> bool:
+        """No <remembered_days> for a check-in or a question about who the
+        robot is. "can you tell the students a bit about yourself?" pulled
+        the 07-13 and 07-14 class introductions by "students" and "yourself",
+        and "how do you differ from chat gpt?" the old answers to it. A user
+        asking what was said ("what did you tell the class about yourself
+        last time?") still gets it."""
+        intents = _user_intents(messages, user_msg, chat_turn)
+        intent = intents[-1]
+        if (is_social_checkin(intent)
+                or contextual_identity_request_kind(intent, messages)
+                in _RECALLED_DAYS_SKIP_KINDS):
+            return True
+        return (is_self_description_request(intent)
+                and not asks_for_recall(intents[-2:]))
+
     def _build_recalled_days_block(
         self,
         user_msg: str,
         robot: str = "blue",
         messages: Optional[List[Dict[str, Any]]] = None,
         chat_turn: bool = False,
+        quote_policy: bool = False,
+        seen: Optional[List[Tuple[str, frozenset]]] = None,
     ) -> str:
         """Retrieve coherent older exchanges from one robot's chat log.
 
@@ -3645,9 +3764,27 @@ class EnhancedMemorySystem:
         `chat_turn`: `user_msg` and `messages` are a chat page's turns, where
         a pasted document searches by the words beside it (_searched_text).
         The panel and the duet pass their own assembled query and leave it off.
+
+        `quote_policy` (the chat context, build_context): the robot's lines
+        are quoted once and only when they are worth quoting. A
+        self-introduction, a flat self-denial, a check-in answer, an answer
+        about himself or a runaway reply reads "(answered)"; the old answer
+        to the question asked again now reads "(answered this same question;
+        answer it fresh)"; an answer already quoted (`seen`, shared with
+        <earlier_answers>) reads "(same answer as quoted elsewhere)". The
+        user asking what was said keeps the re-asked answer, and asking what
+        he said about himself the self-describing ones. Alex's lines are
+        never changed: the recall guard's fallback answers from them.
         """
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
+        if quote_policy:
+            intents = _user_intents(messages, user_msg, chat_turn)
+            intent = intents[-1]
+            recall_ask = asks_for_recall(intents[-2:])
+            recall_self = _asks_what_he_said_about_himself(intents)
+            if seen is None:
+                seen = []
 
         recall_scaffolding = {
             "conversation", "conversations", "discussed", "discussion",
@@ -3756,6 +3893,8 @@ class EnhancedMemorySystem:
 
             excerpt: List[str] = []
             pasted_text = ""
+            # What the user had just said, for judging the reply to it.
+            asked = ""
             # Six turns cover an assertion, Blue's reply, and two follow-ups.
             # A day boundary or 20-minute gap marks a different conversation.
             for row in rows[anchor_index:anchor_index + 6]:
@@ -3772,6 +3911,9 @@ class EnhancedMemorySystem:
                 pasted = row["role"] == "user" and is_bulk_paste(row["content"])
                 if pasted:
                     pasted_text = content.lower()
+                if row["role"] == "user":
+                    asked = (bulk_paste_recall_words(row["content"] or "")
+                             if pasted else content)
                 if content.lower() in live_texts:
                     continue
                 speaker = (
@@ -3800,6 +3942,10 @@ class EnhancedMemorySystem:
                         or bool(identity_response_problem(
                             content, expected_name, other_names=other_names))):
                     continue
+                if quote_policy and row["role"] == "assistant":
+                    content = self._recalled_reply(
+                        asked, row["content"] or "", intent, recall_ask,
+                        recall_self, seen)
                 excerpt.append(f"  {speaker}: {content[:420]}")
             if excerpt:
                 lines.append(
@@ -3810,23 +3956,54 @@ class EnhancedMemorySystem:
 
         if not lines:
             return ""
-        return self._remembered_days_wrapper(lines)
+        return self._remembered_days_wrapper(lines, robot_name=expected_name)
 
-    def _remembered_days_wrapper(self, lines: List[str]) -> str:
+    @staticmethod
+    def _recalled_reply(asked: str, reply: str, intent: str, recall_ask: bool,
+                        recall_self: bool,
+                        seen: List[Tuple[str, frozenset]]) -> str:
+        """The robot's line of a <remembered_days> excerpt (quote_policy).
+
+        The 10-05 harness: asked "we're in front of the DH399 class right
+        now. do you want to say hello to everyone?", the excerpt quoted 420
+        characters of the 09-16 class greeting ("Good morning, everyone. I'm
+        Blue, Alex Levant's robot companion. I exist here in this room…"),
+        and the reply said them again."""
+        if reply_wording_withheld(asked, reply) or is_runaway_text(reply):
+            return "(answered)"
+        if not recall_ask and is_reask(asked, intent):
+            return "(answered this same question; answer it fresh)"
+        if not recall_self and is_self_description_request(asked):
+            return "(answered)"
+        quoted = " ".join(quotable_reply(reply).split())
+        key = _quote_key(quoted)
+        if _quoted_before(key, seen):
+            return "(same answer as quoted elsewhere)"
+        seen.append(key)
+        return quoted
+
+    def _remembered_days_wrapper(self, lines: List[str],
+                                 robot_name: str = "Blue") -> str:
+        # "The excerpt below is a POSITIVE MATCH for the current question"
+        # headed it on 85 of the 103 harness turns of 10-05, "thanks, that
+        # helps" among them: it is retrieved by shared words, and is often
+        # beside the point.
         return (
             "<remembered_days>\n"
-            "Past conversation excerpts that resurfaced because they relate to what the "
-            "user just said — from the conversation log, so you may answer "
-            "from it directly rather than saying you have no record. The excerpt "
-            "below is a POSITIVE MATCH for the current question: state its concrete "
-            "user-provided facts when asked what was discussed, and never ask the "
-            "user to repeat facts shown here. Same "
+            "Possibly related past conversations, found in the conversation "
+            "log by words they share with this one — use one only if it is "
+            "relevant to what the user just said, and otherwise leave it "
+            "alone. They are a real record: when the user asks what was "
+            "discussed, answer from them rather than saying you have no "
+            "record, state the user-provided facts they show, and never ask "
+            "the user to repeat those. Same "
             "caveat as <earlier_sessions>: reliable about topics and dates, "
             "and the date is when you TALKED about it, not "
             "necessarily when the thing happened — an event described as "
             "\"tomorrow\" or \"upcoming\" was tomorrow relative to that date "
-            "and has almost certainly passed. Weave it in only if it genuinely "
-            "helps, and don't recite it:\n"
+            "and has almost certainly passed. Don't recite them. "
+            f"{robot_name}'s lines are things you already said — don't "
+            "re-say them:\n"
             + "\n".join(lines) +
             "\n</remembered_days>"
         )
@@ -3888,20 +4065,28 @@ class EnhancedMemorySystem:
                   - timedelta(hours=PAST_ANSWER_SETTLE_HOURS)).isoformat()
         try:
             conn = self._conn()
+            # With what the user had just said, which is what makes an
+            # answer one about himself.
             rows = conn.execute(
-                "SELECT timestamp, content FROM conversation_log "
-                "WHERE role = 'assistant' AND length(content) >= ? "
-                "AND timestamp <= ? AND robot = ? "
-                "ORDER BY timestamp DESC LIMIT 2000",
+                "SELECT a.timestamp, a.content, ("
+                "SELECT u.content FROM conversation_log u "
+                "WHERE u.robot = a.robot AND u.role = 'user' AND u.id < a.id "
+                "ORDER BY u.id DESC LIMIT 1) AS asked "
+                "FROM conversation_log a "
+                "WHERE a.role = 'assistant' AND length(a.content) >= ? "
+                "AND a.timestamp <= ? AND a.robot = ? "
+                "ORDER BY a.timestamp DESC LIMIT 2000",
                 (SUBSTANTIVE_ANSWER_MIN_CHARS, settle, robot_key),
             ).fetchall()
             conn.close()
         except Exception:
             return cached if cached is not None else []
+        about_self: Set[str] = set()
         corpus: List[Tuple[str, str, str]] = []
         robot_names = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper"}
         expected_name = robot_names.get(robot_key, "Blue")
         other_names = [name for key, name in robot_names.items() if key != robot_key]
+        household = self._owner_dossier_names()
         for r in rows:
             content = r["content"] or ""
             low = content.lower()
@@ -3913,6 +4098,18 @@ class EnhancedMemorySystem:
                     or identity_response_problem(
                         content, expected_name, other_names=other_names)):
                 continue
+            # Answers about himself and about the household are wording, not
+            # work: quoted as "your own work", the 09-16 class greeting came
+            # back word for word for "do you want to say hello to everyone?",
+            # and the June and July family rundowns put "you teach CS310A"
+            # and "Emmy & Athena (10 years old)" into "what else?" (10-05
+            # harness). The <family> and identity blocks answer those.
+            if (is_self_introduction_reply(content)
+                    or is_flat_self_denial(content)
+                    or _AUTOBIOGRAPHY_RE.search(content.lstrip().split("\n", 1)[0])
+                    or "autobiography" in low[:120]
+                    or self._is_owner_dossier(content, household)):
+                continue
             # A reply that argues with itself or loops is not an answer to
             # give again. 10048 (09-27, a forced send_gmail that wrote
             # "Actually, I shouldn't assume…" and "Wait — you mentioned
@@ -3921,13 +4118,70 @@ class EnhancedMemorySystem:
             # word for the students-agent remark (S4 final review). A worked
             # example ("Let's assume a small lab…") is judged without its
             # paragraph, so a teaching reply that has one stays.
+            # Nor is a tool call written out as text (Hexia, 06-10: a
+            # "<tool_call><function=create_document>…" quoted for "tell me
+            # something funny" in the 10-05 harness).
             if (is_runaway_text(content)
-                    or reads_as_deliberation(cut_self_talk(content, live=False))):
+                    or reads_as_deliberation(cut_self_talk(content, live=False))
+                    or written_tool_calls(content)):
                 continue
+            # The answer to a check-in, to "who are you?" or to "how are you
+            # different from chat gpt?" stays, for the user who asks what he
+            # said, and is marked: no one else is quoted it. The 07-09
+            # ChatGPT answer ("I run 100% locally on Alex's hardware in this
+            # house…") was the next pick for "do you want to say hello to
+            # everyone?" once the class greetings were gone.
+            asked = bulk_paste_recall_words(r["asked"] or "")
+            if (reply_wording_withheld(asked, content)
+                    or is_self_description_request(asked)):
+                about_self.add(r["timestamp"])
             corpus.append((r["timestamp"], content, low))
         caches[robot_key] = corpus
         cache_times[robot_key] = now
+        about = getattr(self, "_answer_about_self_by_robot", None)
+        if not isinstance(about, dict):
+            about = {}
+            self._answer_about_self_by_robot = about
+        about[robot_key] = about_self
         return corpus
+
+    def _answer_is_about_self(self, timestamp: str, robot: str = "blue") -> bool:
+        """Whether a corpus answer replied to a check-in or to a question
+        about the robot itself (_substantive_answer_corpus)."""
+        about = getattr(self, "_answer_about_self_by_robot", None) or {}
+        return timestamp in about.get((robot or "blue").strip().lower(), ())
+
+    def _owner_dossier_names(self) -> List[str]:
+        """The partner, children, pet and employer, as the facts table has
+        them ("Athena, Emmy, Vilda" is three)."""
+        try:
+            conn = self._conn()
+            placeholders = ",".join("?" * len(_OWNER_DOSSIER_KEYS))
+            rows = conn.execute(
+                f"SELECT fact_value FROM facts WHERE fact_key IN ({placeholders})",
+                _OWNER_DOSSIER_KEYS,
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return []
+        names = set()
+        for row in rows:
+            for piece in re.split(r"[,|;]|\band\b", row["fact_value"] or ""):
+                piece = piece.strip()
+                if len(piece) >= 2:
+                    names.add(piece)
+        return sorted(names)
+
+    @staticmethod
+    def _is_owner_dossier(content: str, names: List[str]) -> bool:
+        """An answer naming OWNER_DOSSIER_MIN_NAMES of the household."""
+        named = 0
+        for name in names:
+            if re.search(rf"\b{re.escape(name)}\b", content, re.IGNORECASE):
+                named += 1
+                if named >= OWNER_DOSSIER_MIN_NAMES:
+                    return True
+        return False
 
     def _search_past_answers(self, terms: Set[str],
                              limit: int = 2,
@@ -3969,37 +4223,73 @@ class EnhancedMemorySystem:
     def _build_past_answers_block(self, messages: List[Dict[str, Any]],
                                   user_msg: str,
                                   robot: str = "blue",
-                                  chat_turn: bool = False) -> str:
+                                  chat_turn: bool = False,
+                                  seen: Optional[List[Tuple[str, frozenset]]] = None,
+                                  ) -> str:
         """Surface this robot's own earlier substantive answers on this topic.
 
         The day-recap blocks say THAT something was discussed; this says WHAT
         was actually written. Without it "what were your ideas?" has no source,
-        and the model fills the gap."""
+        and the model fills the gap.
+
+        `seen`: quote keys shared with <remembered_days>. An answer quoted
+        once is not quoted again, and each one quoted here is added."""
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
+        intents = _user_intents(messages, user_msg, chat_turn)
+        intent = intents[-1]
         # Not for greetings or "who are you" turns. Old self-descriptions
         # came back through here as "your own work… answer from this" on 44
         # of Blue's 63 turns since 09-01, most saying he runs "here in
-        # Kitchener"; the identity note already forbids reusing them.
-        if (is_social_checkin(user_msg)
-                or contextual_identity_request_kind(user_msg, messages)):
+        # Kitchener"; the identity note already forbids reusing them. Nor
+        # for an ask about himself the identity kinds leave alone ("can you
+        # tell the students a bit about yourself?" quoted the 09-16 class
+        # greeting whole), unless the user is asking what he said. A recall
+        # question ("what did we discuss yesterday?") is what this is for.
+        # No recall-cue gate: the 07-31 "Can you remind me of those ideas?"
+        # needs it, and the cue list is wide on purpose (asks_for_recall).
+        recall_ask = asks_for_recall(intents[-2:])
+        if (is_social_checkin(intent)
+                or contextual_identity_request_kind(intent, messages)
+                not in (None, "shared_recall")
+                or (is_self_description_request(intent) and not recall_ask)):
             return ""
+        if seen is None:
+            seen = []
         try:
             terms = self._topic_query_terms(messages, user_msg,
                                             chat_turn=chat_turn)
-            hits = self._search_past_answers(terms, robot=robot)
+            # Two more than are quoted: an answer given twice (the ChatGPT
+            # answer on 09-15 and 09-16) takes one place, not both, and an
+            # answer about himself none unless it is asked for.
+            hits = self._search_past_answers(
+                terms, robot=robot, limit=PAST_ANSWER_LIMIT + 2)
         except Exception:
             return ""
         if not hits:
             return ""
+        recall_self = _asks_what_he_said_about_himself(intents)
         lines: List[str] = []
         for h in hits:
+            if not recall_self and self._answer_is_about_self(
+                    h["timestamp"], robot=robot):
+                continue
+            # No block citations, self-talk or closing offers: quoted, the
+            # model says them again.
+            excerpt = quotable_reply(h["content"]).strip()
+            key = _quote_key(" ".join(excerpt.split()))
+            if _quoted_before(key, seen):
+                continue
+            seen.append(key)
             day = (h["timestamp"] or "")[:10]
             label = self._friendly_day_label(day) if day else "earlier"
-            excerpt = h["content"].strip()
             if len(excerpt) > PAST_ANSWER_EXCERPT_CHARS:
                 excerpt = excerpt[:PAST_ANSWER_EXCERPT_CHARS].rsplit(" ", 1)[0] + " […]"
             lines.append(f"--- {label} ---\n{excerpt}")
+            if len(lines) >= PAST_ANSWER_LIMIT:
+                break
+        if not lines:
+            return ""
         robot_name = {
             "blue": "Blue", "hexia": "Hexia", "pico": "Casper",
         }.get((robot or "blue").lower(), "this robot")
@@ -4007,9 +4297,10 @@ class EnhancedMemorySystem:
             "<earlier_answers>\n"
             f"Things YOU ({robot_name}) wrote earlier that relate to what the user is asking "
             "about now, quoted from the conversation log. This is your own "
-            "work, recorded verbatim — when the user asks what you said, what "
-            "your ideas were, or to go over something again, answer from this. "
-            "Summarise or quote it as needed. Long answers are cut off at the "
+            "work and you ALREADY SAID it — when the user asks what you said, "
+            "what your ideas were, or to go over something again, answer from "
+            "it in fresh words; quote it only if asked to repeat it exactly. "
+            "Long answers are cut off at the "
             "end; if the user needs the rest, say so rather than filling the "
             "gap from imagination. Never invent content to stand in for this — "
             "if what they want isn't here, say you don't have it. Each was true "

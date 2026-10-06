@@ -1010,10 +1010,17 @@ def is_casual_catch_up(text: str) -> bool:
 # logged replies these match 278 self-introductions and 57 flat denials.
 _SELF_INTRO_REPLY_RE = re.compile(
     r"^[^\n]{0,80}?\b(?:I['’]m|I am|my name is)\s+" + _ROBOT_NAME_ALT + r"\b"
-    r"|^[^\n]{0,60}?\b(?:hello|hi|good (?:morning|afternoon|evening)),?\s+"
+    r"|^[^\n]{0,60}?\b(?:hello|hi|hey|good (?:morning|afternoon|evening)),?\s+"
     r"(?:everyone|everybody|all|class|students|folks)\b",
     re.IGNORECASE,
 )
+# "Hey! Blue here." Capitalised: "the blue here" is a colour.
+_NAME_HERE_RE = re.compile(r"^[^\n]{0,20}?\b(?:Blue|Hexia|Casper|Caspar) here\b")
+# Quote marks, markdown and stage-direction asterisks before the first word.
+_REPLY_LEAD_RE = re.compile(r"^[\s>\"“”'‘’*_]+")
+# A first line this short can be a lead-in to the greeting on the next one:
+# "Alright! *waves from across the room*", "Here's my intro:".
+_INTRO_LEAD_IN_MAX_CHARS = 60
 # "I don't have personal tastes or feelings, so I don't have a favorite" was
 # the required answer to "what's your favorite music?" once it was quoted.
 # "As an AI" counts only when a denial follows: bare, it also opened the long
@@ -1038,8 +1045,25 @@ _WITHHELD_REQUEST_KINDS = frozenset({
 
 
 def is_self_introduction_reply(reply: str) -> bool:
-    """A reply that opens by introducing the robot or greeting a room."""
-    return bool(_SELF_INTRO_REPLY_RE.search(reply or ""))
+    """A reply that opens by introducing the robot or greeting a room.
+
+    On its first line, or on the next after a short lead-in. Read from the
+    reply's first character only, the check missed 61 logged introductions:
+    22 open with a blank line or "Hey everyone!", 39 with a lead-in line
+    ("Alright! *waves from across the room*", then "Hey everyone! Blue
+    here—your friendly AI assistant for CS101…", 04-01), and that one was
+    quoted in <earlier_answers> for "do you want to say hello to everyone?"
+    once the 09-16 greeting was left out. Over 5,034 logged replies the 61
+    are all introductions, and none of the 357 found before is lost.
+    """
+    lines = [line for line in (reply or "").split("\n") if line.strip()]
+    for index, line in enumerate(lines[:2]):
+        if index and len(lines[0].strip()) > _INTRO_LEAD_IN_MAX_CHARS:
+            break
+        opening = _REPLY_LEAD_RE.sub("", line)
+        if _SELF_INTRO_REPLY_RE.search(opening) or _NAME_HERE_RE.search(opening):
+            return True
+    return False
 
 
 def is_flat_self_denial(reply: str) -> bool:
@@ -1068,20 +1092,33 @@ def reply_wording_withheld(user_text: str, reply: str) -> bool:
 # unclassified on purpose: routing "how are you different from chat gpt?"
 # as identity would answer it with the canonical self-introduction.
 _SELF_DESCRIPTION_REQUEST_RE = re.compile(
-    r"\b(?:you|yourself|your \w+|" + _ROBOT_NAME_ALT[3:-1] + r")"
+    r"\b(?:you(?:['’]re)?|yourself|your \w+|" + _ROBOT_NAME_ALT[3:-1] + r")"
     r"(?:\s+\w+)?\s+differ(?:s|ent)?\s+from\b"
     r"|\btell (?:me|us|them|everyone|everybody|"
     r"the (?:class|students|group|audience)) "
     r"(?:(?:a (?:little )?bit|a little|something|more) )?about yourself\b"
     r"|\byour earliest memory\b"
-    r"|\byour favou?rite \w+",
+    r"|\byour favou?rite \w+"
+    # The asks the 10-05 harness found these missing: their answers came
+    # back as "your own work" in <earlier_answers> ("drawing only on the
+    # following texts by ilyenkov, write a detailed long essay about who you
+    # are compared to a human", 07-17, for "what else?"; "Maybe you can tell
+    # me the story of you", 07-14; "how do you differ", 07-16). Over 5,056
+    # logged user turns these add 121, every one about the robot.
+    r"|\bwho you (?:are|were)\b(?!\s+(?:talking|speaking|chatting|with)\b)"
+    r"|\babout (?:yourself|your (?:own )?(?:story|journey|origins?|history|"
+    r"existence|self|life))\b"
+    r"|\b(?:story|history) of (?:you|yourself|" + _ROBOT_NAME_ALT[3:-1] + r")\b"
+    r"|\bhow (?:do|does|are|is) (?:you|" + _ROBOT_NAME_ALT[3:-1] + r") "
+    r"(?:differ|different)\b",
     re.IGNORECASE,
 )
 
 
 def is_self_description_request(text: str) -> bool:
     """"How do you differ from ChatGPT?", "tell the students a bit about
-    yourself", "your earliest memory", "your favourite music"."""
+    yourself", "your earliest memory", "your favourite music", "who you
+    are", "the story of you"."""
     return bool(_SELF_DESCRIPTION_REQUEST_RE.search(text or ""))
 
 
