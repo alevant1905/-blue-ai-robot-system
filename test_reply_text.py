@@ -26,6 +26,9 @@ from blue_reply_text import (
     strip_block_citations,
     strip_closing_asks,
     strip_reasoning_tags,
+    has_tool_markup,
+    strip_tool_markup,
+    written_tool_calls,
 )
 
 # run1 camera_face[2] (2026-09-25 harness): one real answer, then a reminder
@@ -192,6 +195,110 @@ def test_a_forced_call_arguing_with_itself_is_deliberation(text):
 ])
 def test_a_plain_short_answer_is_not_deliberation(text):
     assert not reads_as_deliberation(text)
+
+
+# --- tool calls written as text ----------------------------------------------
+
+# longform_reading_report[1] (2026-10-05 harness, chat-quality-2): the whole
+# reply to the fast path's search_documents, sent with no tools offered.
+HARNESS_WRITTEN_CALL = (
+    "<tool_call>\n<function=search_documents>\n<parameter=query>\n"
+    "reading report requirements assignment instructions format DH399\n"
+    "</parameter>\n</function>\n</tool_call>")
+JSON_WRITTEN_CALL = ('<tool_call>{"name": "get_weather", "arguments": '
+                     '{"location": "Kitchener"}}</tool_call>')
+
+
+def test_the_harness_call_is_read_whole():
+    [call] = written_tool_calls(HARNESS_WRITTEN_CALL)
+
+    assert call.name == "search_documents"
+    assert call.args == {
+        "query": "reading report requirements assignment instructions format DH399"}
+    assert call.complete
+    assert strip_tool_markup(HARNESS_WRITTEN_CALL) == ""
+
+
+@pytest.mark.parametrize("text, name, args", [
+    (JSON_WRITTEN_CALL, "get_weather", {"location": "Kitchener"}),
+    ('<function=get_weather>{"location":"Kitchener"}</function>',
+     "get_weather", {"location": "Kitchener"}),
+    # Nothing but the object, bare or fenced: the Hermes form without a tag.
+    ('{"name": "web_search", "arguments": {"query": "DH399 syllabus"}}',
+     "web_search", {"query": "DH399 syllabus"}),
+    ('```json\n{"name": "web_search", "arguments": "{\\"query\\": \\"x\\"}"}\n```',
+     "web_search", {"query": "x"}),
+])
+def test_each_written_form_is_read(text, name, args):
+    [call] = written_tool_calls(text)
+    assert (call.name, call.args, call.complete) == (name, args, True)
+    assert strip_tool_markup(text) == ""
+
+
+def test_a_call_cut_off_in_its_body_is_still_markup():
+    """A written create_document stopped by the token cap. It is no reply,
+    and its arguments are a fragment, so it is not complete (and is never
+    run: parse_leaked_tool_call skips it)."""
+    text = ("<tool_call>\n<function=create_document>\n<parameter=filename>\n"
+            "chapter4.md\n</parameter>\n<parameter=content>\n# Reading Report\n"
+            "The chapter argues that matter")
+    [call] = written_tool_calls(text)
+
+    assert call.name == "create_document" and not call.complete
+    assert strip_tool_markup(text) == ""
+
+
+@pytest.mark.parametrize("raw, clean", [
+    # The sentence announcing a call that ended the reply goes with it.
+    ("My first search only found the course outline.\n\nLet me try again "
+     "with the right term.\n\n" + HARNESS_WRITTEN_CALL,
+     "My first search only found the course outline."),
+    ("The search found nothing on them. Let me search for each of them "
+     "individually.\n\nFirst, I will look up the first one.\n" + HARNESS_WRITTEN_CALL,
+     "The search found nothing on them."),
+    ("Let me try a more targeted approach:\n\n" + HARNESS_WRITTEN_CALL, ""),
+    ('It searched for "the web" rather than "the term." Let me try again.\n'
+     + JSON_WRITTEN_CALL, 'It searched for "the web" rather than "the term."'),
+    # An answer that opens "Let me…" or "I'll…" is not an announcement.
+    ("I'll summarize: the report is 1,000 words.\n" + HARNESS_WRITTEN_CALL,
+     "I'll summarize: the report is 1,000 words."),
+    ("Let me explain why it matters.\n" + HARNESS_WRITTEN_CALL,
+     "Let me explain why it matters."),
+    # Words after a call are the model's answer and stay.
+    (JSON_WRITTEN_CALL + "\nIt's 4 degrees in Kitchener.",
+     "It's 4 degrees in Kitchener."),
+    ("<tool_call>{not json}</tool_call>", ""),
+    ("Checking.\n<tool_call>\n", "Checking."),
+    # Nothing but a fenced call.
+    ("```xml\n" + HARNESS_WRITTEN_CALL + "\n```", ""),
+])
+def test_the_call_is_cut_out_of_the_reply(raw, clean):
+    assert has_tool_markup(raw)
+    assert strip_tool_markup(raw) == clean
+
+
+@pytest.mark.parametrize("text", [
+    # Prose about how models work names the tags without writing a call.
+    "Qwen wraps each call in <tool_call> tags, and the server turns the tags "
+    "into a real call.",
+    "The tag `<function=web_search>` names the tool, and `</function>` closes it.",
+    "In that format, <function=web_search> names the tool and "
+    "<parameter=query> holds the query.",
+    "The model writes <tool_call><function=NAME> and then its arguments.",
+    "Here is what a written call looks like:\n\n```\n" + HARNESS_WRITTEN_CALL
+    + "\n```\n\nThe server reads the tags and runs the search for it.",
+    "Inline, it is `" + JSON_WRITTEN_CALL + "` and nothing more.",
+    # conversation_log 3197 and 10060: the words, never the markup.
+    "A harness sits around an agent: tool calling, memory and loop orchestration.",
+    "They share a tool-call structure that is separate from reasoning.",
+    '{"name": "Ada", "role": "TA"}',
+    "",
+    None,
+])
+def test_prose_about_tool_calls_is_not_a_call(text):
+    assert written_tool_calls(text) == []
+    assert not has_tool_markup(text)
+    assert strip_tool_markup(text) is text
 
 
 # --- closing asks ------------------------------------------------------------

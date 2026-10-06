@@ -12,7 +12,9 @@ Three pieces lifted out of process_with_tools, which was 1,320 lines:
                      results with tools switched off.
 
 Both entry points return a finished response dict, or None to mean "not my
-turn, carry on" — matching the fall-through the inlined blocks had.
+turn, carry on" — matching the fall-through the inlined blocks had. Whatever
+they return then passes settle_written_call, so a tool call the model wrote
+out as text is run (a lookup) or answered again, never shown.
 
 This is the code that acts on a real house. A mistake here is not a clumsy
 sentence, it is a photograph taken or an email sent that nobody asked for, or
@@ -28,7 +30,9 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import bluetools as bt
-from blue_reply_text import reads_as_deliberation, strip_reasoning_tags
+from blue_reply_text import (has_tool_markup, reads_as_deliberation,
+                             strip_reasoning_tags, strip_tool_markup,
+                             written_tool_calls)
 from blue.server.thinking import THINK_OFF
 
 
@@ -227,6 +231,14 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
     _retry_thinking = THINK_OFF if thinking else None
     if response:
         content = response["choices"][0]["message"].get("content", "")
+        if has_tool_markup(content):
+            # The model asked for another lookup in words: no tools were
+            # offered on this call. That is not a reply to judge (a refusal,
+            # a dodge, a claimed send), and process_with_tools settles it
+            # (settle_written_call).
+            print(f"   [WRITTEN-CALL] the answer to {improved_force_tool} "
+                  f"is a tool call written as text")
+            return response, pending_force_tool
         self_reflection_issue = None
         if document_self_reflection:
             self_reflection_issue = bt.identity_response_problem(
@@ -955,7 +967,11 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
             # A call written out as text is still run, by the leaked-call
             # repair below.
             _written = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
-            if force_tool == correct_tool and not (_written and _known_tool(_written[0])):
+            if force_tool == correct_tool and not (
+                    _written and _known_tool(_written[0])
+                    and _may_run_written(_written[0], force_tool=force_tool,
+                                         retried_tool=repairs.retried_tool,
+                                         last_user_message=last_user_message)):
                 return _forced_call_failed(
                     response, correct_tool, repairs, conversation_messages,
                     bt._intent_text(last_user_message
@@ -981,9 +997,15 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
     # The model wrote a tool call as visible TEXT instead of calling it
     # (the "<tool_call>...</tool_call> reached the user as words" bug).
     # Parse it and run it for real; the next iteration composes the
-    # answer from the actual result.
+    # answer from the actual result. Not any call, though: a written
+    # send_gmail on a turn that asked for nothing was run as written. Mail
+    # runs only when this pass forced it, and another write when it was
+    # forced or retried or the user asked for it (_may_run_written).
     _leaked = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
-    if _leaked and _known_tool(_leaked[0]):
+    if (_leaked and _known_tool(_leaked[0])
+            and _may_run_written(_leaked[0], force_tool=force_tool,
+                                 retried_tool=repairs.retried_tool,
+                                 last_user_message=last_user_message)):
         repairs.leaked_tool = True
         _lk_name, _lk_args = _leaked
         print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
@@ -997,6 +1019,13 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
         conversation_messages.append({"role": "tool", "tool_call_id": "leaked",
                                       "name": _lk_name, "content": tool_result})
         return True, pending
+    # A written call not run here (a second one, a send nobody forced, one
+    # cut off mid-body) is not prose for the checks below: "sent" inside
+    # <function=send_gmail> is no claim. It is settled after the loop.
+    if has_tool_markup(content):
+        print("   [WRITTEN-CALL] a tool call written as text, not run here "
+              "— settled after the loop")
+        return False, None
 
     # Words from a forced call (the remember_fact re-ask, a claimed action
     # being forced through) or from the one retry after a forced call wrote
@@ -1240,6 +1269,174 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
 
     print("[OK] Response complete (no tool calls)")
     return False, None
+
+
+# ================================================================================
+# A TOOL CALL WRITTEN AS TEXT
+# ================================================================================
+# The calls that put a tool's result into words offer no tools: the fast
+# path's one call, and the loop's last. The model still writes a call into
+# its text when it wants another lookup, and nothing read those words as a
+# call. On 2026-10-05 (harness, longform_reading_report[1]) the fast path
+# searched the library for "follow the specific requirements of the
+# assignment as stated in the syllabus", and the call that was to answer from
+# the result came back as nothing but
+#   <tool_call><function=search_documents><parameter=query>reading report
+#   requirements assignment instructions format DH399</parameter>…</tool_call>
+# which was shown, and would have been spoken, stored and journaled. On 08-29
+# (conversation_log 9392) a browse was answered with a written web_search.
+# The loop's repair above only ever saw the reply to a call that offered
+# tools. settle_written_call sees every reply process_with_tools returns:
+#   a read-only lookup the turn may make, when no written call has run yet:
+#       run it once, then one call to answer from its result;
+#   anything else (a send, a reminder, a lookup the turn may not make or has
+#       made already): one regeneration with a note that nothing was run;
+#   words that still hold a call: the words without it, or one honest
+#       sentence.
+# Neither call offers tools, and each sends reasoning_effort "none" when the
+# turn sends one at all (the chat page does; Panel keeps the model default).
+# A write is never run from here: the model asked for it where no tools were
+# offered, and nothing has judged that the user wanted it (the claimed-action
+# lessons above).
+
+# Read-only lookups a written call may run: nothing that sends, saves, moves,
+# plays, takes a picture or opens the inbox.
+LOOKUP_TOOLS = frozenset({
+    "search_documents", "web_search", "browse_website",
+    "search_scholar", "get_paper", "read_paper",
+    "get_weather", "get_local_time", "get_sunrise_sunset",
+    "get_upcoming_reminders", "list_files", "read_file", "get_file_info",
+    "search_notes", "get_tasks", "check_timers", "list_contacts",
+    "find_contact", "who_do_i_know", "recall_visual_memory",
+})
+
+WRITTEN_LOOKUP_GAVE_UP = "I couldn't finish looking that up — want me to try again?"
+
+
+def _may_run_written(name, *, force_tool, retried_tool, last_user_message) -> bool:
+    """May the loop run a call the model wrote out, on a pass that offered
+    tools? A lookup, or the tool this pass forced. Mail only when forced:
+    a send is judged before it is forced, and the retry after a forced send
+    offers no tools. Another write when it was the one retried, or when the
+    user asked for it (bt._user_requested_action, which takes a tool it has
+    no words for as asked, as for a claimed action)."""
+    if name in LOOKUP_TOOLS or name == force_tool:
+        return True
+    if name in _OUTWARD_TOOLS:
+        return False
+    if name == retried_tool:
+        return True
+    return bt._user_requested_action(
+        name, last_user_message if isinstance(last_user_message, str) else "")
+
+
+def _turn_calls(conversation_messages):
+    """(id, name, args) for each call made so far this turn."""
+    for m in conversation_messages:
+        if m.get("role") != "assistant":
+            continue
+        for call in m.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                args = None
+            yield call.get("id"), fn.get("name"), args
+
+
+def _claims_the_write(text, tool) -> bool:
+    """Do these words say `tool`'s work was done?"""
+    return bool(_retry_claims(text, tool)[1]
+                or _claim_sentences(text, bt._ACTION_CLAIM_PATTERNS.get(tool))[1])
+
+
+def _written_call_fallback(*candidates):
+    """(reply, templated) for words that still hold a written call: the
+    first candidate that says something once its calls are cut, else one
+    honest sentence. A write's sentence says what was not done."""
+    from blue.server.turn_completion import _substantive
+    name = next((call.name for words in candidates
+                 for call in written_tool_calls(words) if call.name), "")
+    write = bool(name) and name not in LOOKUP_TOOLS and _known_tool(name)
+    for words in candidates:
+        kept = strip_tool_markup(words or "")
+        if _substantive(kept) and not (write and _claims_the_write(kept, name)):
+            return kept, False
+    if write:
+        return _forced_tool_honest_line(name), True
+    return WRITTEN_LOOKUP_GAVE_UP, True
+
+
+def written_call_fallback(*candidates) -> str:
+    """The reply for words that still hold a tool call written as text
+    (turn_completion.finish's backstop)."""
+    return _written_call_fallback(*candidates)[0]
+
+
+def settle_written_call(response, conversation_messages, *, tools_allowed,
+                        user_name="", on_token=None, thinking=None):
+    """The reply process_with_tools returns, never a tool call written as text.
+
+    `tools_allowed` is the turn's policy: False where the turn answers
+    without tools (a greeting, a question about Blue himself). Returns the
+    response to send: `response` itself, edited or not, or the answer to a
+    lookup run here. `conversation_messages` is appended to in place.
+    """
+    if not isinstance(response, dict) or response.get("blue_error"):
+        return response
+    text = _reply_text(response)
+    calls = written_tool_calls(text)
+    if not calls:
+        return response
+    call = next((c for c in calls if c.name), None)
+    name = call.name if call else ""
+    kid = (user_name or "").strip() in bt._CHAT_ONLY_USERS
+    ran = list(_turn_calls(conversation_messages))
+    write = False
+    if (call and call.complete and name in LOOKUP_TOOLS and _known_tool(name)
+            and tools_allowed and not (kid and name in bt._KID_BLOCKED_TOOLS)
+            and not _missing_required_args(name, call.args)
+            and not any(cid in ("leaked", "written") for cid, _n, _a in ran)
+            and not any(n == name and a == call.args for _c, n, a in ran)):
+        print(f"   [WRITTEN-CALL] {name} written as text where no tools were "
+              f"offered — running it once")
+        result = bt.execute_tool(name, call.args)
+        conversation_messages.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "written", "type": "function",
+                            "function": {"name": name,
+                                         "arguments": json.dumps(call.args)}}]})
+        conversation_messages.append({"role": "tool", "tool_call_id": "written",
+                                      "name": name, "content": result})
+        note = ("[Answer the user's message now from the tool results above, "
+                "in plain words. No more tools: do not write a tool call.]")
+    else:
+        write = bool(name) and name not in LOOKUP_TOOLS and _known_tool(name)
+        undone = (_FORCED_TOOL_UNDONE.get(name, "nothing was done") if write
+                  else "nothing new was looked up")
+        print(f"   [WRITTEN-CALL] {name or 'a tool call'} written as text — not "
+              f"run; answering again without tools")
+        note = (f"[A tool call you wrote out as text was not run, so {undone}. "
+                "Answer the user's message now in plain words, from what is "
+                "already above. Do not write a tool call, and do not say "
+                "anything was done.]")
+    conversation_messages.append({"role": "user", "content": note})
+    again = bt.call_lm_studio(conversation_messages, include_tools=False,
+                              force_tool=None, iteration=2, on_token=on_token,
+                              thinking=THINK_OFF if thinking else None)
+    words = _reply_text(again) if again else ""
+    if words and not has_tool_markup(words) and not (
+            write and _claims_the_write(words, name)):
+        return again
+    print("   [WRITTEN-CALL] still no answer in words — cutting the call out")
+    reply, templated = _written_call_fallback(words, text)
+    _replace_reply(response, reply)
+    if not templated:
+        response.pop("blue_templated", None)
+    return response
+
 
 def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                   improved_force_tool, improved_tool_args, is_greeting,

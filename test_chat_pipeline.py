@@ -452,6 +452,179 @@ def test_the_tool_schema_is_sent_on_an_ordinary_turn(chat):
 
 
 # --------------------------------------------------------------------------
+# A tool call written out as text
+# --------------------------------------------------------------------------
+# longform_reading_report[1] (2026-10-05 harness): the fast path searched the
+# library, and the call that was to answer from the result (no tools offered)
+# came back as exactly this. It was the reply.
+
+WRITTEN_SEARCH = (
+    "<tool_call>\n<function=search_documents>\n<parameter=query>\n"
+    "reading report requirements assignment instructions format DH399\n"
+    "</parameter>\n</function>\n</tool_call>")
+WRITTEN_SEND = (
+    "<tool_call>\n<function=send_gmail>\n<parameter=to>\nstella@example.com\n"
+    "</parameter>\n<parameter=subject>\nReading report\n</parameter>\n"
+    "<parameter=body>\nHere are the requirements.\n</parameter>\n</function>\n"
+    "</tool_call>")
+SYLLABUS_ASK = "search my documents for the reading report requirements"
+ANSWER = "The reading report is 1,000 words on one chapter, due in week 6."
+
+
+def _runs(chat, tool):
+    return [call for call in chat.executed if call["tool"] == tool]
+
+
+def _stored(chat):
+    return [k.get("content") for _a, k in chat.saved if k.get("role") == "assistant"]
+
+
+def _call_after(chat, marker):
+    """The model call whose messages carry `marker` in a tool or user row."""
+    return next(p for p in chat.model.payloads if any(
+        marker in json.dumps(m) for m in p["messages"]
+        if m.get("role") in ("tool", "user")))
+
+
+def test_a_lookup_written_after_the_fast_path_is_run_once_and_answered(chat):
+    harness_ask = ("follow the specific requirements of the assignment as "
+                   "stated in the syllabus")
+    chat.model.queue(WRITTEN_SEARCH, ANSWER)
+    reply = reply_of(chat.ask(harness_ask))
+
+    assert reply == ANSWER
+    assert _stored(chat) == [ANSWER]
+    searches = _runs(chat, "search_documents")
+    assert searches[0]["args"] == {"query": harness_ask}, "the fast path ran"
+    assert len(searches) == 2, "the fast path's search, and the written one once"
+    assert searches[1]["args"] == {
+        "query": "reading report requirements assignment instructions format DH399"}
+    follow = _call_after(chat, '"tool_call_id": "written"')
+    assert not follow.get("tools"), "the answer to it is asked with no tools"
+    assert follow.get("reasoning_effort") == "none"
+
+
+def test_a_lookup_written_twice_is_cut_out_not_shown(chat):
+    chat.model.queue(WRITTEN_SEARCH, "Let me look again.\n" + WRITTEN_SEARCH)
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert "<tool_call>" not in reply and "<function=" not in reply
+    assert reply == "I couldn't finish looking that up — want me to try again?"
+    assert len(_runs(chat, "search_documents")) == 2
+    assert _stored(chat) == [reply]
+
+
+def test_the_same_lookup_written_again_is_not_rerun(chat):
+    """The fast path already searched for these words: answer from that."""
+    chat.model.queue(WRITTEN_SEARCH.replace(
+        "reading report requirements assignment instructions format DH399",
+        SYLLABUS_ASK), ANSWER)
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert reply == ANSWER
+    assert len(_runs(chat, "search_documents")) == 1
+    assert "nothing new was looked up" in chat.model.last_user_message
+
+
+def test_a_lookup_written_in_the_loop_s_last_call_is_run_once(chat):
+    """The loop's last call offers no tools either."""
+    chat.model.queue(_tool_call("search_documents", '{"query": "memory"}'),
+                     WRITTEN_SEARCH, ANSWER)
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert reply == ANSWER
+    assert [c["args"]["query"] for c in _runs(chat, "search_documents")] == [
+        "memory",
+        "reading report requirements assignment instructions format DH399"]
+
+
+def test_a_second_written_call_in_one_turn_is_not_run(chat):
+    """The loop ran the first one (its own repair); the second is answered
+    from what is there."""
+    chat.model.queue(WRITTEN_SEARCH, WRITTEN_SEARCH, ANSWER)
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert reply == ANSWER
+    assert len(_runs(chat, "search_documents")) == 1
+
+
+def test_a_send_written_after_the_fast_path_is_never_run(chat):
+    chat.model.queue(WRITTEN_SEND, ANSWER)
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert not _runs(chat, "send_gmail")
+    assert reply == ANSWER
+    regen = chat.model.payloads[-1]
+    assert not regen.get("tools") and regen.get("reasoning_effort") == "none"
+    assert "nothing was sent" in chat.model.last_user_message
+
+
+def test_a_send_written_on_an_ordinary_turn_is_never_run(chat):
+    """The loop's own repair ran any known tool written as text: on a turn
+    that offered tools, a written send_gmail nobody asked for went out."""
+    chat.model.queue(WRITTEN_SEND, "Memory is less a store than a practice.")
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert not _runs(chat, "send_gmail")
+    assert reply == "Memory is less a store than a practice."
+
+
+def test_a_regeneration_that_claims_the_send_gets_the_honest_line(chat):
+    chat.model.queue(WRITTEN_SEND, "I've sent the email to Stella with the details.")
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert not _runs(chat, "send_gmail")
+    assert reply == ("I didn't act on that, so nothing was sent; "
+                     "say it again if you'd like me to.")
+
+
+def test_a_json_form_written_lookup_is_run_and_answered(chat):
+    chat.model.queue(
+        '<tool_call>{"name": "web_search", "arguments": '
+        '{"query": "DH399 reading report rubric"}}</tool_call>', ANSWER)
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert reply == ANSWER
+    assert [c["args"] for c in _runs(chat, "web_search")] == [
+        {"query": "DH399 reading report rubric"}]
+
+
+def test_a_greeting_answered_with_a_written_call_runs_nothing(chat):
+    """The greeting fast path offers no tools, so the turn may not use one."""
+    chat.model.queue(
+        '<tool_call>{"name": "get_weather", "arguments": '
+        '{"location": "Kitchener"}}</tool_call>', "Hello, Alex!")
+    reply = bt.process_with_tools(
+        [{"role": "user", "content": "hello"}], user_name="Alex")
+
+    assert reply["choices"][0]["message"]["content"] == "Hello, Alex!"
+    assert chat.executed == []
+
+
+def test_a_reply_about_tool_calls_is_left_alone(chat):
+    prose = ("Qwen wraps each call in <tool_call> tags, and the server turns "
+             "the tags into a real call before anything is shown.")
+    chat.model.queue(prose)
+    reply = reply_of(chat.ask("how does a local model call a tool?"))
+
+    assert reply == prose
+    assert len(chat.model.main) == 1, "nothing was regenerated"
+
+
+def test_a_written_call_from_any_path_is_never_shown_or_stored(chat, monkeypatch):
+    """turn_completion.finish is the backstop, as for "</think>"."""
+    monkeypatch.setattr(bt, "process_with_tools", lambda *a, **k: {"choices": [{
+        "message": {"role": "assistant", "content": (
+            "The syllabus has a reading report due in week 6.\n\n"
+            "Let me pull up the rubric.\n" + WRITTEN_SEARCH)}}]})
+    reply = reply_of(chat.ask("what does the syllabus say about the report?"))
+
+    assert reply == "The syllabus has a reading report due in week 6."
+    assert _stored(chat) == [reply]
+    assert chat.executed == []
+
+
+# --------------------------------------------------------------------------
 # The live preview
 # --------------------------------------------------------------------------
 

@@ -17,10 +17,11 @@ The first two also clean the live reply before it is shown, spoken or stored
 (turn_completion.finish, with the narrower live self-talk pattern), so the
 debris is not made in the first place.
 
-Two more judge a reply before it goes out at all: strip_reasoning_tags drops a
-reasoning pass that leaked into the text ("…</think>"), and
-reads_as_deliberation spots a forced tool call that wrote the model arguing
-with itself instead of the call.
+Three more judge a reply before it goes out at all: strip_reasoning_tags drops
+a reasoning pass that leaked into the text ("…</think>"), written_tool_calls
+finds a tool call the model wrote out as text instead of making it
+("<tool_call><function=web_search>…"), and reads_as_deliberation spots a
+forced tool call that wrote the model arguing with itself instead of the call.
 
 Stdlib only and at the repo top level on purpose: blue_memory_improved imports
 this, and importing anything under blue/ runs blue/__init__ → blue.memory →
@@ -31,9 +32,11 @@ live memory system).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
+from typing import List, NamedTuple
 
 # ================================================================================
 # INSTRUCTION-BLOCK CITATIONS
@@ -174,6 +177,219 @@ def reads_as_deliberation(text: str) -> bool:
     return any(brk.start() > first_para
                and _SECOND_THOUGHT_RE.match(text, brk.end())
                for brk in _PARAGRAPH_BREAK_RE.finditer(text))
+
+
+# ================================================================================
+# TOOL CALLS WRITTEN AS TEXT
+# ================================================================================
+
+# A tool call the model wrote into its reply instead of making it. Twelve of
+# Blue's logged replies are one (conversation_log 481 to 9392, July and
+# August), and the 2026-10-05 harness made another. All are the Qwen form:
+#   <tool_call>
+#   <function=search_documents>
+#   <parameter=query>
+#   reading report requirements assignment instructions format DH399
+#   </parameter>
+#   </function>
+#   </tool_call>
+# The Hermes form puts a JSON object inside <tool_call>; a bare
+# <function=NAME>…</function>, and a reply that is nothing but
+# {"name": …, "arguments": {…}}, are the same thing. Each logged one ended
+# the reply. Seven came after a sentence announcing it ("Let me try again
+# with the right term."), and one was a create_document carrying a whole
+# reading report. A call cut off by the token cap stops inside its body.
+#
+# Not a call: "<tool_call>" named in prose ("Qwen wraps each call in
+# <tool_call> tags"). A call has a body, <function=NAME> or a JSON object, or
+# nothing at all after the tag. Nor is markup inside a ``` fence or `code`:
+# that is an example being shown, unless the reply is nothing else.
+
+class WrittenCall(NamedTuple):
+    name: str        # "" when the body names no tool
+    args: dict
+    start: int
+    end: int
+    complete: bool   # every tag closed and the arguments read whole
+
+
+# A function tag opens a call only when a body follows it: "<function=x>
+# names the tool and <parameter=query> holds the query" is prose.
+_FUNCTION_TAG = r"<function=[\w.\-]+>(?=\s*(?:<parameter=|\{|</function|\Z))"
+_CALL_OPEN_RE = re.compile(
+    r"<tool_call\s*>(?=\s*(?:" + _FUNCTION_TAG + r"|\{|\Z))|" + _FUNCTION_TAG,
+    re.I)
+_CALL_CLOSE_RE = re.compile(r"</tool_call\s*>", re.I)
+_FUNCTION_OPEN_RE = re.compile(r"\s*<function=([\w.\-]+)>", re.I)
+_FUNCTION_CLOSE_RE = re.compile(r"</function\s*>", re.I)
+_PARAM_OPEN_RE = re.compile(r"<parameter=[\w.\-]+>", re.I)
+_PARAM_RE = re.compile(
+    r"<parameter=([\w.\-]+)>\s*(.*?)\s*</parameter\s*>", re.I | re.S)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_JSON_REPLY_RE = re.compile(r"\A\s*(?:```(?:json)?\s*)?(\{.*\})\s*(?:```)?\s*\Z",
+                            re.I | re.S)
+# The sentence before a call that ended the reply, announcing it: "Let me try
+# again with the right term.", "First, I will look up the first one." With
+# the call gone it promises a lookup that never comes. Only a sentence about
+# looking something up: "Let me explain why…" or "I'll summarize: …" is an
+# answer.
+_ANNOUNCES_CALL_RE = re.compile(
+    r"(?:(?:(?<=[.!?…:])|(?<=[.!?…:][\"'”’)\]]))[ \t]+|\n\s*|\A\s*)"
+    r"(?:(?:now|first|so|ok(?:ay)?|alright|next)\s*,?\s+)?"
+    r"(?:let me|let['’]s|i['’]ll|i will|i['’]m going to|i am going to)\s+"
+    r"(?:\w+\s+){0,3}?"
+    r"(?:try|search|look|check|correct|fix|find|pull|fetch|query|run|re-?run"
+    r"|read|browse|open|grab|dig|refine|redo|retry|google|call"
+    r"|do (?:that|this|a|another|one))\w*\b"
+    r"[^.!?\n:]{0,200}[.!?…:]*\s*\Z",
+    re.I)
+
+
+def _quoted_spans(text):
+    spans = [m.span() for m in _FENCE_RE.finditer(text)]
+    spans += [m.span() for m in _INLINE_CODE_RE.finditer(text)
+              if not any(a <= m.start() < b for a, b in spans)]
+    return spans
+
+
+def _call_arguments(body):
+    """(args, whole) from a call body: <parameter=KEY> pairs or a JSON object."""
+    if _PARAM_OPEN_RE.search(body):
+        pairs = _PARAM_RE.findall(body)
+        return ({k: v.strip() for k, v in pairs},
+                len(pairs) == len(_PARAM_OPEN_RE.findall(body)))
+    if not body.strip():
+        return {}, True
+    try:
+        start = body.index("{")
+        args, _ = json.JSONDecoder().raw_decode(body, start)
+    except ValueError:
+        return {}, False
+    return (args, True) if isinstance(args, dict) else ({}, False)
+
+
+def _json_call(payload, *, needs_arguments=False):
+    """(name, args) from {"name": …, "arguments": {…}}; None if not that.
+
+    Outside a <tool_call> tag the object must carry its arguments too:
+    {"name": "Ada", "role": "TA"} is not a call."""
+    if not isinstance(payload, dict):
+        return None
+    if needs_arguments and not ({"arguments", "parameters"} & payload.keys()):
+        return None
+    name = payload.get("name")
+    args = payload.get("arguments", payload.get("parameters"))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name.strip(), args if isinstance(args, dict) else {}
+
+
+def _read_call(text, start, end_of_open):
+    """The WrittenCall that opens at `start` ("<tool_call>" or "<function=")."""
+    tool_call = text[start:end_of_open].lower().startswith("<tool_call")
+    close = _CALL_CLOSE_RE.search(text, end_of_open) if tool_call else None
+    limit = close.start() if close else len(text)
+    fn = _FUNCTION_OPEN_RE.match(text, end_of_open if tool_call else start)
+    if fn and fn.end() <= limit:
+        fclose = _FUNCTION_CLOSE_RE.search(text, fn.end(), limit)
+        args, whole = _call_arguments(
+            text[fn.end():fclose.start() if fclose else limit])
+        end = close.end() if close else (fclose.end() if fclose else len(text))
+        return WrittenCall(fn.group(1), args, start, end, bool(fclose and whole))
+    # <tool_call>{"name": …}</tool_call>, or "<tool_call>" and nothing after.
+    body = text[end_of_open:limit]
+    parsed = None
+    try:
+        brace = body.index("{")
+        payload, used = json.JSONDecoder().raw_decode(body, brace)
+        parsed = _json_call(payload)
+        if not close:
+            limit = end_of_open + used
+    except ValueError:
+        pass
+    end = close.end() if close else limit
+    if parsed:
+        return WrittenCall(parsed[0], parsed[1], start, end, bool(close))
+    return WrittenCall("", {}, start, end, False)
+
+
+def written_tool_calls(text) -> List[WrittenCall]:
+    """The tool calls written out in `text` instead of being made, in order.
+
+    Markup quoted in a code fence or `code` is not counted, unless the reply
+    has no words outside it.
+    """
+    if not text or not isinstance(text, str):
+        return []
+    low = text.lower()
+    calls = []
+    if "<tool_call" in low or "<function=" in low:
+        quoted = _quoted_spans(text)
+        if quoted:
+            outside = list(text)
+            for a, b in quoted:
+                outside[a:b] = [" "] * (b - a)
+            if not re.search(r"\w", "".join(outside)):
+                quoted = []
+        pos = 0
+        while True:
+            m = _CALL_OPEN_RE.search(text, pos)
+            if not m:
+                break
+            if any(a <= m.start() < b for a, b in quoted):
+                pos = m.end()
+                continue
+            call = _read_call(text, m.start(), m.end())
+            calls.append(call)
+            pos = max(call.end, m.end())
+    if not calls:
+        whole = _JSON_REPLY_RE.match(text)
+        if whole:
+            try:
+                parsed = _json_call(json.loads(whole.group(1)),
+                                    needs_arguments=True)
+            except ValueError:
+                parsed = None
+            if parsed:
+                calls.append(WrittenCall(parsed[0], parsed[1], 0, len(text), True))
+    return calls
+
+
+def has_tool_markup(text) -> bool:
+    """Does `text` hold a tool call written out instead of made?"""
+    return bool(written_tool_calls(text))
+
+
+def strip_tool_markup(text):
+    """`text` without the tool calls written into it.
+
+    When a call ended the reply, the sentence announcing it goes too ("Let me
+    try again with the right term."): nothing follows it now. Text without a
+    call is returned as is; a reply that was only a call comes back "".
+    """
+    calls = written_tool_calls(text)
+    if not calls:
+        return text
+    pieces, pos = [], 0
+    for call in calls:
+        pieces.append(text[pos:call.start])
+        pos = call.end
+    tail = text[pos:]
+    if not tail.strip():
+        for _ in range(2):
+            cut = _ANNOUNCES_CALL_RE.sub("", pieces[-1], count=1)
+            if cut == pieces[-1]:
+                break
+            pieces[-1] = cut
+    out = "".join(pieces) + tail
+    out = re.sub(r"```[\w-]*\s*```", "", out)   # the fence a call was in
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
 # ================================================================================

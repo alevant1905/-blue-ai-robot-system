@@ -1607,7 +1607,8 @@ from blue.tool_selector import (
 )
 from blue.tool_selector.detectors.gmail import asks_to_send_mail
 from blue.utils import strip_conversational_filler, strip_pasted_block
-from blue_reply_text import strip_reasoning_tags
+from blue_reply_text import (strip_reasoning_tags, strip_tool_markup,
+                             written_tool_calls)
 
 # Direct Ohbot-family head control (this branch only — replaces the Ohbot app
 # for the head). The module is defensive: if a library isn't installed or a
@@ -8943,9 +8944,10 @@ def _build_email_reply(cand: Dict[str, Any]) -> tuple:
         composition = _maybe_handle_owner_composition(body)
         if composition:
             return composition, []
-    # Reasoning that leaked into the text is not part of the reply; an
-    # all-reasoning draft comes back empty and is skipped, not sent.
-    return strip_reasoning_tags(_generate_reply_for_email(cand)), []
+    # Reasoning that leaked into the text is not part of the reply, and
+    # neither is a tool call written out as text; a draft that was only
+    # either comes back empty and is skipped, not sent.
+    return strip_tool_markup(strip_reasoning_tags(_generate_reply_for_email(cand))), []
 
 
 
@@ -10046,47 +10048,17 @@ def _document_search_succeeded(result: str) -> bool:
 # tool call — observed live 2026-07-09: the reply contained a literal
 # "<tool_call><function=web_search><parameter=query>...</parameter></function>
 # </tool_call>" block, which reached the user as words. Parse it and run it.
-_LEAKED_TOOL_RE = re.compile(
-    r"<tool_call>\s*<function=([\w\-]+)>(.*?)</function>\s*</tool_call>"
-    r"|<function=([\w\-]+)>(.*?)</function>",
-    re.DOTALL,
-)
-# The Qwen/Hermes form: a JSON object inside <tool_call>. The patterns above
-# only knew the <function=...> style, so a leak from the model actually loaded
-# here (qwen3.6-35b) was not recognised and reached the user as raw markup.
-_LEAKED_JSON_TOOL_RE = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-_LEAKED_PARAM_RE = re.compile(r"<parameter=([\w\-]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
-
-
+# The forms it is found in (that one, a JSON object inside <tool_call>, a
+# bare <function=…>) are read by blue_reply_text.written_tool_calls, which
+# turn_completion.finish also uses to keep one out of the reply.
 def parse_leaked_tool_call(response: str):
-    """(tool_name, args) when the reply contains a tool call written out as
-    text; None otherwise. Handles <parameter=...> bodies and a JSON body."""
-    m = _LEAKED_TOOL_RE.search(response or "")
-    if not m:
-        j = _LEAKED_JSON_TOOL_RE.search(response or "")
-        if j:
-            try:
-                payload = json.loads(j.group(1))
-            except Exception:
-                return None
-            if isinstance(payload, dict):
-                name = str(payload.get("name") or "").strip()
-                args = payload.get("arguments")
-                if name:
-                    return (name, args if isinstance(args, dict) else {})
-        return None
-    name = (m.group(1) or m.group(3) or "").strip()
-    body = m.group(2) or m.group(4) or ""
-    args = {k: v.strip() for k, v in _LEAKED_PARAM_RE.findall(body)}
-    if not args:
-        try:
-            j = json.loads(body.strip())
-            if isinstance(j, dict):
-                args = j
-        except Exception:
-            pass
-    return (name, args) if name else None
+    """(tool_name, args) for the first whole tool call written out in the
+    reply; None when there is none. One cut off mid-body is not returned:
+    its arguments are a fragment."""
+    for call in written_tool_calls(response or ""):
+        if call.name and call.complete:
+            return (call.name, call.args)
+    return None
 
 
 # Patterns that mean "I performed action X" — keyed by the tool that should
@@ -13429,7 +13401,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
                                   thinking=_thinking_now)
         if response:
-            return response
+            # Every reply below is settled the same way: a tool call the
+            # model wrote out as text is never the reply (tool_pipeline).
+            return _tool_pipeline.settle_written_call(
+                response, conversation_messages, tools_allowed=False,
+                user_name=user_name, on_token=on_token, thinking=_thinking_now)
         return model_unavailable_reply(robot, user_name)
 
     # ================================================================================
@@ -13484,7 +13460,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         thinking=_thinking_now,
     )
     if _direct is not None:
-        return _direct
+        return _tool_pipeline.settle_written_call(
+            _direct, conversation_messages, tools_allowed=True,
+            user_name=user_name, on_token=on_token, thinking=_thinking_now)
 
 
     # "Tell me more": ALSO pin the continue-don't-restart instruction right
@@ -13525,7 +13503,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         on_token, user_name, pending_force_tool, thinking=_thinking_now,
     )
     if _looped is not None:
-        return _looped
+        # A question about Blue himself is answered without tools.
+        return _tool_pipeline.settle_written_call(
+            _looped, conversation_messages,
+            tools_allowed=not (_identity_kind and not improved_force_tool),
+            user_name=user_name, on_token=on_token, thinking=_thinking_now)
 
     # If we exit the loop without returning, something went wrong
     return {"choices": [{"message": {"role": "assistant", "content": "I couldn't complete your request."}}]}
