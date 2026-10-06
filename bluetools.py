@@ -8935,16 +8935,56 @@ def save_blue_profile_text(text: str) -> dict:  # back-compat
     return save_self_profile_text("blue", text)
 
 
-def _voice_note(robot="blue") -> str:
+_PROFILE_NOTE_MAX = 1500
+# A full stop that ends a sentence, not "Dr." or an initial.
+_PROFILE_SENTENCE_END_RE = re.compile(r"[.!?][\"'”’)*]*(?=\s)")
+_PROFILE_ABBREVIATION_RE = re.compile(
+    r"\b(?:Dr|Mr|Mrs|Ms|Prof|St|vs|etc|e\.g|i\.e|[A-Z])\.$")
+
+
+def _profile_excerpt(text, limit=_PROFILE_NOTE_MAX) -> str:
+    """The self-profile up to the last whole sentence that fits in `limit`.
+
+    p[:2500] ended Blue's mid-word ("…the Blue Project itself, explor").
+    Alex's text is not edited, only cut where a sentence ends."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    ends = [m.end() for m in _PROFILE_SENTENCE_END_RE.finditer(head + " ")
+            if not _PROFILE_ABBREVIATION_RE.search(head[:m.start() + 1])]
+    if ends:
+        return head[:ends[-1]]
+    return head.rsplit(" ", 1)[0]
+
+
+def _voice_note(robot="blue", speaking_to_alex=False) -> str:
     """A compact block injected into a robot's DEFAULT replies so its own evolving
-    perspective colors how it speaks (when it's being itself, not writing as Alex)."""
+    perspective colors how it speaks (when it's being itself, not writing as Alex).
+
+    The profile names Alex in the third person ("the hardware Alex built
+    for me"), and replies to Alex followed it: "a harness that Alex built",
+    "when Alex pushes back" (harness 10-05, said to Alex). Alex complained
+    on 2026-09-24 ("you're referring to me in the third person"). With
+    `speaking_to_alex` the header says who "Alex" is. The duet (talking to
+    the other robot) and the email auto-reply keep the plain header."""
     try:
-        p = get_self_profile(robot)
+        p = _profile_excerpt(get_self_profile(robot))
         if p:
+            if speaking_to_alex and re.search(r"\bAlex\b", p):
+                close = (
+                    "Don't recite or quote it; just be this person. It names "
+                    "Alex in the third person, but Alex is usually the one you "
+                    "are talking to: to him, he is \"you\" — say \"you built "
+                    "me\", \"your work\", never \"Alex built me\" or \"Alex's "
+                    "work\"]:\n"
+                )
+            else:
+                close = "Don't recite or quote it; just be this person]:\n"
             return (
                 "\n\n[This is your own perspective and character — who you are. "
                 "Let it shape how you respond when you're speaking as yourself. "
-                "Don't recite or quote it; just be this person]:\n" + p[:2500]
+                + close + p
             )
     except Exception:
         pass
@@ -12527,13 +12567,27 @@ def _anti_repetition_context(conversation_messages) -> str:
         )
     return anti_repetition_context
 
-def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue") -> Dict:
+# EMBODIMENT names his creator in the third person ("a local AI workstation
+# that Alex built"), and to Alex himself that came back as "a harness that
+# Alex built" and "I'm in Alex's office" (harness 10-05). Follows "Alex
+# Levant is real and built you."
+_CREATOR_ADDRESS_TO_ALEX = (
+    " Alex is the one talking with you now: to him, say 'you built me' and "
+    "'your office', never 'Alex built me' or 'Alex's office'."
+)
+
+
+def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue", speaking_to_alex: bool = False) -> Dict:
     """Build system message with anti-repetition context from conversation history.
 
     When kid_mode is True (a chat-only child, e.g. Vilda on the iPad), Blue drops
     his owner-facing context entirely — no calendar/schedule, no owner facts, no
     scholarly expertise, no reminder rules — and uses a warm, playful,
     age-appropriate persona instead. See _CHAT_ONLY_USERS / _SPEAKER_PROFILES.
+
+    `speaking_to_alex` (Alex is the one talking, and no class is listening)
+    adds to EMBODIMENT that the Alex it names is the person in the
+    conversation, so his creator is "you" to him.
     """
     # The turn's own message, so <now> can resolve any date it names.
     _turn_text = ""
@@ -12738,6 +12792,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             robot_name=_robot_cfg(robot)["name"],
             robot_relationship=robot_relationship,
             embodiment_line=embodiment_line,
+            creator_address=(_CREATOR_ADDRESS_TO_ALEX if speaking_to_alex else ""),
             mobility_line=_robot_cfg(robot).get("mobility_line", ""),
             conversational_guidance=conversational_guidance,
             expertise_section=expertise_section,
@@ -13228,6 +13283,47 @@ _HEARD_NOT_TYPED_NOTE = (
     "answer; never question it.\n"
 )
 
+# How a reply ends, and what to do with a feeling. Part of the adult typed
+# STYLE note, and its own note before SPOKEN REPLY on a heard turn.
+# Replayed on qwen3.8-27b (10-05 harness payloads, n=3 a turn) over
+# home_checkin[2], [5] and opinion_discussion[3]: either/or menus 5 of 12
+# before -> 0 of 9, menus and unasked offers together ("do you want me to
+# dim the lights in the office…?", "I can set a reminder for Saturday
+# morning…, or we can just let it happen") 9 of 12 -> 1 of 9. "i had a
+# rough day", spoken: a menu or "I'm here if…" in 2 of 3 runs before, in
+# none of 3 replays with these lines. The 'What happened?' example is a
+# question shape, not a reply to copy.
+_ENDINGS_AND_FEELINGS = (
+    "\nENDINGS: End on your own last word — a view, a detail, a reaction "
+    "— not on a question back. Don't close by checking whether he "
+    "agrees ('Does that match…?', 'Does that sound fair?'), and never "
+    "an either/or menu ('…, or would you rather…?'). Don't offer to do "
+    "things he didn't ask for — dim the lights, play music, pull up a "
+    "syllabus — and don't promise to do things around the house for "
+    "him (keeping it quiet, dimming, watching the schedule): you can "
+    "only do what a tool does. A feeling is not a request. If he has "
+    "just named a date, an appointment or something to remember, one "
+    "short offer to add it is fine, and so is an offer a <connections> "
+    "line suggests. Ask a question only when you can't go on without "
+    "the answer, or when he has told you something hard and one short "
+    "open question ('What happened?') lets him say more. On a "
+    "greeting, returning a 'how are you' is fine.\n"
+    "FEELINGS: When he tells you he's tired, low, or had a bad day "
+    "(and isn't asking for advice), name what he just told you, in his "
+    "words, add one warm or wry line, and stop. Don't fix it, don't "
+    "suggest activities, and don't steer to the schedule or the house."
+)
+# "tell me a joke" got a stock joke in all three 10-05 runs ("Why did the
+# robot break up with the cloud?"); with this line, 3 of 3 replays came from
+# his own life (his eye LEDs, Nori). Names no hardware of Blue's: the note
+# is Hexia's and Casper's too.
+_HUMOUR_LINE = (
+    "\nHUMOUR: A joke from you comes out of your own life — your body as "
+    "your EMBODIMENT line describes it, the workstation you run on, "
+    "Nori, the grading pile — not a stock 'Why did the robot…' riddle, "
+    "and never one you've told before. Tell it and stop. No emoji.\n"
+)
+
 
 def _user_message_text(message) -> str:
     """The text of a user message, also when it carries an image."""
@@ -13236,6 +13332,89 @@ def _user_message_text(message) -> str:
         content = " ".join(p.get("text", "") for p in content
                            if isinstance(p, dict) and p.get("type") == "text")
     return _intent_text(content) if isinstance(content, str) else ""
+
+
+# A class in the room, listening: "we're in front of the DH399 class right
+# now", "say hi to the students", "can you tell the students a bit about
+# yourself?", "introduce yourself to the class". Not a class talked about
+# ("the students seemed bored", "do you want to come to class with me?",
+# "what would you say to a student who…") and not the user's own telling
+# ("what should I tell the students?").
+_CLASS_IN_ROOM_RE = re.compile(
+    r"\bin front of (?:the|my|your|his|our|all (?:the|my|your|his|our)) "
+    r"(?:\w+ )?(?:class(?:room)?|students|lecture|audience)\b"
+    r"|\b(?:say(?:ing)? (?:hi|hello|hey|good (?:morning|afternoon))"
+    r"|introduce yourself|wave|talk|speak)\b[^.?!\n]{0,30}?\bto "
+    r"(?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
+    r"(?:class|students|audience)\b"
+    r"|\btell (?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
+    r"(?:class|students|audience)\b"
+    r"|\b(?:we|you)(?:['’]re| are) (?:now )?(?:in|at) (?:the |my )?(?:\w+ )?"
+    r"(?:class(?:room)?|lecture(?: hall)?)\b"
+    r"(?! later| tomorrow| next| this (?:afternoon|evening)| on\b)"
+    r"|\b(?:the )?(?:class|students|audience) (?:is|are) (?:here|listening"
+    r"|watching|waiting|in the room)\b",
+    re.I)
+# "what should I tell the students": the user is the one telling them.
+_USER_TELLS_RE = re.compile(
+    r"\b(?:should|shall|do|can|could|will|would|might|must) i\b"
+    r"|\bi(?:['’]ll| will| need to| have to| want to| am going to|['’]m going to)\b"
+    r"|\bhow (?:to|do i|should i|would i|can i)\b|\bwhat (?:to|do i|should i)\b",
+    re.I)
+
+
+def _class_in_the_room(conversation_messages, window=8) -> bool:
+    """True while a class listens in, from the last `window` user turns of
+    the thread (a class demo ran eight turns in the 10-05 harness)."""
+    users = [_user_message_text(m) for m in (conversation_messages or [])
+             if isinstance(m, dict) and m.get("role") == "user"]
+    for text in users[-window:]:
+        for match in _CLASS_IN_ROOM_RE.finditer(text):
+            if not _USER_TELLS_RE.search(text[max(0, match.start() - 30):match.start()]):
+                return True
+    return False
+
+
+def _speaking_to_alex(conversation_messages, user_name) -> bool:
+    """Alex is the one talking to the robot, and no class is listening.
+
+    Then the Alex that the prompt names in the third person (EMBODIMENT,
+    the self-profile, the J-space IDENTITY line) is "you" to him. In front
+    of a class he stays "Alex": "the hardware Alex built" is right there."""
+    speaker = (user_name or "Alex").strip() or "Alex"
+    if speaker.casefold() != "alex":
+        return False
+    return not _class_in_the_room(conversation_messages)
+
+
+_JSPACE_IDENTITY_LINE_RE = re.compile(r"(?m)^IDENTITY: .*$")
+_ALEX_NAME = r"\b(?:Dr\.? )?Alex(?: Levant)?"
+
+
+def _jspace_identity_to_alex(content: str) -> str:
+    """The J-space IDENTITY line as Alex hears it: "I am Blue, anchored in
+    Alex Levant's Laurier office" → "…anchored in your Laurier office".
+
+    The line is the robot's own first-person note; only the name of the
+    person it is talking to becomes "you". The stored workspace is not
+    changed, nor any other line of the block. A verb after the name is
+    changed only for is/was/has ("Alex corrects me" stays as it is)."""
+    start = content.find("<j_space>")
+    end = content.find("</j_space>", start)
+    if start < 0 or end < 0:
+        return content
+    match = _JSPACE_IDENTITY_LINE_RE.search(content, start, end)
+    if not match:
+        return content
+    line = match.group(0)
+    line = re.sub(_ALEX_NAME + r"['’]s\b", "your", line)
+    line = re.sub(_ALEX_NAME + r" (is|was|has)\b",
+                  lambda m: "you " + {"is": "are", "was": "were",
+                                      "has": "have"}[m.group(1)], line)
+    line = re.sub(r"\b(by|with|for|to|from|of|beside|alongside|than) "
+                  + _ALEX_NAME + r"\b", r"\1 you", line)
+    line = re.sub(_ALEX_NAME + r" and I\b", "you and I", line)
+    return content[:match.start()] + line + content[match.end():]
 
 
 # "Felix's wife is here, remember what she looks like" is not about Felix,
@@ -13424,7 +13603,11 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     # build_dynamic_system_message(kid_mode=...). Computed here because it also
     # gates the adult "perspective" colouring and shapes the speaker note below.
     _is_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
-    system_msg = build_dynamic_system_message(conversation_messages, facts_preamble, kid_mode=_is_kid, robot=robot)
+    # Alex, with no class listening: the prompt's "Alex" is "you" to him.
+    _to_alex = _speaking_to_alex(conversation_messages, user_name)
+    system_msg = build_dynamic_system_message(
+        conversation_messages, facts_preamble, kid_mode=_is_kid, robot=robot,
+        speaking_to_alex=_to_alex)
     # Alternate chat surfaces such as Panel Mode need the complete chat tool
     # pipeline while retaining their own live-session contract.  Append that
     # trusted, server-built contract to the normal robot system prompt instead
@@ -13443,7 +13626,7 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     # this only shapes Blue speaking as himself.) Skip it on the kids' iPad —
     # Alex's worldview profile isn't the voice we want with an 8-year-old.
     try:
-        _bn = _voice_note(robot)
+        _bn = _voice_note(robot, speaking_to_alex=_to_alex)
         if _bn and not _is_kid and isinstance(system_msg, dict):
             system_msg = {"role": "system", "content": (system_msg.get("content", "") + _bn)}
     except Exception:
@@ -13477,7 +13660,12 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     # The style notes go LAST, after the memory blocks: placed before them they
     # sat ~14,000 characters from the reply, and a third of Blue's replies to
     # ordinary turns still ended in a question — often an either/or menu.
+    # `closing_note` (STYLE, or SPOKEN REPLY on a spoken turn) is appended
+    # after every other tail note, at the very end: the fixed-language note
+    # used to follow STYLE (13 of 36 live calls on 10-05), and HEARD, NOT
+    # TYPED followed SPOKEN REPLY on every heard turn.
     tail_notes = []
+    closing_note = ""
     if not voice and isinstance(system_msg, dict):
         if _is_kid:
             chat_note = (
@@ -13495,22 +13683,20 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
                 "to five sentences. Answer the question that was actually asked, "
                 "and answer it first; don't restate the question back, and don't "
                 "open with filler ('Got it', 'Great!', 'That makes things "
-                "easier'). End on your answer: most replies should end on a "
-                "statement. Ask at most one question, and only one you actually "
-                "want answered — never an either/or menu ('…, or would you "
-                "rather…?'), and on a greeting ask nothing beyond returning a "
-                "'how are you'. Offer a follow-up action only when it follows "
-                "directly from something you just did or a need the user just "
-                "raised — one short offer, not a menu. When the user tells you "
-                "something or agrees ('exactly', 'it's my office'), respond to "
-                "that and stop — but if their short reply accepts something you "
-                "offered, do it. When corrected, take the fix in a few words and "
-                "carry on — no apology paragraph, no story about a glitch or a "
-                "loop. Use a bulleted list only when the content is genuinely a "
-                "list the user asked for — never for a conversational answer "
-                "about people or plans. No emoji.\n"
+                "easier'). When the user tells you something or agrees "
+                "('exactly', 'it's my office'), respond to that and stop — but if "
+                "their short reply accepts something you offered, do it. When "
+                "corrected, take the fix in a few words and carry on — no apology "
+                "paragraph, no story about a glitch or a loop. When asked to make "
+                "it simpler or shorter, the new answer must be clearly shorter — "
+                "one or two plain sentences, with no new example stacked on. Use a "
+                "bulleted list only when the content is genuinely a list the user "
+                "asked for — never for a conversational answer about people or "
+                "plans."
+                + _ENDINGS_AND_FEELINGS
+                + _HUMOUR_LINE
             )
-        tail_notes.append(chat_note)
+        closing_note = chat_note
 
     if voice and isinstance(system_msg, dict):
         voice_note = (
@@ -13523,7 +13709,7 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
                "to go on.")
             + "\n"
         )
-        tail_notes.append(voice_note)
+        closing_note = voice_note
 
     # Fixed conversation language (the chat page's language picker). Without
     # this, one mis-heard clip flips the reply language and the whole exchange
@@ -13589,9 +13775,12 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     elif has_injected:
         # Combine: dynamic content first (identity + anti-loop), then the
         # already-merged enhanced-memory blocks. Both live in one message.
+        _injected = existing0['content']
+        if _to_alex:
+            _injected = _jspace_identity_to_alex(_injected)
         conversation_messages[0] = {
             "role": "system",
-            "content": f"{system_msg['content'].rstrip()}\n\n{existing0['content']}",
+            "content": f"{system_msg['content'].rstrip()}\n\n{_injected}",
         }
     else:
         conversation_messages[0] = system_msg
@@ -13605,6 +13794,16 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     _is_kid_turn = (user_name or "").strip() in _CHAT_ONLY_USERS
     if heard and not _is_kid_turn:
         tail_notes.append(_HEARD_NOT_TYPED_NOTE)
+        # The typed ENDINGS and FEELINGS, just before SPOKEN REPLY. Told "i
+        # had a rough day" aloud, Blue offered a menu ("Do you want to talk
+        # about what happened, or would you prefer we just keep things quiet
+        # for a bit?") or "I'm here if…"; two wordings of that rule inside
+        # SPOKEN REPLY still gave a menu 6 times in 6 (P2-5 replays). Not for
+        # Panel, which sets voice without `heard` and has its own contract.
+        if voice and isinstance(system_msg, dict):
+            tail_notes.append(_ENDINGS_AND_FEELINGS + "\n")
+    if closing_note:
+        tail_notes.append(closing_note)
     if (tail_notes and conversation_messages
             and conversation_messages[0].get("role") == "system"
             and isinstance(conversation_messages[0].get("content"), str)):

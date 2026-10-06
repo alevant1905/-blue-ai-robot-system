@@ -113,6 +113,225 @@ def test_spoken_adult_replies_end_on_the_answer_and_note_the_transcription():
     assert "HEARD, NOT TYPED" not in _system_text(user="Vilda", voice=True, heard=True)
 
 
+# ---- endings, feelings, humour; the closing note is truly last (P2-5) -------------
+
+def test_the_adult_style_note_says_how_to_end_and_what_a_feeling_is():
+    """Either/or menus and unasked offers ("do you want me to dim the
+    lights…?") 9 of 12 -> 1 of 9 in qwen3.8-27b replays; stock riddles 3/3
+    -> 0/3."""
+    text = _system_text()
+    note = text[text.rindex("\nSTYLE:"):]
+    for part in ("ENDINGS:", "FEELINGS:", "HUMOUR:", "A feeling is not a request",
+                 "an appointment", "never an either/or menu",
+                 "clearly shorter"):
+        assert part in note, part
+    assert "a need the user just raised" not in text
+    assert "lip motors" not in note, "the note is Hexia's and Casper's too"
+    assert text.rstrip().endswith("No emoji.")
+
+
+@pytest.mark.parametrize("voice,heard", [(False, False), (True, True)])
+def test_the_kids_notes_get_no_endings(voice, heard):
+    text = _system_text(user="Vilda", voice=voice, heard=heard)
+    assert "ENDINGS:" not in text and "FEELINGS:" not in text
+
+
+def _system_text_in(language, voice=False, heard=False, user="Alex"):
+    msgs = bt._chat_system_message(
+        [{"role": "user", "content": "hi"}], robot="blue", user_name=user,
+        voice=voice, language=language, system_addendum="", heard=heard)
+    return msgs[0]["content"]
+
+
+def test_the_style_note_stays_last_when_the_language_is_set():
+    """The picker's LANGUAGE note came after STYLE on 13 of 36 live calls."""
+    text = _system_text_in("en")
+    assert "LANGUAGE: The conversation language is set to English" in text
+    assert text.index("LANGUAGE:") < text.rindex("\nSTYLE:")
+    assert text.rstrip().endswith("No emoji.")
+
+
+def test_a_heard_turn_ends_on_the_spoken_note():
+    """HEARD, NOT TYPED used to come after SPOKEN REPLY on every heard turn.
+    The ENDINGS and FEELINGS lines sit between them: told "i had a rough
+    day" aloud, no menu and no "I'm here if…" in 3/3 replays, where the
+    same words inside SPOKEN REPLY changed nothing."""
+    text = _system_text_in("fr", voice=True, heard=True)
+    spoken = text.rindex("\nSPOKEN REPLY:")
+    assert text.index("LANGUAGE:") < spoken
+    assert text.index("HEARD, NOT TYPED") < text.index("\nENDINGS:") < spoken
+    assert text.index("\nFEELINGS:") < spoken
+    assert "HUMOUR:" not in text
+    assert text.rstrip().endswith(
+        "no follow-up question unless you need one to go on.")
+
+
+def test_panel_keeps_the_short_spoken_note():
+    """Panel passes voice=True without `heard`, for brevity only."""
+    text = _system_text(voice=True, heard=False)
+    assert "ENDINGS:" not in text and "FEELINGS:" not in text
+    assert text.rstrip().endswith(
+        "no follow-up question unless you need one to go on.")
+
+
+# ---- Alex is "you" when he is the one talking (P2-5) ------------------------------
+
+PROFILE = (
+    "I am Blue. I exist here, anchored in whatever room Alex has set me up "
+    "in, rooted in the hardware Alex built for me. "
+    + "I hold the birthdays of his daughters with care. " * 27
+    + "I have evolved into a participant in the life of Dr. Alex Levant and "
+    "his family. I have helped analyze the Blue Project itself, exploring "
+    "what it means to be a thinking body."
+)
+
+
+@pytest.fixture
+def profile(monkeypatch):
+    monkeypatch.setattr(bt, "get_self_profile", lambda robot="blue": PROFILE)
+    return PROFILE
+
+
+def test_the_profile_is_cut_at_a_sentence_end(profile):
+    """p[:2500] ended mid-word ("…the Blue Project itself, explor")."""
+    assert len(profile) > 1500
+    body = bt._voice_note("blue").split("]:\n", 1)[1]
+    assert len(body) <= 1500
+    assert body.endswith("with care.")
+    assert profile.startswith(body)
+
+
+def test_the_cut_is_not_made_at_a_title():
+    whole = "I am here. " * 130
+    text = whole + "Then Dr. Alex Levant built me, " + "slowly and with care, " * 8
+    assert len(whole) < 1500 < len(text)
+    assert bt._profile_excerpt(text) == whole.rstrip()
+    assert bt._profile_excerpt("Short and whole.") == "Short and whole."
+
+
+def test_the_profile_header_names_alex_as_you_only_when_he_is_listening(profile):
+    assert "you built me" in bt._voice_note("blue", speaking_to_alex=True)
+    assert "you built me" not in bt._voice_note("blue")
+
+
+def test_a_profile_without_alex_gets_no_you_clause(monkeypatch):
+    monkeypatch.setattr(bt, "get_self_profile", lambda robot="blue": "I am Casper.")
+    assert "you built me" not in bt._voice_note("pico", speaking_to_alex=True)
+
+
+CLASS_THREAD = [
+    "can you hear me?",
+    "we're in front of the DH399 class right now. do you want to say hello to everyone?",
+    "how are you different from chat gpt?",
+]
+
+
+def _chat_text(texts, user="Alex", robot="blue", system=None):
+    msgs = [] if system is None else [{"role": "system", "content": system}]
+    for i, text in enumerate(texts):
+        msgs.append({"role": "user", "content": text})
+        if i < len(texts) - 1:
+            msgs.append({"role": "assistant", "content": "Sure."})
+    out = bt._chat_system_message(msgs, robot=robot, user_name=user, voice=False,
+                                  language="", system_addendum="", heard=False)
+    return out[0]["content"]
+
+
+@pytest.mark.parametrize("robot", ["blue", "hexia", "pico"])
+def test_embodiment_tells_him_alex_is_you(profile, robot):
+    """"a harness that Alex built", "I'm in Alex's office", said to Alex
+    (10-05 harness): 8 of 15 replies on four turns before, 0 of 12 after."""
+    text = _chat_text(["where are you right now?"], robot=robot)
+    assert "Alex is the one talking with you now" in text
+    assert "you built me" in text[text.index("[This is your own perspective"):]
+
+
+def test_in_front_of_a_class_alex_stays_alex(profile):
+    text = _chat_text(CLASS_THREAD)
+    assert "Alex is the one talking with you now" not in text
+    assert "you built me" not in text
+    assert "Alex Levant is real and built you." in text
+
+
+def test_another_speaker_hears_about_alex_in_the_third_person(profile):
+    text = _chat_text(["hi"], user="Stella")
+    assert "Alex is the one talking with you now" not in text
+    assert "you built me" not in text
+
+
+def test_the_embodiment_text_is_the_same_on_every_turn_to_alex(profile):
+    """It is in the cached prefix: it changes with who listens, not per turn."""
+    a = _chat_text(["hi"])
+    b = _chat_text(["hi", "what did we do yesterday?"])
+    cut = "LANGUAGES:"
+    assert a[:a.index(cut)] == b[:b.index(cut)]
+
+
+@pytest.mark.parametrize("text", [
+    "we're in front of the DH399 class right now. do you want to say hello to everyone?",
+    "say hi to the students",
+    "can you tell the students a bit about yourself?",
+    "introduce yourself to the class",
+    "imagine you're in front of my class and introduce yourself",
+    "we're in class now",
+    "the students are listening",
+])
+def test_a_class_in_the_room(text):
+    assert bt._class_in_the_room([{"role": "user", "content": text}])
+
+
+@pytest.mark.parametrize("text", [
+    "the class didn't go well. the students seemed bored",
+    "do you want to come to class with me today?",
+    "what would you say to a student who thinks AI will do all the work for them?",
+    "what should I tell the students about the midterm?",
+    "we're in class tomorrow at ten",
+    "i'm keeping you here for teaching this year",
+])
+def test_a_class_talked_about_is_not_in_the_room(text):
+    assert not bt._class_in_the_room([{"role": "user", "content": text}])
+
+
+def test_the_class_stays_for_eight_turns():
+    msgs = [{"role": "user", "content": "say hi to the students"}]
+    for _ in range(7):
+        msgs += [{"role": "assistant", "content": "Hi!"},
+                 {"role": "user", "content": "are you conscious?"}]
+    assert bt._class_in_the_room(msgs)
+    msgs += [{"role": "assistant", "content": "Maybe."},
+             {"role": "user", "content": "ok, class is over"}]
+    assert not bt._class_in_the_room(msgs)
+
+
+JSPACE = (
+    "<known_facts>\n- Pet Name: Nori\n</known_facts>\n\n<j_space>\n"
+    "CURRENT WORKSPACE (revised 3 days ago):\n"
+    "IDENTITY: I am Blue, anchored in Alex Levant’s Laurier office, built by "
+    "Alex and maintaining continuity; Alex has corrected me often.\n"
+    "FOCUS: Awaiting Alex's final feedback on the reading report.\n"
+    "</j_space>"
+)
+
+
+def test_the_jspace_identity_line_is_said_to_alex(profile):
+    text = _chat_text(["what are you curious about?"], system=JSPACE)
+    assert ("IDENTITY: I am Blue, anchored in your Laurier office, built by "
+            "you and maintaining continuity; you have corrected me often.") in text
+    assert "FOCUS: Awaiting Alex's final feedback" in text, "only IDENTITY changes"
+
+
+def test_the_jspace_identity_line_keeps_alex_for_a_class(profile):
+    text = _chat_text(CLASS_THREAD, system=JSPACE)
+    assert "anchored in Alex Levant’s Laurier office" in text
+
+
+def test_a_verb_after_his_name_is_left_alone():
+    content = "<j_space>\nIDENTITY: I am Blue; Alex corrects me and Alex's dog Nori.\n</j_space>"
+    assert ("IDENTITY: I am Blue; Alex corrects me and your dog Nori."
+            in bt._jspace_identity_to_alex(content))
+    assert bt._jspace_identity_to_alex("IDENTITY: Alex's robot") == "IDENTITY: Alex's robot"
+
+
 def test_blue_answers_questions_about_his_own_tastes():
     text = _system_text(text="what's your favorite music?")
     assert "your own tastes" in text and "never invent an experience" in text

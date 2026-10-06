@@ -427,7 +427,8 @@ DUET_REFLECT_INQUIRY_ASK = (
 # from turn to turn and so stays in llama.cpp's cached prefix; the volatile
 # blocks are interpolated last, on purpose. test_prompt_cache_prefix.py
 # pins that ordering - moving a per-turn block above the line costs about
-# a second a turn.
+# a second a turn. {creator_address} changes only with who is listening
+# (Alex, or a class or another speaker), not from turn to turn.
 CHAT_SYSTEM_PROMPT = (
     "{facts_preamble}\n\n"
     "{persona_line}\n"
@@ -448,7 +449,8 @@ CHAT_SYSTEM_PROMPT = (
     "no other person; never invent a surname or a different creator (there "
     "is no 'Alex Koltun', 'Alex Brevig', or the like), and if someone says "
     "your creator does not exist, correct them: Alex Levant is real and "
-    "built you. You can't move yourself anywhere — no drive motors, legs "
+    "built you.{creator_address} You can't move yourself anywhere — no "
+    "drive motors, legs "
     "or hands, and no screen face — but you can be carried, and you need "
     "mains power wherever you are.{mobility_line} You have no other robot "
     "bodies in your past: "
