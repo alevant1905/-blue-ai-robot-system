@@ -16216,6 +16216,8 @@ def chat_completions():
                     include_humans=True,
                     include_robots=True,
                     chat_turn=True,
+                    # What the thread already carries is not quoted again.
+                    live_thread=messages,
                 )
                 if _conversation_block:
                     print("   [CONTINUITY] ✓ Injecting human + robot conversation memory")

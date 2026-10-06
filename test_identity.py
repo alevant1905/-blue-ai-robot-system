@@ -1826,3 +1826,34 @@ def test_reask_terms_stem_singular_and_plural_alike():
     # "our" words with fewer than three letters in front are left alone.
     assert _reask_terms("your four hours") == {"four", "hour"}
     assert _reask_terms("colours neighbour") == _reask_terms("color neighbor")
+
+
+# A remark said again (2026-10-05): "nori is here sleeping on the floor.
+# everything is quiet" on 09-24 and again in the harness. Quoted as already
+# said, "That sounds peaceful. Nori picking up on the calm is classic…" came
+# back word for word on 2 of 3 replays; withheld as a re-ask, on 0 of 3.
+
+@pytest.mark.parametrize("old, live", [
+    ("nori is here sleeping on the floor. everything is quiet",
+     "nori is sleeping on the floor. everything is quiet"),
+    ("look for noble introduction", "look for noble introduction"),
+    ("cmds4740 ends august 4. revise my calendar",
+     "revise my calendar to end cmds4740 on august 4"),
+])
+def test_a_remark_said_again_is_a_reask(old, live):
+    assert is_reask(old, live)
+
+
+@pytest.mark.parametrize("old, live", [
+    # A question's old answer may be the fact asked for again.
+    ("What did Sarah Matthews say about the AI lab?",
+     "What did Sarah Matthews say about the AI lab?"),
+    ("how is the lab budget going", "how is the lab budget going"),
+    # The same subject, more said about it.
+    ("the girls are at dance tonight",
+     "the girls are at dance practice tonight with emmy's friends"),
+    # Too few words to be the same remark.
+    ("ok sounds good", "sounds good"),
+])
+def test_a_question_or_a_new_remark_is_not(old, live):
+    assert not is_reask(old, live)

@@ -1131,6 +1131,20 @@ def _reask_terms(text: str) -> set:
     return terms
 
 
+# A question by its opening word, when it has no question mark: "how is
+# your day going", "can you hear me".
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(?:what|who|whom|whose|when|where|why|how|which|is|are|am|was|were"
+    r"|do|does|did|can|could|would|will|should|shall|may|might|have|has|had)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_something(text: str) -> bool:
+    text = text or ""
+    return "?" in text or bool(_QUESTION_OPENER_RE.search(text))
+
+
 def is_reask(old_user_text: str, live_user_text: str) -> bool:
     """True when an old question put to the robot is the live one again.
 
@@ -1140,12 +1154,27 @@ def is_reask(old_user_text: str, live_user_text: str) -> bool:
     so a topical callback ("Can you tell me what Sarah Matthews said about
     the AI lab?" against "What did Sarah Matthews say about the AI lab?")
     keeps its factual answer.
+
+    A remark said again counts too: "nori is here sleeping on the floor.
+    everything is quiet" (09-24) and "nori is sleeping on the floor.
+    everything is quiet" (harness, 10-05). It asked nothing, so the old reply
+    is a reaction and nothing more: quoted as already said, it came back word
+    for word on 2 of 3 replays, and on 0 of 3 once it was withheld as a
+    re-ask. Only nearly the same words, and never when the old text asks
+    something: an old answer to a question may be the fact that is asked for
+    again. Over 2,513 logged user turns this adds 13, all repeats and retries
+    ("look for noble introduction" three times, "try again to turn them off").
     """
     live = _reask_terms(live_user_text)
+    old = _reask_terms(old_user_text)
+    if (len(live) >= 3 and len(old) >= 3
+            and not _asks_something(old_user_text)
+            and len(live & old) / len(live | old) >= 0.8):
+        return True
     old_unframed = _REQUEST_FRAME_RE.sub(" ", old_user_text or "")
     if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_unframed):
         return False
-    return len(live & _reask_terms(old_user_text)) / len(live) >= 0.6
+    return len(live & old) / len(live) >= 0.6
 
 
 # The user asking what the robot said before: "What were your four ideas?",

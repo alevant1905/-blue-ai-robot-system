@@ -360,12 +360,15 @@ def test_an_exchange_recorded_before_the_stub_is_named_too(continuity_module):
         participants=["Alex", "Blue"], salience=0.7)
 
     block = route.jspace_context_block("blue")
-    # Its length is unknown, and the ask after the chapter was cut off.
+    # Its length is unknown, and the ask after the chapter was cut off. A
+    # chat exchange in <j_space> is named by what was asked, not the reply.
     assert ("Alex shared a document: 'Jonathan Roberge, Michael Castelle - The "
-            "Cultural Life of…' Blue replied: Sure—here's the core") in block
+            "Cultural Life of…' — you answered.") in block
+    assert "Sure—here's the core" not in block
     assert not any(word in block for word in CHAPTER_WORDS)
     memory = route.conversation_memory_block("blue", query="castelle chapter")
     assert "Alex shared a document" in memory
+    assert "Sure—here's the core" in memory
     assert not any(word in memory for word in CHAPTER_WORDS)
 
 
@@ -432,16 +435,26 @@ def test_the_chat_route_says_its_turn_is_a_chat_turn(chat, monkeypatch):
 
     def conversation_memory_block(robot, query="", max_lines=9,
                                   include_humans=True, include_robots=True,
-                                  include_banter_wording=True, chat_turn=False):
+                                  include_banter_wording=True, chat_turn=False,
+                                  live_thread=()):
         seen["journal"] = chat_turn
+        # The browser's thread, so the journal leaves out what it carries.
+        seen["thread"] = [m.get("content") for m in live_thread
+                          if m.get("role") in ("user", "assistant")]
         return ""
 
     monkeypatch.setattr(bt.memory_system, "build_context", build_context)
     monkeypatch.setattr(bt._continuity_routes, "conversation_memory_block",
                         conversation_memory_block)
     chat.model.queue("We talked about the Laurier lab.")
-    reply_of(chat.ask("what did we say about the laurier lab?"))
-    assert seen == {"context": True, "journal": True}
+    reply_of(chat.ask("what did we say about the laurier lab?", messages=[
+        {"role": "user", "content": "the laurier meeting went well"},
+        {"role": "assistant", "content": "Glad to hear it."},
+        {"role": "user", "content": "what did we say about the laurier lab?"},
+    ]))
+    assert seen == {"context": True, "journal": True, "thread": [
+        "the laurier meeting went well", "Glad to hear it.",
+        "what did we say about the laurier lab?"]}
 
 
 # --------------------------------------------------------------------------

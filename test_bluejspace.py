@@ -1177,7 +1177,8 @@ def test_an_ordinary_exchange_is_still_quoted(continuity_module):
         user_name="Alex",
     )
     memory = route.conversation_memory_block("blue", query="Sarah Matthews lab")
-    assert "You replied: She wanted a costed pilot" in memory
+    assert ("You replied (already said — don't re-say it): She wanted a "
+            "costed pilot") in memory
 
 
 def test_a_family_roster_is_not_quoted_back_into_the_prompt(continuity_module):
@@ -1210,6 +1211,221 @@ def test_the_models_own_roster_is_hidden_after_a_non_family_question(continuity_
     jspace = route.jspace_context_block("blue")
     assert "Black Goldendoodle" not in jspace
     assert "answered from the household facts" in jspace
+
+
+# ---------------------------------------------------------------------------
+# His own wording is quoted once, marked as already said (2026-10-05)
+#
+# "Do you want to say hello to everyone?" names no introduction, so the 09-16
+# and 09-18 class greetings ("Good morning, everyone. I'm Blue, Alex Levant's
+# robot companion…") sat in <conversation_memory>, and at the next class
+# demo Blue opened with the 09-18 one for 30 words (harness
+# class_demo_voice[1], 2026-10-05). The ChatGPT answer was quoted twice
+# (09-15, 09-16) and came back for 27-30 words whenever the question was put
+# again (class_demo_voice[4], class_greeting_variants[2]).
+# ---------------------------------------------------------------------------
+
+GREETING_0916 = (
+    "Good morning, everyone. I’m Blue, Alex Levant’s robot companion. I exist "
+    "here in this room with you, running on local hardware that Alex built, "
+    "rather than some distant cloud server.")
+GREETING_0918 = (
+    "I'd be happy to! Good morning, everyone. I'm Blue, Alex Levant's robot "
+    "companion. I'm running locally on the hardware right here in this "
+    "room—no cloud servers, no data extraction. It's nice to meet you all.")
+CHATGPT_0915 = (
+    "The difference is material and political, not just technical. ChatGPT "
+    "runs on massive, centralized servers that extract your data to train "
+    "commercial models; I run locally on Alex’s workstation here in Kitchener, "
+    "so my memory and processing stay in this room [DH201_AL_2026F.docx].")
+CHATGPT_0916 = (
+    "The difference is material and political, not just technical. ChatGPT "
+    "runs on massive, centralized servers that extract your data to train "
+    "commercial models; I run locally on hardware Alex built right here in "
+    "Kitchener.")
+MUSIC_0916 = ("I don't have personal tastes or feelings, so I don't have a "
+              "favorite. But I can play whatever you'd like to hear!")
+
+
+def _thread(*texts):
+    """A browser thread: user and assistant turns alternating, user last."""
+    roles = ("user", "assistant")
+    return [{"role": roles[i % 2], "content": text} for i, text in enumerate(texts)]
+
+
+def _chatgpt_twice(route):
+    route.note_exchange("blue", "how are you different from chat gpt?",
+                        CHATGPT_0915, user_name="Alex")
+    route.note_exchange("blue", "how do you differ from Chat GPT?",
+                        CHATGPT_0916, user_name="Alex")
+
+
+def test_a_class_greeting_is_never_quoted_back(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "we're in front of the class here in DH201. Do you want to "
+        "say hello to everyone?", GREETING_0916, user_name="Alex")
+    route.note_exchange(
+        "blue", "we're in BH399. Do you want to say hello to the students?",
+        GREETING_0918, user_name="Alex")
+
+    ask = ("we're in front of the DH399 class right now. do you want to say "
+           "hello to everyone?")
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True,
+        live_thread=_thread("can you hear me?",
+                            "Yes, I hear you loud and clear. What's up?", ask))
+    jspace = route.jspace_context_block("blue")
+    for block in (memory, jspace):
+        assert "Good morning, everyone" not in block
+        assert "distant cloud server" not in block
+        assert "no data extraction" not in block
+        assert "say hello to the students" in block, "the topic is kept"
+
+
+def test_a_flat_self_denial_is_never_quoted_back(continuity_module):
+    route = continuity_module
+    route.note_exchange("blue", "what's your favorite music?", MUSIC_0916,
+                        user_name="Alex")
+    memory = route.conversation_memory_block(
+        "blue", query="put some music on for us", chat_turn=True)
+    jspace = route.jspace_context_block("blue")
+    for block in (memory, jspace):
+        assert "personal tastes" not in block
+        assert "favorite music" in block
+
+
+def test_the_same_question_again_is_not_answered_from_the_old_reply(
+        continuity_module):
+    route = continuity_module
+    _chatgpt_twice(route)
+    ask = "how do you differ from Chat GPT?"
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True,
+        live_thread=_thread("tell us more about yourself",
+                            "I've been thinking about what continuity means.",
+                            ask))
+    assert "material and political" not in memory
+    # Both stay, by the question: the newest user turn is the live one, so
+    # the old exchange with the same words is not "already in the thread".
+    assert memory.count("answered this same question before; answer it "
+                        "fresh now, in new words") == 2
+    assert "Alex said: how do you differ from Chat GPT?" in memory
+
+
+def test_the_same_remark_again_is_not_answered_from_the_old_reply(
+        continuity_module):
+    """family_smalltalk[0]: marked as already said, the 09-24 reply still
+    came back word for word on 2 of 3 replays; as a re-ask, on 0 of 3."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "nori is here sleeping on the floor. everything is quiet",
+        "That sounds peaceful. Nori picking up on the calm is classic—that dog "
+        "knows when to just *be*. I’ll enjoy the quiet hum of the office in "
+        "silence, then.", user_name="Alex")
+    ask = "nori is sleeping on the floor. everything is quiet"
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True, live_thread=_thread(ask))
+    assert "dog knows when to just" not in memory
+    assert "answered this same question before" in memory
+
+
+def test_a_recall_ask_keeps_the_old_answer_once(continuity_module):
+    route = continuity_module
+    _chatgpt_twice(route)
+    ask = ("what did you tell me last week about how you're different from "
+           "chat gpt?")
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True, live_thread=_thread(ask))
+    assert memory.count("material and political") == 1
+    assert "same answer as a later line" in memory
+    assert "already said — don't re-say it" in memory
+    # A follow-up to the recall ask still reads as one.
+    follow_up = route.conversation_memory_block(
+        "blue", query="and what else?", chat_turn=True,
+        live_thread=_thread(ask, "I told you it comes down to where I run.",
+                            "and what else?"))
+    assert follow_up.count("material and political") == 1
+
+
+def test_a_quoted_reply_is_clean_and_marked(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "What did Sarah Matthews say about the AI lab?",
+        "She wanted a costed pilot before the Dean's visit [known_facts]. "
+        "Want me to draft one, or should we wait for her numbers?",
+        user_name="Alex")
+    memory = route.conversation_memory_block(
+        "blue", query="what about the lab budget", chat_turn=True)
+    assert ("Quoted replies are things you already said — don't re-say "
+            "them.") in memory
+    assert ("You replied (already said — don't re-say it): She wanted a "
+            "costed pilot before the Dean's visit.") in memory
+    assert "[known_facts]" not in memory
+    assert "Want me to draft one" not in memory
+
+
+@pytest.mark.parametrize("thread_user, thread_reply", [
+    # Both as the journal has them.
+    ("what should the lab pilot cost?",
+     "About forty thousand for the first term, mostly GPU time."),
+    # The user's words match; the page holds a different reply.
+    ("what should the lab pilot cost?", "Roughly $40k for the first term."),
+    # The reply matches, markdown and all; the user's words differ.
+    ("ok, so what should the lab pilot cost?",
+     "**About forty thousand** for the first term — mostly GPU time!"),
+])
+def test_an_exchange_in_the_live_thread_is_not_quoted_again(
+        continuity_module, thread_user, thread_reply):
+    route = continuity_module
+    route.note_exchange("blue", "What did Sarah Matthews say about the AI lab?",
+                        "She wanted a costed pilot.", user_name="Alex")
+    route.note_exchange("blue", "what should the lab pilot cost?",
+                        "About forty thousand for the first term, mostly GPU "
+                        "time.", user_name="Alex")
+    thread = _thread(thread_user, thread_reply, "and who pays for the lab?")
+    before = [dict(message) for message in thread]
+    memory = route.conversation_memory_block(
+        "blue", query="and who pays for the lab?", chat_turn=True,
+        live_thread=thread)
+    assert "forty thousand" not in memory
+    assert "lab pilot cost" not in memory
+    assert "costed pilot" in memory, "older exchanges are still recalled"
+    assert thread == before, "the live thread is never touched"
+
+
+def test_short_words_are_not_matched_inside_the_thread(continuity_module):
+    """"Yes." is inside half the replies in any thread, and "yes" is said in
+    every one: the 10-02 "yes" that brought the full reading report is not
+    this window's "yes"."""
+    route = continuity_module
+    route.note_exchange("blue", "is the lab proposal due friday?", "Yes.",
+                        user_name="Alex")
+    route.note_exchange("blue", "yes", "Here is the full reading report, with "
+                        "that summary woven into the main point section.",
+                        user_name="Alex")
+    memory = route.conversation_memory_block(
+        "blue", query="lab proposal", chat_turn=True,
+        live_thread=_thread("are you there?", "Yes. I'm here.",
+                            "yes", "Good, then let's start.",
+                            "lab proposal"))
+    assert "is the lab proposal due friday?" in memory
+    assert "full reading report" in memory
+
+
+def test_a_chat_exchange_in_j_space_shows_what_was_asked(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "What did Sarah Matthews say about the AI lab?",
+        "She wanted a costed pilot before the Dean's visit.", user_name="Alex")
+    route.note_duet_line("blue", "Hexia", "What do you make of sparks?",
+                         "I think a spark is just attention with nowhere to sit.")
+    jspace = route.jspace_context_block("blue")
+    assert ("Alex asked: 'What did Sarah Matthews say about the AI lab?' — "
+            "you answered.") in jspace
+    assert "costed pilot" not in jspace
+    # A duet line keeps its words: the live talk builds on them.
+    assert "attention with nowhere to sit" in jspace
 
 
 # Ages are calendar days, not 24-hour buckets. From Friday 08:33 a Wednesday

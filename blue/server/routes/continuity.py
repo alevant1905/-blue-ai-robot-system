@@ -17,7 +17,7 @@ import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import bluetools as bt
 from flask import jsonify, render_template_string, request
@@ -28,17 +28,20 @@ from blue.llm_coordinator import (
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
+    asks_for_recall,
     bulk_paste_recall_words,
     bulk_paste_stub,
     identity_history_problem,
     identity_request_kind,
     is_bulk_paste,
     is_family_overview_request,
+    is_reask,
     canonical_family_reply_kind,
     is_failure_placeholder,
-    is_social_checkin,
     known_household_target,
+    reply_wording_withheld,
 )
+from blue_reply_text import quotable_reply
 
 
 _BASE = os.path.dirname(os.path.abspath(bt.__file__))
@@ -145,12 +148,39 @@ _SALIENCE_WORDS = {
 _TURN = threading.local()
 
 
-def _wording_omitted(user_text: str) -> bool:
-    """Turns whose reply wording is never quoted back: greetings and
-    check-ins, and self-introductions — Hexia's class introductions came back
-    near word for word from these quotes (2026-09-06..09-11)."""
-    return bool(is_social_checkin(user_text) or identity_request_kind(user_text)
-                in {"introduction", "identity", "identity_more"})
+def _wording_omitted(user_text: str, reply: str = "") -> bool:
+    """Exchanges whose reply wording is never quoted back: greetings and
+    check-ins, questions about the robot itself, and any reply that is a
+    self-introduction, a flat self-denial or the family roster — Hexia's class
+    introductions came back near word for word from these quotes
+    (2026-09-06..09-11), and Blue's 09-16 "Good morning, everyone. I'm Blue…"
+    was a reply to "Do you want to say hello to everyone?", which names no
+    introduction (blue_identity.reply_wording_withheld)."""
+    return reply_wording_withheld(user_text or "", reply or "")
+
+
+def _flat_words(value: Any) -> str:
+    """Lower-case words only, so a reply finds its copy in the browser's
+    thread whatever markdown, quotes or emoji either one carries."""
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower()))
+
+
+def _message_text(content: Any) -> str:
+    """The text of a chat message, plain or in multimodal parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text") or "") for part in content
+            if isinstance(part, dict) and part.get("type") == "text")
+    return ""
+
+
+# A reply's opening, matched against the thread: shorter ones ("Yes.", "Got
+# it.") are inside half the replies there.
+_THREAD_PROBE_MIN = 20
+# A user turn matched against the thread by its words needs this many.
+_THREAD_USER_MIN_WORDS = 3
 
 
 def _is_failure_exchange(episode: Dict[str, Any]) -> bool:
@@ -1240,22 +1270,14 @@ class RobotContinuity:
         for item in episodes:
             if item.get("kind") == "deletion" or _is_failure_exchange(item):
                 continue
-            summary, _ = self._episode_context_summary(item)
+            summary, issue = self._episode_context_summary(item)
             details = item.get("details") or {}
             heard = str(details.get("user_text") or "").strip()
+            replied = str(details.get("reply") or "")
             who = (item.get("participants") or ["Someone"])[0]
             pasted = _pasted_stub(item, who)
-            if (item.get("kind") == "exchange" and _wording_omitted(
-                    bulk_paste_recall_words(heard) if pasted else heard)):
-                # The summary quotes "Blue replied: …"; for a check-in that
-                # quote is only a pattern to copy. Reflection input keeps it.
-                said = pasted or f"{who} said '{_clip(heard, 80)}'"
-                summary = (
-                    f"{said}; your reply wording is omitted so it "
-                    "is never reused."
-                )
-            elif (item.get("kind") == "exchange"
-                  and canonical_family_reply_kind(str(details.get("reply") or ""))):
+            exchange = item.get("kind") == "exchange"
+            if exchange and canonical_family_reply_kind(replied):
                 # Keyed on the REPLY, so the model's own copy of the roster
                 # is covered too (it was re-quoted on 2026-08-19 22:22).
                 asked = pasted or f"'{_clip(heard, 80)}'"
@@ -1263,6 +1285,26 @@ class RobotContinuity:
                     f"{who} asked about the family ({asked}); you "
                     "answered from the household facts (wording omitted)."
                 )
+            elif exchange and _wording_omitted(
+                    bulk_paste_recall_words(heard) if pasted else heard,
+                    replied):
+                # The summary quotes "Blue replied: …"; for a check-in that
+                # quote is only a pattern to copy. Reflection input keeps it.
+                said = pasted or f"{who} said '{_clip(heard, 80)}'"
+                summary = (
+                    f"{said}; your reply wording is omitted so it "
+                    "is never reused."
+                )
+            elif (exchange and not issue
+                  and str(item.get("source") or "chat") == "chat"):
+                # A chat exchange is named by what was asked. Its reply is in
+                # <conversation_memory> once, marked as already said, and the
+                # browser's thread carries this window's; a third copy here
+                # was one more invitation to say it again. Duet and banter
+                # lines keep theirs: the live talk builds on them.
+                one_line = " ".join(heard.split())
+                asked = pasted or f"{who} asked: '{_clip(one_line, 120)}'"
+                summary = f"{asked} — you answered."
             episode_lines.append(
                 f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
                 f"salience {item['salience']:.2f}] {summary}"
@@ -1325,6 +1367,7 @@ class RobotContinuity:
         include_robots: bool = True,
         include_banter_wording: bool = True,
         chat_turn: bool = False,
+        live_thread: Sequence[Dict[str, Any]] = (),
     ) -> str:
         """Return a compact, retrieved slice of this robot's own conversations.
 
@@ -1339,10 +1382,23 @@ class RobotContinuity:
         awareness broad without making Blue claim Hexia's unwitnessed chat (or
         vice versa) as a first-person memory.
 
+        Old replies are quoted once each and marked as already said. A reply
+        that only introduces or denies the robot, or answers a question about
+        the robot itself, is never quoted, and neither is the old answer to
+        the question being asked again now, unless the user is asking what was
+        said: quoted, each came back word for word (class demo, 2026-09-25
+        and 10-05: "The difference is material and political, not just
+        technical…" for "how do you differ from Chat GPT?").
+
         ``chat_turn``: ``query`` is the user's chat message, where a long one
         is a pasted document and searches by the words beside it. The panel,
         duet and banter queries join a topic and several transcript lines and
         can pass 2,000 characters without being a paste; they leave it off.
+
+        ``live_thread``: the chat request's own messages. An exchange the
+        thread already carries is left out (the reply would be in the prompt
+        twice), and its last two user turns say whether this is a recall ask.
+        The thread itself is never changed.
         """
         try:
             exchanges = self.store.list_episodes(limit=1200, kind="exchange")
@@ -1350,6 +1406,33 @@ class RobotContinuity:
             return ""
         if not exchanges:
             return ""
+
+        live_users: List[str] = []
+        live_replies: List[str] = []
+        for message in live_thread or ():
+            if not isinstance(message, dict):
+                continue
+            text = _message_text(message.get("content"))
+            if message.get("role") == "user":
+                live_users.append(text)
+            elif message.get("role") == "assistant":
+                live_replies.append(_flat_words(text))
+        # The newest user turn is the live one, not yet in the journal: an old
+        # exchange with the same words is the question asked again. "yes" and
+        # "keep going" are said in every thread; their exchanges are found by
+        # the reply.
+        earlier_users = {
+            flat for flat in map(_flat_words, live_users[:-1])
+            if len(flat.split()) >= _THREAD_USER_MIN_WORDS
+        }
+
+        def in_live_thread(episode: Dict[str, Any]) -> bool:
+            details = episode.get("details") or {}
+            if _flat_words(details.get("user_text")) in earlier_users:
+                return True
+            probe = _flat_words(details.get("reply"))[:80]
+            return (len(probe) >= _THREAD_PROBE_MIN
+                    and any(probe in reply for reply in live_replies))
 
         robot_names = {
             str(cfg.get("name") or "").strip()
@@ -1381,6 +1464,10 @@ class RobotContinuity:
             if not is_robot_exchange and not include_humans:
                 continue
             if _is_failure_exchange(episode):
+                continue
+            # Left out before choosing, so the recent-turns slots go to
+            # exchanges the browser's thread does not carry.
+            if in_live_thread(episode):
                 continue
             eligible.append(episode)
         if not eligible:
@@ -1490,6 +1577,24 @@ class RobotContinuity:
             r"longer part of (?:my|the) immediate context\b",
             re.I,
         )
+        # One answer given twice is quoted once, as its newest copy: on
+        # 09-15 and 09-16 the ChatGPT question got the same "The difference
+        # is material and political…", and two copies read as the answer.
+        quoted_openings: set[str] = set()
+        repeated_ids: set[int] = set()
+        for episode in reversed(chosen):
+            opening = " ".join(_flat_words(
+                (episode.get("details") or {}).get("reply")).split()[:10])
+            if not opening:
+                continue
+            if opening in quoted_openings:
+                repeated_ids.add(id(episode))
+            quoted_openings.add(opening)
+        # "What did you tell me last week about how you're different from
+        # chat gpt?" asks for the old answer: it is kept, quoted once.
+        recall_ask = asks_for_recall(
+            [bulk_paste_recall_words(text) for text in live_users[-2:]]
+            or [searched])
         lines: List[str] = []
         for episode in chosen:
             people = counterparts(episode)
@@ -1531,19 +1636,35 @@ class RobotContinuity:
                     for name in other_robot_names
                 )
                 unsafe_reply = unsafe_reply or (named_other and bool(denial_re.search(replied)))
-            reply_part = (
-                " The old answer was unreliable, so only the topic is retained."
-                if unsafe_reply else
-                # A check-in answer carries no information, only wording to
-                # copy (see is_social_checkin).
-                " (Your reply wording is omitted so it is never "
-                "reused.)" if replied and _wording_omitted(heard) else
+            if not replied:
+                reply_part = ""
+            elif unsafe_reply:
+                reply_part = (" The old answer was unreliable, so only the "
+                              "topic is retained.")
+            elif canonical_family_reply_kind(replied):
                 # A roster quoted back is copied word for word, even with the
                 # <family> block in the prompt (2026-08-19 22:21 and 22:22).
-                " You answered from the household facts (wording omitted)."
-                if replied and canonical_family_reply_kind(replied) else
-                f" You replied: {_clip(replied, 180)}" if replied else ""
-            )
+                reply_part = (" You answered from the household facts "
+                              "(wording omitted).")
+            elif _wording_omitted(heard, replied):
+                # A check-in answer or a self-introduction carries no
+                # information, only wording to copy.
+                reply_part = (" (Your reply wording is omitted so it is never "
+                              "reused.)")
+            elif not recall_ask and is_reask(heard, searched):
+                # Marked as already said, the old reply to the same message
+                # still came back word for word ("That sounds peaceful. Nori
+                # picking up on the calm is classic…", 2 of 3 replays,
+                # 2026-10-05); with this line instead, 0 of 3.
+                reply_part = (" — you answered this same question before; "
+                              "answer it fresh now, in new words.")
+            elif id(episode) in repeated_ids:
+                reply_part = " — you answered (same answer as a later line)."
+            else:
+                quoted = " ".join(quotable_reply(
+                    str(details.get("reply") or "")).split())
+                reply_part = (" You replied (already said — don't re-say "
+                              f"it): {_clip(quoted, 180)}")
             said = pasted or f"{partner} said: {_clip(heard, 260)}"
             lines.append(
                 f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; {kind} with "
@@ -1561,7 +1682,8 @@ class RobotContinuity:
             "reading a log and do not recite the list. A prior reply records what was "
             "said then, not necessarily what is true now: current identity, household "
             "facts, corrections, and tool results outrank old wording. Relative words "
-            "inside an old line (today, tomorrow, now) belong to that line's timestamp.\n"
+            "inside an old line (today, tomorrow, now) belong to that line's timestamp. "
+            "Quoted replies are things you already said — don't re-say them.\n"
             + "\n".join(lines)
             + "\n</conversation_memory>"
         )
@@ -2124,10 +2246,11 @@ def conversation_memory_block(
     include_robots: bool = True,
     include_banter_wording: bool = True,
     chat_turn: bool = False,
+    live_thread: Sequence[Dict[str, Any]] = (),
 ) -> str:
     """A query-aware slice of a robot's own human and robot conversations.
 
-    ``chat_turn`` is for the chat route alone; see
+    ``chat_turn`` and ``live_thread`` are for the chat route alone; see
     RobotContinuity.conversation_memory_block."""
     hub = _hub(robot)
     if not hub:
@@ -2139,6 +2262,7 @@ def conversation_memory_block(
         include_robots=include_robots,
         include_banter_wording=include_banter_wording,
         chat_turn=chat_turn,
+        live_thread=live_thread,
     )
 
 
