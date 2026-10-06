@@ -200,6 +200,7 @@ def guard_identity(ctx) -> Optional[str]:
             _identity_kind,
             bt._intent_text(last_user_msg if isinstance(last_user_msg, str) else ""),
             messages,
+            user_name=user_name,
         )
         _identity_retry_note = (
             bt.identity_grounding_note(

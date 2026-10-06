@@ -84,6 +84,114 @@ def test_everyone_needs_the_class_named_in_this_turn_or_the_last():
     assert _kind("we're in front of the class", "ok", "say hello to everyone") is None
 
 
+@pytest.mark.parametrize("turns", [
+    # A number after a short word is no course code (P2-4 review): the
+    # canned introduction went out at the party.
+    ("there are 150 people at Stella's party", "say hello to everyone"),
+    ("we'll be in room 138 with the neighbours", "say hello to everyone"),
+    ("I'm at 630 Main with the girls", "say hello to everyone"),
+])
+def test_a_number_is_not_a_course(turns):
+    assert _kind(*turns) is None
+
+
+@pytest.mark.parametrize("named", [
+    "we're in dh399 today", "we're in CS 101 today", "we're in BH399.",
+    "this is CS-101",
+])
+def test_a_course_code_still_names_the_class(named):
+    assert _kind(named, "say hello to everyone") == "introduction"
+
+
+# ---- a greeting remembered, reported, the user's own, or written --------------
+# P2-4 review: each of these was a live introduction, so a recall lost its
+# memory blocks and a nameless answer was replaced by the canned introduction.
+
+@pytest.mark.parametrize("text, kind", [
+    ("do you remember when you had to say hello to the class last week?",
+     "shared_recall"),
+    ("what did you say when I asked you to say hi to the students?", None),
+    ("remember when I asked you to say hello to the students?", None),
+    ("last thursday I asked you to say hello to the class. what did you say?",
+     None),
+    ("you were supposed to say hi to the class, what happened?", None),
+    ("I told you to say hello to the class", None),
+])
+def test_a_remembered_or_reported_greeting_is_no_introduction(text, kind):
+    assert identity_request_kind(text) == kind
+    assert _kind(text) == kind
+    from blue_identity import asked_after_himself
+    assert not asked_after_himself(text)
+
+
+@pytest.mark.parametrize("text", [
+    "how do I say hello to the class in French?",
+    "Should I say hi to the class?",
+    "I'll say hi to the students first",
+    "let me say hello to the class before we start",
+    "how to say good morning to the class in Danish",
+    "email the students and say hello to the class for me",
+    "write a message to my students to say hi to the class",
+    "say hi to the students in the email",
+    "send them a short note and say hi to the class",
+])
+def test_the_users_own_or_a_written_greeting_is_no_introduction(text):
+    assert _kind(text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "say hello to the class in French",
+    "can I get you to say hi to the students?",
+    "let me hear you say hello to the class",
+    "I'd like you to say hello to the class.",
+    "Blue, say hi to the class. We're reading the text by Pasquinelli today.",
+    "I got an email from the dean, say hi to the class",
+    "great reply, now say hello to the students",
+    # the six logged class greetings (P2-4's sweep)
+    "Here we are Wilfred Laurie university in CS101 would you like to say "
+    "hello to the class.",
+    "I want you to stop repeating that I want you to accept the fact that you "
+    "can be moved around and that I brought you to look for glory university "
+    "accept that you're actually there and say hello to the class.",
+    "I brought you here to look for Laura university we're in front of the "
+    "classroom right now it's in CS 10101 I'd like you to say hello to the "
+    "class.",
+    "We're here at Wilfred Laura university in CS101 do you wanna say hello "
+    "to the class.",
+    "we're in front of the class here in DH201. Do you want to say hello to "
+    "everyone?",
+    "we're in BH399. Do you want to say hello to the students?",
+])
+def test_a_greeting_asked_of_him_now_stays_an_introduction(text):
+    assert _kind(text) == "introduction"
+
+
+def test_a_recalled_class_greeting_keeps_the_recall_blocks(tmp_path, monkeypatch):
+    """"A user asking what was said … still gets it" (_skips_recalled_days):
+    both lost <remembered_days> and <earlier_answers> as introductions."""
+    from blue_memory_improved import EnhancedMemorySystem
+    from test_memory_recall import _ask, _at, _blocks, _seed
+    memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
+    _seed(memory, [
+        (_at(6, 12, 26), "user",
+         "we're in DH399. Do you want to say hello to the students?"),
+        (_at(6, 12, 27), "assistant",
+         "Hi everyone, I'm Blue, Alex's robot. Today is about AI agents."),
+        (_at(6, 12, 29), "user", "what should the students read for the class?"),
+        (_at(6, 12, 30), "assistant", "Crawford, chapter two, on the planetary costs."),
+    ])
+    for asked in ("do you remember when you had to say hello to the class "
+                  "last week?",
+                  "what did you say when I asked you to say hi to the students?"):
+        thread = _ask(asked)
+        assert not EnhancedMemorySystem._skips_recalled_days(
+            thread, asked, chat_turn=True)
+        # <earlier_answers> is skipped for any other identity kind
+        assert contextual_identity_request_kind(asked, thread) in (
+            None, "shared_recall")
+        assert "remembered_days" in _blocks(memory, monkeypatch, thread)
+
+
 # ---- the audience: from the live turn, or "us" right after the class -----------
 
 def test_the_class_is_the_audience_only_when_the_turn_speaks_to_it():
@@ -97,6 +205,11 @@ def test_the_class_is_the_audience_only_when_the_turn_speaks_to_it():
     assert class_audience("who are you really?", thread) is None
     assert class_audience("I'm grading my students' essays, what are you?") is None
     assert class_audience("tell us more about yourself") is None
+    # a kind, not a room
+    assert class_audience("who are you? what class of AI are you?") is None
+    assert class_audience("i want you to introduce yourself to the class of "
+                          "cmds4740") == "class"
+    assert class_audience("I'm grading my students' essays") is None
 
 
 def test_the_class_note_says_already_said_no_hardware_and_the_topic():
@@ -166,6 +279,14 @@ def test_an_introduction_needs_only_the_name():
     ("When we're in class tomorrow blue, I'm gonna ask you to introduce "
      "yourself to the class.", None),
     ("I want you to pretend we're in the first class right now", None),
+    # a state, not a place (P2-4 review)
+    ("we're in trouble", None),
+    ("we're in a meeting until four", None),
+    ("we're in luck, the bus is late", None),
+    ("ha, we're at it again", None),
+    ("we're in this together", None),
+    ("we're in Italy", ("Italy", "in")),
+    ("we're at a friend's house", ("a friend's house", "at")),
     # unchanged
     ("Hi Blue. We are at york university. Can you introduce yourself to the "
      "class?", ("York University", "at")),
@@ -229,6 +350,11 @@ def test_the_canned_introductions_do_not_place_him_at_home(variant, audience):
     ("blue", "do you know if hexia is awake"),
     ("hexia", "what do you think of blue's new voice?"),
     ("blue", "what do you remember about the conversation with hexia"),
+    # P2-4 review: the paragraph again, or one that doesn't answer
+    ("blue", "tell me more about hexia"),
+    ("blue", "do you miss hexia?"),
+    ("hexia", "do you trust blue?"),
+    ("pico", "do you love blue?"),
 ])
 def test_where_and_whether_go_to_the_model(robot, text):
     assert canonical_robot_relationship_reply(text, robot=robot) is None
@@ -310,12 +436,32 @@ def test_the_audience_and_topic_ride_only_on_class_identity_turns(monkeypatch, t
     _library(monkeypatch, tmp_path, date.today())
     thread = _thread("we're in DH399", "say hi to the students")
     audience, topic = bt._identity_audience_for_turn(
-        "introduction", "say hi to the students", thread)
+        "introduction", "say hi to the students", thread, user_name="Alex")
     assert audience == "class" and topic.startswith("DH399, ")
     assert bt._identity_audience_for_turn(
-        "self_state", "how are you, students?", thread) == (None, "")
+        "self_state", "how are you, students?", thread,
+        user_name="Alex") == (None, "")
     assert bt._identity_audience_for_turn(
-        "identity", "who are you really?", _thread("who are you really?")) == (None, "")
+        "identity", "who are you really?", _thread("who are you really?"),
+        user_name="Alex") == (None, "")
+
+
+@pytest.mark.parametrize("text", [
+    "say hi to my class",
+    "tell me about yourself, my class is learning about robots",
+])
+def test_vildas_class_is_not_alexs_students(monkeypatch, tmp_path, text):
+    """P2-4 review: on the kids' page "say hi to my class" got the AUDIENCE
+    line, "These are Alex's students, live in the room… first-year class"."""
+    from datetime import date
+    _library(monkeypatch, tmp_path, date.today())
+    thread = _thread("we're in DH399", text)
+    kind = contextual_identity_request_kind(text, thread)
+    assert kind in ("introduction", "identity")
+    assert bt._identity_audience_for_turn(
+        kind, text, thread, user_name="Vilda") == (None, "")
+    assert bt._identity_audience_for_turn(
+        kind, text, thread, user_name="Alex")[0] == "class"
 
 
 def test_the_class_is_the_one_alex_named_not_one_in_a_pinned_block(monkeypatch, tmp_path):
@@ -327,7 +473,7 @@ def test_the_class_is_the_one_alex_named_not_one_in_a_pinned_block(monkeypatch, 
         "[Dated recall: on Friday you were in the CS101 lecture]\n\n"
         "say hi to the students"))
     _, topic = bt._identity_audience_for_turn(
-        "introduction", "say hi to the students", thread)
+        "introduction", "say hi to the students", thread, user_name="Alex")
     assert topic == 'DH399, "What is under the hood of an AI agent? How do they work?"'
     # a CS101 row is read without its date and page count
     assert bt._class_topic_today(["the CS101-A class"]) == (
@@ -373,3 +519,69 @@ def test_where_is_blue_is_answered_by_the_model_on_caspers_page(chat):
     assert chat.model.main, "the model was asked"
     assert "calmer, steadier original companion" not in reply
     assert not chat.executed, "no contact, camera or document lookup for a sibling"
+
+
+def _pinned(chat):
+    return [m["content"] for m in chat.model.main[0]["messages"]
+            if m.get("role") == "user"][-1]
+
+
+def _reply(response):
+    return response.get_json()["choices"][0]["message"]["content"]
+
+
+@pytest.mark.parametrize("asked", [
+    "do you remember when you had to say hello to the class last week?",
+    "what did you say when I asked you to say hi to the students?",
+])
+def test_a_recalled_class_greeting_is_answered_not_reintroduced(chat, monkeypatch, asked):
+    """P2-4 review: both got the introduction task and the AUDIENCE line, and
+    this nameless recall was replaced by the canned hardware introduction."""
+    monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
+    recall = ("Yes — last week I greeted the DH399 students and talked about "
+              "AI agents.")
+    chat.model.queue(recall)
+    response = chat.ask(asked)
+    pinned = _pinned(chat)
+    assert "Speak as though the named audience" not in pinned
+    assert "AUDIENCE:" not in pinned
+    assert len(chat.model.payloads) == 1
+    assert _reply(response) == recall
+
+
+def test_how_to_greet_the_class_is_a_question_not_a_greeting(chat, monkeypatch):
+    """It pinned the introduction task, offered no tools, and shipped "Hello
+    everyone at French. I'm Blue…" after a nameless answer (P2-4 review)."""
+    monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
+    chat.model.queue("Bonjour à tous!")
+    response = chat.ask("how do I say hello to the class in French?")
+    assert "[IDENTITY GROUNDING" not in _pinned(chat)
+    assert len(chat.model.payloads) == 1
+    assert _reply(response) == "Bonjour à tous!"
+
+
+def test_vildas_class_greeting_has_no_alexs_students(chat, monkeypatch):
+    monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
+    monkeypatch.setattr(bt, "_identify_user_from_request", lambda: "Vilda")
+    # nameless first, so the identity retry is built too
+    chat.model.queue("Hi everyone!", "Hi everyone, I'm Blue!")
+    chat.ask("say hi to my class")
+    assert chat.model.payloads
+    for payload in chat.model.payloads:
+        sent = str(payload["messages"])
+        assert "AUDIENCE:" not in sent and "Alex's students" not in sent
+
+
+def test_tell_me_more_about_hexia_is_not_the_same_paragraph(chat):
+    """After the canned answer to "what do you think of hexia?", "tell me
+    more about hexia" got the identical paragraph, with no model call."""
+    first = _reply(chat.ask("what do you think of hexia?"))
+    assert first.startswith("Hexia is my quick") and not chat.model.payloads
+    chat.model.queue("She once asked me whether I dream in Danish, and then "
+                     "argued with my answer for ten minutes.")
+    second = _reply(chat.ask("tell me more about hexia", messages=[
+        {"role": "user", "content": "what do you think of hexia?"},
+        {"role": "assistant", "content": first},
+        {"role": "user", "content": "tell me more about hexia"}]))
+    assert chat.model.main, "the model was asked"
+    assert second != first and "quick, mischievous counterpart" not in second

@@ -13073,11 +13073,17 @@ def _chat_purge_stale_camera(conversation_messages, last_user_message):
     return conversation_messages
 
 
-def _identity_audience_for_turn(identity_kind, user_text, messages):
+def _identity_audience_for_turn(identity_kind, user_text, messages, *,
+                                user_name):
     """(audience, class_topic) for identity_grounding_note: ("class", today's
     syllabus topic or "") when an introduction or a "tell them about
-    yourself" speaks to Alex's class, else (None, "")."""
+    yourself" speaks to Alex's class, else (None, "").
+
+    Never on the kids' page: Vilda's "say hi to my class" is her class, not
+    Alex's first-year students in the room."""
     if identity_kind not in ("introduction", "identity", "identity_more"):
+        return None, ""
+    if (user_name or "").strip() in _CHAT_ONLY_USERS:
         return None, ""
     audience = class_audience(user_text, messages)
     if not audience:
@@ -13142,7 +13148,8 @@ def _chat_self_context(conversation_messages, last_user_message, *,
                 except Exception as _hint_e:
                     log.warning(f"[IDENTITY] check-in state hint failed: {_hint_e}")
             _audience, _class_topic = _identity_audience_for_turn(
-                _identity_kind, _luser, conversation_messages)
+                _identity_kind, _luser, conversation_messages,
+                user_name=user_name)
             _identity_note = identity_grounding_note(
                 _robot_cfg(robot)["name"],
                 _robot_cfg(robot)["self_desc"],

@@ -44,21 +44,89 @@ _GREETING_NEGATION_RE = re.compile(
 # "why don't you say hi to the students?" asks for one.
 _GREETING_SUGGESTION_RE = re.compile(
     r"\bwhy\s+(?:don['’]?t|do not)\s+(?:you|we)\s+$", re.IGNORECASE)
-# A turn that names the class: the class, the students, the lecture, a course.
+# A greeting remembered or reported is not one asked for now. "do you
+# remember when you had to say hello to the class last week?" was
+# shared_recall and "what did you say when I asked you to say hi to the
+# students?" nothing; read as a live introduction, both lost <remembered_days>
+# and <earlier_answers>, and a recalling reply without his name was replaced
+# by the canned introduction (P2-4 review).
+_GREETING_RECALLED_RE = re.compile(
+    r"\b(?:remember|recall)\b"
+    r"|\bwhat\s+did\s+(?:you|u|i|we)\s+(?:say|tell|do)\b"
+    r"|\blast\s+(?:time|week|night|class|lecture|term|semester|year|monday|"
+    r"tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\byesterday\b|\bthe other day\b",
+    re.IGNORECASE,
+)
+_GREETING_REPORTED_RE = re.compile(
+    r"\b(?:asked|told|wanted|needed|had|tried|forgot|promised|"
+    r"(?:was|were)\s+(?:supposed|meant|going|about))"
+    r"\s+(?:(?:you|u|him|her|blue|hexia|casper|kasper|pico)\s+)?to\s+"
+    r"(?:\w+\s+)?$",
+    re.IGNORECASE,
+)
+# The user greeting the class, or asking how to: "how do I say hello to the
+# class in French?", "Should I say hi to the class?", "I'll say hi to the
+# students". Not "can I get you to…" or "let me hear you…".
+_GREETING_BY_USER_RE = re.compile(
+    r"(?:\b(?:should|shall|can|could|may|might|must|do|would|will)\s+i"
+    r"|\bhow\s+(?:do|should|would|can|could|might|shall|will)\s+(?:i|we)"
+    r"|\bhow\s+to"
+    r"|\bi(?:['’]ll|['’]m|\s+will|\s+am|\s+shall|\s+can|\s+could|\s+should|"
+    r"\s+must|\s+might)(?:\s+(?:going\s+to|gonna|have\s+to|need\s+to|"
+    r"try\s+to|want\s+to))?"
+    r"|\bi\s+(?:want|need|have|plan|hope|mean|get)\s+to"
+    r"|\blet\s+me"
+    r")\s+(?:(?:just|quickly|first|also|now|then|go|still)\s+)?$",
+    re.IGNORECASE,
+)
+# A greeting to be written, not said: "email the students and say hello to
+# the class for me", "write a message to my students to say hi to the class",
+# "say hi to the class in the email". Not "the text we read today" or "I got
+# an email from the dean, say hi to the class".
+_GREETING_WRITING_BEFORE_RE = re.compile(
+    r"(?:\b(?:write|draft|compose)\b|\breply\s+(?:to|all)\b"
+    r"|\b(?:e-?mail|text|message|slack)\s+(?:the|my|them|everyone|everybody|"
+    r"all|her|him)\b"
+    r"|\b(?:send|post|put\s+together)\s+(?:\w+\s+){0,2}?(?:a|an)\s+"
+    r"(?:\w+\s+)?(?:message|note|letter|announcement|post|e-?mail|text)\b)"
+    r"[^.!?\n]*$",
+    re.IGNORECASE,
+)
+_GREETING_WRITING_AFTER_RE = re.compile(
+    r"^[^.!?\n]*?\b(?:in|by|via|over)\s+(?:an?\s+|the\s+|my\s+|this\s+)?"
+    r"(?:e-?mail|message|text|note|letter|post|announcement|slack|chat)\b",
+    re.IGNORECASE,
+)
+# A turn that names the class: the class, the students, the lecture, a
+# course code written as one ("dh399", "CS-101") or in capitals ("CS 101").
+# With a space in any case, "there are 150 people at Stella's party" named a
+# course ("are 150"), and "say hello to everyone" next was an introduction.
 _NAMES_CLASS_RE = re.compile(
     r"\b(?:class(?:room)?|students?|audience|lecture|seminar|tutorial)\b"
-    r"|\b[a-z]{2,4}\s?-?\d{3}[a-z]?\b",
+    r"|\b[a-z]{2,4}-?\d{3}[a-z]?\b"
+    r"|(?-i:\b[A-Z]{2,4}\s\d{3}[A-Z]?\b)",
     re.IGNORECASE,
 )
 
 
 def _asks_greeting(pattern, text: str) -> bool:
-    """The greeting is asked for, not refused or asked about."""
-    for match in pattern.finditer(text or ""):
+    """The greeting is asked of him now: not refused or asked about, not
+    remembered or reported, not the user's own, not one to be written."""
+    text = text or ""
+    if _GREETING_RECALLED_RE.search(text):
+        return False
+    for match in pattern.finditer(text):
         before = text[:match.start()]
-        if (not _GREETING_NEGATION_RE.search(before)
-                or _GREETING_SUGGESTION_RE.search(before)):
-            return True
+        if (_GREETING_NEGATION_RE.search(before)
+                and not _GREETING_SUGGESTION_RE.search(before)):
+            continue
+        if (_GREETING_REPORTED_RE.search(before)
+                or _GREETING_BY_USER_RE.search(before)
+                or _GREETING_WRITING_BEFORE_RE.search(before)
+                or _GREETING_WRITING_AFTER_RE.search(text[match.end():])):
+            continue
+        return True
     return False
 
 
@@ -353,7 +421,8 @@ _FAMILY_FOLLOWUP_RE = re.compile(
 # "we're" as people type and speech-to-text writes it: with a space required
 # before "'re", "we're at wilfrid laurier university" was no place at all
 # (09-08, Hexia). "In front of the class" is where Alex stands, and "at the
-# end of the research talk" when, not places. Not "I'm": over 5,056 logged
+# end of the research talk" when, not places; nor "we're in trouble / luck /
+# a meeting", "we're at it again" (P2-4 review). Not "I'm": over 5,056 logged
 # user turns it adds only "I'm at dance practice" and "I'm in bed already",
 # neither a place Blue is.
 _WE_ARE = (
@@ -364,7 +433,11 @@ _EXPLICIT_LOCATION_RE = re.compile(
     _WE_ARE
     + r"(?:(?:right now|currently|now)\s+)?(?:here\s+)?"
     r"(?P<preposition>at|in)\s+"
-    r"(?!front\s+of\b|the\s+(?:end|start|beginning|middle)\s+of\b)"
+    r"(?!front\s+of\b|the\s+(?:end|start|beginning|middle)\s+of\b"
+    r"|(?:trouble|luck|love|charge|danger|sync|agreement|odds|peace|it|this|"
+    r"that)\b"
+    r"|a\s+(?:hurry|rush|meeting|call|mood|loss|bit\s+of)\b"
+    r"|the\s+(?:mood|same\s+boat)\b)"
     r"(?P<location>[^.!?\n,;]{1,100})",
     re.IGNORECASE,
 )
@@ -1000,9 +1073,11 @@ def _prior_user_texts(text: str, messages: Iterable[Mapping[str, object]]):
 # the students ("say hi to the students", "we're in front of the DH399
 # class"), or speaks to the room ("tell everyone…", "tell us more…") right
 # after a turn that did. Not from older turns: "who are you really?" after
-# "the students seemed bored" is Alex asking.
+# "the students seemed bored" is Alex asking. Nor "what class of AI are
+# you?", a kind and not a room; "the class of cmds4740" is his.
 _CLASS_AUDIENCE_RE = re.compile(
-    r"\b(?:class(?:room)?|students?(?!['’]))\b"
+    r"(?<!\bwhat\s)(?<!\bwhich\s)(?<!\bnew\s)\bclass(?:room)?\b"
+    r"|\bstudents?\b(?!['’])"
     r"|\bin front of (?:the|my|your|his) (?:class|students|lecture)\b",
     re.IGNORECASE,
 )
@@ -3263,7 +3338,9 @@ _ROBOT_RELATIONSHIP_ALIASES = {
 # Casper answered "do you know where blue is right now?" with "Blue is the
 # calmer, steadier original companion." (09-07). Where a sibling is, whether
 # she is on, what he said: those go to the model, which has the ROBOT
-# RELATIONSHIPS line, and guard_robot_relationship_denial behind it.
+# RELATIONSHIPS line, and guard_robot_relationship_denial behind it. Nor
+# "tell me more about hexia" (the paragraph just given, word for word) or
+# "do you miss / trust / love hexia?", which the paragraph does not answer.
 _RELATIONSHIP_NAME = r"(?:the\s+)?(?:blue|hexia|casper|caspar|pico|picoh)\b"
 _RELATIONSHIP_NAMES = (
     _RELATIONSHIP_NAME
@@ -3273,10 +3350,9 @@ _ROBOT_RELATIONSHIP_QUERY_RE = re.compile(
     r"\b(?:what do you (?:think|feel) (?:of|about)|how do you feel about"
     r"|what(?:['’]s| is) your (?:opinion|take|view) (?:of|on|about)"
     r"|what do you (?:know|remember) about|what can you tell (?:me|us) about"
-    r"|tell (?:me|us) (?:(?:a (?:little )?bit|more|something) )?about"
+    r"|tell (?:me|us) (?:(?:a (?:little )?bit|something) )?about"
     r"|what about|what do you make of"
-    r"|(?:do|did) you (?:(?:really|even|still) )?(?:know|remember|like|love|"
-    r"trust|miss)"
+    r"|(?:do|did) you (?:(?:really|even|still) )?(?:know|remember|like)"
     r"|(?:are|were) you (?:friends|close) with"
     r"|(?:how )?do you get (?:along|on) with"
     r"|who(?:['’]s| is| are)"
