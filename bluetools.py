@@ -10808,6 +10808,11 @@ _LONG_ARGUMENT_MAX_TOKENS = 8192
 # forced send_gmail ran 214 s and shipped 3,020.
 _FORCED_PROSE_MAX_CHARS = 600
 _FORCED_STREAM_ABORT_CHARS = 1500
+# The forced call of any other tool is a short JSON object (create_reminder's
+# is under 100 tokens), so a blocking one gets this cap and fails fast when it
+# writes words instead: on 2026-10-05 a blocking forced create_reminder ran
+# its full 2,048 tokens of prose before the picked-time fallback, 40-56 s.
+_FORCED_SHORT_MAX_TOKENS = 512
 
 
 def _chat_max_tokens() -> int:
@@ -10897,6 +10902,8 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         # (call_lm_studio gives it back to a streamed retry, which it stops).
         "max_tokens": (_LONG_ARGUMENT_MAX_TOKENS if (force_tool in _LONG_ARGUMENT_TOOLS
                                                      and force_choice == "required")
+                       else _FORCED_SHORT_MAX_TOKENS if (include_tools and force_tool
+                                                         and force_choice == "required")
                        else _chat_max_tokens()),
         "stream": False,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens

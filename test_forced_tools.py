@@ -518,6 +518,24 @@ def test_what_a_retry_claims(tool, text, claims):
     assert bool(tool_pipeline._retry_claims(text, tool)[1]) is claims
 
 
+def test_a_short_forced_call_gets_a_small_cap(loop):
+    """A forced reminder's answer is a short JSON object. A blocking one that
+    writes words instead ran all 2,048 tokens (40-56 s) on 2026-10-05 before
+    the fallback could act, so it gets a cap that fails fast."""
+    loop.model.queued = [
+        tool_call("create_reminder", user_name="Alex", title="Call the dentist",
+                  when="today at 3pm"),
+        "Done — I'll remind you at 3 PM.",
+    ]
+
+    loop.forced("remind me at 3pm to call the dentist", "create_reminder")
+
+    assert loop.calls[0]["tool_choice"] == "required"
+    assert loop.calls[0]["max_tokens"] == bt._FORCED_SHORT_MAX_TOKENS < bt._chat_max_tokens()
+    assert "reasoning_effort" not in loop.calls[0] or loop.calls[0]["reasoning_effort"] == "none"
+    assert [c["tool"] for c in loop.executed] == ["create_reminder"]
+
+
 def test_a_long_argument_tool_is_retried_at_the_normal_cap(loop):
     """The 8,192-token cap is for the forced call's arguments, not for the
     words a retry is likely to write: a blocking retry can't be stopped once
