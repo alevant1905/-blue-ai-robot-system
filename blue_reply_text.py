@@ -52,6 +52,7 @@ _BLOCK_NAMES = (
     "daily_rhythms|connections|expertise|current_activity|upcoming_schedule|"
     "recent_schedule|location|now|family|self_history|recent_duet|"
     "proactive_hint|focused_documents|web_research|wikipedia|syllabus_day|"
+    "syllabus_section|"
     "owner_email|duet_continuity|dated_episode_recall|untrusted_source"
 )
 _BLOCK_CITE_RE = re.compile(
