@@ -35,6 +35,7 @@ from blue_identity import (
     identity_response_problem,
     _BIRTHDATE_KEY_RE,
     age_on,
+    asked_after_himself,
     asks_for_recall,
     bulk_paste_recall_words,
     bulk_paste_stub,
@@ -44,11 +45,10 @@ from blue_identity import (
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
-    is_flat_self_denial,
     is_reask,
     is_self_description_request,
-    is_self_introduction_reply,
     is_social_checkin,
+    is_wording_only_reply,
     reply_wording_withheld,
 )
 from blue_reply_text import (
@@ -222,6 +222,29 @@ _AUTOBIOGRAPHY_RE = re.compile(
 # Questions about who the robot is: <remembered_days> matches their words
 # against old answers to the same question, which are only wording.
 _RECALLED_DAYS_SKIP_KINDS = frozenset({"introduction", "identity", "identity_more"})
+# The user asking what the robot himself said or wrote, in so many words:
+# "what did you tell me about…", "remind me what you wrote about…", "what was
+# your essay on…". Narrower than asks_for_recall, whose "can you remember
+# that?" and "do you remember…" mostly ask about facts.
+_ASKS_WHAT_HE_SAID_RE = re.compile(
+    r"\bwhat (?:did|have) (?:you|u) (?:say|tell|write|written|suggest|"
+    r"recommend|draft|propose|mention|come up with)\b"
+    r"|\bwhat (?:you|u) (?:said|told|wrote|suggested|recommended|mentioned)\b"
+    r"|\bwhat (?:was|were) (?:in )?your (?:\w+ ){0,2}(?:answers?|repl(?:y|ies)|"
+    r"responses?|essays?|reflections?|pieces?|reports?|summar(?:y|ies)|"
+    r"reviews?|critiques?|analys[ie]s|poems?)\b",
+    re.IGNORECASE,
+)
+# The frame of a recall ask, never its subject: "what ELSE do you remember",
+# "what did you WRITE LAST WEEK". Not words that name what was said.
+_RECALL_FRAME_WORDS = frozenset("""
+conversation conversations discussed discussion examine exactly history memory
+memories recall record records remember remembered told tell else earlier last
+week weeks yesterday today tonight morning afternoon evening night month ago
+days wrote write written writing talk talked talking mention mentioned discuss
+decide decided gave given suggest suggested recommend recommended propose
+proposed came come
+""".split())
 
 # Grounding: before model-authored content is written to a database, check that
 # it came from somewhere. Asked to recall four ideas it could no longer find,
@@ -293,13 +316,21 @@ def _searched_text(text: Optional[str], chat_turn: bool) -> str:
 def _asks_what_he_said_about_himself(intents: List[str]) -> bool:
     """A recall ask about the robot himself, in the last two user turns:
     "what did you tell me last week about how you're different from chat
-    gpt?". Only that keeps an old answer about himself. "what do you
-    remember about me?" is a recall cue too, and with it the 07-17 essay
-    "about who you are compared to a human" came back for "what else?"
-    (10-05 harness)."""
+    gpt?". That keeps an old answer about himself, as does asking what he
+    said in words that name its question's subject (_recall_named_terms).
+    "what do you remember about me?" is a recall cue too, and with it the
+    07-17 essay "about who you are compared to a human" came back for "what
+    else?" (10-05 harness)."""
     recent = intents[-2:]
     return (asks_for_recall(recent)
             and any(is_self_description_request(text) for text in recent))
+
+
+def _names_any(terms: Set[str], *texts: str) -> bool:
+    """Whether any of these texts contains one of the terms, as the answer
+    search counts a term (a lowercase substring)."""
+    lowered = [(text or "").lower() for text in texts]
+    return any(term in text for term in terms for text in lowered)
 
 
 def _user_intents(messages: Optional[List[Dict[str, Any]]], user_msg: str,
@@ -3766,15 +3797,10 @@ class EnhancedMemorySystem:
         The panel and the duet pass their own assembled query and leave it off.
 
         `quote_policy` (the chat context, build_context): the robot's lines
-        are quoted once and only when they are worth quoting. A
-        self-introduction, a flat self-denial, a check-in answer, an answer
-        about himself or a runaway reply reads "(answered)"; the old answer
-        to the question asked again now reads "(answered this same question;
-        answer it fresh)"; an answer already quoted (`seen`, shared with
-        <earlier_answers>) reads "(same answer as quoted elsewhere)". The
-        user asking what was said keeps the re-asked answer, and asking what
-        he said about himself the self-describing ones. Alex's lines are
-        never changed: the recall guard's fallback answers from them.
+        are quoted once and only when they are worth quoting (_recalled_reply).
+        The panel and the duet leave it off and quote every line; they share
+        the header (_remembered_days_wrapper). Alex's lines are never
+        changed: the recall guard's fallback answers from them.
         """
         if not user_msg or len(user_msg.strip()) < 5:
             return ""
@@ -3783,6 +3809,7 @@ class EnhancedMemorySystem:
             intent = intents[-1]
             recall_ask = asks_for_recall(intents[-2:])
             recall_self = _asks_what_he_said_about_himself(intents)
+            named = self._recall_named_terms(intents, robot=robot)
             if seen is None:
                 seen = []
 
@@ -3945,7 +3972,7 @@ class EnhancedMemorySystem:
                 if quote_policy and row["role"] == "assistant":
                     content = self._recalled_reply(
                         asked, row["content"] or "", intent, recall_ask,
-                        recall_self, seen)
+                        recall_self, named, seen)
                 excerpt.append(f"  {speaker}: {content[:420]}")
             if excerpt:
                 lines.append(
@@ -3960,7 +3987,7 @@ class EnhancedMemorySystem:
 
     @staticmethod
     def _recalled_reply(asked: str, reply: str, intent: str, recall_ask: bool,
-                        recall_self: bool,
+                        recall_self: bool, named: Set[str],
                         seen: List[Tuple[str, frozenset]]) -> str:
         """The robot's line of a <remembered_days> excerpt (quote_policy).
 
@@ -3968,12 +3995,39 @@ class EnhancedMemorySystem:
         now. do you want to say hello to everyone?", the excerpt quoted 420
         characters of the 09-16 class greeting ("Good morning, everyone. I'm
         Blue, Alex Levant's robot companion. I exist here in this room…"),
-        and the reply said them again."""
-        if reply_wording_withheld(asked, reply) or is_runaway_text(reply):
+        and the reply said them again.
+
+        In order, his line reads:
+        - "(answered)" for a reply that is only wording (a self-introduction,
+          a flat self-denial, a canned family reply) or a runaway one, always;
+        - "(answered)" for the answer to a check-in or to an identity kind of
+          question (selfhood, origin, self_memory…), unless the live turn
+          asks what he said in words that name that question's subject
+          (`named`, _recall_named_terms). A recall ask about himself
+          (`recall_self`) does not keep these;
+        - "(answered this same question; answer it fresh)" for the old answer
+          to the question asked again, unless the user asks what was said
+          (`recall_ask`);
+        - "(answered)" for the answer to another ask about himself
+          (is_self_description_request), unless the user asks what he said
+          about himself (`recall_self`) or names its question's subject;
+        - "(same answer as quoted elsewhere)" for one already quoted (`seen`);
+        - else the reply, through quotable_reply.
+        Named: "what did you tell me about ilyenkov and the ideal?" asks for
+        the 07-17 essay, which answered "drawing only on the following texts
+        by ilyenkov, write a… essay about who you are compared to a human";
+        "what did you say about pasquinelli's text?" for the 07-14
+        reflection, which answered "consider who you are in relation to
+        pasquinelli's text" (selfhood). Both read "(answered)" before."""
+        if is_wording_only_reply(reply) or is_runaway_text(reply):
+            return "(answered)"
+        names_it = _names_any(named, asked)
+        if asked_after_himself(asked) and not names_it:
             return "(answered)"
         if not recall_ask and is_reask(asked, intent):
             return "(answered this same question; answer it fresh)"
-        if not recall_self and is_self_description_request(asked):
+        if (is_self_description_request(asked)
+                and not (recall_self or names_it)):
             return "(answered)"
         quoted = " ".join(quotable_reply(reply).split())
         key = _quote_key(quoted)
@@ -3987,7 +4041,9 @@ class EnhancedMemorySystem:
         # "The excerpt below is a POSITIVE MATCH for the current question"
         # headed it on 85 of the 103 harness turns of 10-05, "thanks, that
         # helps" among them: it is retrieved by shared words, and is often
-        # beside the point.
+        # beside the point. The panel and the duet get this header too
+        # (their robot's name: the duet passes robot=req.speaker), though
+        # their lines are quoted whole.
         return (
             "<remembered_days>\n"
             "Possibly related past conversations, found in the conversation "
@@ -4081,7 +4137,7 @@ class EnhancedMemorySystem:
             conn.close()
         except Exception:
             return cached if cached is not None else []
-        about_self: Set[str] = set()
+        about_self: Dict[str, str] = {}
         corpus: List[Tuple[str, str, str]] = []
         robot_names = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper"}
         expected_name = robot_names.get(robot_key, "Blue")
@@ -4104,8 +4160,9 @@ class EnhancedMemorySystem:
             # and the June and July family rundowns put "you teach CS310A"
             # and "Emmy & Athena (10 years old)" into "what else?" (10-05
             # harness). The <family> and identity blocks answer those.
-            if (is_self_introduction_reply(content)
-                    or is_flat_self_denial(content)
+            # A self-introduction, a flat denial or a canned family reply is
+            # only wording (is_wording_only_reply).
+            if (is_wording_only_reply(content)
                     or _AUTOBIOGRAPHY_RE.search(content.lstrip().split("\n", 1)[0])
                     or "autobiography" in low[:120]
                     or self._is_owner_dossier(content, household)):
@@ -4127,14 +4184,13 @@ class EnhancedMemorySystem:
                 continue
             # The answer to a check-in, to "who are you?" or to "how are you
             # different from chat gpt?" stays, for the user who asks what he
-            # said, and is marked: no one else is quoted it. The 07-09
-            # ChatGPT answer ("I run 100% locally on Alex's hardware in this
-            # house…") was the next pick for "do you want to say hello to
-            # everyone?" once the class greetings were gone.
+            # said, and is marked, with its question: no one else is quoted
+            # it. The 07-09 ChatGPT answer ("I run 100% locally on Alex's
+            # hardware in this house…") was the next pick for "do you want
+            # to say hello to everyone?" once the class greetings were gone.
             asked = bulk_paste_recall_words(r["asked"] or "")
-            if (reply_wording_withheld(asked, content)
-                    or is_self_description_request(asked)):
-                about_self.add(r["timestamp"])
+            if asked_after_himself(asked) or is_self_description_request(asked):
+                about_self[r["timestamp"]] = asked
             corpus.append((r["timestamp"], content, low))
         caches[robot_key] = corpus
         cache_times[robot_key] = now
@@ -4149,7 +4205,48 @@ class EnhancedMemorySystem:
         """Whether a corpus answer replied to a check-in or to a question
         about the robot itself (_substantive_answer_corpus)."""
         about = getattr(self, "_answer_about_self_by_robot", None) or {}
-        return timestamp in about.get((robot or "blue").strip().lower(), ())
+        return timestamp in about.get((robot or "blue").strip().lower(), {})
+
+    def _about_self_question(self, timestamp: str, robot: str = "blue") -> str:
+        """The question a corpus answer about himself replied to, or ""."""
+        about = getattr(self, "_answer_about_self_by_robot", None) or {}
+        return about.get((robot or "blue").strip().lower(), {}).get(timestamp, "")
+
+    def _recall_named_terms(self, intents: List[str],
+                            robot: str = "blue") -> Set[str]:
+        """The subject the live turn names when it asks what the robot said
+        or wrote (_ASKS_WHAT_HE_SAID_RE), as words rare in his answers
+        (PAST_ANSWER_RARE_DF_RATIO): "ilyenkov" and "ideal" in "what did you
+        tell me about ilyenkov and the ideal?".
+
+        An old answer about himself whose question named one is the answer
+        asked for, and is quoted. The 07-17 essay "The Ideal in the Machine:
+        An Ilyenkovian Reflection on Selfhood", which Alex praised and asked
+        to keep, answered "drawing only on the following texts by ilyenkov,
+        write a detailed long essay about who you are compared to a human",
+        and was withheld from exactly that ask as an answer about himself;
+        so was the 07-14 reflection on Pasquinelli ("consider who you are in
+        relation to pasquinelli's text"). "what do you remember about me?"
+        and "what else?" ask nothing of what he said (family_smalltalk[3]).
+
+        Only the live turn's words, and only the old question. Read from the
+        last two turns on any recall cue (asks_for_recall), the same rule
+        changed 88 of 351 logged recall asks when the old answer's words
+        counted and 23 when only its question's did, nearly all for the
+        worse ("Continue I didn't hear what you just said." quoting a class
+        introduction; "can you remember that going forward" a self-portrait).
+        As written it changes none of them. Empty unless the live turn asks.
+        """
+        live = intents[-1] if intents else ""
+        if not _ASKS_WHAT_HE_SAID_RE.search(live):
+            return set()
+        named = _topic_terms(live) - _RECALL_FRAME_WORDS
+        if not named:
+            return set()
+        corpus = self._substantive_answer_corpus(robot=robot)
+        ceiling = max(1, int(len(corpus) * PAST_ANSWER_RARE_DF_RATIO))
+        return {term for term in named
+                if sum(1 for _, _, low in corpus if term in low) <= ceiling}
 
     def _owner_dossier_names(self) -> List[str]:
         """The partner, children, pet and employer, as the facts table has
@@ -4268,11 +4365,16 @@ class EnhancedMemorySystem:
             return ""
         if not hits:
             return ""
+        # An answer about himself is quoted when the user asks what he said
+        # about himself, or names its subject in a recall ask.
         recall_self = _asks_what_he_said_about_himself(intents)
+        named = self._recall_named_terms(intents, robot=robot)
         lines: List[str] = []
         for h in hits:
-            if not recall_self and self._answer_is_about_self(
-                    h["timestamp"], robot=robot):
+            if (not recall_self
+                    and self._answer_is_about_self(h["timestamp"], robot=robot)
+                    and not _names_any(named, self._about_self_question(
+                        h["timestamp"], robot=robot))):
                 continue
             # No block citations, self-talk or closing offers: quoted, the
             # model says them again.

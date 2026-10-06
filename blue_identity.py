@@ -1079,13 +1079,23 @@ def reply_wording_withheld(user_text: str, reply: str) -> bool:
     self-denials and the canned family replies: quoted, each is only a
     pattern, and the model says it again word for word.
     """
-    return (
-        is_social_checkin(user_text)
-        or identity_request_kind(user_text) in _WITHHELD_REQUEST_KINDS
-        or is_self_introduction_reply(reply)
-        or is_flat_self_denial(reply)
-        or bool(canonical_family_reply_kind(reply))
-    )
+    return asked_after_himself(user_text) or is_wording_only_reply(reply)
+
+
+def asked_after_himself(user_text: str) -> bool:
+    """A check-in, or a question about the robot itself: what makes its
+    answer one about himself (reply_wording_withheld, by the question)."""
+    return (is_social_checkin(user_text)
+            or identity_request_kind(user_text) in _WITHHELD_REQUEST_KINDS)
+
+
+def is_wording_only_reply(reply: str) -> bool:
+    """A self-introduction, a flat self-denial or a canned family reply:
+    only wording, whatever was asked (reply_wording_withheld, by the reply).
+    Never quoted, not even to a user asking what was said."""
+    return (is_self_introduction_reply(reply)
+            or is_flat_self_denial(reply)
+            or bool(canonical_family_reply_kind(reply)))
 
 
 # Asks for the robot to describe itself that identity_request_kind leaves
@@ -1237,9 +1247,12 @@ _RECALL_CUE_RE = re.compile(
     r"|\b(?:say|tell me|go over|run through|read) (?:that|it|them|those) "
     r"(?:again|back)\b"
     r"|\bwhat did (?:you|u|we|i) (?:say|tell(?: you| me)?|decide|come up with|"
-    r"talk about|discuss)\b"
-    r"|\bwhat (?:was|were) your (?:\w+ ){0,2}(?:answers?|repl(?:y|ies)|"
-    r"responses?)\b"
+    r"talk about|discuss|write|suggest|recommend|draft|propose|mention)\b"
+    # "what was your essay on ilyenkov…?": without these, <remembered_days>
+    # told the model to answer the 07-17 essay request afresh, as a re-ask.
+    r"|\bwhat (?:was|were) (?:in )?your (?:\w+ ){0,2}(?:answers?|repl(?:y|ies)|"
+    r"responses?|essays?|reflections?|pieces?|reports?|summar(?:y|ies)|"
+    r"reviews?|critiques?|analys[ie]s|poems?)\b"
     r"|\brecap\b"
     r"|\b(?:earlier|last time|yesterday|last (?:week|night)|this morning),? you\b",
     re.IGNORECASE,
@@ -1249,8 +1262,9 @@ _RECALL_CUE_RE = re.compile(
 def asks_for_recall(user_texts) -> bool:
     """True when either of the last two user turns asks what was said before.
 
-    Used only to KEEP a quote that would otherwise be withheld as a re-ask.
-    Pass the user's own words (intent text), not pasted material.
+    Used only to KEEP what would otherwise be withheld: a quote withheld as
+    a re-ask, an old answer about himself, a recall block for an ask about
+    himself. Pass the user's own words (intent text), not pasted material.
     """
     if isinstance(user_texts, str):
         user_texts = [user_texts]

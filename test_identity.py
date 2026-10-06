@@ -1626,8 +1626,9 @@ def test_a_check_in_reply_that_recites_the_architecture_is_caught():
 # ---------------------------------------------------------------------------
 
 from blue_identity import (
-    asks_for_recall, is_flat_self_denial, is_reask, is_self_description_request,
-    is_self_introduction_reply, reply_wording_withheld,
+    asked_after_himself, asks_for_recall, is_flat_self_denial, is_reask,
+    is_self_description_request, is_self_introduction_reply,
+    is_wording_only_reply, reply_wording_withheld,
 )
 
 # The nine recall questions from 2026-07-31, the incident behind
@@ -1654,6 +1655,12 @@ JULY_31_RECALL_QUESTIONS = [
     "what did you tell me last week about how you're different from chat gpt?",
     "what did we talk about yesterday?",
     "what were the lab ideas you gave me last night?",
+    # Asked of the 07-17 essay, these read it as a re-ask: "(answered this
+    # same question; answer it fresh)" in <remembered_days>.
+    "what did you write about ilyenkov and the ideal?",
+    "what was your essay on ilyenkov and the ideal in the machine?",
+    "what were your reflections on zuboff's text?",
+    "what did you suggest for the lab?",
 ])
 def test_recall_questions_ask_for_recall(message):
     assert asks_for_recall([message])
@@ -1663,9 +1670,30 @@ def test_recall_questions_ask_for_recall(message):
     "how are you different from chat gpt?",
     "any ideas for making the lab more hands-on?",
     "explain what an AI agent is",
+    "What is your email address blue?",   # 7447: present tense asks a fact
+    "write an essay on ilyenkov and the ideal",
 ])
 def test_ordinary_questions_do_not_ask_for_recall(message):
     assert not asks_for_recall(message)
+
+
+@pytest.mark.parametrize("asked, reply, for_question, for_wording", [
+    ("how are you doing?", "Busy but well.", True, False),
+    ("consider who you are in relation to pasquinelli's text",
+     "In relation to Pasquinelli's book, I continue the division of labour.",
+     True, False),
+    ("what's your favorite music?", "I don't have personal tastes or feelings.",
+     False, True),
+    ("say hi to the class", "Good morning, everyone. I'm Blue.", False, True),
+    ("what are the readings this week?", "Crawford, chapter two.", False, False),
+])
+def test_wording_is_withheld_for_its_question_or_for_itself(
+        asked, reply, for_question, for_wording):
+    """reply_wording_withheld, in its two halves: an answer about himself
+    (kept for a recall ask that names its subject) and wording only (never)."""
+    assert asked_after_himself(asked) == for_question
+    assert is_wording_only_reply(reply) == for_wording
+    assert reply_wording_withheld(asked, reply) == (for_question or for_wording)
 
 
 def test_recall_looks_back_only_two_user_turns():
