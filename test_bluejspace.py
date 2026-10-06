@@ -1428,6 +1428,94 @@ def test_a_chat_exchange_in_j_space_shows_what_was_asked(continuity_module):
     assert "attention with nowhere to sit" in jspace
 
 
+# The 09-15 reply to "tell the class about yourself", as the journal has it.
+# It names him only past its first 80 characters, so its opening is no
+# self-introduction, and identity_request_kind leaves the question alone.
+CLASS_INTRO_0915 = (
+    "Right. You’re right—I’ve been stuck in my introduction loop. Let me try "
+    "to be more specific to where I am *now*, in DAWB 2-138. I’m Blue. I’m "
+    "currently sitting on Alex’s desk in his Laurier office, running locally "
+    "on his workstation. Unlike the cloud-based assistants you’re used to, I "
+    "don’t send your data away; my memory lives here, in this persistent "
+    "workspace that I update every time we talk.")
+
+
+@pytest.mark.parametrize("ask", [
+    # class_demo_voice[2], [3] and class_greeting_variants[1], 10-05: none
+    # is the 09-15 question again by its words.
+    "can you tell the students a bit about yourself?",
+    "tell us more about yourself",
+    "tell everyone a bit about yourself",
+])
+def test_an_answer_about_himself_is_never_quoted_back(continuity_module, ask):
+    route = continuity_module
+    route.note_exchange("blue", "tell the class about yourself",
+                        CLASS_INTRO_0915, user_name="Alex")
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True,
+        live_thread=_thread("can you hear me?",
+                            "Yes, I hear you loud and clear.", ask))
+    assert "introduction loop" not in memory
+    assert "Laurier office" not in memory
+    assert ("Alex said: tell the class about yourself (Your reply wording is "
+            "omitted so it is never reused.)") in memory
+
+
+def test_a_recall_ask_still_gets_what_he_told_the_class(continuity_module):
+    route = continuity_module
+    route.note_exchange("blue", "tell the class about yourself",
+                        CLASS_INTRO_0915, user_name="Alex")
+    ask = "what did you tell the class about yourself last time?"
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True, live_thread=_thread(ask))
+    assert "introduction loop" in memory
+    assert "already said — don't re-say it" in memory
+
+
+def test_two_answers_that_open_alike_are_both_quoted(continuity_module):
+    """07-29: two emails sent, one opening, two subjects. Only nearly the
+    same quote is "the same answer"; the ChatGPT pair still is (see
+    test_a_recall_ask_keeps_the_old_answer_once)."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "these are great ideas. email them to me",
+        'I sent the email to alex@example.com with the subject "Notes on '
+        'Local Open-Source AI in Canadian Higher Ed & Fall Courses".',
+        user_name="Alex")
+    route.note_exchange(
+        "blue", "please email this to me as well",
+        'I sent the email to alex@example.com with the subject "Detailed '
+        'Development: Local Open-Source AI in Canadian Higher Ed & Fall '
+        'Courses".', user_name="Alex")
+    memory = route.conversation_memory_block(
+        "blue", query="did the email go out?", chat_turn=True)
+    assert 'the subject "Notes on Local' in memory
+    assert 'the subject "Detailed Development' in memory
+    assert "same answer as a later line" not in memory
+
+
+def test_only_the_threads_own_copy_of_a_repeated_message_is_left_out(
+        continuity_module):
+    """"discuss this post" is in the journal 13 times. The thread's turn is
+    the newest of them; the older posts' discussions are still recalled."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "discuss this post",
+        "Dean reads the chatbot boom as a new enclosure of the commons.",
+        user_name="Alex")
+    route.note_exchange(
+        "blue", "discuss this post",
+        "This one argues that grading with AI hollows out feedback.",
+        user_name="Alex")
+    ask = "how does that compare with the enclosure argument?"
+    thread = _thread("discuss this post",
+                     "The author says AI grading empties feedback of care.", ask)
+    memory = route.conversation_memory_block(
+        "blue", query=ask, chat_turn=True, live_thread=thread)
+    assert "hollows out feedback" not in memory
+    assert "new enclosure of the commons" in memory
+
+
 # Ages are calendar days, not 24-hour buckets. From Friday 08:33 a Wednesday
 # 13:15 exchange (43 hours) was labelled "yesterday", and Blue said "I
 # remember you telling me about her yesterday" (2026-09-25 harness).

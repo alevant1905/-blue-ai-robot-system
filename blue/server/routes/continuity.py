@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -36,6 +37,7 @@ from blue_identity import (
     is_bulk_paste,
     is_family_overview_request,
     is_reask,
+    is_self_description_request,
     canonical_family_reply_kind,
     is_failure_placeholder,
     known_household_target,
@@ -1384,11 +1386,13 @@ class RobotContinuity:
 
         Old replies are quoted once each and marked as already said. A reply
         that only introduces or denies the robot, or answers a question about
-        the robot itself, is never quoted, and neither is the old answer to
-        the question being asked again now, unless the user is asking what was
-        said: quoted, each came back word for word (class demo, 2026-09-25
-        and 10-05: "The difference is material and political, not just
-        technical…" for "how do you differ from Chat GPT?").
+        the robot itself, is never quoted. Nor are the old answer to the
+        question being asked again now and an answer describing the robot
+        ("how are you different from chat gpt?", "tell the class about
+        yourself"), unless the user is asking what was said: quoted, each came
+        back word for word (class demo, 2026-09-25 and 10-05: "The difference
+        is material and political, not just technical…" for "how do you
+        differ from Chat GPT?").
 
         ``chat_turn``: ``query`` is the user's chat message, where a long one
         is a pasted document and searches by the words beside it. The panel,
@@ -1418,21 +1422,29 @@ class RobotContinuity:
             elif message.get("role") == "assistant":
                 live_replies.append(_flat_words(text))
         # The newest user turn is the live one, not yet in the journal: an old
-        # exchange with the same words is the question asked again. "yes" and
-        # "keep going" are said in every thread; their exchanges are found by
-        # the reply.
-        earlier_users = {
+        # exchange with the same words is the question asked again. An earlier
+        # turn's words find the newest exchange that has them, once for each
+        # time the thread says them: "can you hear me" is in the newest 200
+        # exchanges three times ("discuss this post" in the journal 13), and
+        # only this window's copy is in the thread. "yes" and "keep going" are
+        # said in every thread; their exchanges are found by the reply. Newest
+        # first, as list_episodes returns them.
+        unmatched_users = Counter(
             flat for flat in map(_flat_words, live_users[:-1])
             if len(flat.split()) >= _THREAD_USER_MIN_WORDS
-        }
-
-        def in_live_thread(episode: Dict[str, Any]) -> bool:
+        )
+        in_thread: set[int] = set()
+        for episode in exchanges:
             details = episode.get("details") or {}
-            if _flat_words(details.get("user_text")) in earlier_users:
-                return True
+            asked = _flat_words(details.get("user_text"))
+            if unmatched_users[asked] > 0:
+                unmatched_users[asked] -= 1
+                in_thread.add(id(episode))
+                continue
             probe = _flat_words(details.get("reply"))[:80]
-            return (len(probe) >= _THREAD_PROBE_MIN
-                    and any(probe in reply for reply in live_replies))
+            if (len(probe) >= _THREAD_PROBE_MIN
+                    and any(probe in reply for reply in live_replies)):
+                in_thread.add(id(episode))
 
         robot_names = {
             str(cfg.get("name") or "").strip()
@@ -1467,7 +1479,7 @@ class RobotContinuity:
                 continue
             # Left out before choosing, so the recent-turns slots go to
             # exchanges the browser's thread does not carry.
-            if in_live_thread(episode):
+            if id(episode) in in_thread:
                 continue
             eligible.append(episode)
         if not eligible:
@@ -1580,16 +1592,27 @@ class RobotContinuity:
         # One answer given twice is quoted once, as its newest copy: on
         # 09-15 and 09-16 the ChatGPT question got the same "The difference
         # is material and political…", and two copies read as the answer.
-        quoted_openings: set[str] = set()
+        # The same answer is the same quote: its first ten words, and nine in
+        # ten of its words. The two ChatGPT quotes differ by one clause
+        # (0.93); the two 07-29 replies "I sent the email to … with the
+        # subject …" name different subjects (0.83), and both are quoted.
+        quotes: Dict[int, str] = {}
+        newer_quotes: List[tuple] = []
         repeated_ids: set[int] = set()
         for episode in reversed(chosen):
-            opening = " ".join(_flat_words(
-                (episode.get("details") or {}).get("reply")).split()[:10])
-            if not opening:
+            quoted = _clip(" ".join(quotable_reply(str(
+                (episode.get("details") or {}).get("reply") or "")).split()), 180)
+            quotes[id(episode)] = quoted
+            words = _flat_words(quoted).split()
+            if not words:
                 continue
-            if opening in quoted_openings:
+            opening, vocabulary = " ".join(words[:10]), set(words)
+            if any(opening == newer_opening
+                   and len(vocabulary & newer_vocabulary)
+                   >= 0.9 * len(vocabulary | newer_vocabulary)
+                   for newer_opening, newer_vocabulary in newer_quotes):
                 repeated_ids.add(id(episode))
-            quoted_openings.add(opening)
+            newer_quotes.append((opening, vocabulary))
         # "What did you tell me last week about how you're different from
         # chat gpt?" asks for the old answer: it is kept, quoted once.
         recall_ask = asks_for_recall(
@@ -1658,13 +1681,21 @@ class RobotContinuity:
                 # 2026-10-05); with this line instead, 0 of 3.
                 reply_part = (" — you answered this same question before; "
                               "answer it fresh now, in new words.")
+            elif not recall_ask and is_self_description_request(heard):
+                # An answer about himself to a question the checks above do
+                # not name: "tell the class about yourself" (09-15) got
+                # "Right. You're right—I've been stuck in my introduction
+                # loop… I'm Blue. I'm currently sitting on Alex's desk…", and
+                # it was quoted on the three turns of the 10-05 harness that
+                # asked about him in other words ("tell everyone a bit about
+                # yourself").
+                reply_part = (" (Your reply wording is omitted so it is never "
+                              "reused.)")
             elif id(episode) in repeated_ids:
                 reply_part = " — you answered (same answer as a later line)."
             else:
-                quoted = " ".join(quotable_reply(
-                    str(details.get("reply") or "")).split())
                 reply_part = (" You replied (already said — don't re-say "
-                              f"it): {_clip(quoted, 180)}")
+                              f"it): {quotes[id(episode)]}")
             said = pasted or f"{partner} said: {_clip(heard, 260)}"
             lines.append(
                 f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; {kind} with "
