@@ -5240,14 +5240,16 @@ def _course_codes_in(text: str) -> List[str]:
             for m in _COURSE_CODE_IN_TEXT_RE.finditer(text or "")]
 
 
-def _syllabi_by_course() -> Dict[str, list]:
+def _syllabi_by_course(docs=None) -> Dict[str, list]:
     """{'dh399': [index entry, ...]}: each course syllabus in the library,
-    by the course code its folder or file name carries."""
-    try:
-        index = load_document_index()
-        docs = index.get("documents", []) if isinstance(index, dict) else []
-    except Exception:
-        return {}
+    by the course code its folder or file name carries. `docs` is the
+    index's documents, read here when not given."""
+    if docs is None:
+        try:
+            index = load_document_index()
+            docs = index.get("documents", []) if isinstance(index, dict) else []
+        except Exception:
+            return {}
     by_code: Dict[str, list] = {}
     for d in docs:
         if not _looks_like_syllabus_entry(d):
@@ -5272,11 +5274,81 @@ def _in_library_focus(d) -> bool:
     return any(fol == f or fol.startswith(f + '/') for f in focus_folders)
 
 
-# A short follow-up that keeps the question before it: "and dh399?",
-# "no, it's on wednesdays", "are you sure?".
+def _focus_courses(docs, every) -> set:
+    """The courses the chat Context panel's picks belong to, of those in
+    `every`; all of them when nothing is picked.
+
+    A picked syllabus, and any picked document or folder filed under a
+    course: with only the reading picked (Reigeluth.pdf in DH399/readings,
+    or that folder), "follow the specific requirements of the assignment as
+    stated in the syllabus" after a DH399 reading report got nothing, and
+    went back to a search of the reading (review of e897c8b)."""
+    focus_docs = set(globals().get("_ACTIVE_FOCUS_DOCS") or [])
+    focus_folders = list(globals().get("_ACTIVE_FOCUS_FOLDERS") or [])
+    if not (focus_docs or focus_folders):
+        return set(every)
+    codes = {code for code, syll in every.items()
+             if any(_in_library_focus(d) for d in syll)}
+    paths = focus_folders + [d.get("folder") or "" for d in docs
+                             if (d.get("filename") or "") in focus_docs]
+    for path in paths:
+        for part in re.split(r"[\\/]", path):
+            codes.update(c for c in _course_codes_in(part) if c in every)
+    for name in focus_docs:
+        # "DH399_notes.pdf": the code leads the file name.
+        m = re.match(r"([A-Za-z]{2,5})[\s_-]?(\d{3,4})(?!\d)", name)
+        if m and (m.group(1) + m.group(2)).lower() in every:
+            codes.add((m.group(1) + m.group(2)).lower())
+    return codes
+
+
+# A short follow-up that keeps the question before it: "and dh399?" (a
+# code), "no, it's on wednesdays", "that's wrong", "are you sure?", "and the
+# room?". Not "not bad, you?", "no worries, thanks" or "and what about
+# dinner?" (review of e897c8b).
 _SECTION_FOLLOWUP_RE = re.compile(
-    r"^\s*(?:and|what about|how about|same for|no|nope|not)\b"
-    r"|\b(?:wrong|not right|incorrect|are you sure)\b", re.I)
+    r"^\s*(?:no|nope|nah)\b[,.!:;]?\s*(?:it|its|it['\u2019]s|that|thats|that['\u2019]s|"
+    r"this|the|they|we|on|in|at|every|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|\d)"
+    r"|\b(?:that|it|this|you)(?:['\u2019]s| is|['\u2019]re| are) (?:wrong|not right|"
+    r"incorrect|not correct)\b"
+    r"|\bwrong (?:room|day|time|building|place|course|class)\b|\bare you sure\b"
+    r"|^\s*(?:and|what about|how about|same for|also)\b(?=[^?.!]{0,30}\b(?:room|building|"
+    r"location|where|when|time|times|days?|office|hours|e-?mail|instructor|"
+    r"prof(?:essor)?|grad(?:e|es|ed|ing)|weight|worth|percent(?:age)?|late|"
+    r"extensions?|attendance|participation|due|deadline)\b)",
+    re.I)
+# Another robot's line in Panel's tool path rides as a user message; a
+# course code it said is not Alex's question.
+_PANEL_OTHER_ROBOT_RE = re.compile(r"^\[[^\]\n]{1,60}, another robot in the panel, said\]")
+# Another class than the one meeting now: "when is my next class?", "when
+# do my classes start this term?", "what did we cover yesterday?".
+_OTHER_OCCASION_RE = re.compile(
+    r"\bnext\b|\b(?:classes|courses|lectures|seminars)\b|\byesterday\b"
+    r"|\b(?:this|next|last) (?:term|semester|year)\b|\blast (?:week|class|time)\b",
+    re.I)
+
+
+def _section_topics(turns) -> List[str]:
+    """The syllabus parts the first of `turns` (the user's own words,
+    newest first) asks about.
+
+    A loose form ("what room?", "how much is it worth?") counts right after
+    a course question, and a short follow-up ("and dh399?", "no, it's on
+    wednesdays") keeps the question before it. Asking what was said or
+    decided is for the earlier talk, not the syllabus."""
+    if not turns:
+        return []
+    newest = turns[0]
+    if _syllabus_sections.asks_what_was_said(newest):
+        return []
+    before = _section_topics(turns[1:])
+    topics = _syllabus_sections.asked_topics(newest, after_course_question=bool(before))
+    if (not topics and before and len(newest) <= 60
+            and (_syllabus_sections.written_course_codes(newest)
+                 or _SECTION_FOLLOWUP_RE.search(newest))):
+        topics = before
+    return topics
 
 
 def _syllabus_section_note(conversation_messages) -> str:
@@ -5290,14 +5362,23 @@ def _syllabus_section_note(conversation_messages) -> str:
     blue/server/syllabus_sections.py; this finds the course: a code in the
     message, else in the three user turns before it, else in his last reply
     when it names one course, else the one course the Context panel picks,
-    else the class on the calendar right now. A short follow-up ("and
+    else the class on the calendar right now. When the panel's picks belong
+    to a course (a syllabus, or a reading filed under DH399), the course
+    must be among them. The last two are skipped for a message about
+    another day's class, the next one or all of them ("what time is my
+    friday class?" during the Wednesday lecture), and a class named by its
+    day ("friday's class") takes no course from the turns before either.
+    Asking what was said or decided gets nothing. A short follow-up ("and
     dh399?", "no, it's on wednesdays") keeps the question before it, and
     "the assignment" is the one the turns before it named. Nothing without
-    a course: never another course's rooms or rules.
+    a course, or for a course whose syllabus is not in the library ("for
+    cmds4740"): never another course's rooms or rules.
     """
+    from datetime import date as _date
     msgs = [m for m in (conversation_messages or []) if isinstance(m, dict)]
     users = [m.get("content") for m in msgs
-             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+             if m.get("role") == "user" and isinstance(m.get("content"), str)
+             and not _PANEL_OTHER_ROBOT_RE.match(m.get("content"))]
     if not users:
         return ""
     newest = _intent_text(users[-1])
@@ -5307,14 +5388,11 @@ def _syllabus_section_note(conversation_messages) -> str:
         if m.get("role") == "assistant" and isinstance(m.get("content"), str):
             last_reply = m["content"]
             break
-    topics = _syllabus_sections.asked_topics(newest)
-    if (not topics and earlier and len(newest) <= 60
-            and (_syllabus_sections.course_codes(newest)
-                 or _SECTION_FOLLOWUP_RE.search(newest))):
-        topics = _syllabus_sections.asked_topics(earlier[0])
+    topics = _section_topics([newest] + earlier)
+    day = _day_of(newest)
     # "what's the assignment for tomorrow?" is that day's row (<syllabus_day>),
     # not the list of the term's assignments.
-    if not topics or (topics == ["assessment"] and _day_of(newest) is not None):
+    if not topics or (topics == ["assessment"] and day is not None):
         return ""
     if _syllabus_sections.means_an_unnamed_assignment(newest):
         named = next((n for text in earlier + [last_reply]
@@ -5323,43 +5401,63 @@ def _syllabus_section_note(conversation_messages) -> str:
             topics = [named if t == "assessment" else t for t in topics]
             if named not in topics:
                 topics.insert(0, named)
-    every = _syllabi_by_course()
+    try:
+        index = load_document_index()
+        docs = index.get("documents", []) if isinstance(index, dict) else []
+    except Exception:
+        return ""
+    every = _syllabi_by_course(docs)
     if not every:
         return ""
 
     def known(text):
         return [c for c in _syllabus_sections.course_codes(text) if c in every]
 
+    def names_a_course(text):
+        # "CS240J" or "cmds4740", whose syllabus is not in the library, is a
+        # course too: no other course's lines stand in for it (the logged
+        # CS240J and CMDS4740 reading report turns, in class, would have
+        # got DH399's).
+        return bool(known(text) or _syllabus_sections.written_course_codes(text))
+
     # The Context panel's picks. A course the message names is read even
-    # outside them; one the thread only implies must be among them, and is
-    # never swapped for a picked one.
-    picked = {code: [d for d in docs if _in_library_focus(d)]
-              for code, docs in every.items()}
-    picked = {code: docs for code, docs in picked.items() if docs}
+    # outside them; one the thread only implies must be among them when
+    # they belong to a course, and is never swapped for a picked one.
+    picked = _focus_courses(docs, every)
+    focused = bool(globals().get("_ACTIVE_FOCUS_DOCS")
+                   or globals().get("_ACTIVE_FOCUS_FOLDERS"))
+    other_day = day is not None and day != _date.today()
     codes = known(newest)
-    if not codes:
-        implied = next((found for found in map(known, earlier) if found), [])
-        if not implied:
+    if not names_a_course(newest) and not (other_day and re.search(
+            r"\b(?:class|lecture|seminar|tutorial|course)\b", newest, re.I)):
+        named_before = next((text for text in earlier if names_a_course(text)), None)
+        if named_before is not None:
+            implied = known(named_before)
+        else:
             # "DH399", or the file he cited: "[DH399_AL_2026F.docx]".
             cited = known(last_reply)
-            cited += [code for code, docs in every.items() if code not in cited
+            cited += [code for code, syll in every.items() if code not in cited
                       and any(d.get("filename") and d["filename"] in last_reply
-                              for d in docs)]
+                              for d in syll)]
             implied = cited if len(cited) == 1 else []
-        if not implied and len(picked) == 1 and len(picked) < len(every):
-            implied = list(picked)
-        if not implied:
+        codes = [c for c in implied if c in picked or not picked]
+        # The pick and the calendar say which course is in front of him now,
+        # not which one meets on Friday, next, or this term.
+        now_only = (named_before is None and not implied
+                    and not (other_day or _OTHER_OCCASION_RE.search(newest)))
+        if now_only and focused and len(picked) == 1:
+            codes = list(picked)
+        if now_only and not codes:
             try:
                 event = _calendar_event_now()
             except Exception as e:
                 log.warning(f"[SYLLABUS] calendar check failed: {e}")
                 event = None
-            implied = known((event or {}).get("title") or "")
-        codes = [c for c in implied if c in picked]
+            codes = [c for c in known((event or {}).get("title") or "") if c in picked]
     blocks = []
     asked = []
     for code in codes[:2]:
-        for d in picked.get(code) or every[code]:
+        for d in [d for d in every[code] if _in_library_focus(d)] or every[code]:
             fp = d.get("filepath", "")
             if not fp or not os.path.exists(fp):
                 continue

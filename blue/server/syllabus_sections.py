@@ -20,9 +20,11 @@ in the prompt as <syllabus_section>.
 
 The topics are narrow on purpose: the block is only for a question about a
 course, and "where are you?", "what's your email?" or "your journal" are
-not one. Without a course (named in the message or the turns just before
-it, cited in his last reply, picked in the Context panel, or on the
-calendar right now) nothing is added at all.
+not one; "what percentage...", "how can I reach..." or "which room..."
+count only in a message tied to a course (tied_to_a_course). Without a
+course (named in the message or the turns just before it, cited in his
+last reply, picked in the Context panel, or on the calendar right now)
+nothing is added at all.
 
 Pure text in, text out — no bluetools import.
 """
@@ -39,24 +41,55 @@ _WHERE_Q = r"\bwhere(?:['\u2019]s| is| are| does| do| was| were| will)\b"
 # A course code: "DH201", "dh 201", "CS-101".
 COURSE_CODE_RE = re.compile(r"\b([a-z]{2,5})\s?-?(\d{3,4})[a-z]?\b", re.I)
 
+# Each part has the forms that are about a course on their own ("what's the
+# late policy?", "is attendance mandatory?") and loose ones that are just as
+# often about anything else: "what percentage of jobs will AI agents
+# replace?", "how can I reach Leo?", "what time does the movie start
+# tonight?", "which room has the best light?", "what are the requirements
+# for a passport?", "tell me about your final project". During DH399 on the
+# calendar, or with one course picked in the Context panel, each of those
+# got that course's grading, email or room (review of e897c8b). A loose
+# form counts only when the message is tied to a course: a course code or
+# a course word in it, or, right after a course question, a message that
+# points back to it ("and what room?", "what time does it start?").
+_COURSE_WORD_RE = re.compile(
+    r"(?<!middle )(?<!working )(?<!upper )(?<!lower )(?<!-)\bclass(?:es|room)?\b"
+    r"|\bcourses?\b|\blectures?\b|\bseminars?\b|\btutorials?\b|\bsyllab(?:us|i)\b"
+    # not "what percentage of students use AI?"
+    r"|(?<!\bof )\bstudents?\b"
+    r"|\bassignments?\b|\bgrad(?:e|es|ed|ing)\b|(?<!question )\bmarks\b|\bmarking\b",
+    re.I)
+# Pointing back at the course question just before: a leading "and", a
+# pronoun for it, or two or three words and nothing else ("what room?").
+_REFERS_BACK_RE = re.compile(
+    r"^\s*(?:and|also|plus|so|what about|how about)\b"
+    r"|\b(?:it|its|it['\u2019]s|that|this|they|them|their|there|he|him|his|she|her)\b",
+    re.I)
+
 # Where and when a course meets. "where are you located?", "what's your
 # location?" and "what room are you in?" ask about the robot, so "where" and
 # "location" count only with a class word, or a course code in the same
-# message.
+# message. "what room are we in?" is asked in class, of the class's room;
+# "which room has the best light?" is a loose form.
 _ROOM_RE = re.compile(
-    r"\b(?:what|which)\s+(?:room|building|classroom|lecture hall|hall)\b"
-    r"(?!\s+(?:are|were|is|was) (?:you|blue|hexia|casper)\b)"
-    r"|\b(?:what|which)(?:['\u2019]s| is| was) the (?:room|building|classroom)\b"
-    r"|\broom (?:number|no\b|#)"
-    r"|" + _WHERE_Q + r"[^?.!]{0,30}\b" + _CLASS_WORDS + r"\b"
+    _WHERE_Q + r"[^?.!]{0,30}\b" + _CLASS_WORDS + r"\b"
     r"|\b(?:class|lecture|course|seminar|classroom) (?:location|room)\b"
-    r"|\blocation of (?:the |my |our )?" + _CLASS_WORDS + r"\b",
+    r"|\blocation of (?:the |my |our )?" + _CLASS_WORDS + r"\b"
+    r"|\b(?:what|which)(?:['\u2019]s| is| was)?(?: the)? classroom\b"
+    r"|\b(?:what|which) (?:room|building) (?:are|were) we in\b",
+    re.I)
+_ROOM_LOOSE_RE = re.compile(
+    r"\b(?:what|which)\s+(?:room|building|lecture hall|hall)\b"
+    r"(?!\s+(?:are|were|is|was) (?:you|blue|hexia|casper)\b)"
+    r"|\b(?:what|which)(?:['\u2019]s| is| was) the (?:room|building)\b"
+    r"|\broom (?:number|no\b|#)",
     re.I)
 _TIME_RE = re.compile(
-    r"\bwhat time\b[^?.!]{0,30}\b(?:" + _CLASS_WORDS
-    + r"|start|starts|end|ends|meet|meets)\b"
+    r"\bwhat time\b[^?.!]{0,30}\b" + _CLASS_WORDS + r"\b"
     r"|" + _WHEN_Q + r"[^?.!]{0,25}\b" + _CLASS_WORDS + r"\b",
     re.I)
+_TIME_LOOSE_RE = re.compile(
+    r"\bwhat time\b[^?.!]{0,30}\b(?:start|starts|end|ends|meet|meets)\b", re.I)
 # With a course code in the message: "when is dh201 again?", "where is
 # dh399?", "what time does CS101 start?", "dh201 location".
 _CODE_WHEN_WHERE_RE = re.compile(
@@ -74,92 +107,136 @@ _OFFICE_HOURS_RE = re.compile(
 # own) and not "what email did you send".
 _CONTACT_RE = re.compile(
     r"\b(?:instructor|professor|prof|teacher)(?:['\u2019]s)?\s+(?:e-?mail|contact|name)\b"
-    r"|\b(?:course|class|contact) e-?mail\b"
+    r"|\b(?:course|class) e-?mail\b"
     r"|\be-?mail address(?:es)? (?:for|of) (?:the )?(?:course|class|instructor|prof)"
-    r"|\b(?:alex|his|the instructor|the prof(?:essor)?|dr\.? levant)['\u2019]?s? e-?mail\b"
+    r"|\b(?:the instructor|the prof(?:essor)?|dr\.? levant)['\u2019]?s? e-?mail\b"
+    r"|\bwho(?:['\u2019]s| is) the (?:instructor|prof(?:essor)?)\b",
+    re.I)
+_CONTACT_LOOSE_RE = re.compile(
+    r"\bcontact e-?mail\b"
+    r"|\b(?:alex|his)['\u2019]?s? e-?mail\b"
     r"|\bhow (?:do|can|should|would) (?:students|they|i|we|people) "
     r"(?:contact|reach|e-?mail|get in touch with)\b"
     r"|\bwho (?:teaches|is teaching|instructs)\b"
-    r"|\bwho(?:['\u2019]s| is) the (?:instructor|prof(?:essor)?|teacher)\b"
+    r"|\bwho(?:['\u2019]s| is) the teacher\b"
     r"|\bsubject line\b",
     re.I)
 # How the course is graded, and what students hand in.
 _ASSESSMENT_RE = re.compile(
-    r"\bhow (?:is|are|will|was|were|do|does)\b[^?.!]{0,40}\b"
-    r"(?:graded|marked|evaluated|assessed|weighted)\b"
-    r"|\bhow (?:does|do|is|will|would) (?:the )?(?:grading|marking|evaluation)\b"
-    r"|\b(?:grading|marking|evaluation|assessment) (?:scheme|breakdown|policy|"
-    r"criteria|rubric|system|structure|weights?)\b"
+    r"\bhow (?:is|are|will|was|were|do|does)\b[^?.!]{0,40}\b(?:graded|marked)\b"
+    r"|\bhow (?:does|do|is|will|would) (?:the )?(?:grading|marking)\b"
+    r"|\b(?:grading|marking) (?:scheme|breakdown|policy|criteria|rubric|system|"
+    r"structure|weights?)\b"
     r"|\bgrade (?:breakdown|distribution|scheme|weights?|weighting)\b"
-    r"|\bhow much (?:is|are|does|do)\b[^?.!]{0,40}\b(?:worth|count|weigh)\b"
-    r"|\bwhat (?:percent(?:age)?|weight(?:ing)?)\b"
-    r"|\bworth\b[^?.!]{0,12}(?:%|\bpercent\b|\bmarks?\b|\bpoints?\b)"
-    r"|\bcourse requirements?\b|\bdeliverables\b"
-    r"|\b(?:what|which)(?: are| were)?(?: the)?(?: main| major| key| big)? "
-    r"(?:assignments|requirements)\b"
+    r"|\bcourse requirements?\b"
+    r"|\b(?:what|which)(?: are| were)?(?: the)?(?: main| major| key| big)? assignments\b"
     # "Go over the assignment with the class" (live 9469).
     r"|\b(?:go over|explain|describe|outline|review|walk (?:me|us|them) through|"
-    r"tell (?:me|us|them) about|what(?:['\u2019]s| is| are)) the (?:assignments?|"
-    r"requirements)\b"
+    r"tell (?:me|us|them) about|what(?:['\u2019]s| is| are)) the assignments?\b"
     r"|\b(?:requirements|instructions|guidelines|criteria|rubric) (?:of|for)\b"
     r"[^?.!]{0,30}\bassignments?\b"
     r"|\bassignments (?:are|is) (?:there|in|for)\b",
     re.I)
+_ASSESSMENT_LOOSE_RE = re.compile(
+    r"\bhow (?:is|are|will|was|were|do|does)\b[^?.!]{0,40}\b"
+    r"(?:evaluated|assessed|weighted)\b"
+    r"|\bhow (?:does|do|is|will|would) (?:the )?evaluation\b"
+    r"|\b(?:evaluation|assessment) (?:scheme|breakdown|policy|criteria|rubric|system|"
+    r"structure|weights?)\b"
+    r"|\bhow much (?:is|are|does|do)\b[^?.!]{0,40}\b(?:worth|count|weigh)\b"
+    r"|\bwhat (?:percent(?:age)?|weight(?:ing)?)\b"
+    r"|\bworth\b[^?.!]{0,12}(?:%|\bpercent\b|\bmarks?\b|\bpoints?\b)"
+    r"|\bdeliverables\b"
+    r"|\b(?:what|which)(?: are| were)?(?: the)?(?: main| major| key| big)? requirements\b"
+    r"|\b(?:go over|explain|describe|outline|review|walk (?:me|us|them) through|"
+    r"tell (?:me|us|them) about|what(?:['\u2019]s| is| are)) the requirements\b",
+    re.I)
 _LATE_RE = re.compile(
-    r"\blate (?:policy|penalty|penalties|work|assignments?|submissions?|papers?|"
-    r"journals?|reports?|essays?)\b"
+    r"\blate (?:policy|penalty|penalties|assignments?|journals?|essays?)\b"
+    r"|\bextensions? policy\b",
+    re.I)
+_LATE_LOOSE_RE = re.compile(
+    r"\blate (?:work|submissions?|papers?|reports?)\b"
     r"|\b(?:submit|submitted|submitting|hand(?:ed|ing)? in|turn(?:ed|ing)? in|"
     r"accept(?:ed|s)?)\b[^?.!]{0,30}\blate\b"
     r"|\b(?:get|give|grant|ask for|asking for|request|allow)(?:s|ed|ing)? "
     r"(?:an |any |for )?extensions?\b"
-    r"|\bextensions? (?:policy|allowed|possible|available)\b",
+    r"|\bextensions? (?:allowed|possible|available)\b",
     re.I)
 _ATTENDANCE_RE = re.compile(
-    r"\battendance\b|\bparticipation\b"
-    r"|\b(?:mandatory|required|compulsory) to (?:attend|come)\b"
+    r"\battendance\b"
     r"|\b(?:is|are) (?:the )?(?:class|classes|lectures?|tutorials?) "
     r"(?:mandatory|required|compulsory)\b"
-    r"|\b(?:have|need) to (?:attend|come to|show up)\b"
     r"|\bmiss(?:es|ed|ing)? (?:a |the |one |two )?" + _CLASS_WORDS + r"\b",
     re.I)
+_ATTENDANCE_LOOSE_RE = re.compile(
+    r"\bparticipation\b"
+    r"|\b(?:mandatory|required|compulsory) to (?:attend|come)\b"
+    r"|\b(?:have|need) to (?:attend|come to|show up)\b",
+    re.I)
 
-# A named assignment: (topic, how a message names it, how the syllabus heads
-# or lists it). "journal" alone is Blue's own journal (J-space), so a message
-# must say which; "project" alone is any project.
+# A named assignment: (topic, how a message names it, the looser names that
+# need a course tie, how the syllabus heads or lists it). "journal" alone is
+# Blue's own journal (J-space), so a message must say which; "project" alone
+# is any project, and "final project", "research paper" or "bibliography"
+# are as often his or Alex's own work.
 ASSIGNMENTS = (
     ("the reading report",
      re.compile(r"\breading reports?\b", re.I),
+     None,
      re.compile(r"reading reports?\b", re.I)),
     ("the journal",
-     re.compile(r"\b(?:personal|reflection|reflective|weekly|course|reading)"
+     re.compile(r"(?<!\byour )\b(?:personal|reflection|reflective|weekly|course|reading)"
                 r" journals?\b|\bjournals? of reflections?\b"
                 r"|\bjournal (?:entries|entry|assignment)\b"
                 r"|\b(?:the|their|students['\u2019]?) journals?\b(?=[^?.!]{0,30}\b"
                 r"(?:due|worth|submit|words?|marks?|graded|requirements?)\b)", re.I),
+     None,
      re.compile(r"(?:personal )?journal\b", re.I)),
     ("the project",
-     re.compile(r"\b(?:final|group|course|class|team) projects?\b"
+     re.compile(r"\b(?:course|class) projects?\b"
                 r"|\bprojects? and presentations?\b"
-                r"|\b(?:final|group|class|student) presentations\b", re.I),
+                r"|\b(?:class|student) presentations\b", re.I),
+     re.compile(r"\b(?:final|group|team) projects?\b"
+                r"|\b(?:final|group) presentations\b", re.I),
      re.compile(r"(?:final |group |course )?project\b", re.I)),
     ("the annotated bibliography",
+     re.compile(r"\bannotated bibliograph(?:y|ies)\b", re.I),
      re.compile(r"\bbibliograph(?:y|ies)\b", re.I),
      re.compile(r"(?:annotated )?bibliograph", re.I)),
     ("the research paper",
-     re.compile(r"\bresearch (?:paper|essay)s?\b|\bterm papers?\b"
-                r"|\bfinal (?:paper|essay)s?\b", re.I),
+     re.compile(r"\bterm papers?\b", re.I),
+     re.compile(r"\bresearch (?:paper|essay)s?\b|\bfinal (?:paper|essay)s?\b", re.I),
      re.compile(r"research (?:paper|essay)|(?:final |term )?(?:paper|essay)\b", re.I)),
     ("the midterm",
-     re.compile(r"\bmid-?terms?\b", re.I),
+     re.compile(r"\bmid-?terms?\b(?!\s+elections?\b)", re.I),
+     None,
      re.compile(r"mid-?term", re.I)),
     ("the final exam",
      re.compile(r"\bfinal exam(?:s|ination)?\b", re.I),
+     None,
      re.compile(r"final exam", re.I)),
 )
 
 # "the assignment" names none: the one the turns before it named, else the
 # list of all of them.
 _THE_ASSIGNMENT_RE = re.compile(r"\b(?:the|this|that) (?:assignment|report)\b", re.I)
+
+# Asking what was said or decided: "what did you tell me last week about
+# the reading report for dh399?", "what did we decide about the final
+# project for dh201?". <earlier_answers> and the memory blocks answer that;
+# a block saying the syllabus overrides his earlier replies would answer a
+# different question. "do you remember what room dh201 is in?" asks for
+# the room, and is not one.
+_WHAT_WAS_SAID_RE = re.compile(
+    r"\bwhat (?:did|have|had) (?:you|u|we|i|you and i) (?:just |already |ever )?"
+    r"(?:say|said|tell|told|decide|agree|come up with|came up with|suggest|"
+    r"recommend|write|wrote|draft|propose|mention|talk|discuss|chat|settle)\w*"
+    r"|\bwhat (?:were|was) (?:your|those|these) (?:\w+ ){0,2}(?:ideas?|suggestions?|"
+    r"answers?|repl(?:y|ies)|advice|points?|notes?)\b"
+    r"|\bremember (?:what|how) (?:we|i|you|u) (?:just |already )?"
+    r"(?:talk|discuss|chat|said|say|told|tell|decid|mention|agreed|came up)\w*",
+    re.I)
 
 
 def course_codes(text: str) -> List[str]:
@@ -172,40 +249,83 @@ def course_codes(text: str) -> List[str]:
     return out
 
 
-def named_assignments(text: str) -> List[str]:
-    """The assignments a message names, in ASSIGNMENTS order."""
-    return [name for name, said, _h in ASSIGNMENTS if said.search(text or "")]
+# Words before a number that course_codes() reads as a code: "in 2026",
+# "by 2030", "at 1030", "room 107".
+_NOT_A_COURSE = frozenset((
+    "in", "at", "on", "by", "to", "of", "for", "from", "til", "till", "until",
+    "since", "after", "about", "circa", "ca", "than", "over", "under", "is",
+    "was", "are", "and", "or", "the", "year", "years", "page", "pages", "pp",
+    "room", "rm", "no", "jan", "feb", "mar", "apr", "may", "jun", "june", "jul",
+    "july", "aug", "sep", "sept", "oct", "nov", "dec"))
 
 
-def asked_topics(text: str) -> List[str]:
+def written_course_codes(text: str) -> List[str]:
+    """'cs240' for "CS240J", "cmds4740" or "dh 201": every course the
+    message names, whether or not its syllabus is in the library."""
+    return [code for code in course_codes(text)
+            if re.match(r"[a-z]+", code).group(0) not in _NOT_A_COURSE]
+
+
+def named_assignments(text: str, tied: bool = True) -> List[str]:
+    """The assignments a message names, in ASSIGNMENTS order. With `tied`
+    False (no course in sight) only the names that are a course's own:
+    "reading report", not "final project"."""
+    t = text or ""
+    return [name for name, said, loose, _h in ASSIGNMENTS
+            if said.search(t) or (tied and loose is not None and loose.search(t))]
+
+
+def asks_what_was_said(text: str) -> bool:
+    """"what did we decide about the final project?" asks for the earlier
+    talk, not the syllabus."""
+    return bool(_WHAT_WAS_SAID_RE.search(text or ""))
+
+
+def tied_to_a_course(text: str, after_course_question: bool = False) -> bool:
+    """A course code or a course word in the message, or, right after a
+    course question, a message that points back to it."""
+    t = text or ""
+    if written_course_codes(t) or _COURSE_WORD_RE.search(t):
+        return True
+    return after_course_question and (
+        len(re.findall(r"[\w'\u2019]+", t)) <= 3 or bool(_REFERS_BACK_RE.search(t)))
+
+
+def asked_topics(text: str, after_course_question: bool = False) -> List[str]:
     """The parts of a syllabus a message asks about.
 
-    `text` is the user's own words (attachments and pastes stripped). A
-    named assignment replaces the overview: "how much is the reading report
-    worth?" is about the reading report."""
+    `text` is the user's own words (attachments and pastes stripped);
+    `after_course_question` says the user turn just before it asked about a
+    course. A named assignment replaces the overview: "how much is the
+    reading report worth?" is about the reading report."""
     t = text or ""
     if not t.strip():
         return []
-    has_code = bool(COURSE_CODE_RE.search(t))
-    named = named_assignments(t)
+    has_code = bool(written_course_codes(t))
+    tied = tied_to_a_course(t, after_course_question)
+
+    def asks(strict, loose):
+        return bool(strict.search(t) or (tied and loose is not None and loose.search(t)))
+
+    named = named_assignments(t, tied)
     topics: List[str] = []
-    if _ROOM_RE.search(t) or (has_code and re.search(_WHERE_Q, t, re.I)):
+    if asks(_ROOM_RE, _ROOM_LOOSE_RE) or (has_code and re.search(_WHERE_Q, t, re.I)):
         topics.append("when_where")
-    elif not named and (_TIME_RE.search(t)
+    elif not named and (asks(_TIME_RE, _TIME_LOOSE_RE)
                         or (has_code and _CODE_WHEN_WHERE_RE.search(t))):
         # "when is the journal due?" asks about the journal, not when class
         # meets.
         topics.append("when_where")
     if _OFFICE_HOURS_RE.search(t):
         topics.append("office_hours")
-    if _CONTACT_RE.search(t):
+    if asks(_CONTACT_RE, _CONTACT_LOOSE_RE):
         topics.append("contact")
     topics.extend(named)
-    if _LATE_RE.search(t):
+    if asks(_LATE_RE, _LATE_LOOSE_RE):
         topics.append("late")
-    if _ATTENDANCE_RE.search(t):
+    if asks(_ATTENDANCE_RE, _ATTENDANCE_LOOSE_RE):
         topics.append("attendance")
-    if _ASSESSMENT_RE.search(t) and not named:
+    if asks(_ASSESSMENT_RE, _ASSESSMENT_LOOSE_RE) and not named:
         topics.append("assessment")
     return topics
 
@@ -366,7 +486,7 @@ def sections(text: str, topic: str) -> List[Tuple[str, str]]:
                               _clip(_listed_item(lines, n), 900)))
                 break
         return found
-    heads = next((h for name, _said, h in ASSIGNMENTS if name == topic), None)
+    heads = next((h for name, _said, _loose, h in ASSIGNMENTS if name == topic), None)
     if heads is None:
         return []
     label = topic[4:] if topic.startswith("the ") else topic
