@@ -189,3 +189,32 @@ def test_a_fact_about_clothes_that_is_not_a_look_is_saved_as_given(monkeypatch):
                                       "fact_value": "blue leotard and tights"})
 
     assert written == {"emmy_dance_outfit": "blue leotard and tights"}
+
+
+def test_a_look_with_no_clothes_in_it_is_saved(monkeypatch):
+    """Review of P2-1: "remember that Svetlana has a nose ring", filed as
+    svetlana_appearance, was refused as "clothes or the scene" because it
+    named no feature from a fixed list."""
+    written = {}
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: written.update(facts) or True)
+
+    result = json.loads(bt.execute_tool("remember_fact", {
+        "fact_key": "svetlana_appearance",
+        "fact_value": "nose ring and a shaved head"}))
+
+    assert written == {"svetlana_appearance": "nose ring and a shaved head"}
+    assert result["success"] is True
+
+
+def test_a_face_word_inside_a_key_is_no_look(monkeypatch):
+    written = {}
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: written.update(facts) or True)
+
+    result = json.loads(bt.execute_tool("remember_fact", {
+        "fact_key": "favorite_face_cream", "fact_value": "Nivea"}))
+
+    assert written == {"favorite_face_cream": "Nivea"}
+    assert result["success"] is True
+    assert "not a face" not in result["message"]

@@ -608,13 +608,19 @@ def _tool_remember_fact(tool_name, tool_args):
     # CS101; playful food-themed outfit — bread-bun hat and strawberry-
     # patterned skirt, sitting in office chair…" (harness, 10-05). In
     # <known_facts> that outfit names whoever wears it next. A look keeps
-    # its lasting features only; with none named, nothing is saved.
-    from blue_visual_memory import is_look_fact_key, look_fact_value
-    if is_look_fact_key(fact_key):
+    # what is not clothes or the scene; when that was all, nothing is saved.
+    look_key = False
+    try:
+        from blue_visual_memory import is_look_fact_key, look_fact_value
+        look_key = is_look_fact_key(fact_key)
+    except ImportError as e:
+        # The filter is never a reason to lose a fact.
+        bt.log.warning(f"[FACT] look filter unavailable: {e}")
+    if look_key:
         lasting = look_fact_value(fact_value)
         if not lasting:
-            print(f"   [FACT] not saving a look with no lasting feature: "
-                  f"{fact_key}={fact_value!r}")
+            print(f"   [FACT] not saving a look that was only clothes or "
+                  f"the scene: {fact_key}={fact_value!r}")
             return json.dumps({
                 "success": False,
                 "message": (
@@ -661,7 +667,7 @@ def _tool_remember_fact(tool_name, tool_args):
             "overrides older mentions in conversation history."
             + (" It is a text note, not a face: recognizing someone by face "
                "still needs a reference photo on your Visual Memory page."
-               if is_look_fact_key(fact_key) else "")
+               if look_key else "")
         ),
     })
 

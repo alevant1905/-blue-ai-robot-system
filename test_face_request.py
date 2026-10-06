@@ -10,7 +10,8 @@ is_face_request decides when the FACE REQUEST note goes in; run over the
 
 import pytest
 
-from blue.tool_selector.detectors.vision import is_face_request, is_own_face_request
+from blue.tool_selector.detectors.vision import (
+    is_face_request, is_own_face_request, is_plural_face_request)
 
 
 @pytest.mark.parametrize("text", [
@@ -32,6 +33,11 @@ from blue.tool_selector.detectors.vision import is_face_request, is_own_face_req
     "remember clover's face",
     "learn what he looks like",
     "I'll show you Felix so you can recognize him next time",
+    # Review of P2-1: a person named by a word for one.
+    "remember what the new TA looks like",
+    "remember what my daughter looks like",
+    "remember what the kids look like",
+    "so you know me next time",
 ])
 def test_asking_blue_to_learn_a_face(text):
     assert is_face_request(text)
@@ -55,6 +61,15 @@ def test_asking_blue_to_learn_a_face(text):
     "she's the TA, so that you know her schedule",
     "that's Clover, she's a TA for CS101",
     "Do you remember what you look like.",
+    # Review of P2-1: the speaker not remembering, a recall question with
+    # no "do", a picture saved to a folder, "so you know" without a face.
+    "I can't remember what he looks like",
+    "I cannot remember her face",
+    "you remember what she looks like right?",
+    "can you save a picture of her face to my desktop",
+    "these are the TAs' names, so you know them.",
+    "I'm telling you so you know me.",
+    "remember what this room looks like now that we painted",
 ])
 def test_not_a_request_to_learn_a_face(text):
     assert not is_face_request(text)
@@ -64,3 +79,21 @@ def test_a_request_about_the_speakers_own_face():
     assert is_own_face_request("remember my face so you can recognize me")
     assert is_own_face_request("remember what I look like")
     assert not is_own_face_request("remember what she looks like")
+
+
+@pytest.mark.parametrize("text, plural", [
+    # Four of the six real requests are about several people.
+    ("i want you to remember what they look like so you can recognize them "
+     "next time", True),
+    ("very good. understand that they move around. its best to remember what "
+     "they look like instead of where they are.", True),
+    ("good. its athena and vilda at the table. try to get a good look at them "
+     "so you can remember what they look like", True),
+    ("take a fresh look at the girls at the table so you can remember what "
+     "they look like", True),
+    ("She wears different things. Try to remember what she looks like", False),
+    ("I want you to remember what she looks like so next time you can "
+     "recognize her can you do that?", False),
+])
+def test_a_request_about_several_people(text, plural):
+    assert is_plural_face_request(text) is plural

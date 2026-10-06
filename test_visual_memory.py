@@ -171,18 +171,47 @@ def test_lasting_appearance_keeps_features_not_clothes(text, kept):
     assert lasting_appearance(text)[0] == kept
 
 
-def test_a_look_fact_must_name_a_feature():
+def test_a_look_fact_keeps_no_outfit():
     """10-05: "remember what she looks like" → remember_fact clover_appearance
     = "TA for CS101; playful food-themed outfit — bread-bun hat and
     strawberry-patterned skirt, sitting in office chair…"."""
     from blue_visual_memory import is_look_fact_key, look_fact_value
     assert is_look_fact_key("clover_appearance")
     assert is_look_fact_key("what_she_looks_like")
+    assert is_look_fact_key("emmy_face")
     assert not is_look_fact_key("emmy_dance_outfit")
     assert not is_look_fact_key("alex_facebook")
+    assert not is_look_fact_key("favorite_face_cream")
     assert look_fact_value(
         "TA for CS101; playful food-themed outfit — bread-bun hat and "
         "strawberry-patterned skirt, sitting in office chair by white brick "
         "wall and bookshelf") == ""
-    assert look_fact_value("TA for CS101") == ""
     assert look_fact_value("long brown hair with bangs") == "long brown hair with bangs"
+
+
+@pytest.mark.parametrize("value", [
+    # Review of P2-1: a look with no clothes in it was refused for naming
+    # no feature from a fixed list.
+    "nose ring and a shaved head",
+    "man with a shaved head and a nose ring",
+    "young girl (age 8)",
+    "has dimples and a big smile",
+    "uses a wheelchair",
+    "elderly man with a cane",
+    "TA for CS101",
+])
+def test_a_look_fact_with_no_clothes_is_kept_as_given(value):
+    from blue_visual_memory import look_fact_value
+    assert look_fact_value(value) == value
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("man with a shaved head and a nose ring, wearing a black jacket",
+     "man with a shaved head and a nose ring"),
+    ("young girl (age 8), wears varied clothing including a red hoodie",
+     "young girl (age 8)"),
+    ("elderly man with a cane, in a grey coat", "elderly man with a cane"),
+])
+def test_age_and_the_body_survive_the_clothes(text, kept):
+    from blue_visual_memory import lasting_appearance
+    assert lasting_appearance(text)[0] == kept

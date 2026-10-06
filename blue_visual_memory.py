@@ -72,15 +72,24 @@ _SCENE_RE = re.compile(
 _CLAUSE_BREAK_RE = re.compile(
     r"(\s*[;,/]\s*|\s+(?:and|with)\s+|\s+[—–-]\s+|\.\s+"
     r"|\s+(?=(?:wearing|dressed)\b))", re.I)
-# What a look is made of. A fact filed under a look key must name one:
-# "TA for CS101" is a role, whatever key it was saved under.
+# What a look is made of. Once the clothes are taken out of a description,
+# what is left must name one: "TA wearing a … costume" leaves "TA", a role.
+# Age and the body count too ("young girl (age 8)", "elderly man with a
+# cane", "a shaved head and a nose ring").
 _LOOK_FEATURE_RE = re.compile(
     r"\b(?:hair|haired|bald|balding|bangs|fringe|ponytail|braids?"
     r"|dreadlocks|curly|wavy|straight|blond|blonde|brunette|redhead|ginger"
-    r"|beard|bearded|mustache|moustache|stubble|goatee|glasses|spectacles"
-    r"|eyes?|eyebrows|freckles|tall|short|height|build|slim|stocky|petite"
-    r"|skin|complexion|tattoos?|scars?|braces)\b", re.I)
-_LOOK_KEY_WORDS = {"appearance", "look", "looks", "face", "faces"}
+    r"|beard|bearded|mustache|moustache|stubble|goatee|shaved|glasses"
+    r"|spectacles|eyes?|eyebrows|freckles|freckled|dimples?|moles?"
+    r"|birthmarks?|wrinkles|tall|short|height|build|slim|stocky|petite"
+    r"|skin|complexion|tattoos?|scars?|braces|piercings?|pierced|nose\s+ring"
+    r"|wheelchair|cane|young|elderly|age|aged|years\s+old|teen|teenager"
+    r"|toddler)\b", re.I)
+# Words that make a fact key a look ("clover_appearance", "what_she_looks_
+# like"); "face" only as the last word ("emmy_face", not
+# "favorite_face_cream").
+_LOOK_KEY_WORDS = {"appearance", "look", "looks"}
+_LOOK_KEY_LAST_WORDS = {"face", "faces"}
 
 
 def lasting_appearance(text: str):
@@ -120,15 +129,18 @@ def lasting_appearance(text: str):
 
 def is_look_fact_key(fact_key: str) -> bool:
     """'clover_appearance', 'what_she_looks_like', 'emmy_face'."""
-    words = set(re.split(r"[^a-z]+", str(fact_key or "").lower()))
-    return bool(words & _LOOK_KEY_WORDS)
+    words = [w for w in re.split(r"[^a-z]+", str(fact_key or "").lower()) if w]
+    return bool(set(words) & _LOOK_KEY_WORDS
+                or (words and words[-1] in _LOOK_KEY_LAST_WORDS))
 
 
 def look_fact_value(value: str) -> str:
-    """What may be kept of a fact filed under a look key: its lasting
-    features, or nothing when no feature is named at all."""
-    kept, _dropped = lasting_appearance(value)
-    return kept if _LOOK_FEATURE_RE.search(kept) else ""
+    """What may be kept of a fact filed under a look key: the value without
+    its clothes and scene, or nothing when that was all it held. A value
+    with no clothes in it is kept as given ("nose ring and a shaved head",
+    "uses a wheelchair"): the 10-05 outfit is refused by what it wears, not
+    by a list of features the rest has to match."""
+    return lasting_appearance(value)[0]
 
 
 class VisualMemory:

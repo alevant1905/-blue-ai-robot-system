@@ -163,14 +163,16 @@ def test_no_face_is_said_to_be_saved_without_a_reference_photo():
 
 @pytest.fixture
 def people(tmp_path, monkeypatch):
-    """Clover with no photo, Felix with one, and Blue's own row (the people
-    table really has one)."""
+    """Clover and the girls with no photo, Felix with one, and Blue's own
+    row (the people table really has one)."""
     from blue_visual_memory import VisualMemory
     vm = VisualMemory(str(tmp_path / "visual.db"))
     vm.add_person("Clover", relationship="TA for CS101",
                   typical_appearance="bread-bun hat and strawberry-patterned skirt")
     vm.add_person("Blue", relationship="educational AI robot")
     vm.add_person("Felix", relationship="Alex's brother")
+    for girl in ("Athena", "Emmy", "Vilda"):
+        vm.add_person(girl, relationship="Alex's daughter")
     photo = tmp_path / "felix.jpg"
     photo.write_bytes(b"reference")
     vm.set_entity_image("person", vm.get_person("Felix")["id"], str(photo))
@@ -245,6 +247,72 @@ def test_a_request_about_the_speakers_face_names_the_speaker(people):
     text = _thread_system_text(["remember my face so you can recognize me"],
                                user="Stella")
     assert "Stella has no reference photo yet" in text
+    # Said to someone else, the path is Alex's.
+    assert "Alex can save it" in text
+
+
+def _face_note(text):
+    note = text[text.index("FACE REQUEST:"):]
+    return note[:note.index("\n")]
+
+
+def test_a_request_about_several_people_names_them_all(people):
+    """Real request 2794 (05-24): the note named only Vilda, and Athena
+    was never mentioned."""
+    note = _face_note(_thread_system_text([
+        "who is sitting at the table now", "take a fresh look",
+        "good. its athena and vilda at the table. try to get a good look at "
+        "them so you can remember what they look like"]))
+    assert "Athena and Vilda have no reference photo yet" in note
+    assert "each one's card" in note
+    assert "Don't describe their clothes" in note
+
+
+def test_several_people_named_a_turn_before_the_request(people):
+    """Real request 2742 (05-24): Emmy is named by her face."""
+    note = _face_note(_thread_system_text([
+        "that's actually athena lying down on the left. emmy's face is "
+        "peaking out on the right. vilda is there too but you cant see her",
+        "i want you to remember what they look like so you can recognize "
+        "them next time"]))
+    assert "Athena, Emmy and Vilda have no reference photo yet" in note
+
+
+def test_several_people_with_one_enrolled(people):
+    note = _face_note(_thread_system_text(
+        ["Felix and Clover are here", "remember what they look like"]))
+    assert "Felix is already enrolled. Clover has no reference photo yet" in note
+
+
+def test_several_people_none_named(people):
+    note = _face_note(_thread_system_text(["remember what they look like"]))
+    assert "They have no reference photo yet, so you can't recognize them" in note
+
+
+def test_a_name_that_is_someone_elses_is_not_the_person(people):
+    """Felix is enrolled: "Felix's wife" got "Felix is already enrolled;
+    you recognize Felix when you look", and no word that nothing saves a
+    face."""
+    note = _face_note(_thread_system_text(
+        ["Felix's wife is here, remember what she looks like"]))
+    assert "Felix is already enrolled" not in note
+    assert "This person has no reference photo yet" in note
+    assert "Nothing you say here saves a face" in note
+
+
+def test_a_name_with_s_for_is_is_still_the_person(people):
+    note = _face_note(_thread_system_text(
+        ["Clover's here today", "remember what she looks like"]))
+    assert "Clover has no reference photo yet" in note
+
+
+def test_alex_is_told_the_path_as_you(people):
+    """camera_face[2] replay: "Alex needs to open my Visual Memory page",
+    said to Alex, from the note's "Alex can open your Visual Memory page"."""
+    note = _face_note(_thread_system_text(CLOVER_THREAD, user="Alex"))
+    assert "Alex can" not in note
+    assert "so say 'you'" in note
+    assert "on the Visual Memory page, open Clover's card" in note
 
 
 def test_the_face_rule_gives_the_real_path_and_forbids_naming_by_clothes(monkeypatch):

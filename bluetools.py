@@ -12567,7 +12567,8 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     # error (claiming to recognize a face that was never enrolled): the actual
     # "who you see" ground truth is injected at camera-capture time.
     # The path is the real one: a person's card on the Visual Memory page, and
-    # its "Use Blue's camera" or "Upload photo" button. Asked to "remember what
+    # its "Use Blue's camera" or "Upload photo" button — which a new card shows
+    # only once it has been saved (pages/visual.py). Asked to "remember what
     # she looks like", Blue said he had "her look on file: bread-bun hat,
     # strawberry skirt" (10-05) — nothing said in chat saves a face. No tool
     # is named: naming one gave 5/5 false "I have saved her face".
@@ -12577,8 +12578,9 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
             "FACE RECOGNITION: You CAN recognize people by face through your "
             "camera, but only people whose face has been saved as a reference "
             "photo on your Visual Memory page — Alex can open that person's "
-            "card there and press 'Use Blue's camera' while they are in front "
-            "of your camera, or upload a photo. Nothing you say in "
+            "card there (+ New, then Save, for someone new) and press 'Use "
+            "Blue's camera' while they are in front of your camera, or upload "
+            "a photo. Nothing you say in "
             "conversation saves a face or a description: unless a tool result "
             "this turn says something was saved, say it is NOT saved yet and "
             "how Alex can add the photo. When you take a camera picture you "
@@ -13123,16 +13125,43 @@ def _user_message_text(message) -> str:
     return _intent_text(content) if isinstance(content, str) else ""
 
 
-def _named_visual_person(vm, texts, skip) -> str:
-    """The person from visual memory named last in the newest of `texts`
-    that names one ("that's clover, she's a TA" → "Clover"). Names in
-    `skip` (the speaker, the robots) and course rows ("DH399 course") never
-    count."""
+# "Felix's wife is here, remember what she looks like" is not about Felix,
+# nor "this is chris, stella's dad" about Stella. "emmy's face is peeking
+# out" is about Emmy, and "Vilda's here" is "Vilda is here".
+_SOMEONE_ELSES_RE = re.compile(
+    r"['’]s\s+(?:(?:new|old|best|little|older|younger|big|baby|other|eldest"
+    r"|oldest|youngest|ex)\s+)?(?:wife|husband|partner|girlfriend|boyfriend"
+    r"|fianc[eé]e?|spouse|dad|father|mom|mum|mother|parents?|brother|sister"
+    r"|sons?|daughters?|kids?|child|children|baby|friends?|colleagues?"
+    r"|coworkers?|boss|teacher|students?|ta|tas|nanny|babysitter|aunt|uncle"
+    r"|cousins?|niece|nephew|grandma|grandpa|grandmother|grandfather|family"
+    r"|neighbou?rs?|roommate|classmates?|assistant|in-laws?|sister-in-law"
+    r"|brother-in-law|guests?)\b", re.I)
+
+
+def _join_names(names) -> str:
+    """"Athena", "Athena and Vilda", "Athena, Emmy and Vilda"."""
+    names = list(names)
+    if len(names) < 2:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _named_visual_people(vm, texts, skip, *, plural=False) -> list:
+    """The people from visual memory named in the newest of `texts` that
+    names any. For one person, the one named last ("that's clover, she's a
+    TA" → ["Clover"]); for several, all of them in the order named ("its
+    athena and vilda at the table … remember what they look like" →
+    ["Athena", "Vilda"]: the note had named only Vilda). Names in `skip`
+    (the speaker, the robots), course rows ("DH399 course") and a name that
+    is someone else's ("Felix's wife") never count."""
     skip = {str(s).casefold() for s in skip if s}
     people = [p["name"] for p in (vm.get_recognition_people() or [])
               if p.get("name")]
     for text in reversed(texts):
-        best = None
+        # Where each name starts → (length matched, row name): "Felix
+        # Levant" and "Felix" at one place are one person.
+        at = {}
         for name in people:
             first = name.split()[0]
             if (name.casefold() in skip or first.casefold() in skip
@@ -13140,11 +13169,23 @@ def _named_visual_person(vm, texts, skip) -> str:
                 continue
             for cand in {name} | ({first} if len(first) >= 3 else set()):
                 for m in re.finditer(r"\b" + re.escape(cand) + r"\b", text, re.I):
-                    if best is None or m.start() > best[0]:
-                        best = (m.start(), name)
-        if best:
-            return best[1]
-    return ""
+                    if _SOMEONE_ELSES_RE.match(text, m.end()):
+                        continue
+                    if len(cand) > at.get(m.start(), (0, ""))[0]:
+                        at[m.start()] = (len(cand), name)
+        if not at:
+            continue
+        named = [at[pos][1] for pos in sorted(at)]
+        if not plural:
+            return [named[-1]]
+        found, seen = [], set()
+        for name in named:
+            key = re.sub(r"\s*\([^)]*\)\s*$", "", name).casefold()
+            if key not in seen:
+                seen.add(key)
+                found.append(name)
+        return found
+    return []
 
 
 def _face_request_note(conversation_messages, user_name) -> str:
@@ -13158,9 +13199,15 @@ def _face_request_note(conversation_messages, user_name) -> str:
     this puts it beside the turn, with the person's name and whether they
     have a reference photo. Not on the kids' page, and not without the face
     engine, when no photo would make Blue know anyone by face.
+
+    Four of the six real requests were about several people ("its athena
+    and vilda at the table … remember what they look like"): every one
+    named is in the note. Said to Alex, the path is his to take as "you":
+    "Alex can open your Visual Memory page" came back to him as "Alex needs
+    to open my Visual Memory page" (1 of 4 replays).
     """
     from blue.tool_selector.detectors.vision import (
-        is_face_request, is_own_face_request)
+        is_face_request, is_own_face_request, is_plural_face_request)
     speaker = (user_name or "Alex").strip() or "Alex"
     if speaker in _CHAT_ONLY_USERS or not FACE_RECOGNITION_AVAILABLE:
         return ""
@@ -13168,39 +13215,72 @@ def _face_request_note(conversation_messages, user_name) -> str:
              if m.get("role") == "user"]
     if not users or not is_face_request(users[-1]):
         return ""
+    request = users[-1]
+    plural = is_plural_face_request(request)
     vm = None
     if VISUAL_MEMORY_AVAILABLE:
         try:
             vm = get_visual_memory()
         except Exception as e:
             log.warning(f"[FACE] visual memory unavailable for the note: {e}")
-    name = ""
-    if is_own_face_request(users[-1]):
-        name = speaker
+    names = []
+    if is_own_face_request(request):
+        names = [speaker]
     elif vm is not None:
         robots = ({cfg["name"] for cfg in ROBOTS.values()} | set(ROBOTS))
-        name = _named_visual_person(vm, users[-4:], {speaker} | robots)
-    enrolled = False
-    if name and vm is not None:
+        names = _named_visual_people(vm, users[-4:], {speaker} | robots,
+                                     plural=plural)
+    enrolled, missing = [], []
+    for raw in names:
         try:
-            enrolled = vm.has_face_reference(name)
+            has_photo = vm is not None and vm.has_face_reference(raw)
         except Exception:
-            enrolled = False
-    # "Alex (Doctor Levant)" is the live row's name.
-    name = re.sub(r"\s*\([^)]*\)\s*$", "", name)
+            has_photo = False
+        # "Alex (Doctor Levant)" is the live row's name.
+        (enrolled if has_photo else missing).append(
+            re.sub(r"\s*\([^)]*\)\s*$", "", raw))
+    if enrolled and not missing:
+        who = _join_names(enrolled)
+        if len(enrolled) == 1:
+            return (f"\nFACE REQUEST: {who} is already enrolled; you "
+                    f"recognize {who} when you look.\n")
+        return (f"\nFACE REQUEST: {who} are already enrolled; you recognize "
+                "them when you look.\n")
+    known = ""
     if enrolled:
-        return (f"\nFACE REQUEST: {name} is already enrolled; you recognize "
-                f"{name} when you look.\n")
-    who = name or "this person"
-    whose = f"{name}'s" if name else "their"
+        known = (f"{_join_names(enrolled)} "
+                 f"{'is' if len(enrolled) == 1 else 'are'} already enrolled. ")
+    # `first` names them once; `who` and `them` refer back.
+    if len(missing) == 1:
+        first = who = them = missing[0]
+        card = f"{who}'s card (+ New, then Save, if there isn't one yet)"
+        whose = f"{who}'s"
+    elif missing or plural:
+        first = _join_names(missing) or "They"
+        who, them = "they", "them"
+        card = "each one's card (+ New, then Save, for anyone without one)"
+        whose = "their"
+    else:
+        first = "This person"
+        who = them = "this person"
+        card = "their card (+ New, then Save, if there isn't one yet)"
+        whose = "their"
+    many = who == "they"
+    if speaker.casefold() == "alex":
+        tell = ("Say plainly that it isn't saved, and tell Alex how to save "
+                "it — he is the one you are talking to, so say 'you': ")
+    else:
+        tell = "Say plainly that it isn't saved, and that Alex can save it: "
     return (
         "\nFACE REQUEST: Nothing you say here saves a face — there is no "
-        f"face-saving step in this conversation. {who[0].upper() + who[1:]} "
-        f"has no reference photo yet, so you can't recognize {who} by face. "
-        "Say plainly that it isn't saved, and that Alex can open your Visual "
-        f"Memory page, open {whose} card (+ New if there isn't one) and press "
-        f"'Use Blue's camera' while {who} is in front of your camera; after "
-        f"that you'll know {who} by face. Don't describe {whose} clothes.\n"
+        "face-saving step in this conversation. " + known
+        + f"{first} {'have' if many else 'has'} no reference photo yet, so "
+        f"you can't recognize {them} by face. "
+        + tell
+        + f"on the Visual Memory page, open {card} and press 'Use Blue's "
+        f"camera' while {who} {'are' if many else 'is'} in front of the "
+        f"camera; after that you'll know {them} by face. Don't describe "
+        f"{whose} clothes.\n"
     )
 
 

@@ -41,28 +41,57 @@ _NOT_A_NAME_RE = re.compile(
 # next time you can recognize her can you do that?" (09-23), five on 05-24.
 # A save verb, not keep/record ("keep his face out of the photos", "record
 # her face for the video"); a person, not "this room" or "that painting".
+# "what the new TA looks like" names a person by a word for one.
+_FACE_PERSON_NOUN = (
+    r"(?:tas?|teachers?|students?|daughters?|sons?|kids?|child|children"
+    r"|girls?|boys?|baby|twins|wife|husband|partner|brothers?|sisters?|mom"
+    r"|mum|mother|dad|father|grandma|grandpa|grandmother|grandfather|aunt"
+    r"|uncle|cousins?|niece|nephew|friends?|neighbou?rs?|guests?|visitors?"
+    r"|colleagues?|coworkers?|boss|nanny|babysitter|family|man|woman|lady"
+    r"|guy|person)")
 _FACE_REQUEST_RE = re.compile(
     r"\b(?:remember|memori[sz]e|learn|save)\b[^.!?]{0,25}?"
     r"(?:\bwhat\s+(?:she|he|they|i|(?!(?:it|this|that|these|those|you|we|the"
     r"|a|an|my|your|our|his|her|their|everything|everyone|everybody|anyone"
-    r"|anybody|someone|somebody|people)\b)[a-z][a-z'\-]+)\s+looks?\s+like\b"
+    r"|anybody|someone|somebody|people)\b)[a-z][a-z'\-]+"
+    r"|(?:the|my|our|your|his|her|their|this|that|these|those)\s+"
+    r"(?:[a-z\-]+\s+)?" + _FACE_PERSON_NOUN + r")\s+looks?\s+like\b"
     r"|\b(?:her|his|their|my"
     r"|(?!(?:it|that|what|there|here|who|she|he|let)['’]s)[a-z][a-z\-]+['’]s)"
     r"\s+face\b)"
+    # "so you can recognize him next time"; "know" only with "next time" or
+    # "by face": "these are the TAs' names, so you know them." is no face.
     r"|\bso\s+(?:that\s+)?(?:next\s+time\s+)?you(?:\s+(?:can|will|could)|['’]ll)?\s+"
-    r"(?:recogni[sz]e|know|identify)\s+(?:her|him|them|me)\b"
-    r"\s*(?:next\s+time|in\s+the\s+future|by\s+face|[.!?]|$)", re.I)
-# Not a request: a negation near the face, a recall question ("do you
-# remember what she looks like?"), a capability question.
+    r"(?:(?:recogni[sz]e|identify)\s+(?:her|him|them|me)\b"
+    r"\s*(?:next\s+time|in\s+the\s+future|by\s+face|[.!?]|$)"
+    r"|know\s+(?:her|him|them|me)\s+(?:next\s+time|in\s+the\s+future"
+    r"|by\s+face|when\s+you\s+see))", re.I)
+# Not a request: a negation near the face, the speaker not remembering ("I
+# can't remember what he looks like"), a recall question ("do you remember
+# what she looks like?", "you remember what she looks like right?"), a
+# capability question, a picture saved to a folder.
 _FACE_NOT_NOW_RE = re.compile(
     r"\b(?:don['’]?t|do\s+not|never|stop|forget|delete)\b[^.!?]{0,30}"
     r"\b(?:face|looks?|recogni[sz]e)"
+    r"|\b(?:i|we)\s+(?:can['’]?t|cannot|can\s+not|couldn['’]?t|could\s+not)\s+"
+    r"(?:remember|recall)\b"
     r"|\b(?:do|did|does)\s+(?:you|u)\s+(?:still\s+)?(?:remember|recall|know)\b"
-    r"|\bcan\s+you\s+recogni[sz]e\s+(?:faces|people)\b", re.I)
+    r"|(?:^|[.!?]\s+)(?:(?:and|so|but)\s+)?(?:you|u)\s+(?:still\s+)?"
+    r"(?:remember|recall)\b[^.!?]*\?"
+    r"|\bcan\s+you\s+recogni[sz]e\s+(?:faces|people)\b"
+    r"|\bsave\b[^.!?]{0,40}?\bto\s+(?:my|the|your|a)\s+(?:desktop|folder"
+    r"|drive|computer|laptop|downloads|documents|disk|files?|gallery|phone)\b",
+    re.I)
 # The speaker's own face: "remember my face", "so you know me next time".
 _OWN_FACE_RE = re.compile(
     r"\bmy\s+face\b|\bwhat\s+i\s+look\s+like\b"
     r"|\b(?:recogni[sz]e|know|identify)\s+me\b", re.I)
+# More than one person: four of the six real requests ("remember what they
+# look like", "take a fresh look at the girls at the table").
+_PLURAL_FACE_RE = re.compile(
+    r"\b(?:they|them|their|both|everyone|everybody|all\s+of\s+(?:you|them)"
+    r"|girls|boys|kids|children|twins|tas|students|daughters|sons|friends"
+    r"|guests|visitors|family)\b", re.I)
 
 
 def is_face_request(text: str) -> bool:
@@ -74,6 +103,12 @@ def is_face_request(text: str) -> bool:
 def is_own_face_request(text: str) -> bool:
     """A face request about the speaker ("remember my face")."""
     return is_face_request(text) and bool(_OWN_FACE_RE.search(text or ""))
+
+
+def is_plural_face_request(text: str) -> bool:
+    """A face request about more than one person ("remember what they
+    look like")."""
+    return is_face_request(text) and bool(_PLURAL_FACE_RE.search(text or ""))
 
 
 def extract_camera_view_args(msg_lower: str) -> dict:
