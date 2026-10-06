@@ -60,7 +60,7 @@ All reachable from the home hub at `http://localhost:5000/`:
 
 | Page | What it's for |
 |------|----------------|
-| `/chat` · `/hexia` · `/casper` | Chat with Blue / Hexia / Casper (text + voice, image & file sharing) |
+| `/chat` · `/hexia` · `/casper` | Chat with Blue / Hexia / Casper (text + voice, image & file sharing). Every conversation is kept as a transcript and listed down the left side — reopen one to read it or carry on (on a phone, tap **Conversations**) |
 | `/panel` | Human-led conversation with all three — name routing, acknowledgements, shared hearing, roles, slang, websites/PDFs, and per-robot library sources |
 | `/duet` | Blue & Hexia converse — topic, link (article/YouTube), roles, tone, slang, per‑robot sources |
 | `/banter` | Blue, Hexia & Casper riff together on a topic in Comedic Banter mode |
@@ -278,6 +278,7 @@ Blue uses SQLite for persistent storage:
 | `notes.db` | Notes and tasks |
 | `timers.db` | Timers and reminders |
 | `recognition.db` | Face/place recognition data |
+| `data/chat_transcripts.db` | Chat-page conversation transcripts (the chat sidebar) |
 
 ## 🛠️ Configuration
 
@@ -302,6 +303,7 @@ export UNPAYWALL_EMAIL="your.email@gmail.com"                 # polite-pool cont
 # Database Locations (optional)
 export BLUE_CALENDAR_DB="path/to/calendar.db"
 export BLUE_CONTACTS_DB="path/to/contacts.db"
+export BLUE_TRANSCRIPTS_DB="path/to/chat_transcripts.db"
 # ... etc
 ```
 

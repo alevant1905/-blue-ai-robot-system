@@ -17240,6 +17240,10 @@ def chat_completions():
         except Exception as _eye_e:
             log.warning(f"[EYES] mood colour failed: {_eye_e}")
 
+        # The chat page's sidebar keeps every conversation; this turn joins
+        # the one the page tagged it with (blue/server/routes/transcripts.py).
+        _transcript_routes.record_turn(response, robot, user_name)
+
         return jsonify(response)
     except Exception as e:
         if _continuity_turn_started:
@@ -17268,6 +17272,9 @@ _continuity_routes.register(app)
 
 from blue.server.routes import system as _system_routes
 _system_routes.register(app)
+
+from blue.server.routes import transcripts as _transcript_routes
+_transcript_routes.register(app)
 
 
 

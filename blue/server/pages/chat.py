@@ -281,9 +281,67 @@ CHAT_HTML = """
         .cam-zoom span { font-family: 'IBM Plex Mono', monospace; min-width: 48px; text-align: center; color: var(--ink); }
         .cam-zoom button { font-size: 1.4em; }
         .cam-sub { padding: 4px 14px 12px; color: var(--slate); font-size: 0.8em; text-align: center; }
+
+        /* ---- Conversations: every chat kept, listed down the left ---- */
+        body.has-history { padding-left: 292px; }
+        .history { position: fixed; top: 0; bottom: 0; left: 0; width: 272px; z-index: 40;
+                   display: flex; flex-direction: column; background: var(--paper);
+                   border-right: 1px solid var(--line); }
+        /* Left padding clears the site menu button blue.js pins to this corner. */
+        .hist-head { display: flex; align-items: center; justify-content: space-between;
+                     min-height: 72px; padding: 14px 14px 10px 72px; }
+        .hist-title { font-family: 'Playfair Display', Georgia, serif; font-weight: 600; font-size: 1.2em; color: var(--ink); }
+        .hist-close { display: none; background: none; border: none; font-size: 1.6em; line-height: 1; color: var(--slate); cursor: pointer; padding: 0 4px; }
+        .hist-new { margin: 0 14px 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--sage);
+                    background: var(--paper); color: var(--forest); font-family: inherit; font-size: 0.92em;
+                    font-weight: 500; text-align: left; cursor: pointer; transition: background 0.2s, border-color 0.2s; }
+        .hist-new:hover { background: var(--mg-glass, var(--cream)); border-color: var(--forest); }
+        .hist-list { flex: 1 1 auto; overflow-y: auto; padding: 0 8px 18px; }
+        .hist-group { font-family: 'IBM Plex Mono', monospace; font-size: 0.68em; text-transform: uppercase;
+                      letter-spacing: 0.12em; color: var(--slate); padding: 14px 10px 4px; }
+        .hist-item { display: flex; align-items: stretch; border-radius: 8px; margin: 1px 0; }
+        .hist-item:hover { background: var(--mg-glass, var(--cream)); }
+        .hist-item.active { background: var(--mg-glass2, #eef4ee); }
+        .hist-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 8px 4px 8px 10px;
+                     background: none; border: none; text-align: left; cursor: pointer; font-family: inherit; color: var(--ink); }
+        .hist-open .ht { font-size: 0.9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .hist-item.active .ht { font-weight: 500; }
+        .hist-open .hm { font-family: 'IBM Plex Mono', monospace; font-size: 0.68em; color: var(--slate); }
+        .hist-del { flex: none; width: 30px; background: none; border: none; color: var(--slate); font-size: 1.15em;
+                    cursor: pointer; opacity: 0; border-radius: 6px; }
+        .hist-item:hover .hist-del, .hist-item.active .hist-del, .hist-del:focus { opacity: 1; }
+        .hist-del:hover { color: var(--ink); }
+        .hist-empty { color: var(--slate); font-size: 0.85em; padding: 10px; }
+        .hist-scrim { display: none; position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 85; background: rgba(26,46,26,0.35); }
+        .navlinks a.hist-toggle { display: none; }
+        @media (hover: none) { .hist-del { opacity: 0.6; } }
+        /* Narrow screens: the list becomes a drawer behind "Conversations". */
+        @media (max-width: 860px) {
+            body.has-history { padding-left: 20px; }
+            .history { z-index: 90; width: min(300px, 86vw); background: var(--cream);
+                       transform: translateX(-100%); transition: transform 0.2s ease; }
+            body.hist-drawer-out .history { transform: none; box-shadow: 0 0 40px rgba(26,46,26,0.25); }
+            body.hist-drawer-out .hist-scrim { display: block; }
+            .hist-close { display: block; }
+            .navlinks a.hist-toggle { display: inline; }
+        }
+        @media (max-width: 640px) {
+            body.has-history { padding-left: 0; }
+        }
     </style>
 </head>
-<body{% if kid %} class="kid"{% endif %}>
+<body class="{{ 'kid' if kid else 'has-history' }}">
+    {% if not kid %}
+    <aside class="history" id="history" aria-label="Conversations">
+        <div class="hist-head">
+            <h2 class="hist-title">Conversations</h2>
+            <button class="hist-close" id="histClose" aria-label="Close conversations">&times;</button>
+        </div>
+        <button class="hist-new" id="histNew">+ New chat</button>
+        <div class="hist-list" id="histList"><div class="hist-empty">Loading&hellip;</div></div>
+    </aside>
+    <div class="hist-scrim" id="histScrim"></div>
+    {% endif %}
     <div class="container">
         <div class="header">
             {% if kid %}
@@ -292,7 +350,7 @@ CHAT_HTML = """
             {% else %}
             <h1>Chat with {{ robot_name }}</h1>
             <p>Type to talk with {{ robot_name }}, and attach images or documents to share.</p>
-            <div class="navlinks"><a href="/">&larr; Home</a>{% if continuity_href %}<a href="{{ continuity_href }}">Continuity</a>{% endif %}<a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
+            <div class="navlinks"><a href="#" class="hist-toggle" id="histOpen">Conversations</a><a href="/">&larr; Home</a>{% if continuity_href %}<a href="{{ continuity_href }}">Continuity</a>{% endif %}<a href="/duet">Duet</a><a href="/calendar">Calendar</a><a href="/contacts">Contacts</a><a href="/visual">Visual Memory</a><a href="/documents">Documents</a></div>
             {% endif %}
         </div>
         {% if kid %}
@@ -586,6 +644,13 @@ CHAT_HTML = """
 
             addBubble('user', text || '(see attachment)', atts.filter(a => a.kind !== 'error'));
             apiMessages.push({ role: 'user', content: sentContent });
+            // The server keeps this turn in the conversation's transcript.
+            let transcriptTag;
+            if (historyOn) {
+                if (!convId) convId = newConvId();
+                transcriptTag = { id: convId, text: text,
+                                  attachments: atts.filter(a => a.kind !== 'error').map(a => a.name) };
+            }
 
             inputEl.value = '';
             autoGrow();
@@ -616,7 +681,7 @@ CHAT_HTML = """
                     body: JSON.stringify({ messages: apiMessages, voice: isVoiceTurn, robot: ROBOT.id,
                                            language: (LANG_MODE !== 'auto' ? LANG_MODE : ''),
                                            research: researchOn, wiki: wikiOn, focus: FOCUS,
-                                           stream_id: streamId })
+                                           stream_id: streamId, transcript: transcriptTag })
                 });
                 const data = await res.json();
                 if (preview) { preview.stop(); preview = null; }
@@ -651,6 +716,7 @@ CHAT_HTML = """
                 speak(reply);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 apiMessages.push({ role: 'assistant', content: reply });
+                if (transcriptTag) { showConversationInUrl(convId); loadHistory(); }
             } catch (e) {
                 thinking.querySelector('.bubble').textContent = '[System: could not reach the server. Is it running?]';
                 thinking.querySelector('.bubble').classList.add('sys-error');
@@ -2479,6 +2545,208 @@ CHAT_HTML = """
             });
             window.addEventListener('pagehide', function () { eyeStop(); });
           })();
+        }
+
+        // ===== Conversations: every chat is kept, listed down the left =====
+        // The server keeps each turn under the conversation id sent with it
+        // (blue/server/routes/transcripts.py). Opening a past conversation
+        // shows it and restores its thread, so the next message continues it.
+        // The kids' iPad has no list and nothing of hers is kept.
+        const historyEl = document.getElementById('history');
+        const histListEl = document.getElementById('histList');
+        let historyOn = !!historyEl;
+        let convId = '';        // '' until a new conversation's first message
+        let histItems = [];
+
+        function newConvId() {
+            // randomUUID needs a secure context; the LAN address is plain http.
+            try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+            return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+        }
+
+        // Same device header as the chat POST, so both resolve to the same speaker.
+        function transcriptFetch(path, opts) {
+            opts = opts || {};
+            opts.headers = { 'X-Blue-Device': blueDeviceTag() };
+            return fetch(path + '?robot=' + encodeURIComponent(ROBOT.id), opts);
+        }
+
+        function showConversationInUrl(id) {
+            try { history.replaceState(null, '', id ? ('#' + id) : (location.pathname + location.search)); } catch (e) {}
+        }
+
+        function histDaysAgo(d, now) {
+            const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            return Math.round((today - day) / 86400000);
+        }
+        function histGroupOf(d, now) {
+            const days = histDaysAgo(d, now);
+            if (days <= 0) return 'Today';
+            if (days === 1) return 'Yesterday';
+            if (days < 7) return 'Previous 7 days';
+            return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+        }
+        function histWhen(d, now) {
+            const days = histDaysAgo(d, now);
+            if (days <= 1) return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+            if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        }
+
+        function renderHistory() {
+            if (!histListEl) return;
+            histListEl.textContent = '';
+            if (!histItems.length) {
+                histListEl.innerHTML = '<div class="hist-empty">No conversations yet. Each chat with ' + esc(ROBOT.name) + ' will be kept here.</div>';
+                return;
+            }
+            const now = new Date();
+            let group = '';
+            histItems.forEach(function (t) {
+                const when = new Date(t.updated_at);
+                const g = histGroupOf(when, now);
+                if (g !== group) {
+                    group = g;
+                    const label = document.createElement('div');
+                    label.className = 'hist-group';
+                    label.textContent = g;
+                    histListEl.appendChild(label);
+                }
+                const active = t.id === convId;
+                const item = document.createElement('div');
+                item.className = 'hist-item' + (active ? ' active' : '');
+                item.dataset.id = t.id;
+                const open = document.createElement('button');
+                open.className = 'hist-open';
+                open.title = t.title;
+                if (active) open.setAttribute('aria-current', 'true');
+                const title = document.createElement('span');
+                title.className = 'ht';
+                title.textContent = t.title;
+                const meta = document.createElement('span');
+                meta.className = 'hm';
+                meta.textContent = histWhen(when, now);
+                open.appendChild(title);
+                open.appendChild(meta);
+                const del = document.createElement('button');
+                del.className = 'hist-del';
+                del.title = 'Delete this conversation';
+                del.setAttribute('aria-label', 'Delete conversation');
+                del.textContent = '\\u00d7';
+                item.appendChild(open);
+                item.appendChild(del);
+                histListEl.appendChild(item);
+            });
+        }
+
+        async function loadHistory() {
+            if (!historyOn) return;
+            try {
+                const res = await transcriptFetch('/chat/transcripts');
+                // A device the chat-only fence covers cannot list transcripts.
+                if (res.status === 403) { hideHistory(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                histItems = (data && data.transcripts) || [];
+                renderHistory();
+            } catch (e) {
+                if (!histItems.length && histListEl) {
+                    histListEl.innerHTML = '<div class="hist-empty">Could not load conversations.</div>';
+                }
+            }
+        }
+
+        function hideHistory() {
+            historyOn = false;
+            document.body.classList.remove('has-history', 'hist-drawer-out');
+            if (historyEl) historyEl.style.display = 'none';
+            const toggle = document.getElementById('histOpen');
+            if (toggle) toggle.style.display = 'none';
+        }
+
+        function closeHistoryDrawer() { document.body.classList.remove('hist-drawer-out'); }
+
+        function clearThread() {
+            messagesEl.querySelectorAll('.row').forEach(function (row) { row.remove(); });
+            if (emptyEl) emptyEl.style.display = '';
+            apiMessages = [];
+        }
+
+        function focusComposerOnWideScreens() {
+            // On a phone, focusing pops the keyboard over what was just opened.
+            if (!(window.matchMedia && window.matchMedia('(max-width: 860px)').matches)) inputEl.focus();
+        }
+
+        async function openConversation(id) {
+            if (busy || !id) return;
+            closeHistoryDrawer();
+            if (id === convId && apiMessages.length) return;
+            let t = null;
+            try {
+                const res = await transcriptFetch('/chat/transcripts/' + encodeURIComponent(id));
+                if (res.ok) t = await res.json();
+            } catch (e) {}
+            if (!t || !Array.isArray(t.messages)) {
+                // Deleted elsewhere, or a stale link: drop it from the address.
+                if (location.hash.slice(1) === id) showConversationInUrl(convId);
+                loadHistory();
+                return;
+            }
+            if (busy) return;   // a message went out while this loaded
+            if (isRobotSpeaking()) stopSpeaking('switch');
+            clearThread();
+            t.messages.forEach(function (m) {
+                const shown = m.role === 'user' ? (m.text || '(see attachment)') : m.text;
+                addBubble(m.role, shown, (m.attachments || []).map(function (n) { return { name: n }; }));
+                apiMessages.push({ role: m.role, content: m.content });
+            });
+            convId = t.id;
+            showConversationInUrl(convId);
+            renderHistory();
+            focusComposerOnWideScreens();
+        }
+
+        function startNewConversation() {
+            if (busy) return;
+            closeHistoryDrawer();
+            if (isRobotSpeaking()) stopSpeaking('switch');
+            clearThread();
+            convId = '';
+            showConversationInUrl('');
+            renderHistory();
+            focusComposerOnWideScreens();
+        }
+
+        async function deleteConversation(id) {
+            // The turn in flight would land in it again, as a new transcript.
+            if (!id || (busy && id === convId)) return;
+            if (!confirm('Delete this conversation? Its transcript will be gone for good.')) return;
+            try {
+                const res = await transcriptFetch('/chat/transcripts/' + encodeURIComponent(id), { method: 'DELETE' });
+                if (!res.ok && res.status !== 404) return;
+            } catch (e) { return; }
+            if (id === convId) startNewConversation();
+            loadHistory();
+        }
+
+        if (historyOn) {
+            histListEl.addEventListener('click', function (e) {
+                const item = e.target.closest('.hist-item');
+                if (!item) return;
+                if (e.target.closest('.hist-del')) deleteConversation(item.dataset.id);
+                else openConversation(item.dataset.id);
+            });
+            document.getElementById('histNew').addEventListener('click', startNewConversation);
+            document.getElementById('histClose').addEventListener('click', closeHistoryDrawer);
+            document.getElementById('histScrim').addEventListener('click', closeHistoryDrawer);
+            document.getElementById('histOpen').addEventListener('click', function (e) {
+                e.preventDefault();
+                document.body.classList.add('hist-drawer-out');
+            });
+            loadHistory();
+            // A reload, or a bookmarked conversation, reopens it.
+            if (location.hash.length > 1) openConversation(location.hash.slice(1));
         }
 
         inputEl.focus();

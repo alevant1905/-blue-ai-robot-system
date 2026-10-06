@@ -192,7 +192,9 @@ html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
     padding-top: calc(18px + env(safe-area-inset-top, 0px));
     background: var(--cream); border-right: 1px solid var(--line);
     box-shadow: 0 0 60px rgba(0,0,0,0.5);
-    transform: translateX(-102%); transition: transform .22s ease;
+    /* Closed, it sits a shadow's width off-screen: at -102% the shadow
+       still shaded the left edge of every light-theme page. */
+    transform: translateX(calc(-100% - 64px)); transition: transform .22s ease;
     overflow-y: auto; display: flex; flex-direction: column; gap: 3px;
 }
 :root:not([data-theme="light"]) .blue-nav-drawer {
