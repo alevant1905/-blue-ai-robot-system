@@ -1485,10 +1485,15 @@ def settle_written_call(response, conversation_messages, *, tools_allowed,
 def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                   improved_force_tool, improved_tool_args, is_greeting,
                   last_user_message, max_iterations, on_token, user_name,
-                  pending_force_tool=None, *, thinking=None):
+                  pending_force_tool=None, *, thinking=None, reply_cap=None):
     """Offer the tools, run what the model asks for, then make it answer.
 
     `thinking` is the turn's decision, passed to every call of the loop.
+
+    `reply_cap` is a short message's cap on the visible reply
+    (blue/server/reply_budget.py). It goes to the first call when no tool is
+    forced — the one that answers the message itself. After a tool has run,
+    the answer is what the tool brought back, and a retry is a repair.
 
     Returns a finished response, or None if the loop ran out of iterations
     without producing one (the caller supplies the fallback, as before).
@@ -1601,6 +1606,8 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 tool_scope=("reflex" if _conversational_turn and not force_tool
                             else "full"),
                 thinking=thinking,
+                reply_cap=(reply_cap if iteration == 1 and not force_tool
+                           else None),
             )
 
         if not response:

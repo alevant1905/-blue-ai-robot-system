@@ -94,7 +94,8 @@ def chat(monkeypatch):
     monkeypatch.setattr(bt, "_post_to_model",
                         lambda payload, timeout=120: model(payload, timeout, main=True))
 
-    def stream(payload, on_token, timeout=120, prose_limit=None):
+    def stream(payload, on_token, timeout=120, prose_limit=None,
+               visible_limit=None):
         result = model(payload, timeout, main=True)
         text = result["choices"][0]["message"].get("content") or ""
         if on_token and text:

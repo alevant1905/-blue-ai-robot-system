@@ -268,14 +268,22 @@ def test_the_reply_after_a_forced_call_keeps_the_turn_s_decision(chat):
 
 
 def test_the_chat_page_sends_the_decision(chat):
+    # Short messages, so the visible reply has its short cap
+    # (blue/server/reply_budget.py) and the allowance goes on top of it.
     chat.ask("what do you make of memory?")
     assert chat.model.main[-1]["reasoning_effort"] == "medium"
-    assert chat.model.main[-1]["max_tokens"] == (bt._chat_max_tokens()
-                                                 + THINKING_ALLOWANCE_TOKENS)
+    assert chat.model.main[-1]["max_tokens"] == (
+        bt._reply_budget.TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS)
 
     chat.ask("what's your favorite music?", voice=True)
     assert chat.model.main[-1]["reasoning_effort"] == "none"
-    assert chat.model.main[-1]["max_tokens"] == bt._chat_max_tokens()
+    assert chat.model.main[-1]["max_tokens"] == bt._reply_budget.SPOKEN_REPLY_TOKENS
+
+    chat.ask("what do you make of memory, and of how it changes what a robot "
+             "like you can be for a family?")
+    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["max_tokens"] == (bt._chat_max_tokens()
+                                                 + THINKING_ALLOWANCE_TOKENS)
 
     chat.ask("hi blue")                     # the greeting fast path
     assert chat.model.main[-1]["reasoning_effort"] == "none"
@@ -516,7 +524,9 @@ def test_the_turn_logs_model_thinking_and_tokens(chat, capsys):
     chat.ask("what do you make of memory?")
     out = capsys.readouterr().out
 
-    assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent medium), 1 call: "
+    # A short message: its reply cap is named too (blue/server/reply_budget.py).
+    assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent medium), "
+            "reply cap 220t, 1 call: "
             "prompt 10440t, reasoning 120t, completion 300t") in out
 
 

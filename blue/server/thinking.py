@@ -249,6 +249,25 @@ def _asks_something(text: str) -> bool:
     return False
 
 
+def _bare(text: str) -> str:
+    """The message without its markdown, a greeting or the robot's name."""
+    t = _normalise(text)
+    t = _TRAILING_NAME_RE.sub("", _LEADING_NAME_RE.sub("", t))
+    return _GREETING_PREFIX_RE.sub("", t).strip()
+
+
+def asks_something(text: str) -> bool:
+    """A question or a request, in any sentence of the message."""
+    return _asks_something(_bare(text))
+
+
+def offer_accepted(text: str, prev_reply: str = "") -> bool:
+    """"sure" after "want me to draft it?": the go-ahead for the work Blue
+    just offered, not an acknowledgement."""
+    return bool(_ACCEPT_RE.match(_bare(text))
+                and _OFFER_RE.search((prev_reply or "")[-400:].lower()))
+
+
 def thinking_for_turn(text: str, *, voice: bool = False, kid: bool = False,
                       is_greeting: bool = False,
                       identity_kind: Optional[str] = None,
@@ -279,13 +298,12 @@ def thinking_for_turn(text: str, *, voice: bool = False, kid: bool = False,
         return THINK_OFF
     if _URL_RE.search(t):
         return THINK_ON
-    t = _TRAILING_NAME_RE.sub("", _LEADING_NAME_RE.sub("", t))
-    rest = _GREETING_PREFIX_RE.sub("", t).strip()
+    rest = _bare(t)
     if not rest or _NAME_ONLY_RE.match(rest):
         return THINK_OFF
     if _CONTINUE_RE.match(rest):
         return THINK_ON
-    if _ACCEPT_RE.match(rest) and _OFFER_RE.search((prev_reply or "")[-400:].lower()):
+    if offer_accepted(rest, prev_reply):
         return THINK_ON
     words = len(rest.split())
     if _ACK_RE.match(rest) or _CHECKIN_RE.match(rest):

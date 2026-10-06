@@ -79,6 +79,21 @@ def to_last_sentence(text: str) -> str:
     return stripped + "…"
 
 
+# A list item's marker that a cut leaves on its own: "…on time.\n3." ends on
+# "3." as if it were a sentence.
+_DANGLING_ITEM_RE = re.compile(r"\n[ \t]*(?:\d+[.)]|[-*•])[ \t]*$")
+
+
+def cut_to_length(text: str, limit: int) -> str:
+    """`text` held to `limit` characters and pulled back to its last full
+    sentence: a short message's reply that ran past its cap
+    (blue/server/reply_budget.py)."""
+    if not text or not isinstance(text, str):
+        return text
+    out = to_last_sentence(text[:limit] if len(text) > limit else text)
+    return _DANGLING_ITEM_RE.sub("", out).rstrip()
+
+
 def trim_runaway(text: str, truncated: bool = False) -> str:
     """Cut a looping reply; `truncated` means the model hit its token cap."""
     if not text or not isinstance(text, str):

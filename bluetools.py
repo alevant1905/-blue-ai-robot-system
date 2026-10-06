@@ -10457,7 +10457,8 @@ def _post_to_model(payload: Dict, timeout: int = 120) -> Dict:
 
 
 def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
-                       prose_limit: Optional[int] = None) -> Dict:
+                       prose_limit: Optional[int] = None,
+                       visible_limit: Optional[int] = None) -> Dict:
     """A streamed call, assembled into exactly what a blocking call returns.
 
     Streaming here changes only WHEN text becomes visible, never what the rest
@@ -10476,6 +10477,12 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
     writing instead of calling, and the stream is closed with finish_reason
     "length" rather than left to run to the 8,192-token cap. The "auto" retry
     of a long-argument tool uses it too, with its words still shown.
+
+    ``visible_limit`` is a short message's cap on the reply, in characters
+    (blue/server/reply_budget.py). A turn that thinks has its reasoning
+    allowance on top of the cap in max_tokens, which leaves the words that
+    follow room to run on; past this many characters the stream is closed
+    with finish_reason "length", as the cap would.
 
     The token counts come in a last chunk of their own, and only when asked
     for (stream_options.include_usage, checked against LM Studio 2026-10-05):
@@ -10534,6 +10541,15 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
                         if "<tool_call" not in _text and "<function=" not in _text:
                             print(f"   [FORCE] forced call wrote {prose_chars} chars "
                                   f"of text and no call — stopped")
+                            finish_reason = "length"
+                            break
+                    if (visible_limit is not None and prose_chars > visible_limit
+                            and not tool_calls):
+                        # A call written out is left whole for the loop.
+                        _text = "".join(parts)
+                        if "<tool_call" not in _text and "<function=" not in _text:
+                            print(f"   [LENGTH] reply passed its {visible_limit}-char "
+                                  f"cap — stopped")
                             finish_reason = "length"
                             break
                 for call in delta.get("tool_calls") or []:
@@ -10944,6 +10960,8 @@ def _chat_max_tokens() -> int:
 
 
 from blue.server import thinking as _thinking
+from blue.server import reply_budget as _reply_budget
+from blue.server import runaway as _runaway
 
 # Whether the model thinks first is decided per chat turn
 # (blue/server/thinking.py) and sent as `reasoning_effort`. Checked against
@@ -10981,8 +10999,21 @@ def _reasoning_refused(body) -> bool:
     return True
 
 
+def _reply_cap_applies(payload, reply_cap, force_tool=None,
+                       force_choice="required") -> bool:
+    """Whether a short message's reply cap holds for this request. Not on a
+    forced call, whose answer is the call; nor where a tool that carries a
+    whole body in its arguments is offered (a selector tie can offer
+    send_gmail or create_document): the call would be cut off mid-JSON."""
+    if not reply_cap or (force_tool and force_choice == "required"):
+        return False
+    return not any((t.get("function") or {}).get("name") in _LONG_ARGUMENT_TOOLS
+                   for t in payload.get("tools") or [])
+
+
 def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
-                       tool_scope, force_choice="required", thinking=None):
+                       tool_scope, force_choice="required", thinking=None,
+                       reply_cap=None):
     """Assemble the request body: the turn, the tools it may use, and a trim
     to fit the model's input budget.
 
@@ -11000,6 +11031,11 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     other callers that have not been decided yet keep the model default).
     A forced call ("required") never thinks; the decision is for the calls
     after the tool has run.
+
+    `reply_cap` is a short message's cap on the visible reply, in tokens
+    (blue/server/reply_budget.py): it replaces the chat cap, and the
+    reasoning allowance goes on top of it (see _reply_cap_applies for where
+    it does not).
     """
     # Final-pass normalization for strict chat templates (Qwen et al.).
     # Ensures: leading systems, alternating user/assistant, starts with user
@@ -11086,6 +11122,16 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
             payload["tools"] = tools_to_use
             payload["tool_choice"] = "auto"
 
+    # A short message's reply: the cap is on what he says, and the reasoning
+    # allowance stays on top of it. Only where the reasoning is ours to size:
+    # a model that refused reasoning_effort may think inside the cap, and
+    # call_lm_studio holds its words to it as they arrive instead.
+    if ("reasoning_effort" in payload
+            and _reply_cap_applies(payload, reply_cap, force_tool, force_choice)):
+        _allowance = _thinking_allowance(payload)
+        payload["max_tokens"] = (min(payload["max_tokens"] - _allowance,
+                                     int(reply_cap)) + _allowance)
+
     # Token-budget guard: trim oldest non-system history if the request would
     # overflow LM Studio's context. Sized from the LOADED model's real context
     # (see _lm_input_budget); override via BLUE_LM_INPUT_BUDGET_TOKENS.
@@ -11125,6 +11171,7 @@ _LM_MODEL_SEEN = {"id": None, "warned": set()}
 
 def _lm_turn_reset(thinking=None):
     _LM_TURN.thinking = thinking
+    _LM_TURN.reply_cap = None
     _LM_TURN.calls = []
 
 
@@ -11170,8 +11217,10 @@ def _lm_turn_summary() -> str:
     efforts = ", ".join(dict.fromkeys(c["effort"] or "-" for c in calls))
     cached = (f" (cached {total('cached')})"
               if any(isinstance(c.get("cached"), int) for c in calls) else "")
+    cap = getattr(_LM_TURN, "reply_cap", None)
     return (f"   [LM] model {models}, thinking {thinking} (sent {efforts}), "
-            f"{len(calls)} call{'s' if len(calls) != 1 else ''}: "
+            + (f"reply cap {cap}t, " if cap else "")
+            + f"{len(calls)} call{'s' if len(calls) != 1 else ''}: "
             f"prompt {total('prompt')}{cached}, reasoning {total('reasoning')}, "
             f"completion {total('completion')}"
             + _lm_ignored_none([c for c in calls if c["effort"] == "none"]))
@@ -11366,11 +11415,53 @@ def _lm_studio_recover(e, payload):
         print(f"[DEBUG] Could not write dump: {dump_err}")
     return None
 
+def _reply_starved(result, visible_limit) -> bool:
+    """A short message's reply that the reasoning left no room: cut off by
+    max_tokens with under a third of its cap written. The allowance on top
+    of the cap is 1,536 tokens, and two of the 10-05 harness's short turns
+    reasoned for 1,945 and 2,062."""
+    try:
+        choice = result["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if message.get("tool_calls") or choice.get("finish_reason") != "length":
+        return False
+    words = strip_reasoning_tags(message.get("content") or "") or ""
+    return len(words.strip()) < visible_limit // 3
+
+
+def _hold_to_reply_cap(result, visible_limit) -> None:
+    """Hold a short message's reply to its cap, in place.
+
+    A thinking turn's words have the reasoning allowance to run on, and one
+    stopped by max_tokens ends mid-sentence: either way the reply ends on its
+    last full sentence within the cap, with finish_reason "length". A tool
+    call, made or written out, is left whole."""
+    choice = result["choices"][0]
+    message = choice["message"]
+    text = message.get("content")
+    if (message.get("tool_calls") or not isinstance(text, str)
+            or written_tool_calls(text)):
+        return
+    words = strip_reasoning_tags(text) or ""
+    if len(words) <= visible_limit and choice.get("finish_reason") != "length":
+        return
+    held = _runaway.cut_to_length(words, visible_limit)
+    if held != text:
+        print(f"   [LENGTH] reply held to its cap: {len(text)} -> {len(held)} chars")
+        message["content"] = held
+    choice["finish_reason"] = "length"
+
+
 def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool: str = None, iteration: int = 1,
                    on_token=None, tool_scope: str = "full",
-                   force_choice: str = "required", thinking: Optional[str] = None) -> Dict:
+                   force_choice: str = "required", thinking: Optional[str] = None,
+                   reply_cap: Optional[int] = None) -> Dict:
     """One chat call. `thinking` is the turn's decision (see
-    _lm_studio_payload); None leaves the model's default."""
+    _lm_studio_payload); None leaves the model's default. `reply_cap` is a
+    short message's cap on the visible reply, in tokens
+    (blue/server/reply_budget.py); None for none."""
 
     # NOTE: tool_choice="required" with a single-tool filter already guarantees
     # the model will call the right tool. We only add text hints for tools where
@@ -11401,10 +11492,6 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
 
     _chat_inject_vision(messages)
 
-    payload = _lm_studio_payload(
-        messages, include_tools=include_tools, force_tool=force_tool,
-        iteration=iteration, tool_scope=tool_scope, force_choice=force_choice,
-        thinking=thinking)
     # The "auto" retry after a forced note or document came back as words may
     # still make the call, body and all, and 2,048 tokens cut that off
     # mid-JSON. Streamed, it gets the forced call's cap and its stop on prose
@@ -11415,7 +11502,18 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                        and force_choice == "auto"
                        and force_tool in _LONG_ARGUMENT_TOOLS)
     if _long_retry:
+        reply_cap = None
+    payload = _lm_studio_payload(
+        messages, include_tools=include_tools, force_tool=force_tool,
+        iteration=iteration, tool_scope=tool_scope, force_choice=force_choice,
+        thinking=thinking, reply_cap=reply_cap)
+    if _long_retry:
         payload["max_tokens"] = _LONG_ARGUMENT_MAX_TOKENS + _thinking_allowance(payload)
+    # A short message's reply, held to its cap in characters as well: on a
+    # turn that thinks, max_tokens is the cap plus the reasoning allowance.
+    _visible = (_reply_budget.visible_chars(reply_cap)
+                if _reply_cap_applies(payload, reply_cap, force_tool, force_choice)
+                else None)
 
     def _send():
         if on_token is not None:
@@ -11435,6 +11533,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             if _long_retry:
                 return _stream_from_model(
                     payload, on_token, prose_limit=_FORCED_STREAM_ABORT_CHARS)
+            if _visible:
+                return _stream_from_model(payload, on_token, visible_limit=_visible)
             return _stream_from_model(payload, on_token)
         return _post_to_model(payload)
 
@@ -11451,6 +11551,22 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 raise
             _allowance = _thinking_allowance(payload)
             payload.pop("reasoning_effort", None)
+            payload["max_tokens"] -= _allowance
+            if _visible:
+                # Its own default thinking may come out of max_tokens now.
+                payload["max_tokens"] = _chat_max_tokens()
+            result = _send()
+        # The reasoning ran past its allowance and left the short reply no
+        # room: asked once more, without thinking, at the cap alone.
+        _allowance = _thinking_allowance(payload)
+        if _visible and _allowance and _reply_starved(result, _visible):
+            try:
+                _lm_turn_note(result, payload)
+            except Exception as e:
+                log.warning(f"[LM] could not record the call's usage: {e}")
+            print("   [LENGTH] the reasoning used the reply's room — asking "
+                  "again without thinking")
+            payload["reasoning_effort"] = _REASONING_EFFORT[_thinking.THINK_OFF]
             payload["max_tokens"] -= _allowance
             result = _send()
     except Exception as e:
@@ -11469,6 +11585,8 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         _LM_FAILURE.dump = ""
         print(f"[ERROR] LM Studio returned no usable message: {str(result)[:200]}")
         return None
+    if _visible:
+        _hold_to_reply_cap(result, _visible)
     try:
         _lm_turn_note(result, payload)
     except Exception as e:
@@ -13871,7 +13989,27 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
         pass
     return conversation_messages
 
-def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None, heard: bool = False, decide_thinking: bool = False) -> Dict:
+def _pin_short_turn_note(conversation_messages, note) -> None:
+    """`note` beside the user's words in the live turn, in brackets.
+
+    Not in the system message: as one more line at the end of STYLE, the
+    same request for a short answer changed nothing on qwen3.8-27b (see
+    blue/server/reply_budget.py). The model weighs what is next to the turn
+    far more, as the "more" cue's note found (process_with_tools). A new
+    dict replaces the turn, so the caller's message — the one stored and
+    shown — keeps the user's words alone."""
+    for i in range(len(conversation_messages) - 1, -1, -1):
+        message = conversation_messages[i]
+        if message.get("role") != "user":
+            continue
+        if isinstance(message.get("content"), str):
+            conversation_messages[i] = {
+                **message,
+                "content": message["content"].rstrip() + f"\n\n[{note}]"}
+        return
+
+
+def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str = "Alex", voice: bool = False, robot: str = "blue", language: str = "", focus: Optional[Dict] = None, system_addendum: str = "", on_token=None, heard: bool = False, decide_thinking: bool = False, length_follows_turn: bool = False) -> Dict:
     """Process conversation with tool support. `robot` selects which persona is
     speaking (Blue by default; "hexia" for her chat page). `focus` carries the
     chat Context panel's library picks ({"docs": [...], "folders": [...]}),
@@ -13880,7 +14018,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     `decide_thinking` (the chat page) decides per turn whether the model
     thinks first (blue/server/thinking.py). Without it nothing is sent and
     the model keeps its own default — Panel calls this too, and is a
-    separate change."""
+    separate change.
+
+    `length_follows_turn` (the chat page) caps the visible reply to a short
+    message that asks for nothing long (blue/server/reply_budget.py). Panel
+    has its own length contract and does not pass it."""
     global _ACTIVE_CHAT_ROBOT, _ACTIVE_FOCUS_DOCS, _ACTIVE_FOCUS_FOLDERS
     _ACTIVE_CHAT_ROBOT = (robot or "blue").strip().lower()
     # Set the library-focus globals up front — build_dynamic_system_message and
@@ -13918,19 +14060,48 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _turn_words = _intent_text(_turn_raw)
     _turn_prev = next((_get_text_content(m) for m in reversed(messages[:-1])
                        if m.get("role") == "assistant"), "")
+    # An attachment, or a paste the intent text dropped.
+    _turn_attached = ("[attached document:" in _turn_raw.lower()
+                      or len(_turn_raw) - len(_turn_words) > 500)
+    _turn_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
 
     def _decide_thinking(forced_tool=None, greeting=False):
         if not decide_thinking:
             return None
         return _thinking.thinking_for_turn(
             _turn_words, voice=heard,
-            kid=(user_name or "").strip() in _CHAT_ONLY_USERS,
+            kid=_turn_kid,
             is_greeting=greeting, identity_kind=_identity_kind,
             forced_tool=forced_tool,
-            # An attachment, or a paste the intent text dropped.
-            has_attachment=("[attached document:" in _turn_raw.lower()
-                            or len(_turn_raw) - len(_turn_words) > 500),
+            has_attachment=_turn_attached,
             prev_reply=_turn_prev)
+
+    def _settle_reply_cap(thinking_now, forced_tool=None):
+        """The visible reply's cap for this turn, or None; a typed question
+        under it gets the short-message note beside its words. Not with a
+        forced tool: its answer is the call, or what the tool brought back."""
+        cap = None
+        if length_follows_turn and not forced_tool:
+            cap = _reply_budget.reply_budget(
+                _turn_words, voice=voice,
+                has_attachment=(_turn_attached or _vision_queue.has_images()
+                                or isinstance((messages[-1] if messages else {})
+                                              .get("content"), list)),
+                depth_cue=_thinking.offer_accepted(_turn_words, _turn_prev))
+        _LM_TURN.reply_cap = cap
+        if cap:
+            note = _reply_budget.short_turn_note(
+                _turn_words, voice=voice, kid=_turn_kid, thinking=thinking_now)
+            # An English note inside a French or Russian turn is English
+            # beside the words he answers: the cap alone there.
+            if note and ((language and language != "en")
+                         or _message_language(_turn_words) not in ("", "en")):
+                note = ""
+            if note:
+                _pin_short_turn_note(conversation_messages, note)
+            print(f"   [LENGTH] short message — reply capped at {cap} tokens"
+                  + (", note pinned beside it" if note else ""))
+        return cap
 
     conversation_messages = _chat_purge_stale_camera(
         conversation_messages, last_user_message)
@@ -13961,8 +14132,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     if _is_simple_greeting:
         print(f"   [FAST] Simple greeting detected - skipping tool selection")
         _thinking_now = _LM_TURN.thinking = _decide_thinking(greeting=True)
+        _cap_now = _settle_reply_cap(_thinking_now)
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
-                                  thinking=_thinking_now)
+                                  thinking=_thinking_now, reply_cap=_cap_now)
         if response:
             # Every reply below is settled the same way: a tool call the
             # model wrote out as text is never the reply (tool_pipeline).
@@ -14005,6 +14177,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     is_greeting = _choice.is_greeting
     _thinking_now = _LM_TURN.thinking = _decide_thinking(
         forced_tool=improved_force_tool, greeting=is_greeting)
+    _cap_now = _settle_reply_cap(_thinking_now, forced_tool=improved_force_tool)
 
     # ================================================================================
     # FAST EXECUTION: Execute tool directly, then ONE LLM call to format response.
@@ -14064,6 +14237,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         _detect_msg, _identity_kind, conversation_messages, improved_force_tool,
         improved_tool_args, is_greeting, last_user_message, max_iterations,
         on_token, user_name, pending_force_tool, thinking=_thinking_now,
+        reply_cap=_cap_now,
     )
     if _looped is not None:
         # A question about Blue himself is answered without tools.
@@ -16695,6 +16869,7 @@ def chat_completions():
                 focus=focus,
                 on_token=_stream_routes.token_sink(_stream_id),
                 decide_thinking=True,
+                length_follows_turn=True,
             )
             # The draft is done; the output checks may still replace it.
             _stream_routes.mark_phase(_stream_id, "checking")
