@@ -120,6 +120,113 @@ def test_asking_for_length_lifts_the_cap(text, kwargs):
     assert reply_budget(text, **kwargs) is None
 
 
+# Real turns, conversation_log ids, whose logged replies were the work
+# itself: capped at 220 tokens they were cut off.
+ASKS_FOR_AN_ANALYSIS = [
+    "I want u to analyze his encyclical and assess it",                 # 3214
+    "discuss the blue project in relation to sofie lachapelle's book",   # 5198
+    "Great. Deepen the analysis using Alex’s published work",            # 5208
+    "revise your analysis of the similarities between them now",         # 5202
+    "explain this further by distinguishing between dialectical and "
+    "formal logic",                                                      # 6046
+    "yes a longer one",                                                  # 5838
+    "can I have the fuller version",
+]
+
+
+@pytest.mark.parametrize("text", ASKS_FOR_AN_ANALYSIS)
+def test_asking_for_an_analysis_lifts_the_cap(text):
+    assert reply_budget(text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "What’s your assessment of the bill?",                               # 3220
+    "how does her critique of ai affect your self-understanding",        # 7721
+    "For real, tell me what you guys discussed.",                        # 7661
+])
+def test_the_nouns_of_an_analysis_stay_capped(text):
+    """The verbs ask for one; "what's your assessment?" asks an opinion."""
+    assert reply_budget(text) == TYPED_REPLY_TOKENS
+
+
+TRANSCRIPT_OFFER = ("I can't save documents to your library directly. However, I "
+                    "can paste the full transcript here so you can copy and save "
+                    "it wherever you like. Want me to do that?")
+MENU_OFFER = ("It simply lists them under the July 9 slot.\n\nWould you like me "
+              "to:\n1. Draft a standard critical reading report for Terranova "
+              "based on common academic structures?\n2. Look at previous "
+              "examples if they exist in our focused documents?\n3. Summarize "
+              "Terranova’s key arguments first, so you can decide on the "
+              "structure?")
+LONGER_OFFER = ("I don’t have subjective experience or feelings. If you’d like "
+                "the longer academic version of my origins and design, I’ve got "
+                "that documented too.")
+SYLLABUS_OFFER = ("The focus on \"non-representational\" media makes it very "
+                  "relevant.\nWould you like to dive into the syllabus to see "
+                  "what we’re covering this week?")
+CHANGELOG_OFFER = ("One thing worth noting — it's now a platform. If you want, I "
+                   "can pull the changelog and see if any of those newer pieces "
+                   "are relevant to your digest setup.")
+LACHAPELLE_OFFER = ("Both approaches suggest that understanding the trick "
+                    "matters.\n\nWould you like me to dig deeper into any "
+                    "specific aspect of Lachapelle’s argument?")
+
+
+@pytest.mark.parametrize("text,prev", [
+    ("Yeah, okay.", TRANSCRIPT_OFFER),        # 5544: 7,595 characters logged
+    ("1", MENU_OFFER),                        # 5356: 3,460
+    ("the first one", MENU_OFFER),
+    ("yes a longer one", LONGER_OFFER),       # 5838: 2,671
+    ("Yeah sure do that.", SYLLABUS_OFFER),   # 1981: 1,499
+    ("Surely", CHANGELOG_OFFER),              # 10063: 1,988
+    ("Let's go.", LACHAPELLE_OFFER),          # 5262: 1,184
+    ("thanks, go ahead", TRANSCRIPT_OFFER),
+    ("Lift the focus", "If you want me to rewrite *I’m Blue: Lada Dee Lada "
+     "Da* using all 61 documents, say “lift the focus” and I’ll switch to the "
+     "full library. Otherwise I can keep working within the current scope."),
+    # 6236: 7,604
+])
+def test_a_go_ahead_for_what_he_offered_lifts_the_cap(text, prev):
+    """Its answer is the work. thinking.offer_accepted misses most of these,
+    and there a miss only meant no reasoning; here it cut the work off."""
+    assert reply_budget(text, prev_reply=prev) is None
+
+
+@pytest.mark.parametrize("text,prev", [
+    # turned down, or something else asked
+    ("no thanks", TRANSCRIPT_OFFER),
+    ("not now", TRANSCRIPT_OFFER),
+    ("Okay sounds good thanks", TRANSCRIPT_OFFER),                       # 3774
+    ("Great job, thanks.", TRANSCRIPT_OFFER),                            # 6114
+    ("ok, what about cats?", TRANSCRIPT_OFFER),
+    ("That's incorrect.", TRANSCRIPT_OFFER),                             # 2575
+    ("Can you hear me OK.", TRANSCRIPT_OFFER),                           # 30
+    ("introduce yourself to the class", "Want me to adjust the tone or "
+     "focus for your class?"),                                           # 5434
+    ("You keep repeating yourself.", TRANSCRIPT_OFFER),                  # 1899
+    # no offer to take up
+    ("sure", "Cloudy, 12 degrees."),
+    ("Yeah, okay.", "What would you like to do?"),
+    ("cool", "Three things could go wrong:\n1. Keys leak.\n2. Rate limits."),
+])
+def test_anything_else_after_an_offer_stays_capped(text, prev):
+    assert reply_budget(text, prev_reply=prev) == TYPED_REPLY_TOKENS
+
+
+def test_a_pick_from_a_list_lifts_the_cap_without_an_offer():
+    prev = "Three things could go wrong:\n1. Keys leak.\n2. Rate limits.\n3. Bias."
+    assert reply_budget("2", prev_reply=prev) is None
+    assert reply_budget("2", prev_reply="It's 2 degrees out.") == TYPED_REPLY_TOKENS
+
+
+@pytest.mark.parametrize("text", [
+    "can you continue?", "could you go on with that?",
+    "would you continue please", "ok can you continue",
+])
+def test_the_more_cue_asked_politely_lifts_the_cap(text):
+    assert reply_budget(text) is None
+
+
 def test_the_note_goes_with_a_typed_question_that_thinks():
     """Where the long replies were. A greeting or a correction is short
     already, and a size in the note could pad it."""
@@ -161,6 +268,29 @@ def test_a_cut_inside_a_list_drops_the_dangling_number():
 
 def test_a_reply_under_its_cap_is_left_alone():
     assert runaway.cut_to_length("Short and done.", 900) == "Short and done."
+
+
+BULLETS = "Here are the risks:\n" + "\n".join(
+    f"- risk number {i} is that the students lose their keys" for i in range(40))
+
+
+def test_a_list_without_full_stops_ends_on_its_last_whole_line():
+    """No sentence end in its second half: the cut fell at the limit,
+    mid-word, and the truncated reply's trim added a second "…" (the chat
+    page gave "…- risk number 17 i……")."""
+    held = runaway.cut_to_length(BULLETS, 946)
+    assert len(held) <= 946
+    assert held.endswith("lose their keys…") and not held.endswith("……")
+    assert runaway.trim_runaway(held, truncated=True) == held
+
+
+def test_a_paragraph_without_full_stops_ends_on_a_whole_word():
+    text = ("Here are the risks you would want to think about: "
+            + "students lose track of credentials and keys, " * 40)
+    held = runaway.cut_to_length(text, 946)
+    assert len(held) <= 946
+    assert held.endswith("…") and held[:-1].split()[-1] in text.split()
+    assert runaway.trim_runaway(held, truncated=True) == held
 
 
 # --------------------------------------------------------------------------
@@ -302,6 +432,44 @@ def test_a_reply_the_reasoning_starved_is_asked_again_without_thinking(
     assert "2 calls" in bt._lm_turn_summary()
 
 
+def _call(arguments, finish_reason):
+    return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "type": "function",
+         "function": {"name": "web_search", "arguments": arguments}}]},
+        "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 9000, "completion_tokens": 1756,
+                  "completion_tokens_details": {"reasoning_tokens": 1700}}}
+
+
+def test_a_tool_call_the_reasoning_cut_off_is_asked_again_without_thinking(
+        fresh, monkeypatch):
+    """Before the cap a thinking turn had 3,584 tokens, now 1,756. A reflex
+    call after 1,700 tokens of reasoning was cut mid-arguments, and the loop
+    answers a cut call with "[System: that was cut off at the length
+    limit…]"."""
+    monkeypatch.setattr(bt._TURN_OFFER, "tools", (), raising=False)
+    sent = []
+
+    def post(payload, timeout=120):
+        sent.append(dict(payload))
+        if len(sent) == 1:
+            return _call('{"query": "autog', "length")
+        return _call('{"query": "autogpt harness"}', "tool_calls")
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    result = bt.call_lm_studio([{"role": "user", "content": "is autogpt still around?"}],
+                               include_tools=True, tool_scope="reflex",
+                               thinking=THINK_ON, reply_cap=TYPED_REPLY_TOKENS)
+
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]) == {
+        "query": "autogpt harness"}
+    assert [(p["reasoning_effort"], p["max_tokens"]) for p in sent] == [
+        ("medium", TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
+        ("none", TYPED_REPLY_TOKENS)]
+
+
 def test_a_reply_that_stopped_short_is_not_asked_again(fresh, monkeypatch):
     """Over a third of the cap written: a shorter answer, ended on its last
     full sentence, not a retry."""
@@ -430,6 +598,73 @@ def test_accepting_an_offer_of_real_work_lifts_the_cap(chat):
         bt._chat_max_tokens(), bt._chat_max_tokens() + THINKING_ALLOWANCE_TOKENS)
 
 
+def _after(chat, question, reply, turn):
+    return chat.client.post("/v1/chat/completions", json={"messages": [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": reply},
+        {"role": "user", "content": turn}], "robot": "blue"})
+
+
+@pytest.mark.parametrize("question,offer,turn", [
+    ("can you save the transcript of my talk to the library?",
+     TRANSCRIPT_OFFER, "Yeah, okay."),                                   # 5544
+    ("what do I need for the reading report?", MENU_OFFER, "1"),         # 5356
+    ("who are you?", LONGER_OFFER, "yes a longer one"),                  # 5838
+])
+def test_a_go_ahead_on_the_chat_page_is_not_capped(chat, question, offer, turn):
+    """Each was sent with max_tokens 220 and no reasoning."""
+    _after(chat, question, offer, turn)
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == bt._chat_max_tokens()
+    assert SHORT_TURN_NOTE not in _user_text(payload)
+
+
+def test_can_you_continue_keeps_the_more_cue_and_no_cap(chat):
+    """The note was pinned before the "more" cue read the turn, and the cue
+    reads nothing over 60 characters: "can you continue?" lost "[This asks
+    for MORE…]", the fix for the 2026-07-10 re-greeting, and got the cap."""
+    _after(chat, "what is an AI agent?",
+           "An agent is a model in a loop that can call tools. It plans, acts, "
+           "and checks.", "can you continue?")
+    payload = chat.model.main[-1]
+    words = _user_text(payload)
+    assert "[This asks for MORE" in words and words.endswith("can you continue?")
+    assert SHORT_TURN_NOTE not in words
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == bt._chat_max_tokens()
+
+
+def test_the_note_is_pinned_after_the_more_cue_has_read_the_turn(chat, monkeypatch):
+    """Whatever the cue makes of a capped turn, it reads the user's words."""
+    seen = []
+    real = bt._continuation_cue
+    monkeypatch.setattr(bt, "_continuation_cue",
+                        lambda text: seen.append(text) or real(text))
+    _after(chat, "what is an AI agent?", "A model in a loop.", "what could go wrong?")
+    assert seen and all(SHORT_TURN_NOTE not in text for text in seen)
+    assert _user_text(chat.model.main[-1]).endswith(f"[{SHORT_TURN_NOTE}]")
+
+
+def test_a_tie_that_offers_a_body_tool_is_neither_capped_nor_noted(
+        chat, monkeypatch, capsys):
+    """_lm_studio_payload never applied the cap there (send_gmail's call
+    would be cut off mid-JSON), but the log said "reply cap 220t" and the
+    note was pinned."""
+    monkeypatch.setattr(bt._TURN_OFFER, "tools", (), raising=False)
+
+    def choose(conversation_messages, last_user_message, **kw):
+        bt._TURN_OFFER.tools = ("send_gmail", "create_reminder")
+        return bt._ChatToolChoice(detect_msg=last_user_message)
+
+    monkeypatch.setattr(bt, "_chat_choose_tool", choose)
+    chat.ask("what could go wrong?")
+    payload = chat.model.main[-1]
+    out = capsys.readouterr().out
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == bt._chat_max_tokens()
+    assert SHORT_TURN_NOTE not in _user_text(payload)
+    assert "send_gmail is offered — no reply cap" in out
+    assert "reply cap 220t" not in out and "capped at" not in out
+
+
 def test_a_reply_after_a_tool_has_run_is_not_capped(chat):
     """The model reached for a reflex tool itself: its answer is what the
     tool brought back, so only the first call has the cap."""
@@ -459,6 +694,14 @@ def test_a_long_reply_on_the_chat_page_ends_within_the_cap(chat):
     reply = reply_of(chat.ask("what could go wrong?"))
     assert len(reply) <= visible_chars(TYPED_REPLY_TOKENS)
     assert reply.endswith("wrong.")
+
+
+def test_a_long_list_on_the_chat_page_ends_on_a_whole_line(chat):
+    """It came back "…- risk number 17 i……"."""
+    chat.model.queue(BULLETS)
+    reply = reply_of(chat.ask("what could go wrong?"))
+    assert len(reply) <= visible_chars(TYPED_REPLY_TOKENS)
+    assert reply.endswith("lose their keys…") and not reply.endswith("……")
 
 
 def test_panel_has_no_cap(chat):

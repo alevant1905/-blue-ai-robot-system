@@ -11419,14 +11419,22 @@ def _reply_starved(result, visible_limit) -> bool:
     """A short message's reply that the reasoning left no room: cut off by
     max_tokens with under a third of its cap written. The allowance on top
     of the cap is 1,536 tokens, and two of the 10-05 harness's short turns
-    reasoned for 1,945 and 2,062."""
+    reasoned for 1,945 and 2,062.
+
+    A tool call cut off there is starved too: after 1,700 tokens of
+    reasoning, a reflex call (a search, a reminder) has about 50 left for
+    its arguments, and run_tool_loop answers a cut call with "[System: that
+    was cut off at the length limit…]". Asked again without thinking, the
+    call has the whole cap."""
     try:
         choice = result["choices"][0]
         message = choice["message"]
     except (KeyError, IndexError, TypeError):
         return False
-    if message.get("tool_calls") or choice.get("finish_reason") != "length":
+    if choice.get("finish_reason") != "length":
         return False
+    if message.get("tool_calls"):
+        return True
     words = strip_reasoning_tags(message.get("content") or "") or ""
     return len(words.strip()) < visible_limit // 3
 
@@ -14076,19 +14084,34 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             has_attachment=_turn_attached,
             prev_reply=_turn_prev)
 
-    def _settle_reply_cap(thinking_now, forced_tool=None):
-        """The visible reply's cap for this turn, or None; a typed question
-        under it gets the short-message note beside its words. Not with a
-        forced tool: its answer is the call, or what the tool brought back."""
+    def _settle_reply_cap(thinking_now, forced_tool=None, offered=()):
+        """(cap, note): the visible reply's cap for this turn, or None, and
+        the short-message note a typed question under it gets beside its
+        words, or "". The caller pins the note (_pin_short_turn_note) after
+        the "more" cue has read the turn: that cue reads the user's words
+        alone, and returns None for anything over 60 characters.
+
+        No cap with a forced tool: its answer is the call, or what the tool
+        brought back. Nor when a selector tie offers a tool that carries a
+        whole body (`offered`): _lm_studio_payload would not apply it, and
+        the log would claim a cap the call never had. Nor on the "more" cue
+        ("can you continue?"), whatever asks_for_length makes of it."""
         cap = None
         if length_follows_turn and not forced_tool:
+            _more = bool(_turn_prev.strip()) and _continuation_cue(_turn_words) == "more"
             cap = _reply_budget.reply_budget(
                 _turn_words, voice=voice,
                 has_attachment=(_turn_attached or _vision_queue.has_images()
                                 or isinstance((messages[-1] if messages else {})
                                               .get("content"), list)),
-                depth_cue=_thinking.offer_accepted(_turn_words, _turn_prev))
+                depth_cue=_more, prev_reply=_turn_prev)
+            _long = sorted(set(offered or ()) & _LONG_ARGUMENT_TOOLS)
+            if cap and _long:
+                print(f"   [LENGTH] short message, but {', '.join(_long)} is offered "
+                      f"— no reply cap")
+                cap = None
         _LM_TURN.reply_cap = cap
+        note = ""
         if cap:
             note = _reply_budget.short_turn_note(
                 _turn_words, voice=voice, kid=_turn_kid, thinking=thinking_now)
@@ -14097,11 +14120,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             if note and ((language and language != "en")
                          or _message_language(_turn_words) not in ("", "en")):
                 note = ""
-            if note:
-                _pin_short_turn_note(conversation_messages, note)
             print(f"   [LENGTH] short message — reply capped at {cap} tokens"
-                  + (", note pinned beside it" if note else ""))
-        return cap
+                  + (", with the short-message note" if note else ""))
+        return cap, note
 
     conversation_messages = _chat_purge_stale_camera(
         conversation_messages, last_user_message)
@@ -14132,7 +14153,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     if _is_simple_greeting:
         print(f"   [FAST] Simple greeting detected - skipping tool selection")
         _thinking_now = _LM_TURN.thinking = _decide_thinking(greeting=True)
-        _cap_now = _settle_reply_cap(_thinking_now)
+        _cap_now, _cap_note = _settle_reply_cap(_thinking_now)
+        if _cap_note:
+            _pin_short_turn_note(conversation_messages, _cap_note)
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
                                   thinking=_thinking_now, reply_cap=_cap_now)
         if response:
@@ -14177,7 +14200,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     is_greeting = _choice.is_greeting
     _thinking_now = _LM_TURN.thinking = _decide_thinking(
         forced_tool=improved_force_tool, greeting=is_greeting)
-    _cap_now = _settle_reply_cap(_thinking_now, forced_tool=improved_force_tool)
+    _cap_now, _cap_note = _settle_reply_cap(
+        _thinking_now, forced_tool=improved_force_tool,
+        offered=getattr(_TURN_OFFER, "tools", ()))
 
     # ================================================================================
     # FAST EXECUTION: Execute tool directly, then ONE LLM call to format response.
@@ -14213,6 +14238,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         _cue_lu, _cue_pa = _last_exchange(conversation_messages)
         _cue_kind = _continuation_cue(_cue_lu) if (_cue_pa or "").strip() else None
         if _cue_kind == 'more':
+            # More of the last answer is not a short message's reply.
+            if _cap_now:
+                print("   [LENGTH] 'more' cue — reply cap lifted")
+            _cap_now, _cap_note = None, ""
+            _LM_TURN.reply_cap = None
             for _cue_i in range(len(conversation_messages) - 1, -1, -1):
                 _cue_m = conversation_messages[_cue_i]
                 if _cue_m.get("role") == "user" and isinstance(_cue_m.get("content"), str):
@@ -14231,6 +14261,10 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                     break
     except Exception as _cue_e:
         log.warning(f"[CUE] pin failed: {_cue_e}")
+
+    # The short-message note goes in after the cue has read the user's words.
+    if _cap_note:
+        _pin_short_turn_note(conversation_messages, _cap_note)
 
     # The tool loop now lives in blue/server/tool_pipeline.py.
     _looped = _tool_pipeline.run_tool_loop(

@@ -69,9 +69,13 @@ def cut_repeats(text: str) -> str:
 
 
 def to_last_sentence(text: str) -> str:
-    """Drop a trailing fragment left by the token cap."""
+    """Drop a trailing fragment left by the token cap. A text that already
+    ends on "…" — a cut made before, by cut_to_length — is left as it is:
+    a short message's reply held to its cap is trimmed again as a truncated
+    one (turn_completion), and came out ending "…risk number 17 i……"."""
     stripped = text.rstrip()
-    if not stripped or _SENTENCE_END_RE.search(stripped[-3:] + " "):
+    if (not stripped or stripped.endswith("…")
+            or _SENTENCE_END_RE.search(stripped[-3:] + " ")):
         return stripped
     ends = list(_SENTENCE_END_RE.finditer(stripped))
     if ends and ends[-1].end() >= len(stripped) * 0.5:
@@ -87,10 +91,23 @@ _DANGLING_ITEM_RE = re.compile(r"\n[ \t]*(?:\d+[.)]|[-*•])[ \t]*$")
 def cut_to_length(text: str, limit: int) -> str:
     """`text` held to `limit` characters and pulled back to its last full
     sentence: a short message's reply that ran past its cap
-    (blue/server/reply_budget.py)."""
+    (blue/server/reply_budget.py).
+
+    With no sentence end in its second half — a bulleted list without full
+    stops — it ends on its last whole line instead, or failing that its last
+    whole word, and "…": not mid-word, as to_last_sentence alone would."""
     if not text or not isinstance(text, str):
         return text
-    out = to_last_sentence(text[:limit] if len(text) > limit else text)
+    head = (text[:limit] if len(text) > limit else text).rstrip()
+    out = to_last_sentence(head)
+    if out.endswith("…") and not head.endswith("…"):
+        line = head.rfind("\n")
+        if line >= len(head) * 0.5:
+            out = _DANGLING_ITEM_RE.sub("", head[:line].rstrip())
+        else:
+            space = head.rfind(" ")
+            out = head[:space] if space >= len(head) * 0.5 else head
+        out = out.rstrip(" \t\n,;:-–—") + "…"
     return _DANGLING_ITEM_RE.sub("", out).rstrip()
 
 
