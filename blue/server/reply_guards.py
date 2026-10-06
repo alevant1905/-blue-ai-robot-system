@@ -195,12 +195,20 @@ def guard_identity(ctx) -> Optional[str]:
         return None
     print(f"   [IDENTITY] invalid self-description ({_identity_issue}) — regenerating once")
     if _identity_kind:
+        # The retry keeps the room: Alex's class, plain words, no hardware.
+        _audience, _class_topic = bt._identity_audience_for_turn(
+            _identity_kind,
+            bt._intent_text(last_user_msg if isinstance(last_user_msg, str) else ""),
+            messages,
+        )
         _identity_retry_note = (
             bt.identity_grounding_note(
                 _identity_name,
                 bt._robot_cfg(robot)["self_desc"],
                 _identity_kind,
                 avoid_topics=_identity_topic_history,
+                audience=_audience,
+                class_topic=_class_topic,
             )
             + "\n[Your previous reply failed this grounding because "
               f"of {_identity_issue.replace('_', ' ')}. Answer the last "

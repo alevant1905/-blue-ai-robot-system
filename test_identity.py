@@ -1684,7 +1684,10 @@ def test_ordinary_questions_do_not_ask_for_recall(message):
      True, False),
     ("what's your favorite music?", "I don't have personal tastes or feelings.",
      False, True),
-    ("say hi to the class", "Good morning, everyone. I'm Blue.", False, True),
+    # A class greeting is an introduction (P2-4); a greeting passed on to
+    # one person is not, and that reply is withheld for itself alone.
+    ("say hi to the class", "Good morning, everyone. I'm Blue.", True, True),
+    ("can you say hi to Stella", "Hi everyone, I'm Blue.", False, True),
     ("what are the readings this week?", "Crawford, chapter two.", False, False),
 ])
 def test_wording_is_withheld_for_its_question_or_for_itself(

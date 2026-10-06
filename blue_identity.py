@@ -15,6 +15,53 @@ _INTRODUCTION_RE = re.compile(
     r"\bintroduction\b",
     re.IGNORECASE,
 )
+# A greeting to Alex's class is an introduction. "we're in front of the DH399
+# class right now. do you want to say hello to everyone?" and "say hi to the
+# students" classified as nothing (10-05 harness): no identity note, every
+# old class greeting quoted back, and the 09-16 one said again for 26-38
+# words. "everyone" counts only when this turn or the one before names the
+# class (contextual_identity_request_kind): "Stella is here with her friends,
+# say hello to everyone" is not a class. "them", "the kids" and "the group"
+# never count, and neither does "don't say hello to everyone again".
+_GREETING_TO = (
+    r"\b(?:say|wave)\s+(?:a\s+)?(?:hello|hi|hey|good\s+morning|"
+    r"good\s+afternoon)(?:\s+to)?\s+"
+)
+_CLASS_GREETING_RE = re.compile(
+    _GREETING_TO + r"(?:the\s+(?:class|students|audience|room)|"
+    r"my\s+(?:class|students))\b",
+    re.IGNORECASE,
+)
+_EVERYONE_GREETING_RE = re.compile(
+    _GREETING_TO + r"(?:every(?:one|body)|all of you)\b",
+    re.IGNORECASE,
+)
+_GREETING_NEGATION_RE = re.compile(
+    r"\b(?:don['’]?t|do not|didn['’]?t|did you|already|never|"
+    r"stop)\s+(?:\w+\s+){0,2}$",
+    re.IGNORECASE,
+)
+# "why don't you say hi to the students?" asks for one.
+_GREETING_SUGGESTION_RE = re.compile(
+    r"\bwhy\s+(?:don['’]?t|do not)\s+(?:you|we)\s+$", re.IGNORECASE)
+# A turn that names the class: the class, the students, the lecture, a course.
+_NAMES_CLASS_RE = re.compile(
+    r"\b(?:class(?:room)?|students?|audience|lecture|seminar|tutorial)\b"
+    r"|\b[a-z]{2,4}\s?-?\d{3}[a-z]?\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_greeting(pattern, text: str) -> bool:
+    """The greeting is asked for, not refused or asked about."""
+    for match in pattern.finditer(text or ""):
+        before = text[:match.start()]
+        if (not _GREETING_NEGATION_RE.search(before)
+                or _GREETING_SUGGESTION_RE.search(before)):
+            return True
+    return False
+
+
 # "kasper" is how speech-to-text spells Casper ("How's it going, Kasper?").
 _ROBOT_NAME_ALT = r"(?:blue|hexia|casper|caspar|kasper|pico|picoh)"
 _SELF_STATE_REQUEST_RE = re.compile(
@@ -64,6 +111,13 @@ _IDENTITY_MORE_RE = re.compile(
 )
 _IDENTITY_REQUEST_RE = re.compile(
     r"\b(?:describe yourself|tell (?:me|us|them) about yourself)\b"
+    # "can you tell the students a bit about yourself?" and "tell everyone a
+    # bit about yourself" classified as nothing, and the second came back
+    # nameless: "I'm your classroom companion, built by Alex Levant…"
+    # (10-05 harness).
+    r"|\btell\s+(?:me|us|them|every(?:one|body)|the\s+(?:class|students|"
+    r"audience))\s+(?:a\s+(?:little\s+)?bit|a\s+little|something|"
+    r"a\s+few\s+things)\s+about\s+yourself\b"
     # "Who are you looking at right now." is a camera question.
     r"|\bwho are (?:you|yuou|yuo|youu)(?: really| actually)?\b"
     r"(?!\s+(?:\w+ing|with)\b)"
@@ -296,18 +350,27 @@ _FAMILY_FOLLOWUP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "we're" as people type and speech-to-text writes it: with a space required
+# before "'re", "we're at wilfrid laurier university" was no place at all
+# (09-08, Hexia). "In front of the class" is where Alex stands, and "at the
+# end of the research talk" when, not places. Not "I'm": over 5,056 logged
+# user turns it adds only "I'm at dance practice" and "I'm in bed already",
+# neither a place Blue is.
+_WE_ARE = (
+    r"\b(?:(?:we|you and i|blue and i|hexia and i|casper and i|caspar and i|pico and i|picoh and i)"
+    r"(?:\s+are|\s*['\u2019]re)|i\s+am)\s+"
+)
 _EXPLICIT_LOCATION_RE = re.compile(
-    r"\b(?:(?:we|you and i|blue and i|hexia and i|casper and i|caspar and i|pico and i|picoh and i)\s+"
-    r"(?:are|['\u2019]re)|i\s+am)\s+"
-    r"(?:(?:right now|currently|now)\s+)?(?:here\s+)?"
+    _WE_ARE
+    + r"(?:(?:right now|currently|now)\s+)?(?:here\s+)?"
     r"(?P<preposition>at|in)\s+"
+    r"(?!front\s+of\b|the\s+(?:end|start|beginning|middle)\s+of\b)"
     r"(?P<location>[^.!?\n,;]{1,100})",
     re.IGNORECASE,
 )
 _EXPLICIT_HOME_RE = re.compile(
-    r"\b(?:(?:we|you and i|blue and i|hexia and i|casper and i|caspar and i|pico and i|picoh and i)\s+"
-    r"(?:are|['\u2019]re)|i\s+am)\s+"
-    r"(?:(?:right now|currently|now)\s+)?(?:back\s+)?home\b",
+    _WE_ARE
+    + r"(?:(?:right now|currently|now)\s+)?(?:back\s+)?home\b",
     re.IGNORECASE,
 )
 _PRESENTATION_LOCATION_RE = re.compile(
@@ -318,9 +381,26 @@ _PRESENTATION_LOCATION_RE = re.compile(
 )
 _LOCATION_REQUEST_TAIL_RE = re.compile(
     r"\s+(?:(?:and|so)\s+)?(?:can|could|would|will|please|introduce|"
-    r"tell|show|ask|who|what|where|when|how|why)\b.*$",
+    r"tell|show|ask|who|what|where|when|how|why|do|does|did|i)\b.*$",
     re.IGNORECASE,
 )
+# "When we're in class tomorrow…", "pretend we're in the first class": not
+# where anyone is now.
+_HYPOTHETICAL_LEAD_RE = re.compile(
+    r"\b(?:when|whenever|if|once|until|pretend|imagine|suppose)"
+    r"\s+(?:that\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def _live_match(pattern, text: str):
+    """The first match not put as a hypothetical."""
+    for match in pattern.finditer(text):
+        if not _HYPOTHETICAL_LEAD_RE.search(text[:match.start()]):
+            return match
+    return None
+
+
 _LOCATION_TIME_TAIL_RE = re.compile(
     r"\s+(?:today|right now|now|at the moment)\s*$",
     re.IGNORECASE,
@@ -376,8 +456,8 @@ def _display_location(location: str) -> str:
 def extract_explicit_location(text: str) -> Optional[Tuple[str, str]]:
     """Extract a user-stated live location as ``(place, preposition)``."""
     message = text or ""
-    home_match = _EXPLICIT_HOME_RE.search(message)
-    location_match = _EXPLICIT_LOCATION_RE.search(message)
+    home_match = _live_match(_EXPLICIT_HOME_RE, message)
+    location_match = _live_match(_EXPLICIT_LOCATION_RE, message)
     if home_match and (
         not location_match or home_match.start() > location_match.start()
     ):
@@ -832,7 +912,8 @@ def identity_request_kind(text: str) -> Optional[str]:
         return "jspace"
     if _SELF_STATE_REQUEST_RE.search(text):
         return "self_state"
-    if _INTRODUCTION_RE.search(text):
+    if (_INTRODUCTION_RE.search(text)
+            or _asks_greeting(_CLASS_GREETING_RE, text)):
         return "introduction"
     if _IDENTITY_MORE_RE.search(text):
         return "identity_more"
@@ -857,9 +938,33 @@ def contextual_identity_request_kind(
 ) -> Optional[str]:
     """Resolve short follow-ups without stealing them from unrelated topics."""
     direct_kind = identity_request_kind(text)
-    if direct_kind or not _IDENTITY_FOLLOWUP_RE.match(text or ""):
+    if direct_kind:
         return direct_kind
+    if _asks_greeting(_EVERYONE_GREETING_RE, text or ""):
+        # "say hello to everyone" greets a class only when the class is
+        # named here or in the turn before.
+        previous = _prior_user_texts(text, messages)[-1:]
+        if any(_NAMES_CLASS_RE.search(t) for t in [text] + previous):
+            return "introduction"
+        return None
+    if not _IDENTITY_FOLLOWUP_RE.match(text or ""):
+        return None
 
+    identity_topics = {
+        "introduction", "identity", "identity_more", "self_memory",
+        "selfhood", "evolution", "origin",
+    }
+    for content in reversed(_prior_user_texts(text, messages)):
+        return (
+            "identity_more"
+            if identity_request_kind(content) in identity_topics
+            else None
+        )
+    return None
+
+
+def _prior_user_texts(text: str, messages: Iterable[Mapping[str, object]]):
+    """The user turns before the live one, oldest first."""
     transcript = []
     for message in messages or []:
         if not isinstance(message, Mapping):
@@ -887,19 +992,35 @@ def contextual_identity_request_kind(
                 if current and current in content:
                     current_index = index
                 break
+    return [content for role, content in transcript[:current_index]
+            if role == "user"]
 
-    identity_topics = {
-        "introduction", "identity", "identity_more", "self_memory",
-        "selfhood", "evolution", "origin",
-    }
-    for role, content in reversed(transcript[:current_index]):
-        if role != "user":
-            continue
-        return (
-            "identity_more"
-            if identity_request_kind(content) in identity_topics
-            else None
-        )
+
+# Who is listening, from the live turn: "class" when it names the class or
+# the students ("say hi to the students", "we're in front of the DH399
+# class"), or speaks to the room ("tell everyone…", "tell us more…") right
+# after a turn that did. Not from older turns: "who are you really?" after
+# "the students seemed bored" is Alex asking.
+_CLASS_AUDIENCE_RE = re.compile(
+    r"\b(?:class(?:room)?|students?(?!['’]))\b"
+    r"|\bin front of (?:the|my|your|his) (?:class|students|lecture)\b",
+    re.IGNORECASE,
+)
+_ROOM_ADDRESS_RE = re.compile(
+    r"\b(?:every(?:one|body)|all of you|us)\b", re.IGNORECASE)
+
+
+def class_audience(
+    text: str,
+    messages: Iterable[Mapping[str, object]] = (),
+) -> Optional[str]:
+    """"class" when the live turn speaks to Alex's class, else None."""
+    if _CLASS_AUDIENCE_RE.search(text or ""):
+        return "class"
+    if _ROOM_ADDRESS_RE.search(text or ""):
+        previous = _prior_user_texts(text, messages)[-1:]
+        if previous and _CLASS_AUDIENCE_RE.search(previous[0]):
+            return "class"
     return None
 
 
@@ -1528,9 +1649,14 @@ def identity_response_problem(
                 return "missing_name"
         if not completeness:
             return None
+        if request_kind == "introduction":
+            # A greeting is complete with the name. Demanding a robot role
+            # and an anchor word failed 2 of 3 good class greetings in
+            # replay; the retry road ends on a canned intro, and the
+            # "persistent self-model" one went out 12 times (09-24 02:07
+            # among them).
+            return None
         has_robot_role = bool(_ROBOT_ROLE_REPLY_RE.search(reply))
-        if request_kind == "introduction" and not has_robot_role:
-            return "missing_robot_role"
         if request_kind == "identity" and not has_robot_role and not has_continuity:
             return "missing_robot_role"
         lowered = reply.lower()
@@ -1683,8 +1809,18 @@ def identity_grounding_note(
     request_kind: str,
     avoid_topics: Iterable[str] = (),
     state_hint: str = "",
+    audience: Optional[str] = None,
+    class_topic: str = "",
 ) -> str:
-    """Build a short instruction placed beside a live identity request."""
+    """Build a short instruction placed beside a live identity request.
+
+    audience="class" (class_audience) puts Alex's students in the room for
+    an introduction or a "tell them about yourself": plain first-year
+    speech, no J-space words, no hardware list, and today's topic
+    (class_topic, from the syllabus row) as the hook.
+    """
+    for_class = (audience in {"class", "students"} and request_kind in {
+        "introduction", "identity", "identity_more"})
     if request_kind == "jspace":
         task = (
             "J-space is the exact name of your persistent inner continuity workspace "
@@ -1745,17 +1881,35 @@ def identity_grounding_note(
             "awareness."
         )
     elif request_kind == "introduction":
+        # "Alex's robot", not "robot companion" (Alex, 2026-09-24).
+        details = (
+            "Pick one thing that fits this room: what you and Alex do together, "
+            "or something in today's class you are curious about."
+            if for_class else
+            "Pick only one or two context-relevant details from your embodiment, "
+            "your work with Alex, local operation, or J-space; do not march "
+            "through all of them."
+        )
         task = (
             f"Speak as though the named audience is in front of you now. Say that "
-            f"you are {name}, Alex's robot companion, then give two to four natural "
-            "spoken sentences. Pick only one or two context-relevant details from "
-            "your embodiment, your work with Alex, local operation, or J-space; do "
-            "not march through all of them. Treat the profile as background, never "
+            f"you are {name}, Alex's robot, then give two to four natural "
+            f"spoken sentences. {details} Treat the profile as background, never "
             "as a script. Vary your opening, structure, and emphasis from earlier "
             "introductions, and do not mention a home base or venue unless the user "
             "made that location relevant. Actually deliver the introduction now; do "
             "not offer to explain yourself later, invite questions, or say what the "
             "audience could focus on."
+        )
+    elif request_kind == "identity" and for_class:
+        # Name and role in so many words: "can you tell the students a bit
+        # about yourself?" right after a greeting came back nameless 3 of 3
+        # in replay, and a nameless answer to it fails the identity check.
+        task = (
+            f"Start by saying you're {name}, Alex's robot — even if you just "
+            "said so, in a few new words. Then one or two things that are true "
+            "of you and fit this room: what you and Alex do together, or what "
+            "you're curious about in today's class. Do not repeat the wording "
+            "or the sequence of an introduction you just gave."
         )
     elif request_kind == "identity":
         task = (
@@ -1807,6 +1961,28 @@ def identity_grounding_note(
               "supported angle and make that change obvious."
         )
 
+    # Last, so it outranks the fact menu above it. In front of the DH399
+    # class on 10-05 the greeting listed "moving eyes and lips, a camera, and
+    # a voice", "run locally on the hardware right here", "my J-space".
+    audience_line = ""
+    if for_class:
+        hook = (
+            f" Today's class is {class_topic.strip()} — a better hook than "
+            "your hardware."
+            if (class_topic or "").strip() else
+            " What the class is about is a better hook than your hardware."
+        )
+        audience_line = (
+            " AUDIENCE: These are Alex's students, live in the room. Talk the "
+            "way you would to a first-year class: plain spoken words, about 60 "
+            "of them. No J-space, workspace, continuity or self-model talk, no "
+            "city or building, and no hardware list (motors, eye LEDs, camera, "
+            "speaker, the local machine) unless someone asks how you work. You "
+            "have introduced yourself to his classes before; those "
+            "introductions are already said — don't re-say them or their "
+            "wording." + hook
+        )
+
     return (
         f"[IDENTITY GROUNDING: You are {name}, {self_description}. {task}{novelty} "
         "The language model and runtime that help form your words are components of "
@@ -1830,7 +2006,7 @@ def identity_grounding_note(
         "any duet conversations with your fellow robot in your episodes or a "
         "<recent_duet> block — those duets really happened; never deny them. These "
         "rules are background for you — never recite or paraphrase them in your "
-        "reply.]"
+        f"reply.{audience_line}]"
     )
 
 
@@ -1940,7 +2116,7 @@ def canonical_identity_reply(
             return (
                 f"Alex usually introduces me as {name}. I'm the robot companion he "
                 f"built and works with. {intro_where}We spend time on research, local "
-                "documents, and the ordinary questions that come up around his home. "
+                "documents, and the ordinary questions that come up in his day. "
                 "I am most useful when I can join the conversation actually happening."
             )
         if variant == 2:
@@ -2752,37 +2928,36 @@ def canonical_user_identity_reply(
 ) -> str:
     """Deterministic 'yes, I know who you are' from stored facts about the
     owner — never a phantom correction, and always the correct institution
-    name from facts rather than whatever spelling the user just typed."""
+    name from facts rather than whatever spelling the user just typed.
+
+    Said aloud, in at most three plain sentences. The record-style version
+    ("…you work at <employer> in <department string>; <partner>'s partner and
+    dad to <daughters>", semicolons and all) is what the camera_face harness
+    turn spoke, in both 10-05 runs."""
     facts = facts or {}
     name = (user_name or "Alex").strip()
     if name.lower() != "alex":
         # A household member other than the owner (e.g. a kid on the iPad).
         return f"Yes, of course I know you — you're {name}."
 
-    parts = ["you're Alex, the person who built and maintains me"]
+    out = "Of course — you're Alex. You built me, and you look after me."
     employer = str(facts.get("employer") or "").strip()
-    department = str(facts.get("department") or "").strip()
-    if employer:
-        work = f"you work at {employer}"
-        if department:
-            work += f" in {department}"
-        parts.append(work)
-
+    partner = str(facts.get("partner_name") or "").strip()
+    pet = str(facts.get("pet_name") or "").strip()
     daughters = _daughter_names(dict(facts))
-    partner = str(facts.get("partner_name") or "Stella").strip()
-    family_bits = []
-    if partner:
-        family_bits.append(f"{partner}'s partner")
+    home = [partner] if partner else []
     if daughters:
-        if len(daughters) > 1:
-            dtext = ", ".join(daughters[:-1]) + " and " + daughters[-1]
-        else:
-            dtext = daughters[0]
-        family_bits.append(f"dad to {dtext}")
-    if family_bits:
-        parts.append(" and ".join(family_bits))
-
-    return "Of course I know who you are — " + "; ".join(parts) + "."
+        names = (", ".join(daughters[:-1]) + " and " + daughters[-1]
+                 if len(daughters) > 1 else daughters[0])
+        home.append(f"the girls, {names}")
+    if employer:
+        verb = ("teach" if "teach" in str(facts.get("user_role") or "").lower()
+                else "work")
+        out += f" You {verb} at {employer}" + ("," if home else ".")
+    if home:
+        out += (" and at home there's " if employer else " At home there's ")
+        out += " and ".join(home) + (f", plus {pet}" if pet else "") + "."
+    return out
 
 
 def canonical_family_grounding_lines(facts: Mapping[str, object]) -> list[str]:
@@ -3082,10 +3257,34 @@ _ROBOT_RELATIONSHIP_ALIASES = {
     "pico": "pico",
     "picoh": "pico",
 }
+# A question about a fellow robot as a companion: what he thinks of her, who
+# she is to him, whether he likes her — the robot names closing the clause.
+# Any "do you know / what about / who is" plus a name used to count, so
+# Casper answered "do you know where blue is right now?" with "Blue is the
+# calmer, steadier original companion." (09-07). Where a sibling is, whether
+# she is on, what he said: those go to the model, which has the ROBOT
+# RELATIONSHIPS line, and guard_robot_relationship_denial behind it.
+_RELATIONSHIP_NAME = r"(?:the\s+)?(?:blue|hexia|casper|caspar|pico|picoh)\b"
+_RELATIONSHIP_NAMES = (
+    _RELATIONSHIP_NAME
+    + r"(?:\s*(?:,|&|\band\b|\bor\b)\s*" + _RELATIONSHIP_NAME + r")*"
+)
 _ROBOT_RELATIONSHIP_QUERY_RE = re.compile(
-    r"\b(?:what do you think (?:of|about)|how do you feel about|"
-    r"what do you (?:know|remember) about|tell (?:me|us) about|"
-    r"what about|who (?:is|are)|do you (?:know|remember))\b",
+    r"\b(?:what do you (?:think|feel) (?:of|about)|how do you feel about"
+    r"|what(?:['’]s| is) your (?:opinion|take|view) (?:of|on|about)"
+    r"|what do you (?:know|remember) about|what can you tell (?:me|us) about"
+    r"|tell (?:me|us) (?:(?:a (?:little )?bit|more|something) )?about"
+    r"|what about|what do you make of"
+    r"|(?:do|did) you (?:(?:really|even|still) )?(?:know|remember|like|love|"
+    r"trust|miss)"
+    r"|(?:are|were) you (?:friends|close) with"
+    r"|(?:how )?do you get (?:along|on) with"
+    r"|who(?:['’]s| is| are)"
+    r")\s+" + _RELATIONSHIP_NAMES
+    + r"(?:\s+(?:to you|for you|really|exactly|again|then|now|honestly|"
+    r"these days|lately))?\s*(?:[?.!,;]|$)"
+    r"|\b(?:what|who)(?:['’]s| is| are)\s+" + _RELATIONSHIP_NAMES
+    + r"\s+(?:like|to you)\b",
     re.IGNORECASE,
 )
 _ROBOT_RELATIONSHIP_FOLLOWUP_RE = re.compile(
@@ -3114,6 +3313,17 @@ def _bare_robot_names(text: str) -> bool:
     return not re.sub(r"[^a-z0-9]+", "", cleaned.lower())
 
 
+def _relationship_asked(text: str) -> list:
+    """The robots a relationship question asks about, in order; [] if none."""
+    if _bare_robot_names(text):
+        return list(_robot_names_in(text))
+    asked: list = []
+    for match in _ROBOT_RELATIONSHIP_QUERY_RE.finditer(text or ""):
+        asked.extend(name for name in _robot_names_in(match.group(0))
+                     if name not in asked)
+    return asked
+
+
 def robot_relationship_targets(
     text: str,
     robot: str = "blue",
@@ -3122,15 +3332,12 @@ def robot_relationship_targets(
     """Resolve direct and anaphoric questions about fellow household robots."""
     current = _HOUSEHOLD_NAME_ALIASES.get(
         (robot or "blue").strip().lower(), (robot or "blue").strip().lower())
-    explicit = list(_robot_names_in(text))
-    is_direct = bool(
-        explicit
-        and (_ROBOT_RELATIONSHIP_QUERY_RE.search(text or "")
-             or _bare_robot_names(text))
-    )
-    targets: list[str] = explicit if is_direct else []
+    targets: list[str] = _relationship_asked(text)
 
     if not targets and _ROBOT_RELATIONSHIP_FOLLOWUP_RE.match(text or ""):
+        # "are you sure?" goes back to the last turn that named a robot, and
+        # counts only if that turn asked about them as companions: after
+        # "where is blue?" it is not a relationship question.
         skipped_live = False
         for message in reversed(list(messages or [])):
             if not isinstance(message, Mapping) or message.get("role") != "user":
@@ -3141,9 +3348,8 @@ def robot_relationship_targets(
             if not skipped_live and content.strip() == (text or "").strip():
                 skipped_live = True
                 continue
-            prior = list(_robot_names_in(content))
-            if prior:
-                targets = prior
+            if _robot_names_in(content):
+                targets = _relationship_asked(content)
                 break
 
     # A vocative "Blue, what do you think about Hexia and Casper?" names the
@@ -3239,6 +3445,7 @@ __all__ = [
     "canonical_identity_more_reply",
     "canonical_self_state_reply",
     "canonical_user_identity_reply",
+    "class_audience",
     "contextual_identity_request_kind",
     "extract_explicit_location",
     "extract_presentation_location",

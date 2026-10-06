@@ -624,8 +624,10 @@ def test_remembered_days_says_his_introduction_was_answered(tmp_path, monkeypatc
         (_at(19, 12, 29), "user", "what are the class readings this week?"),
         (_at(19, 12, 30), "assistant", "Crawford, chapter two, on the planetary costs."),
     ])
-    live = _ask("we're in front of the DH399 class right now. do you want to "
-                "say hello to everyone?")
+    # Not a greeting: since P2-4 that is an introduction, which gets no
+    # <remembered_days> at all.
+    live = _ask("we were in front of the class here in DH201 again today, and "
+                "everyone said hello")
     days = _blocks(memory, monkeypatch, live)["remembered_days"]
     assert "  Blue: (answered)" in days
     assert "I exist here in this room" not in days
@@ -653,6 +655,7 @@ def test_remembered_days_is_honest_about_what_it_is(tmp_path):
     "how are you doing?",
     "who are you?",
     "can you tell the students a bit about yourself?",
+    "say hi to the students",
 ])
 def test_no_remembered_days_for_a_check_in_or_a_question_about_himself(
         tmp_path, monkeypatch, message):

@@ -80,6 +80,7 @@ from email.utils import getaddresses
 
 from blue_identity import (
     canonical_family_grounding_lines,
+    class_audience,
     canonical_household_reply,
     canonical_identity_reply,
     canonical_robot_relationship_reply,
@@ -5225,6 +5226,76 @@ def _syllabus_day_note(conversation_messages) -> str:
             "workspace or your earlier replies, which have been wrong about this. "
             "Otherwise ignore them.\n"
             + "\n\n".join(rows) + "\n</syllabus_day>\n")
+
+
+_COURSE_CODE_IN_TEXT_RE = re.compile(r"\b([a-z]{2,5})\s?-?(\d{3,4})[a-z]?\b", re.I)
+_ROW_DATE_LEAD_RE = re.compile(
+    rf"^\s*(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)[a-z]*,?\s+)?"
+    rf"{_MONTH_NAME_RE}\.?\s*\d{{1,2}}(?:st|nd|rd|th)?\s*[:\-–—]?\s*",
+    re.I)
+
+
+def _course_codes_in(text: str) -> List[str]:
+    return [(m.group(1) + m.group(2)).lower()
+            for m in _COURSE_CODE_IN_TEXT_RE.finditer(text or "")]
+
+
+def _class_topic_today(texts) -> str:
+    """'DH399, "What is under the hood of an AI agent? How do they work?"'.
+
+    Today's syllabus row for the class Blue is being introduced to, for the
+    class audience line (identity_grounding_note): in front of the DH399
+    class on 10-05 he talked hardware, and the day's topic is the better
+    hook. The course is the first one `texts` name (newest first), else the
+    class on the calendar right now. Nothing when neither is known or the
+    course has no row dated today: never another day's topic.
+    """
+    from datetime import date as _date
+    try:
+        index = load_document_index()
+        docs = index.get("documents", []) if isinstance(index, dict) else []
+    except Exception:
+        return ""
+    by_code: Dict[str, list] = {}
+    for d in docs:
+        if not _looks_like_syllabus_entry(d):
+            continue
+        code = _course_code_of(d) or next(
+            iter(_course_codes_in(d.get("filename") or "")), "")
+        if code:
+            by_code.setdefault(code, []).append(d)
+    if not by_code:
+        return ""
+    code = next((c for text in texts for c in _course_codes_in(text)
+                 if c in by_code), "")
+    if not code:
+        try:
+            event = _calendar_event_now()
+        except Exception as e:
+            log.warning(f"[CLASS] calendar check failed: {e}")
+            event = None
+        code = next((c for c in _course_codes_in((event or {}).get("title") or "")
+                     if c in by_code), "")
+    if not code:
+        return ""
+    for d in by_code[code]:
+        fp = d.get("filepath", "")
+        if not fp or not os.path.exists(fp):
+            continue
+        txt = _syllabus_file_text(fp)
+        heading = _SCHEDULE_HEADING_RE.search(txt)
+        if not heading:
+            continue
+        row = _syllabus_rows_for_date(
+            txt[heading.start():heading.start() + 12000], _date.today())
+        lines = [line for line in row.splitlines() if line.strip()]
+        if not lines:
+            continue
+        topic = _ROW_DATE_LEAD_RE.sub("", lines[0])
+        topic = re.sub(r"\s*\(\d+\s*pages?\)\s*$", "", topic, flags=re.I).strip()
+        if len(topic) >= 4:
+            return f'{code.upper()}, "{topic[:160]}"'
+    return ""
 
 
 def _named_syllabus(d) -> bool:
@@ -11968,6 +12039,21 @@ def _build_location_block() -> str:
     )
 
 
+def _calendar_event_now(now=None):
+    """The calendar occurrence spanning this moment, or None. Looks back far
+    enough to catch a long event that started earlier and is still running."""
+    from datetime import datetime, timedelta
+    if not globals().get("ENHANCED_TOOLS_AVAILABLE", False):
+        return None
+    from blue_tools_enhanced import occurrences_in_window
+    now = now or datetime.now()
+    for o in occurrences_in_window(now - timedelta(hours=12),
+                                   now + timedelta(minutes=1)):
+        if o["start"] <= now <= (o["end"] or o["start"]):
+            return o
+    return None
+
+
 def _build_current_activity_block() -> str:
     """Render <current_activity> — an auto-inferred sense of what's happening
     right now, from the clock and the calendar only.
@@ -11977,7 +12063,7 @@ def _build_current_activity_block() -> str:
     adds just the two things the model can't otherwise see: the part of the
     day/week, and whether a scheduled event is in progress this very moment.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
     now = datetime.now()
     hour = now.hour
     day_name = now.strftime("%A")
@@ -11993,44 +12079,38 @@ def _build_current_activity_block() -> str:
         when_phrase = f"It's {day_name} night"
     day_kind = "the weekend" if now.weekday() >= 5 else "a weekday"
 
-    # Anything on the calendar spanning right now? Look back far enough to catch
-    # a long event that started earlier and is still running.
     now_event = ""
     if globals().get("ENHANCED_TOOLS_AVAILABLE", False):
         try:
-            from blue_tools_enhanced import occurrences_in_window
-            occs = occurrences_in_window(now - timedelta(hours=12),
-                                         now + timedelta(minutes=1))
-            for o in occs:
+            o = _calendar_event_now(now)
+            if o:
                 start = o["start"]
                 end = o["end"] or start
-                if start <= now <= end:
-                    title = o["title"]
-                    # The event is the calendar owner's, not Blue's. "You're in
-                    # the middle of CS101-A" had him talking as if he sat in
-                    # Alex's lecture (5/5 on "what are you up to right now?",
-                    # 0/5 with this wording, 2026-09-25). "started" because
-                    # "until" alone read as "waiting for you to head into
-                    # CS101" at 08:37. Not %-I: it fails on Windows. The
-                    # workspace clause must not deny between-conversation
-                    # activity: <j_space> says the workspace revises itself
-                    # while he is away, and it does (the reflection worker),
-                    # and this line is up during every class demo.
-                    who = str(o.get("user_name") or "Alex").strip() or "Alex"
-                    if who.lower().startswith("alex"):
-                        who = "Alex"
-                    started = start.strftime("%I:%M %p").lstrip("0")
-                    until = (", until " + end.strftime("%I:%M %p").lstrip("0")
-                             if o["end"] else "")
-                    now_event = (
-                        f" On the calendar right now: {who}'s \"{title}\" "
-                        f"(started {started}{until}). That is {who}'s event, "
-                        "not yours, and it doesn't say where you are — only "
-                        "Alex or <location> can. Nothing is scheduled for "
-                        "you; don't present your inner workspace as an "
-                        "activity you're busy with right now."
-                    )
-                    break
+                title = o["title"]
+                # The event is the calendar owner's, not Blue's. "You're in
+                # the middle of CS101-A" had him talking as if he sat in
+                # Alex's lecture (5/5 on "what are you up to right now?",
+                # 0/5 with this wording, 2026-09-25). "started" because
+                # "until" alone read as "waiting for you to head into
+                # CS101" at 08:37. Not %-I: it fails on Windows. The
+                # workspace clause must not deny between-conversation
+                # activity: <j_space> says the workspace revises itself
+                # while he is away, and it does (the reflection worker),
+                # and this line is up during every class demo.
+                who = str(o.get("user_name") or "Alex").strip() or "Alex"
+                if who.lower().startswith("alex"):
+                    who = "Alex"
+                started = start.strftime("%I:%M %p").lstrip("0")
+                until = (", until " + end.strftime("%I:%M %p").lstrip("0")
+                         if o["end"] else "")
+                now_event = (
+                    f" On the calendar right now: {who}'s \"{title}\" "
+                    f"(started {started}{until}). That is {who}'s event, "
+                    "not yours, and it doesn't say where you are — only "
+                    "Alex or <location> can. Nothing is scheduled for "
+                    "you; don't present your inner workspace as an "
+                    "activity you're busy with right now."
+                )
         except Exception as e:
             log.warning(f"[ACTIVITY] now-event check failed: {e}")
 
@@ -12993,6 +13073,28 @@ def _chat_purge_stale_camera(conversation_messages, last_user_message):
     return conversation_messages
 
 
+def _identity_audience_for_turn(identity_kind, user_text, messages):
+    """(audience, class_topic) for identity_grounding_note: ("class", today's
+    syllabus topic or "") when an introduction or a "tell them about
+    yourself" speaks to Alex's class, else (None, "")."""
+    if identity_kind not in ("introduction", "identity", "identity_more"):
+        return None, ""
+    audience = class_audience(user_text, messages)
+    if not audience:
+        return None, ""
+    # The user's own words: the live turn may carry pinned recall blocks by
+    # now, and an old episode's course code is not today's class.
+    users = [m.get("content") for m in (messages or [])
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    earlier = [_intent_text(text) for text in reversed(users[:-1][-3:])]
+    try:
+        topic = _class_topic_today([user_text] + earlier)
+    except Exception as e:
+        log.warning(f"[IDENTITY] class topic lookup failed: {e}")
+        topic = ""
+    return audience, topic
+
+
 def _chat_self_context(conversation_messages, last_user_message, *,
                        robot, user_name):
     """Answer or pin whatever this turn asks about Blue himself.
@@ -13039,12 +13141,16 @@ def _chat_self_context(conversation_messages, last_user_message, *,
                             _ws.get("updated") or "")
                 except Exception as _hint_e:
                     log.warning(f"[IDENTITY] check-in state hint failed: {_hint_e}")
+            _audience, _class_topic = _identity_audience_for_turn(
+                _identity_kind, _luser, conversation_messages)
             _identity_note = identity_grounding_note(
                 _robot_cfg(robot)["name"],
                 _robot_cfg(robot)["self_desc"],
                 _identity_kind,
                 avoid_topics=_recent_identity_topics,
                 state_hint=_state_hint,
+                audience=_audience,
+                class_topic=_class_topic,
             )
             for _identity_i in range(len(conversation_messages) - 1, -1, -1):
                 _identity_m = conversation_messages[_identity_i]

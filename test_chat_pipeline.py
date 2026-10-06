@@ -934,14 +934,20 @@ def test_a_turn_the_selector_has_an_opinion_about_still_acts(chat):
 
 def test_a_greeting_to_the_class_is_offered_the_reflex_set_only(chat):
     """class_demo_voice[1] was offered all 54 schemas: ~19.7k prompt tokens
-    against ~13k on reflex-set turns (2026-10-05 harness)."""
+    against ~13k on reflex-set turns (2026-10-05 harness). A greeting is
+    offered the reflex set; the class greeting is an introduction since
+    P2-4, and like "introduce yourself to the class" is offered none."""
     bt.process_with_tools([{"role": "user", "content": (
-        "we're in front of the DH399 class right now. do you want to say "
-        "hello to everyone?")}], user_name="Alex")
-
+        "good morning! it's a busy day here, we're packing for the cottage")}],
+        user_name="Alex")
     offered = _tool_names(chat.model.main[-1])
     assert offered, "the device tools stay available"
     assert offered <= bt._REFLEX_TOOL_NAMES
+
+    bt.process_with_tools([{"role": "user", "content": (
+        "we're in front of the DH399 class right now. do you want to say "
+        "hello to everyone?")}], user_name="Alex")
+    assert not _tool_names(chat.model.main[-1])
 
 
 @pytest.mark.parametrize("text,greeting", [
