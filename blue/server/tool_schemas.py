@@ -980,7 +980,7 @@ RAW_TOOLS = [
         "type": "function",
         "function": {
             "name": "remember_person",
-            "description": "Learn and remember information about a person you see. Use this when the user tells you who someone is or provides information about a person. This helps you recognize them in the future.",
+            "description": "Learn and remember information about a person you see. Use this when the user tells you who someone is or provides information about a person. It saves a text profile only — it does NOT save their face; face recognition needs a reference photo on the Visual Memory page.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -990,7 +990,7 @@ RAW_TOOLS = [
                     },
                     "appearance": {
                         "type": "string",
-                        "description": "Description of how they typically look (e.g., 'woman with long brown hair', 'man with beard and glasses')"
+                        "description": "Lasting features only — hair, glasses, beard, build (e.g., 'long brown hair', 'beard and glasses'). Never clothing, costumes or what they are wearing today; leave empty if you only know their clothes."
                     },
                     "relationship": {
                         "type": "string",

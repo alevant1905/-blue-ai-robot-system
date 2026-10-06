@@ -78,3 +78,82 @@ def test_get_local_time_keeps_its_two_implementations():
     guard_at = source.index("ENHANCED_TOOLS_AVAILABLE")
     tail = source[guard_at:]
     assert tail.count("return") >= 2, "the plain fallback vanished"
+
+
+# ---- remember_person keeps a profile, never an outfit, and never a face ----------
+
+@pytest.fixture
+def visual_memory(tmp_path, monkeypatch):
+    from blue_visual_memory import VisualMemory
+    vm = VisualMemory(str(tmp_path / "visual.db"))
+    monkeypatch.setattr(bt, "VISUAL_MEMORY_AVAILABLE", True)
+    monkeypatch.setattr(bt, "get_visual_memory", lambda: vm)
+    return vm
+
+
+def _remember_person(**args):
+    import json
+    return json.loads(tool_handlers.HANDLERS["remember_person"]("remember_person", args))
+
+
+def test_remember_person_keeps_features_and_drops_what_they_wear(visual_memory):
+    result = _remember_person(name="Emmy",
+                              appearance="long brown hair, wearing a red hoodie")
+    assert result["success"] is True
+    assert visual_memory.get_person("Emmy")["typical_appearance"] == "long brown hair"
+    assert "not kept" in result["message"]
+
+
+def test_remember_person_stores_no_outfit_as_a_look(visual_memory):
+    """The 09-23 forced call wrote Clover's 'bread-bun hat and strawberry-
+    patterned skirt'."""
+    result = _remember_person(name="Clover", relationship="TA for CS101",
+                              appearance="bread-bun hat and strawberry skirt")
+    clover = visual_memory.get_person("Clover")
+    assert result["success"] is True
+    assert clover["relationship"] == "TA for CS101"
+    assert not clover["typical_appearance"]
+
+
+def test_remember_person_says_the_face_is_not_saved(visual_memory):
+    result = _remember_person(name="Clover", relationship="TA for CS101")
+    assert "face is NOT saved" in result["message"]
+    assert "Visual Memory page" in result["message"]
+    assert "recognize them in the future" not in result["message"]
+
+
+def test_remember_person_without_a_field_keeps_the_stored_one(visual_memory):
+    """add_person merges with COALESCE; the handler passed "" for a missing
+    argument, which wiped Emmy's stored look and notes."""
+    visual_memory.add_person("Emmy", typical_appearance="long brown hair with bangs",
+                             notes="loves art")
+    _remember_person(name="Emmy", relationship="daughter")
+    emmy = visual_memory.get_person("Emmy")
+    assert emmy["typical_appearance"] == "long brown hair with bangs"
+    assert emmy["notes"] == "loves art"
+    assert emmy["relationship"] == "daughter"
+
+
+def test_remember_person_needs_a_name(visual_memory):
+    assert _remember_person(appearance="beard")["success"] is False
+    assert visual_memory.get_all_people() == []
+
+
+def test_the_remember_person_schema_says_it_saves_no_face():
+    from blue.server.tool_schemas import RAW_TOOLS
+    tool = next(t for t in RAW_TOOLS if t["function"]["name"] == "remember_person")
+    text = str(tool)
+    assert "does NOT save their face" in text
+    assert "Never clothing" in text
+    assert "This helps you recognize them in the future" not in text
+
+
+def test_who_do_i_know_gives_a_look_but_never_an_outfit(visual_memory, monkeypatch):
+    import json
+    visual_memory.add_person("Clover", relationship="TA for CS101",
+                             typical_appearance="bread-bun hat and strawberry skirt")
+    visual_memory.add_person("Emmy", typical_appearance="long brown hair with bangs")
+    monkeypatch.setattr(bt, "_ACTIVE_CHAT_ROBOT", "blue", raising=False)
+    result = json.loads(tool_handlers.HANDLERS["who_do_i_know"]("who_do_i_know", {}))
+    looks = {p["name"]: p["appearance"] for p in result["people"]}
+    assert looks == {"Clover": None, "Emmy": "long brown hair with bangs"}

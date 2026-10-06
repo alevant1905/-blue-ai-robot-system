@@ -43,6 +43,94 @@ _DEFAULT_PERSON_ALIASES = {
 }
 
 
+# A person's look is what stays the same from one day to the next. What they
+# have on, and the room around them, does not: remember_person kept "TA
+# wearing a playful food-themed costume, specifically a bread-bun hat and
+# strawberry-patterned skirt" as Clover's appearance (2026-09-23), the prompt
+# carried it as her "appearance profile" from then on, and Blue named whoever
+# wore that outfit "Clover" (4/4 replays of the 09-23 camera turn on the
+# earlier model, 0/4 with the profile gone; a 10-05 harness run on the
+# current one did it again). Asked on 10-05 to "remember what she looks
+# like", the model filed "bread-bun hat, strawberry skirt" as a fact.
+_CLOTHING_RE = re.compile(
+    r"\b(?:outfits?|costumes?|clothes|clothing|dressed|attire|uniforms?"
+    r"|shirts?|t-shirts?|tees?|hoodies?|sweaters?|sweatshirts?|jumpers?"
+    r"|cardigans?|blouses?|skirts?|dress(?:es)?|jackets?|coats?|blazers?"
+    r"|vests?|suits?|pants|trousers|jeans|shorts|leggings|shoes|sneakers"
+    r"|boots|sandals|socks|hats?|caps?|beanies?|hoods?|scarf|scarves|gloves"
+    r"|ties?|pajamas|pyjamas)\b", re.I)
+_WORN_RE = re.compile(r"\b(?:wear|wears|wearing|wore|worn)\b", re.I)
+# Worn, but part of how someone looks: "does not wear glasses" is a stored
+# correction about Felix.
+_WORN_FEATURE_RE = re.compile(
+    r"\b(?:glasses|spectacles|eyeglasses|contacts|contact lenses"
+    r"|hearing aids?|braces)\b", re.I)
+_SCENE_RE = re.compile(
+    r"\b(?:sits?|sitting|seated|stands?|standing|smiling|holding|chairs?"
+    r"|desks?|walls?|bookshel(?:f|ves)|background|monitors?|office|room"
+    r"|lecture hall|classroom)\b", re.I)
+_CLAUSE_BREAK_RE = re.compile(
+    r"(\s*[;,/]\s*|\s+(?:and|with)\s+|\s+[—–-]\s+|\.\s+"
+    r"|\s+(?=(?:wearing|dressed)\b))", re.I)
+# What a look is made of. A fact filed under a look key must name one:
+# "TA for CS101" is a role, whatever key it was saved under.
+_LOOK_FEATURE_RE = re.compile(
+    r"\b(?:hair|haired|bald|balding|bangs|fringe|ponytail|braids?"
+    r"|dreadlocks|curly|wavy|straight|blond|blonde|brunette|redhead|ginger"
+    r"|beard|bearded|mustache|moustache|stubble|goatee|glasses|spectacles"
+    r"|eyes?|eyebrows|freckles|tall|short|height|build|slim|stocky|petite"
+    r"|skin|complexion|tattoos?|scars?|braces)\b", re.I)
+_LOOK_KEY_WORDS = {"appearance", "look", "looks", "face", "faces"}
+
+
+def lasting_appearance(text: str):
+    """Split a description of someone into what lasts and what they had on.
+
+    Returns (kept, dropped): `kept` is the description with every clause
+    that names clothing, or the scene around the person, taken out, in the
+    original wording; `dropped` lists the clauses taken out. "long brown
+    hair, wearing a red hoodie" keeps "long brown hair"; "bread-bun hat and
+    strawberry skirt" keeps nothing. A clause mixing the two ("wears a hat
+    and glasses" is split, "a cap over curly hair" is not) is dropped whole.
+    Once clothes were taken out, what is left must name a feature: "TA
+    wearing a playful food-themed costume…" keeps nothing, not "TA". A
+    description with no clothes in it stays whole ("black dog").
+    """
+    parts = _CLAUSE_BREAK_RE.split(str(text or "").strip())
+    kept, dropped = [], []
+    # parts alternates clause, separator, clause, ...: a kept clause keeps
+    # the separator before it, unless it is the first one kept.
+    for i in range(0, len(parts), 2):
+        clause = parts[i].strip()
+        if not clause:
+            continue
+        if (_CLOTHING_RE.search(clause) or _SCENE_RE.search(clause)
+                or (_WORN_RE.search(clause)
+                    and not _WORN_FEATURE_RE.search(clause))):
+            dropped.append(clause)
+            continue
+        if kept and i > 0:
+            kept.append(parts[i - 1])
+        kept.append(clause)
+    kept_text = "".join(kept).strip(" .;,")
+    if dropped and kept_text and not _LOOK_FEATURE_RE.search(kept_text):
+        return "", dropped + [kept_text]
+    return kept_text, dropped
+
+
+def is_look_fact_key(fact_key: str) -> bool:
+    """'clover_appearance', 'what_she_looks_like', 'emmy_face'."""
+    words = set(re.split(r"[^a-z]+", str(fact_key or "").lower()))
+    return bool(words & _LOOK_KEY_WORDS)
+
+
+def look_fact_value(value: str) -> str:
+    """What may be kept of a fact filed under a look key: its lasting
+    features, or nothing when no feature is named at all."""
+    kept, _dropped = lasting_appearance(value)
+    return kept if _LOOK_FEATURE_RE.search(kept) else ""
+
+
 class VisualMemory:
     """Manages Blue's visual memory - what he knows about people, places, and things."""
 
@@ -790,6 +878,20 @@ class VisualMemory:
                     break
         return matched
 
+    def has_face_reference(self, name: str) -> bool:
+        """True when this person (or an alias of them) has a reference photo
+        on disk — the only thing face recognition can name them from."""
+        canonical = self.resolve_person_name(name).casefold()
+        if not canonical:
+            return False
+        for person in self.get_recognition_people():
+            # "Alex (Doctor Levant)" is Alex.
+            base = re.sub(r"\s*\([^)]*\)\s*$", "", person["name"]).casefold()
+            if canonical in (person["name"].casefold(), base):
+                path = person.get("image_path")
+                return bool(path and os.path.exists(path))
+        return False
+
     def get_people_memory_context(self, observer: str,
                                   max_people: int = 16) -> str:
         """Compact bridge from the shared face gallery into one robot's memory."""
@@ -801,15 +903,14 @@ class VisualMemory:
             name = person["name"]
             bits = []
             relationship = str(person.get("relationship") or "").strip()
-            appearance = str(
-                person.get("typical_appearance")
-                or person.get("description")
-                or ""
-            ).strip()
             if relationship:
                 bits.append(relationship[:120])
-            if appearance:
-                bits.append(f"appearance profile: {appearance[:180]}")
+            # No "appearance profile": a text description beside a camera
+            # caption is how Blue named someone from her outfit ("I'm looking
+            # at Clover … wearing that playful bread-bun hat … again", 10-05).
+            # The rule below forbade it and lost to the description sitting
+            # next to it. who_do_i_know still answers "what does Emmy look
+            # like?".
             enrolled = bool(
                 person.get("image_path") and os.path.exists(person["image_path"])
             )
@@ -817,7 +918,7 @@ class VisualMemory:
                 "visual reference stored; the face engine may name them only "
                 "after it extracts and matches a usable human-face embedding"
                 if enrolled else
-                "no face reference enrolled; appearance notes alone must not be used to guess"
+                "no face reference enrolled, so you can't recognize them by face"
             )
             sighting = self.get_person_sighting(name, observer)
             if sighting:
@@ -841,10 +942,10 @@ class VisualMemory:
             return ""
         return (
             f'<visual_people_memory observer="{observer}">\n'
-            "Shared appearance profiles and face references are semantic household "
+            "Who these people are and whose face is enrolled is shared household "
             "memory. Sighting times below are YOUR camera history only. Name someone "
             "from a live image only when face recognition reports an enrolled match; "
-            "never guess from age, gender, clothing, or these text descriptions.\n"
+            "never guess from age, gender, clothing, or a text description.\n"
             + "\n".join(lines)
             + "\n</visual_people_memory>"
         )
@@ -883,8 +984,14 @@ class VisualMemory:
         
         return dict(row) if row else None
     
-    def get_recognition_context(self) -> str:
-        """Get formatted context for visual recognition."""
+    def get_recognition_context(self, include_appearance: bool = True) -> str:
+        """Get formatted context for visual recognition.
+
+        include_appearance=False leaves out each person's stored look. With
+        the face engine running, it is what tells the model who is in view;
+        a look printed beside the camera image only invites naming someone
+        from their clothes.
+        """
         people = self.get_recognition_people()
         places = self.get_all_places()
         
@@ -896,8 +1003,10 @@ class VisualMemory:
                 parts = [f"• {person['name']}"]
                 if person['relationship']:
                     parts.append(f"({person['relationship']})")
-                if person['typical_appearance']:
-                    parts.append(f"- Appearance: {person['typical_appearance']}")
+                appearance = (lasting_appearance(person['typical_appearance'])[0]
+                              if include_appearance else "")
+                if appearance:
+                    parts.append(f"- Appearance: {appearance}")
                 if person['description']:
                     parts.append(f"- {person['description']}")
                 if person['common_locations']:

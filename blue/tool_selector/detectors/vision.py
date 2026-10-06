@@ -34,6 +34,48 @@ _NOT_A_NAME_RE = re.compile(
     r"(?:\s+[a-z][a-z'\-]{1,20})?\s*[.!?]*\s*$")
 
 
+# ---- A request to learn someone's face ("remember what she looks like") ----
+# Nothing said in chat can save a face, so the reply has to say so and point
+# at the Visual Memory page; bluetools adds a FACE REQUEST note when this
+# matches. The real requests: "I want you to remember what she looks like so
+# next time you can recognize her can you do that?" (09-23), five on 05-24.
+# A save verb, not keep/record ("keep his face out of the photos", "record
+# her face for the video"); a person, not "this room" or "that painting".
+_FACE_REQUEST_RE = re.compile(
+    r"\b(?:remember|memori[sz]e|learn|save)\b[^.!?]{0,25}?"
+    r"(?:\bwhat\s+(?:she|he|they|i|(?!(?:it|this|that|these|those|you|we|the"
+    r"|a|an|my|your|our|his|her|their|everything|everyone|everybody|anyone"
+    r"|anybody|someone|somebody|people)\b)[a-z][a-z'\-]+)\s+looks?\s+like\b"
+    r"|\b(?:her|his|their|my"
+    r"|(?!(?:it|that|what|there|here|who|she|he|let)['’]s)[a-z][a-z\-]+['’]s)"
+    r"\s+face\b)"
+    r"|\bso\s+(?:that\s+)?(?:next\s+time\s+)?you(?:\s+(?:can|will|could)|['’]ll)?\s+"
+    r"(?:recogni[sz]e|know|identify)\s+(?:her|him|them|me)\b"
+    r"\s*(?:next\s+time|in\s+the\s+future|by\s+face|[.!?]|$)", re.I)
+# Not a request: a negation near the face, a recall question ("do you
+# remember what she looks like?"), a capability question.
+_FACE_NOT_NOW_RE = re.compile(
+    r"\b(?:don['’]?t|do\s+not|never|stop|forget|delete)\b[^.!?]{0,30}"
+    r"\b(?:face|looks?|recogni[sz]e)"
+    r"|\b(?:do|did|does)\s+(?:you|u)\s+(?:still\s+)?(?:remember|recall|know)\b"
+    r"|\bcan\s+you\s+recogni[sz]e\s+(?:faces|people)\b", re.I)
+# The speaker's own face: "remember my face", "so you know me next time".
+_OWN_FACE_RE = re.compile(
+    r"\bmy\s+face\b|\bwhat\s+i\s+look\s+like\b"
+    r"|\b(?:recogni[sz]e|know|identify)\s+me\b", re.I)
+
+
+def is_face_request(text: str) -> bool:
+    """True when the user asks Blue to learn what someone looks like."""
+    text = text or ""
+    return bool(_FACE_REQUEST_RE.search(text)) and not _FACE_NOT_NOW_RE.search(text)
+
+
+def is_own_face_request(text: str) -> bool:
+    """A face request about the speaker ("remember my face")."""
+    return is_face_request(text) and bool(_OWN_FACE_RE.search(text or ""))
+
+
 def extract_camera_view_args(msg_lower: str) -> dict:
     """Pull camera view-control params (look / zoom / zoom_region) out of a
     message. Empty dict when none are present (plain straight-on capture)."""

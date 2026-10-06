@@ -142,3 +142,50 @@ def test_the_tool_survives_the_conversational_reflex_filter():
     turn only offers the reflex set. A tool missing from it cannot be called
     where it matters most."""
     assert "remember_fact" in bt._REFLEX_TOOL_NAMES
+
+
+# ---------------------------------------------------- a look is not an outfit
+
+def test_an_outfit_filed_as_a_look_is_not_saved(monkeypatch):
+    """Harness 10-05, "remember what she looks like so next time you
+    recognize her": the model filed Clover's outfit as a household fact and
+    said "I've got her look on file". In <known_facts> that outfit would
+    name whoever wears it next."""
+    called = []
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: called.append(facts) or True)
+
+    result = json.loads(bt.execute_tool("remember_fact", {
+        "fact_key": "clover_appearance",
+        "fact_value": ("TA for CS101; playful food-themed outfit — bread-bun hat "
+                       "and strawberry-patterned skirt, sitting in office chair "
+                       "by white brick wall and bookshelf")}))
+
+    assert result["success"] is False
+    assert not called
+    assert "Visual Memory page" in result["message"]
+
+
+def test_a_look_keeps_its_lasting_features(monkeypatch):
+    written = {}
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: written.update(facts) or True)
+
+    result = json.loads(bt.execute_tool("remember_fact", {
+        "fact_key": "emmy_appearance",
+        "fact_value": "long brown hair with bangs, wearing a red hoodie"}))
+
+    assert written == {"emmy_appearance": "long brown hair with bangs"}
+    assert result["success"] is True
+    assert "not a face" in result["message"]
+
+
+def test_a_fact_about_clothes_that_is_not_a_look_is_saved_as_given(monkeypatch):
+    written = {}
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: written.update(facts) or True)
+
+    bt.execute_tool("remember_fact", {"fact_key": "emmy_dance_outfit",
+                                      "fact_value": "blue leotard and tights"})
+
+    assert written == {"emmy_dance_outfit": "blue leotard and tights"}

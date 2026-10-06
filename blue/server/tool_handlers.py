@@ -604,6 +604,30 @@ def _tool_remember_fact(tool_name, tool_args):
             "message": "Nothing saved - both fact_key and fact_value are required.",
         })
 
+    # "remember what she looks like" was filed as clover_appearance = "TA for
+    # CS101; playful food-themed outfit — bread-bun hat and strawberry-
+    # patterned skirt, sitting in office chair…" (harness, 10-05). In
+    # <known_facts> that outfit names whoever wears it next. A look keeps
+    # its lasting features only; with none named, nothing is saved.
+    from blue_visual_memory import is_look_fact_key, look_fact_value
+    if is_look_fact_key(fact_key):
+        lasting = look_fact_value(fact_value)
+        if not lasting:
+            print(f"   [FACT] not saving a look with no lasting feature: "
+                  f"{fact_key}={fact_value!r}")
+            return json.dumps({
+                "success": False,
+                "message": (
+                    f"Nothing saved - {fact_key} described clothes or the "
+                    "scene, and clothes are not how someone looks. A face "
+                    "can't be saved from a description either: you can "
+                    "recognize someone only after a reference photo is added "
+                    "on your Visual Memory page. Say plainly that it is not "
+                    "saved."
+                ),
+            })
+        fact_value = lasting
+
     try:
         # An explicit "remember that …" is the one write allowed to move a
         # stored birth year to match a stated age.
@@ -635,33 +659,59 @@ def _tool_remember_fact(tool_name, tool_args):
         "message": (
             f"Saved: {fact_key} = {fact_value}. This is now authoritative and "
             "overrides older mentions in conversation history."
+            + (" It is a text note, not a face: recognizing someone by face "
+               "still needs a reference photo on your Visual Memory page."
+               if is_look_fact_key(fact_key) else "")
         ),
     })
 
 
 def _tool_remember_person(tool_name, tool_args):
     if bt.VISUAL_MEMORY_AVAILABLE:
-        name = tool_args.get("name", "")
-        appearance = tool_args.get("appearance", "")
-        relationship = tool_args.get("relationship", "")
-        notes = tool_args.get("notes", "")
+        from blue_visual_memory import lasting_appearance
+
+        name = (tool_args.get("name") or "").strip()
+        # What someone has on is not how they look: the 09-23 call stored
+        # Clover's "bread-bun hat and strawberry-patterned skirt", and the
+        # prompt then named whoever wore that outfit "Clover".
+        appearance, worn = lasting_appearance(tool_args.get("appearance") or "")
+        relationship = (tool_args.get("relationship") or "").strip()
+        notes = (tool_args.get("notes") or "").strip()
+        if not name:
+            return json.dumps({
+                "success": False,
+                "message": "Nothing saved - a person needs a name.",
+            })
 
         try:
             vm = bt.get_visual_memory()
-            vm.add_person(
+            # None, not "", for anything not given: add_person merges with
+            # COALESCE, and an empty string wiped the stored value.
+            saved = vm.add_person(
                 name=name,
-                typical_appearance=appearance,
-                relationship=relationship,
-                notes=notes
+                typical_appearance=appearance or None,
+                relationship=relationship or None,
+                notes=notes or None,
             )
-            print(f"   [OK] Remembered person: {name}")
-            return json.dumps({
-                "success": True,
-                "message": (
-                    f"I'll remember {name}'s profile. Reliable automatic face "
-                    "recognition also requires a clear enrolled reference photo."
-                )
-            })
+            if not saved:
+                return json.dumps({
+                    "success": False,
+                    "message": f"Nothing saved - {name}'s profile could not be written.",
+                })
+            print(f"   [OK] Remembered person: {name}"
+                  + (f" (not kept as their look: {'; '.join(worn)})" if worn else ""))
+            if vm.has_face_reference(name):
+                face = (f"{name} already has a reference photo, so face "
+                        f"recognition can name {name} on camera.")
+            else:
+                face = (f"This is a text profile only - {name}'s face is NOT "
+                        "saved, and you can't recognize them by face until a "
+                        "reference photo is added on your Visual Memory page.")
+            message = f"Saved {name}'s profile. {face}"
+            if worn:
+                message += (" What they are wearing was not kept: clothes are "
+                            "not how someone looks.")
+            return json.dumps({"success": True, "message": message})
         except Exception as e:
             return json.dumps({
                 "success": False,
@@ -698,6 +748,8 @@ def _tool_remember_place(tool_name, tool_args):
 
 def _tool_who_do_i_know(tool_name, tool_args):
     if bt.VISUAL_MEMORY_AVAILABLE:
+        from blue_visual_memory import lasting_appearance
+
         try:
             vm = bt.get_visual_memory()
             people = vm.get_recognition_people()
@@ -711,7 +763,10 @@ def _tool_who_do_i_know(tool_name, tool_args):
                 result["people"].append({
                     "name": person['name'],
                     "relationship": person['relationship'],
-                    "appearance": person['typical_appearance'],
+                    # A look, never an outfit ("what does Emmy look like?"
+                    # still gets "long brown hair with bangs").
+                    "appearance": lasting_appearance(
+                        person['typical_appearance'] or "")[0] or None,
                     "visual_reference_stored": bool(
                         person.get('image_path')
                         and os.path.exists(person['image_path'])

@@ -159,6 +159,114 @@ def test_no_face_is_said_to_be_saved_without_a_reference_photo():
     assert "Visual Memory page" in rule
 
 
+# ---- "remember what she looks like" (harness camera_face, 2026-10-05) -------------
+
+@pytest.fixture
+def people(tmp_path, monkeypatch):
+    """Clover with no photo, Felix with one, and Blue's own row (the people
+    table really has one)."""
+    from blue_visual_memory import VisualMemory
+    vm = VisualMemory(str(tmp_path / "visual.db"))
+    vm.add_person("Clover", relationship="TA for CS101",
+                  typical_appearance="bread-bun hat and strawberry-patterned skirt")
+    vm.add_person("Blue", relationship="educational AI robot")
+    vm.add_person("Felix", relationship="Alex's brother")
+    photo = tmp_path / "felix.jpg"
+    photo.write_bytes(b"reference")
+    vm.set_entity_image("person", vm.get_person("Felix")["id"], str(photo))
+    monkeypatch.setattr(bt, "VISUAL_MEMORY_AVAILABLE", True)
+    monkeypatch.setattr(bt, "FACE_RECOGNITION_AVAILABLE", True)
+    monkeypatch.setattr(bt, "get_visual_memory", lambda: vm)
+    return vm
+
+
+def _thread_system_text(texts, user="Alex", voice=False):
+    msgs = []
+    for i, text in enumerate(texts):
+        msgs.append({"role": "user", "content": text})
+        if i < len(texts) - 1:
+            msgs.append({"role": "assistant", "content": "Nice to meet you."})
+    out = bt._chat_system_message(msgs, robot="blue", user_name=user, voice=voice,
+                                  language="", system_addendum="", heard=False)
+    return out[0]["content"]
+
+
+CLOVER_THREAD = ["that's Clover, she's a TA for CS101",
+                 "remember what she looks like so next time you recognize her"]
+
+
+def test_a_face_request_is_told_nothing_here_saves_a_face(people):
+    text = _thread_system_text(CLOVER_THREAD)
+    note = text[text.index("FACE REQUEST:"):]
+    assert "Nothing you say here saves a face" in note
+    assert "Clover has no reference photo yet" in note
+    assert "press 'Use Blue's camera'" in note
+    assert "Don't describe Clover's clothes" in note
+    assert text.rstrip().endswith("No emoji."), "the style note stays last"
+
+
+def test_a_spoken_face_request_keeps_the_spoken_note_last(people):
+    text = _thread_system_text(CLOVER_THREAD, voice=True)
+    assert text.index("FACE REQUEST:") < text.index("SPOKEN REPLY:")
+    assert text.rstrip().endswith("no follow-up question unless you need one to go on.")
+
+
+def test_the_name_is_found_when_it_is_typed_in_lower_case(people):
+    text = _thread_system_text(["that's clover, she's a ta for cs101",
+                                "remember what she looks like"])
+    assert "Clover has no reference photo yet" in text
+
+
+def test_the_robot_is_never_the_person_to_remember(people):
+    text = _thread_system_text(["blue, remember what she looks like"])
+    assert "This person has no reference photo yet" in text
+    assert "Blue has no reference photo" not in text
+
+
+def test_an_enrolled_person_is_said_to_be_enrolled(people):
+    text = _thread_system_text(["this is my brother Felix", "remember his face"])
+    assert "FACE REQUEST: Felix is already enrolled" in text
+    assert "Nothing you say here saves a face" not in text
+
+
+def test_no_face_request_note_on_a_question_or_for_vilda(people):
+    assert "FACE REQUEST" not in _thread_system_text(
+        ["that's Clover", "do you remember what she looks like?"])
+    assert "FACE REQUEST" not in _thread_system_text(CLOVER_THREAD, user="Vilda")
+
+
+def test_no_face_request_note_without_a_face_engine(people, monkeypatch):
+    """No photo would make Blue know anyone by face then."""
+    monkeypatch.setattr(bt, "FACE_RECOGNITION_AVAILABLE", False)
+    assert "FACE REQUEST" not in _thread_system_text(CLOVER_THREAD)
+
+
+def test_a_request_about_the_speakers_face_names_the_speaker(people):
+    text = _thread_system_text(["remember my face so you can recognize me"],
+                               user="Stella")
+    assert "Stella has no reference photo yet" in text
+
+
+def test_the_face_rule_gives_the_real_path_and_forbids_naming_by_clothes(monkeypatch):
+    monkeypatch.setattr(bt, "FACE_RECOGNITION_AVAILABLE", True)
+    text = _system_text()
+    rule = text[text.index("FACE RECOGNITION:"):]
+    rule = rule[:rule.index("\n")]
+    assert "press 'Use Blue's camera'" in rule
+    assert "Nothing you say in conversation saves a face" in rule
+    assert "never name someone from their clothes" in rule
+
+
+def test_a_named_person_shows_no_outfit_as_their_look(people):
+    """<visual_memory> for "that's Clover…" printed "TA wearing a playful
+    food-themed costume, specifically a bread-bun hat and strawberry-patt"
+    (camera_face[1], 10-05)."""
+    block = bt._visual_context_block("that's Clover, she's a TA for CS101",
+                                     observer="blue")
+    assert "Clover (person): TA for CS101" in block
+    assert "bread-bun" not in block
+
+
 def test_the_light_moods_are_left_to_the_tool_schema():
     from blue.server.tool_schemas import RAW_TOOLS
     lights = next(t for t in RAW_TOOLS if t["function"]["name"] == "control_lights")

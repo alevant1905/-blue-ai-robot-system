@@ -150,7 +150,8 @@ from google.auth.transport.requests import Request
 
 # Visual Memory System (if available)
 try:
-    from blue_visual_memory import get_visual_memory, VisualMemory, VISUAL_REF_DIR
+    from blue_visual_memory import (get_visual_memory, VisualMemory, VISUAL_REF_DIR,
+                                    lasting_appearance)
     VISUAL_MEMORY_AVAILABLE = True
     print("[OK] Visual memory system loaded - Blue can now recognize people and places!")
 except ImportError:
@@ -3746,7 +3747,11 @@ def _visual_context_block(text: str, max_entities: int = 4,
                     bits.append(f"last recorded {str(e['last_seen'])[:16]}")
                 if sighting and sighting.get('times_seen'):
                     bits.append(f"recognized {sighting['times_seen']} times by you")
-                desc = (e.get('typical_appearance') or e.get('description') or '').strip()
+                # A named person keeps their look here ("what does Emmy look
+                # like?"), but never what they had on: Clover's stored look
+                # was a bread-bun hat and a strawberry skirt.
+                desc = (lasting_appearance(e.get('typical_appearance') or '')[0]
+                        or e.get('description') or '').strip()
                 if desc:
                     bits.append(desc[:90])
                 if kind == 'person':
@@ -10552,7 +10557,11 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
             if VISUAL_MEMORY_AVAILABLE:
                 try:
                     vm = get_visual_memory()
-                    recognition_context = "\n\n" + vm.get_recognition_context()
+                    # With the face engine running, the engine says who is
+                    # in view; a stored look beside the image only invites
+                    # naming someone from what they are wearing.
+                    recognition_context = "\n\n" + vm.get_recognition_context(
+                        include_appearance=not FACE_RECOGNITION_AVAILABLE)
 
                     # Get list of known people for enhanced understanding
                     people = vm.get_all_people()
@@ -12557,16 +12566,25 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     # flatly denies having any facial recognition. Phrased to avoid the opposite
     # error (claiming to recognize a face that was never enrolled): the actual
     # "who you see" ground truth is injected at camera-capture time.
+    # The path is the real one: a person's card on the Visual Memory page, and
+    # its "Use Blue's camera" or "Upload photo" button. Asked to "remember what
+    # she looks like", Blue said he had "her look on file: bread-bun hat,
+    # strawberry skirt" (10-05) — nothing said in chat saves a face. No tool
+    # is named: naming one gave 5/5 false "I have saved her face".
     face_capability = ""
     if FACE_RECOGNITION_AVAILABLE:
         face_capability = (
             "FACE RECOGNITION: You CAN recognize people by face through your "
-            "camera — but only people who have been introduced to you with a "
-            "reference photo (added on your Visual Memory page). When you take a "
-            "camera picture, you are told who you recognize. So don't say you "
-            "lack facial recognition. If someone asks whether you recognize them "
-            "and no photo has been added for them, explain that you can once "
-            "they add one — never claim to recognize a face you were never shown.\n"
+            "camera, but only people whose face has been saved as a reference "
+            "photo on your Visual Memory page — Alex can open that person's "
+            "card there and press 'Use Blue's camera' while they are in front "
+            "of your camera, or upload a photo. Nothing you say in "
+            "conversation saves a face or a description: unless a tool result "
+            "this turn says something was saved, say it is NOT saved yet and "
+            "how Alex can add the photo. When you take a camera picture you "
+            "are told who you recognize; never name someone from their clothes "
+            "or a text description, and never claim to recognize a face you "
+            "were never shown.\n"
         )
 
     robot_id = (robot or "blue").strip().lower()
@@ -13096,6 +13114,96 @@ _HEARD_NOT_TYPED_NOTE = (
 )
 
 
+def _user_message_text(message) -> str:
+    """The text of a user message, also when it carries an image."""
+    content = (message or {}).get("content")
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content
+                           if isinstance(p, dict) and p.get("type") == "text")
+    return _intent_text(content) if isinstance(content, str) else ""
+
+
+def _named_visual_person(vm, texts, skip) -> str:
+    """The person from visual memory named last in the newest of `texts`
+    that names one ("that's clover, she's a TA" → "Clover"). Names in
+    `skip` (the speaker, the robots) and course rows ("DH399 course") never
+    count."""
+    skip = {str(s).casefold() for s in skip if s}
+    people = [p["name"] for p in (vm.get_recognition_people() or [])
+              if p.get("name")]
+    for text in reversed(texts):
+        best = None
+        for name in people:
+            first = name.split()[0]
+            if (name.casefold() in skip or first.casefold() in skip
+                    or re.search(r"\d", first)):
+                continue
+            for cand in {name} | ({first} if len(first) >= 3 else set()):
+                for m in re.finditer(r"\b" + re.escape(cand) + r"\b", text, re.I):
+                    if best is None or m.start() > best[0]:
+                        best = (m.start(), name)
+        if best:
+            return best[1]
+    return ""
+
+
+def _face_request_note(conversation_messages, user_name) -> str:
+    """For "remember what she looks like": nothing said here saves a face,
+    and how one does get saved.
+
+    Asked exactly that (harness, 10-05), Blue filed "bread-bun hat,
+    strawberry skirt" as Clover's look and said "I've got her look on file",
+    or promised to "remember her as the student in the bread-bun hat". The
+    capability line in the stable prompt says the same thing in general;
+    this puts it beside the turn, with the person's name and whether they
+    have a reference photo. Not on the kids' page, and not without the face
+    engine, when no photo would make Blue know anyone by face.
+    """
+    from blue.tool_selector.detectors.vision import (
+        is_face_request, is_own_face_request)
+    speaker = (user_name or "Alex").strip() or "Alex"
+    if speaker in _CHAT_ONLY_USERS or not FACE_RECOGNITION_AVAILABLE:
+        return ""
+    users = [_user_message_text(m) for m in (conversation_messages or [])
+             if m.get("role") == "user"]
+    if not users or not is_face_request(users[-1]):
+        return ""
+    vm = None
+    if VISUAL_MEMORY_AVAILABLE:
+        try:
+            vm = get_visual_memory()
+        except Exception as e:
+            log.warning(f"[FACE] visual memory unavailable for the note: {e}")
+    name = ""
+    if is_own_face_request(users[-1]):
+        name = speaker
+    elif vm is not None:
+        robots = ({cfg["name"] for cfg in ROBOTS.values()} | set(ROBOTS))
+        name = _named_visual_person(vm, users[-4:], {speaker} | robots)
+    enrolled = False
+    if name and vm is not None:
+        try:
+            enrolled = vm.has_face_reference(name)
+        except Exception:
+            enrolled = False
+    # "Alex (Doctor Levant)" is the live row's name.
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", name)
+    if enrolled:
+        return (f"\nFACE REQUEST: {name} is already enrolled; you recognize "
+                f"{name} when you look.\n")
+    who = name or "this person"
+    whose = f"{name}'s" if name else "their"
+    return (
+        "\nFACE REQUEST: Nothing you say here saves a face — there is no "
+        f"face-saving step in this conversation. {who[0].upper() + who[1:]} "
+        f"has no reference photo yet, so you can't recognize {who} by face. "
+        "Say plainly that it isn't saved, and that Alex can open your Visual "
+        f"Memory page, open {whose} card (+ New if there isn't one) and press "
+        f"'Use Blue's camera' while {who} is in front of your camera; after "
+        f"that you'll know {who} by face. Don't describe {whose} clothes.\n"
+    )
+
+
 def _chat_system_message(conversation_messages, *, robot, user_name,
                          voice, language, system_addendum, heard=False):
     """Build this turn's system message, splice it in, and trim the context.
@@ -13246,6 +13354,16 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     if _day_note and isinstance(system_msg, dict):
         print("   [SYLLABUS] pinned the syllabus rows for the day asked about")
         tail_notes.insert(0, _day_note)
+    # "remember what she looks like": ahead of the notes after it, so the
+    # style note stays last.
+    try:
+        _face_note = _face_request_note(conversation_messages, user_name)
+    except Exception as _face_e:
+        _face_note = ""
+        log.warning(f"[FACE] request note failed: {_face_e}")
+    if _face_note and isinstance(system_msg, dict):
+        print("   [FACE] asked to learn a face — noting that chat saves none")
+        tail_notes.insert(0, _face_note)
     if not language and isinstance(system_msg, dict):
         # Auto. The memory blocks quote earlier turns, so after one Russian
         # exchange an English "hi blue" was answered in Russian (2026-09-24).
