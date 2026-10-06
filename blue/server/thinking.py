@@ -12,9 +12,11 @@ always says which it wants.
 Alex's call (2026-10-05): no thinking for greetings, acknowledgements and
 short replies, voice small talk and class introductions; thinking for real
 questions, planning, opinions and discussion, and document work. The answer
-goes out as the request field ``reasoning_effort`` ("none" or "medium"),
-which is the switch LM Studio honours on this model: chat_template_kwargs
-enable_thinking and a "/no_think" suffix do not, and "low" still reasons.
+goes out as the request field ``reasoning_effort`` ("none", or "low" when
+thinking — Alex chose the lighter setting on 2026-10-06; BLUE_THINKING_EFFORT
+can raise it), which is the switch LM Studio honours on this model:
+chat_template_kwargs enable_thinking and a "/no_think" suffix do not. "low"
+still reasons, only less than "medium".
 
 Pure text in, a word out — no bluetools import.
 """

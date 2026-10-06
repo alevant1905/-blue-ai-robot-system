@@ -2189,7 +2189,7 @@ class LMStudioClient:
         in kwargs is sent to LM Studio as a payload field, and a function is
         not JSON.
 
-        ``reasoning_effort`` ("none", "medium") is sent as that request field
+        ``reasoning_effort`` ("none", "low", "medium") is sent as that request field
         and is declared for the same reason: callers pass it by name, and a
         model that refuses it is asked again without it (see
         _reasoning_refused). None sends nothing — the model's own default.
@@ -11192,7 +11192,20 @@ from blue.server import syllabus_sections as _syllabus_sections
 # greeting (0.6 s); "medium" reasoned on a real question (49 and 72 tokens,
 # blocking and streamed) where the same question with no field drew none. With
 # no field, all 116 harness calls that morning had reasoned.
-_REASONING_EFFORT = {_thinking.THINK_OFF: "none", _thinking.THINK_ON: "medium"}
+#
+# Alex's call (2026-10-06): the lighter setting. "low" still reasons, but on
+# 10-05 it cut the reasoning on heavy turns by about half against "medium" (an
+# opinion turn 19.2 s -> 12.1 s, lab ideas 26.7 s -> 20.1 s; light turns about
+# the same). BLUE_THINKING_EFFORT overrides it with "low", "medium" or "high".
+_THINKING_EFFORTS = ("low", "medium", "high")
+
+
+def _thinking_effort() -> str:
+    effort = (os.environ.get("BLUE_THINKING_EFFORT") or "low").strip().lower()
+    return effort if effort in _THINKING_EFFORTS else "low"
+
+
+_REASONING_EFFORT = {_thinking.THINK_OFF: "none", _thinking.THINK_ON: _thinking_effort()}
 # Loaded models that refused the field, each named once in the log; it is not
 # sent to them again.
 _REASONING_REFUSED_BY: set = set()

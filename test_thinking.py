@@ -208,9 +208,9 @@ def _payload(thinking, **kw):
                                  thinking=thinking, **kw)
 
 
-def test_thinking_on_asks_for_medium_with_room_for_the_reasoning(fresh):
+def test_thinking_on_asks_for_the_lighter_setting_with_room_for_the_reasoning(fresh):
     payload = _payload(THINK_ON)
-    assert payload["reasoning_effort"] == "medium"
+    assert payload["reasoning_effort"] == "low"
     assert payload["max_tokens"] == bt._chat_max_tokens() + THINKING_ALLOWANCE_TOKENS
 
 
@@ -264,14 +264,14 @@ def test_the_reply_after_a_forced_call_keeps_the_turn_s_decision(chat):
 
     assert chat.model.main[0]["reasoning_effort"] == "none"
     assert [c["tool"] for c in chat.executed] == ["send_gmail"]
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
 
 
 def test_the_chat_page_sends_the_decision(chat):
     # Short messages, so the visible reply has its short cap
     # (blue/server/reply_budget.py) and the allowance goes on top of it.
     chat.ask("what do you make of memory?")
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
     assert chat.model.main[-1]["max_tokens"] == (
         bt._reply_budget.TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS)
 
@@ -281,7 +281,7 @@ def test_the_chat_page_sends_the_decision(chat):
 
     chat.ask("what do you make of memory, and of how it changes what a robot "
              "like you can be for a family?")
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
     assert chat.model.main[-1]["max_tokens"] == (bt._chat_max_tokens()
                                                  + THINKING_ALLOWANCE_TOKENS)
 
@@ -291,7 +291,7 @@ def test_the_chat_page_sends_the_decision(chat):
     chat.ask('[Attached document: notes.pdf]\n"""\n'
              + "- a point about lectures\n" * 60
              + '"""\nwhat do you make of these notes?')
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
 
 
 @pytest.fixture
@@ -330,7 +330,7 @@ def test_a_question_carrying_the_greeting_flag_still_thinks(
 
     chat.ask(text)
     assert greeting_flags and greeting_flags[-1] is True
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
 
 
 @pytest.mark.parametrize("text", ["hi blue", "hey there", "thanks!"])
@@ -343,9 +343,9 @@ def test_a_greeting_still_does_not(chat, greeting_flags, text):
 @pytest.mark.parametrize("text", ["the calendar is still not updated", "its not lab 5"])
 def test_a_spoken_correction_thinks_like_a_typed_one(chat, text):
     chat.ask(text, voice=True)
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
     chat.ask(text)
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
 
 
 def test_panel_keeps_the_model_default(chat):
@@ -364,7 +364,7 @@ def test_a_refused_field_is_dropped_and_the_call_made_again(fresh, monkeypatch, 
             response = requests.Response()
             response.status_code = 400
             response._content = json.dumps({"error": {
-                "message": "Invalid 'reasoning_effort' value: 'medium'.",
+                "message": "Invalid 'reasoning_effort' value: 'low'.",
                 "param": "reasoning_effort"}}).encode()
             raise requests.exceptions.HTTPError("400", response=response)
         return {"choices": [{"message": {"role": "assistant", "content": "Fine."},
@@ -375,7 +375,7 @@ def test_a_refused_field_is_dropped_and_the_call_made_again(fresh, monkeypatch, 
                                include_tools=False, thinking=THINK_ON)
 
     assert result["choices"][0]["message"]["content"] == "Fine."
-    assert sent[0]["reasoning_effort"] == "medium"
+    assert sent[0]["reasoning_effort"] == "low"
     assert "reasoning_effort" not in sent[1]
     assert sent[1]["max_tokens"] == bt._chat_max_tokens()
     assert "refused reasoning_effort" in capsys.readouterr().out
@@ -419,7 +419,7 @@ def test_a_guard_regeneration_sends_none_through_the_live_client(chat, monkeypat
     reply = reply_of(chat.ask("do you remember our family?"))
 
     assert "don't have any record" not in reply.lower()
-    assert chat.model.main[-1]["reasoning_effort"] == "medium"
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
     assert bodies, "the guard never regenerated through the client"
     for body in bodies:
         assert body["reasoning_effort"] == "none"
@@ -525,7 +525,7 @@ def test_the_turn_logs_model_thinking_and_tokens(chat, capsys):
     out = capsys.readouterr().out
 
     # A short message: its reply cap is named too (blue/server/reply_budget.py).
-    assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent medium), "
+    assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent low), "
             "reply cap 220t, 1 call: "
             "prompt 10440t, reasoning 120t, completion 300t") in out
 
@@ -587,3 +587,14 @@ def test_a_model_change_is_named_once(monkeypatch, capsys):
 
     assert out.count("[MODEL] WARNING") == 1
     assert "qwen/qwen3.6-27b -> qwen/qwen3.8-27b" in out
+
+
+def test_the_thinking_setting_is_low_unless_overridden(monkeypatch):
+    """Alex chose the lighter setting (2026-10-06); BLUE_THINKING_EFFORT can
+    raise it, and anything else falls back to low rather than being sent."""
+    monkeypatch.delenv("BLUE_THINKING_EFFORT", raising=False)
+    assert bt._thinking_effort() == "low"
+    for value, expected in (("medium", "medium"), (" HIGH ", "high"),
+                            ("none", "low"), ("max", "low"), ("", "low")):
+        monkeypatch.setenv("BLUE_THINKING_EFFORT", value)
+        assert bt._thinking_effort() == expected

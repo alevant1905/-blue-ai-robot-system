@@ -426,7 +426,7 @@ def test_a_reply_the_reasoning_starved_is_asked_again_without_thinking(
     assert result["choices"][0]["message"]["content"] == (
         "A few things, mostly the email step.")
     assert [(p["reasoning_effort"], p["max_tokens"]) for p in sent] == [
-        ("medium", TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
+        ("low", TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
         ("none", TYPED_REPLY_TOKENS)]
     assert "asking again without thinking" in capsys.readouterr().out
     assert "2 calls" in bt._lm_turn_summary()
@@ -466,7 +466,7 @@ def test_a_tool_call_the_reasoning_cut_off_is_asked_again_without_thinking(
     assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]) == {
         "query": "autogpt harness"}
     assert [(p["reasoning_effort"], p["max_tokens"]) for p in sent] == [
-        ("medium", TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
+        ("low", TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
         ("none", TYPED_REPLY_TOKENS)]
 
 
