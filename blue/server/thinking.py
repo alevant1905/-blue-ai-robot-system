@@ -41,6 +41,8 @@ _ACTION_TOOLS = frozenset({
     "remember_fact", "remember_person", "remember_place",
 })
 # Forced tools that bring back text to read or write a body: document work.
+# The forced call itself never thinks (bluetools._lm_studio_payload); this
+# is for the calls after the tool has run.
 _WORK_TOOLS = frozenset({
     "search_documents", "read_document", "web_search", "browse_website",
     "search_scholar", "get_paper", "read_paper", "read_gmail", "send_gmail",
@@ -257,10 +259,10 @@ def thinking_for_turn(text: str, *, voice: bool = False, kid: bool = False,
 
     `text` is the user's own words (attachments stripped). `voice` means the
     words were spoken — the chat page's voice turns, not Panel's brevity
-    flag. `is_greeting` is the selector's flag or the greeting fast path's,
-    and both match loosely ("hey" in "they", "sup" in "supervised", any
-    short message opening on "hi"), so it only counts on a message of a few
-    words that asks nothing.
+    flag. `is_greeting` is the selector's flag or the greeting fast path's.
+    The fast path's matches loosely ("sup" opens "supervised", any short
+    message opening on "hi"), as the selector's did until 7a9f70b ("hey" in
+    "they"), so it only counts on a message of a few words that asks nothing.
     `prev_reply` is Blue's previous reply: "sure" after "want me to draft
     it?" is the go-ahead for real work, not an acknowledgement.
     """

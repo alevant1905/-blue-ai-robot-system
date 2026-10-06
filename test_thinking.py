@@ -140,7 +140,9 @@ THINKING = [
     ("what are we covering in dh399?", {"forced_tool": "search_documents"}),
     # "sure" to an offer of real work is the go-ahead, not an ack
     ("sure", {"prev_reply": "Want me to sketch a lesson plan around it?"}),
-    # the selector's flag is a substring match: "they" has "hey" in it
+    # a stray greeting flag: the selector's matched "hey" in "they" until
+    # 7a9f70b, and the greeting fast path still takes a short message that
+    # opens on "sup" ("supervised…")
     ("which theory is better, and why do they disagree?", {"is_greeting": True}),
     ("are they conscious?", {"is_greeting": True}),
     ("why do they disagree?", {"is_greeting": True}),
@@ -222,10 +224,47 @@ def test_no_decision_sends_no_field(fresh):
     assert "reasoning_effort" not in _payload(None)
 
 
-def test_a_forced_document_keeps_its_long_cap_plus_the_allowance(fresh):
-    payload = _payload(THINK_ON, include_tools=True, force_tool="create_document")
-    assert payload["max_tokens"] == (bt._LONG_ARGUMENT_MAX_TOKENS
-                                     + THINKING_ALLOWANCE_TOKENS)
+@pytest.mark.parametrize("tool", ["create_document", "send_gmail"])
+def test_a_forced_call_does_not_think(fresh, tool):
+    """Its answer is the call. Thinking, a forced send_gmail had 9,728 tokens,
+    and the reasoning streams where the stop on prose never looks: minutes of
+    hidden deliberation (S4 final review)."""
+    payload = _payload(THINK_ON, include_tools=True, force_tool=tool)
+    assert payload["tool_choice"] == "required"
+    assert payload["reasoning_effort"] == "none"
+    assert payload["max_tokens"] == bt._LONG_ARGUMENT_MAX_TOKENS
+
+
+def test_a_forced_send_thinks_neither_on_the_call_nor_on_its_retry(chat):
+    """"send an email to stella": the forced call wrote words, and the retry
+    after it is a retry."""
+    chat.model.queue("Sure — who is Stella, and what should it say?",
+                     "I haven't sent it yet — what should the email say?")
+    chat.ask("send an email to stella")
+
+    forced, retry = chat.model.main[0], chat.model.main[1]
+    assert forced["tool_choice"] == "required"
+    assert (forced["reasoning_effort"], forced["max_tokens"]) == (
+        "none", bt._LONG_ARGUMENT_MAX_TOKENS)
+    assert "tools" not in retry
+    assert (retry["reasoning_effort"], retry["max_tokens"]) == (
+        "none", bt._chat_max_tokens())
+
+
+def test_the_reply_after_a_forced_call_keeps_the_turn_s_decision(chat):
+    chat.model.queue(
+        {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {
+                "name": "send_gmail", "arguments": json.dumps(
+                    {"to": "stella@example.com", "subject": "Hi",
+                     "body": "Hi Stella"})}}]},
+            "finish_reason": "tool_calls"}]},
+        "Sent — Stella has your hello.")
+    chat.ask("send an email to stella@example.com saying hi")
+
+    assert chat.model.main[0]["reasoning_effort"] == "none"
+    assert [c["tool"] for c in chat.executed] == ["send_gmail"]
+    assert chat.model.main[-1]["reasoning_effort"] == "medium"
 
 
 def test_the_chat_page_sends_the_decision(chat):
@@ -263,15 +302,26 @@ def greeting_flags(monkeypatch):
 
 
 @pytest.mark.parametrize("text", [
-    "are they conscious?",              # the selector: "hey" in "they"
-    "why do they disagree?",
-    "what is supervised learning?",     # the selector: "sup"
     "hey blue, what's RAG?",            # the greeting fast path
+    "good morning, why do they disagree?",
+    "hello, what is supervised learning?",
+    # Over eight words, so the selector's flag (whole words since 7a9f70b).
+    "hi blue, which theory is better and why do they disagree?",
 ])
-def test_a_question_carrying_the_greeting_flag_still_thinks(chat, greeting_flags, text):
+def test_a_question_carrying_the_greeting_flag_still_thinks(
+        chat, greeting_flags, monkeypatch, text):
+    """A greeting in front of a question. "are they conscious?" and "what is
+    supervised learning?" stood here, and once the selector matched greetings
+    as whole words they carried no flag and skipped on every run."""
+    from blue.tool_selector.detectors.documents import DocumentsDetector
+    monkeypatch.setattr(DocumentsDetector, "_refresh_library",
+                        classmethod(lambda cls: None))
+    for attr in ("_lib_phrases", "_lib_rare_tokens"):
+        monkeypatch.setattr(DocumentsDetector, attr, set())
+    monkeypatch.setattr(DocumentsDetector, "_lib_tokens_by_doc", [])
+
     chat.ask(text)
-    if not greeting_flags or greeting_flags[-1] is not True:
-        pytest.skip("routed to a tool, so no greeting flag (live library?)")
+    assert greeting_flags and greeting_flags[-1] is True
     assert chat.model.main[-1]["reasoning_effort"] == "medium"
 
 

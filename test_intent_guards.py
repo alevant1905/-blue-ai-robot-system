@@ -960,6 +960,8 @@ EMAIL_STATEMENTS = [
     # "now" after a subject is a statement.
     "my students now check their email on their phones",
     "students now read their email during class",
+    # A robot's name as the subject is still a statement.
+    "hexia reads my email out loud when i ask her",
 ]
 
 
@@ -1002,6 +1004,13 @@ EMAIL_REQUESTS = [
     ("would you mind sending an email to stella saying hi", "send_gmail"),
     ("i was wondering if you could send an email to stella", "send_gmail"),
     ("sounds good send an email to stella", "send_gmail"),
+    # Spoken to Hexia or Casper with no comma: the name was taken for the
+    # clause's first word, a statement (S4 final review).
+    ("hexia check my email", "read_gmail"),
+    ("hey hexia can you read my inbox", "read_gmail"),
+    ("Casper send Stella an email saying I'll be late", "send_gmail"),
+    ("kasper reply to stella's email and say yes", "reply_gmail"),
+    ("hexia reply to the last email", "reply_gmail"),
 ]
 
 
@@ -1039,6 +1048,15 @@ def test_an_email_request_still_reaches_its_tool(library, msg, expected):
 def test_a_verb_counts_only_when_blue_is_asked_to_do_it(msg, verbs, asked):
     from blue.tool_selector.detectors.gmail import asks_blue_to
     assert asks_blue_to(msg, verbs) is asked
+
+
+def test_a_follow_up_to_hexia_still_sends():
+    """"Hexia go ahead and send it" after a draft, with no comma."""
+    from blue.tool_selector.detectors.gmail import GmailDetector
+    msg = "hexia go ahead and send it"
+    tools = [i.tool_name for i in
+             GmailDetector().detect(msg, msg, {"has_email_in_history": True})]
+    assert tools == ["send_gmail"]
 
 
 def test_a_spoken_now_starts_only_a_follow_up():

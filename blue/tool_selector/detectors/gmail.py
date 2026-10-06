@@ -21,6 +21,13 @@ from ..utils import has_any_word
 _ADDRESS_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
 _EMAIL_NOUNS = ['email', 'emails', 'mail', 'gmail', 'inbox']
 
+# The robots' names, as they open a request: "hexia check my email",
+# "Casper send Stella an email…". Spoken to Hexia or Casper with no comma
+# (push-to-talk rarely writes one), "hexia" was taken for the clause's first
+# word and the request for a statement, so the mail tools were never offered
+# (S4 final review). The same names as blue_identity._ROBOT_NAME_ALT.
+_ROBOT_NAMES = r"(?:blue|hexia|casper|caspar|kasper|pico|picoh)"
+
 # Blue as the RECIPIENT: "I think I've got a draft to send to you" was read
 # as "send to" at 0.95 and mailed alex.levant@example.com (2026-08-12).
 _SENT_TO_BLUE_RE = re.compile(
@@ -29,19 +36,21 @@ _SENT_TO_BLUE_RE = re.compile(
 # A reply to an email, as opposed to "how would you respond to her" or "what
 # did she say in reply to that argument", which scored reply_gmail at 0.95.
 _REPLY_IMPERATIVE_RE = re.compile(
-    r"^\s*(?:(?:blue|ok(?:ay)?|please|now|so|and)[,\s]+)*"
+    r"^\s*(?:(?:" + _ROBOT_NAMES + r"|ok(?:ay)?|please|now|so|and)[,\s]+)*"
     r"(?:reply|respond|write\s+(?:a\s+)?reply)\b")
 
 
 _SEND_IMPERATIVE_RE = re.compile(
-    r"^\s*(?:(?:blue|ok(?:ay)?|please|now|so|and|then|hey)[,\s]+)*"
+    r"^\s*(?:(?:" + _ROBOT_NAMES
+    + r"|ok(?:ay)?|please|now|so|and|then|hey)[,\s]+)*"
     r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+)?"
     r"send\b[^.!?]{0,40}\bto\b")
 _SEND_NEGATED_RE = re.compile(
     r"\b(?:don'?t|do\s+not|never|no\s+need\s+to|won'?t|shouldn'?t)\s+"
     r"(?:\w+\s+){0,2}(?:send|e-?mail)\b")
 _SEND_ASKED_ABOUT_RE = re.compile(
-    r"^\s*(?:(?:blue|so|and|hey)[,\s]+)*(?:did|have|has|why\s+did|when\s+did|"
+    r"^\s*(?:(?:" + _ROBOT_NAMES + r"|so|and|hey)[,\s]+)*"
+    r"(?:did|have|has|why\s+did|when\s+did|"
     r"who\s+did|what\s+did|where\s+did)\b[^.!?]{0,60}\bsen[dt]\b")
 
 
@@ -77,7 +86,8 @@ _CLAUSE_BREAK_RE = re.compile(
 # Greetings, acknowledgements and the fillers that come before a verb:
 # "sounds good send…", "can you pls check…", "blue go check your email".
 _PREAMBLE_RE = re.compile(
-    r"^(?:(?:blue|ok(?:ay)?|yes|yeah|yep|sure|please|pls|plz|now|so|and|then"
+    r"^(?:(?:" + _ROBOT_NAMES
+    + r"|ok(?:ay)?|yes|yeah|yep|sure|please|pls|plz|now|so|and|then"
     r"|hey|hi|also|great|good|cool|alright|right|well|oh|no|just|immediately"
     r"|thanks|thank\s+you|perfect|sounds\s+good|awesome|nice|maybe|actually"
     r"|quickly|kindly|go(?!\s+(?:ahead|on)\b))\b\s*)+")
@@ -171,6 +181,38 @@ def asks_blue_to(msg_lower: str, verbs, after_now: bool = False) -> bool:
             if mind and not _peel_request(clause[:mind.start()]):
                 return True
     return False
+
+
+# Sending mail, asked of Blue. The hallucinated-action recovery turns a
+# reply that SAYS mail went into a real send (bluetools._user_requested_action),
+# and it asked only whether "email", "send" or "message" appeared anywhere: the
+# remark that no longer reached send_gmail here ("i'm thinking of having my
+# students build an agent that reads the news and emails them a digest"),
+# answered "…reading the headlines and sending the digest every morning…",
+# had send_gmail forced with "get the recipient from the recent conversation",
+# and the call ran (S4 final review, stubbed model). So did "It summarizes
+# news and sends the newsfeed by email to me" (live 10047).
+# "tell" counts as it did, but not "tell me": "tell me about the email you
+# sent stella" asks for an account, not a send. Writing, and a follow-up
+# ("…you're hallucinating now do it", log 367; "…there is no attachment.
+# Try it again.", 4706), is mail only when mail is named: "write your
+# autobiography" and "draft the proposal" send nothing.
+_SEND_MAIL_ASKS = ("send", "resend", "forward", "email", "mail", "message",
+                   "reply", "respond")
+_WRITE_MAIL_ASKS = ("write", "draft", "compose", "shoot")
+_TELL_SOMEONE_RE = re.compile(r"\btell\b(?!\s+(?:me|us)\b)")
+_WRITE_TO_RE = re.compile(r"\bwrite\s+(?:back\s+)?to\b")
+
+
+def asks_to_send_mail(msg_lower: str) -> bool:
+    """True if this message asks Blue to send, forward or reply to mail."""
+    text = (msg_lower or "").replace("e-mail", "email").replace("e mail", "email")
+    if (asks_blue_to(text, _SEND_MAIL_ASKS) or asks_blue_to(text, _TELL_SOMEONE_RE)
+            or asks_blue_to(text, _WRITE_TO_RE)):
+        return True
+    return has_any_word(_EMAIL_NOUNS + ['message'], text) and (
+        asks_blue_to(text, _WRITE_MAIL_ASKS)
+        or asks_blue_to(text, _FOLLOWUP_ASKS, after_now=True))
 
 
 class GmailDetector(BaseDetector):

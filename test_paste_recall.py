@@ -475,11 +475,13 @@ def laurier(scratch):
         (_at(68, 9, 11), "assistant", LAURIER_ANSWER),
         (_at(68, 9, 14), "user", "the cluster sounds strongest to me"),
     ])
+    # Numbered steps: one sentence said eight times is a loop, and a loop is
+    # not an earlier answer.
     _seed(scratch, [
         (_at(40, 6, minute), "assistant",
-         f"Here is the plan for chore list {minute}: " + "we can tidy the "
-         "kitchen, water the garden and sort the recycling before the "
-         "weekend. " * 8)
+         f"Here is the plan for chore list {minute}: " + " ".join(
+             f"Step {step}: we can tidy the kitchen, water the garden and sort "
+             "the recycling before the weekend." for step in range(8)))
         for minute in range(30)
     ])
     return scratch

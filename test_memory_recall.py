@@ -178,14 +178,16 @@ def test_cross_day_chat_and_past_answers_are_namespaced_per_robot(tmp_path):
         "Alex", "assistant",
         "The Laurier governance proposal should give the university a concrete "
         "right to refuse model reuse, with a named decision maker. "
-        + "Governance detail grounded in the proposal. " * 14,
+        # Numbered: one sentence said 14 times is a loop, not an answer.
+        + " ".join(f"Governance detail {i} grounded in the proposal."
+                   for i in range(14)),
         robot="blue")
     memory.log_conversation(
         "Alex", "user", "The moon garden needs silver flowers.", robot="hexia")
     memory.log_conversation(
         "Alex", "assistant",
         "The moon garden gets silver flowers and one theatrically suspicious owl. "
-        + "A moonlit detail in Hexia's own telling. " * 15,
+        + " ".join(f"Moonlit detail {i} in Hexia's own telling." for i in range(15)),
         robot="hexia")
 
     old = (datetime.now() - timedelta(days=2)).replace(
@@ -208,6 +210,53 @@ def test_cross_day_chat_and_past_answers_are_namespaced_per_robot(tmp_path):
     assert not any("moon garden" in answer for _, answer, _ in blue_answers)
     assert any("moon garden" in answer for _, answer, _ in hexia_answers)
     assert not any("right to refuse" in answer for _, answer, _ in hexia_answers)
+
+
+# conversation_log 10048, cut: three good paragraphs, then the forced
+# send_gmail call arguing with itself. <earlier_answers> quoted it as "your own
+# work, recorded verbatim", and the live model replayed it (S4 final review).
+DELIBERATING_REPLY = (
+    "That's a clean, bounded use case — read, summarize, send one digest. Much "
+    "safer than general inbox access, and it gives you a real task to judge the "
+    "newsfeed loop against.\n\n"
+    "The summarization step is where I'd watch for drift most — local models "
+    "sometimes pad or repeat themselves when generating long text. If the "
+    "digest gets bloated, add a length constraint to the prompt.\n\n"
+    "So my honest read: you've got a working agent, it's doing one job well, "
+    "and it's visible enough to teach from.\n\n"
+    "Wait — you mentioned sending the newsfeed by email to yourself. Do you "
+    "want me to send a test email to your address?\n\n"
+    "Actually, I shouldn't assume — you asked me about structure and I've "
+    "answered. The Gmail thing was just context.")
+TEACHING_REPLY = (
+    "A newsfeed digest agent needs three steps: fetch the headlines, summarize "
+    "them, and send one message. Keep each step visible so students can see "
+    "where it fails. The summary is actually the hard part.\n\n"
+    "Let's assume a small lab of twenty students: each pair builds one step, "
+    "and the class wires them together at the end. That turns one agent into "
+    "a lesson about interfaces between parts.\n\n"
+    "Grade the hand-offs, not the polish: a digest that arrives every morning "
+    "with three honest headlines beats a clever one that breaks. Ask each pair "
+    "to write down one way their step could fail, and test that failure first.")
+LOOPING_REPLY = ("The digest goes out at seven every morning without fail. " * 12)
+
+
+def test_a_reply_that_argues_with_itself_is_not_an_earlier_answer(tmp_path):
+    memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
+    for reply in (DELIBERATING_REPLY, TEACHING_REPLY, LOOPING_REPLY):
+        memory.log_conversation("Alex", "user", "tell me about the newsfeed agent",
+                                robot="blue")
+        memory.log_conversation("Alex", "assistant", reply, robot="blue")
+    conn = memory._conn()
+    conn.execute("UPDATE conversation_log SET timestamp = ?",
+                 ((datetime.now() - timedelta(days=8)).isoformat(),))
+    conn.commit()
+    conn.close()
+
+    answers = [answer for _, answer, _ in memory._substantive_answer_corpus(robot="blue")]
+
+    # A worked example ("Let's assume…") and a mid-paragraph "actually" stay.
+    assert answers == [TEACHING_REPLY]
 
 
 def test_recalled_days_returns_the_coherent_older_house_exchange(tmp_path):

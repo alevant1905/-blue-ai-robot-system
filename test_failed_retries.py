@@ -600,7 +600,35 @@ def remembered(chat, monkeypatch):
                         lambda *a, **k: state["block"])
     monkeypatch.setattr(bt.memory_system, "has_conversation_on",
                         lambda day, robot="blue", user_name=None: day in state["talked"])
+    # "next Monday's lecture" opened Alex's real syllabi in documents/.
+    monkeypatch.setattr(bt, "_syllabus_day_note", lambda *a, **k: "")
     return state
+
+
+# A Wednesday. On a Monday the Friday three days back was a day talked on, so
+# reading "my Friday class" as the day asked about changed nothing and the
+# test meant to catch it passed (S4 final review).
+FROZEN_TODAY = datetime.date(2026, 10, 7)
+
+
+@pytest.fixture
+def frozen_day(monkeypatch):
+    """Today, for the day a recall question asks about and for the
+    <remembered_days> labels the guard compares it with."""
+    import blue_memory_improved as bmi
+
+    class _Date(datetime.date):
+        @classmethod
+        def today(cls):
+            return FROZEN_TODAY
+
+    monkeypatch.setattr(tc, "date", _Date)
+    monkeypatch.setattr(bt, "recall_day_asked",
+                        lambda text, today=None: recall_day_asked(
+                            text, today=today or FROZEN_TODAY))
+    monkeypatch.setattr(bmi, "_now", lambda: datetime.datetime.combine(
+        FROZEN_TODAY, datetime.time(12)))
+    return FROZEN_TODAY
 
 
 RECALL_NOTE = "Your previous reply said this discussion was not"
@@ -620,7 +648,7 @@ def test_recall_thread_draft_ships(chat, remembered):
 
 
 AUTOGPT_BLOCK = (
-    "<remembered_days>\nPast conversation excerpts:\n- 3 days ago (Friday):\n"
+    "<remembered_days>\nPast conversation excerpts:\n- {label}:\n"
     "  Alex: I want to look at autogpt for the DH399 agent assignment\n"
     "  Blue: AutoGPT chains model calls toward a goal.\n"
     "  Alex: lets compare it with langchain next time\n</remembered_days>")
@@ -632,13 +660,18 @@ AUTOGPT_BLOCK = (
     "do you remember what we talked about with autogpt for next Monday's lecture?",
     "do you remember what we discussed about autogpt for my Friday class?",
 ])
-def test_a_day_that_does_not_date_the_talk_keeps_the_guard(chat, remembered, question):
+def test_a_day_that_does_not_date_the_talk_keeps_the_guard(
+        chat, remembered, frozen_day, question):
     """"I want to try it today" switched the recall guard off: today was taken
     for the day asked about, and today's rows are never in the excerpt."""
-    today = datetime.date.today()
-    remembered["block"] = AUTOGPT_BLOCK
-    remembered["talked"] = {today.isoformat(),
-                            (today - datetime.timedelta(days=3)).isoformat()}
+    today, talked_on = frozen_day, frozen_day - datetime.timedelta(days=3)
+    remembered["block"] = AUTOGPT_BLOCK.format(
+        label=bt.memory_system._friendly_day_label(talked_on.isoformat()))
+    remembered["talked"] = {today.isoformat(), talked_on.isoformat()}
+    # Read as a day asked about, Friday and Monday would switch the guard off.
+    for day in ("friday", "monday"):
+        asked = recall_day_asked(f"what did we talk about on {day}?", today=today)
+        assert asked.isoformat() not in remembered["talked"]
     chat.model.queue("I don't have a record of that conversation about autogpt — "
                      "could you fill me in?",
                      "We talked about AutoGPT for the DH399 agent assignment.")

@@ -316,3 +316,91 @@ def test_an_insisted_claim_nobody_asked_for_is_scrubbed_not_performed():
     assert pending is None
     assert "sent the introduction email" not in content_of(response).lower(), \
         "the claim survived into the reply"
+
+
+# A remark about an agent that mails people, answered in kind. The selector no
+# longer routes these to send_gmail, but the reply paraphrases the plan and
+# reads as a send claim; "email" inside "emails" then made the remark a
+# request, and the recovery forced a real send_gmail (S4 final review).
+REMARKS_ABOUT_MAIL = [
+    ("i'm thinking of having my students build an agent that reads the news "
+     "and emails them a digest",
+     "That's a nicely bounded project — reading the headlines and sending the "
+     "digest every morning gives them one clear job."),
+    ("It summarizes news and sends the newsfeed by email to me",   # 10047
+     "Nice — so the agent ends up sending you the newsfeed each morning."),
+]
+
+
+@pytest.mark.parametrize("asked,said", REMARKS_ABOUT_MAIL)
+def test_a_send_claim_on_a_remark_is_regenerated_not_forced(asked, said):
+    assert bt.detect_hallucinated_action(said) == "send_gmail"
+
+    retry, pending, _resp, messages = _judge(said, asked)
+
+    assert retry is True
+    assert pending is None, "a remark was turned into a real send"
+    assert "did not ask for any such action" in json.dumps(messages)
+
+
+@pytest.mark.parametrize("text,asked", [
+    ("email the reading list to the class", True),
+    ("can you send stella the summary", True),
+    ("tell stella i'll be late", True),
+    ("please forward that to felix", True),
+    ("snap a photo and email it to me", True),
+    ("draft an email to felix about the lab", True),
+    ("write to stella and say thanks", True),
+    # Follow-ups that name the mail (log 367, 4706).
+    ("You did not send that e-mail you're hallucinating now do it "
+     "immediately right now.", True),
+    ("Yes, I see that you sent the email, but there is no attachment.  "
+     "Try it again.", True),
+    ("my mom sent me a message yesterday", False),
+    ("tell me about the email you sent stella", False),
+    ("the agent will read the news and then email them", False),
+    # Writing that is not mail (log 6683, 8831), and a read.
+    ("write your autobiography", False),
+    ("draft the proposal", False),
+    ("Check your e-mail.", False),
+    (REMARKS_ABOUT_MAIL[0][0], False),
+    (REMARKS_ABOUT_MAIL[1][0], False),
+])
+def test_a_mail_claim_counts_as_asked_only_when_blue_was_asked(text, asked):
+    for tool in ("send_gmail", "reply_gmail", "email_snapshot"):
+        assert bt._user_requested_action(tool, text) is asked
+
+
+@pytest.mark.parametrize("said", [
+    "I haven't sent it yet — what should the email say?",
+    "I haven't sent that email yet; what should it say?",
+    "Nothing has gone yet. What should the email to Stella say?",
+])
+def test_a_retry_that_says_the_mail_has_not_gone_ships(said):
+    """The retry is told to say it hasn't gone; "sent it" in "I haven't sent
+    it yet" is not a claim (S4 final review: it was scrubbed to "What would
+    you like to know?")."""
+    from blue.server import tool_pipeline
+
+    repairs = tool_pipeline._ReplyRepairs()
+    repairs.retried_tool = "send_gmail"
+
+    retry, pending, response, _messages = _judge(
+        said, "send an email to stella", repairs=repairs)
+
+    assert (retry, pending) == (False, None)
+    assert content_of(response) == said
+
+
+def test_a_retry_that_claims_the_mail_went_gets_the_honest_line():
+    from blue.server import tool_pipeline
+
+    repairs = tool_pipeline._ReplyRepairs()
+    repairs.retried_tool = "send_gmail"
+
+    retry, pending, response, _messages = _judge(
+        "Sure! I've sent it to Stella.", "send an email to stella",
+        repairs=repairs)
+
+    assert (retry, pending) == (False, None)
+    assert content_of(response) == tool_pipeline._forced_tool_honest_line("send_gmail")

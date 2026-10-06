@@ -706,6 +706,28 @@ def test_a_plan_about_an_email_agent_reads_no_inbox(chat):
     assert not ran & {"read_gmail", "send_gmail", "reply_gmail"}, ran
 
 
+@pytest.mark.parametrize("remark,draft", [
+    ("i'm thinking of having my DH399 students build an agent that reads the "
+     "news and emails them a digest",
+     "That's a nicely bounded project — reading the headlines and sending the "
+     "digest every morning gives them one clear job."),
+    ("It summarizes news and sends the newsfeed by email to me",   # 10047
+     "Nice — so the agent ends up sending you the newsfeed each morning. "
+     "That's a clean bounded loop."),
+])
+def test_a_reply_that_paraphrases_a_mailing_agent_sends_no_mail(chat, remark, draft):
+    """The draft reads as a send claim. The recovery forced send_gmail on
+    the next pass ("get the recipient … from the recent conversation"), and
+    the model's call was run (S4 final review)."""
+    chat.model.queue(draft, "A daily digest is a nicely bounded job for it.")
+    chat.ask(remark)
+
+    assert not any(p.get("tool_choice") == "required" for p in chat.model.main), \
+        "a remark had a tool forced on it"
+    assert not any(call["tool"] == "send_gmail" for call in chat.executed)
+    assert "did not ask for any such action" in json.dumps(chat.model.main[-1]["messages"])
+
+
 def test_a_science_question_on_the_kids_page_leaves_the_lights_alone(
         chat, monkeypatch):
     """It ran control_lights color blue on the zero-LLM path (S2 review)."""

@@ -1605,6 +1605,7 @@ from blue.tool_selector import (
     ImprovedToolSelector,
     integrate_with_existing_system,
 )
+from blue.tool_selector.detectors.gmail import asks_to_send_mail
 from blue.utils import strip_conversational_filler, strip_pasted_block
 from blue_reply_text import strip_reasoning_tags
 
@@ -10209,11 +10210,11 @@ def detect_hallucinated_action(response: str) -> str | None:
 # class" (2026-07-09, nobody asked for ANY email) would be turned into a REAL
 # email to an invented address. A claim with no matching request must be
 # regenerated or scrubbed, never executed.
+# Mail is judged by the email detector's own test of a request addressed to
+# Blue (blue/tool_selector/detectors/gmail.asks_to_send_mail), not by these:
+# "email" inside "emails them a digest" made a remark a request to send.
+_MAIL_CLAIM_TOOLS = frozenset({"send_gmail", "reply_gmail", "email_snapshot"})
 _ACTION_REQUEST_WORDS = {
-    "send_gmail": ("email", "e-mail", "mail", "send", "write to", "message",
-                   "forward", "compose", "reply", "respond", "tell "),
-    "reply_gmail": ("reply", "respond", "answer", "write back", "email", "mail"),
-    "email_snapshot": ("email", "send", "mail", "photo", "picture", "snapshot", "pic"),
     "capture_camera": ("photo", "picture", "camera", "snapshot", "look", "see",
                        "capture", "pic", "watch"),
     "create_reminder": ("remind", "reminder", "timer", "alarm", "schedule",
@@ -10276,11 +10277,13 @@ def _drop_ungrounded_description(tool_args: Dict[str, Any]) -> Dict[str, Any]:
 def _user_requested_action(tool_name: str, user_text: str) -> bool:
     """Did the user's latest message actually ask for the claimed action?
     Unknown tools default to True (keep the legacy force-retry for them)."""
+    # The user's own words: an attached syllabus says "email" a dozen times.
+    t = _intent_text(user_text or "").lower()
+    if tool_name in _MAIL_CLAIM_TOOLS:
+        return asks_to_send_mail(t)
     words = _ACTION_REQUEST_WORDS.get(tool_name)
     if not words:
         return True
-    # The user's own words: an attached syllabus says "email" a dozen times.
-    t = _intent_text(user_text or "").lower()
     return any(w in t for w in words)
 
 
@@ -10894,6 +10897,8 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     the cap: the reasoning is generated inside max_tokens, and on 10-05 it
     took all 2,048 of a reading report's. None sends no field (Panel and the
     other callers that have not been decided yet keep the model default).
+    A forced call ("required") never thinks; the decision is for the calls
+    after the tool has run.
     """
     # Final-pass normalization for strict chat templates (Qwen et al.).
     # Ensures: leading systems, alternating user/assistant, starts with user
@@ -10922,6 +10927,13 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
     }
     _effort = _REASONING_EFFORT.get(thinking)
+    # A forced call's answer is the call. With "medium" a forced send_gmail
+    # had 9,728 tokens of room, and this model's reasoning streams as
+    # delta.reasoning_content, which the stop on prose in _stream_from_model
+    # never counts: about 4.5 minutes at the 35 tok/s measured live, the 214 s
+    # of 09-27's forced send moved out of sight (S4 final review).
+    if _effort and include_tools and force_tool and force_choice == "required":
+        _effort = _REASONING_EFFORT[_thinking.THINK_OFF]
     if _effort and not _reasoning_field_refused():
         payload["reasoning_effort"] = _effort
         payload["max_tokens"] += _thinking_allowance(payload)

@@ -404,6 +404,22 @@ def test_a_retry_that_claims_the_send_is_scrubbed_not_forced(loop):
 
 
 @pytest.mark.parametrize("answer", [
+    "I haven't sent it yet — what should the email say?",
+    "I haven't sent that email yet; what should it say?",
+])
+def test_a_retry_that_says_the_send_has_not_gone_ships(loop, answer):
+    """What the retry's note asks for. It matched the send claim on "sent
+    it" and went out as "To be clear — I didn't actually send or do anything
+    just now. What would you like to know?" (S4 final review)."""
+    loop.model.queued = [LIVE_10048, answer]
+
+    result = loop.forced("send an email to stella", "send_gmail")
+
+    assert loop.executed == []
+    assert content_of(result) == answer
+
+
+@pytest.mark.parametrize("answer", [
     "What time should I remind you to call your mom?",
     "Should I set a reminder for 3 PM today, or did you mean tomorrow?",
     "Do you want the reminder set for 3 PM today?",

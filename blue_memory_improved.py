@@ -45,6 +45,7 @@ from blue_identity import (
     is_family_overview_request,
     is_social_checkin,
 )
+from blue_reply_text import cut_self_talk, is_runaway_text, reads_as_deliberation
 
 
 def _now() -> datetime:
@@ -3429,7 +3430,7 @@ class EnhancedMemorySystem:
             d = datetime.fromisoformat(date_str).date()
         except (ValueError, TypeError):
             return date_str
-        delta = (datetime.now().date() - d).days
+        delta = (_now().date() - d).days
         if delta == 0:
             return "today"
         if delta == -1:
@@ -3911,6 +3912,17 @@ class EnhancedMemorySystem:
                     or is_failure_placeholder(content)
                     or identity_response_problem(
                         content, expected_name, other_names=other_names)):
+                continue
+            # A reply that argues with itself or loops is not an answer to
+            # give again. 10048 (09-27, a forced send_gmail that wrote
+            # "Actually, I shouldn't assume…" and "Wait — you mentioned
+            # sending the newsfeed…") came back here under "your own work,
+            # recorded verbatim", and the live model replayed it word for
+            # word for the students-agent remark (S4 final review). A worked
+            # example ("Let's assume a small lab…") is judged without its
+            # paragraph, so a teaching reply that has one stays.
+            if (is_runaway_text(content)
+                    or reads_as_deliberation(cut_self_talk(content, live=False))):
                 continue
             corpus.append((r["timestamp"], content, low))
         caches[robot_key] = corpus

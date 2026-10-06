@@ -653,8 +653,13 @@ def _retry_claims(text, tool):
     """Split a retry's words into (kept, claimed): `claimed` are the sentences
     that say `tool`'s work is done. Kept keeps its own whitespace, so the
     paragraph breaks survive. A tool whose claims are not judged here (mail
-    has bt.detect_hallucinated_action) claims nothing."""
-    pattern = _RETRY_CLAIM_RES.get(_RETRY_CLAIM_KIND.get(tool))
+    has bt.detect_hallucinated_action, judged with _claim_sentences) claims
+    nothing."""
+    return _claim_sentences(text, _RETRY_CLAIM_RES.get(_RETRY_CLAIM_KIND.get(tool)))
+
+
+def _claim_sentences(text, pattern):
+    """_retry_claims for any claim pattern: (kept, claimed)."""
     text = (text or "").strip()
     if pattern is None or not text:
         return text, []
@@ -1129,12 +1134,29 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
         hallucinated_tool = None
     if hallucinated_tool and not force_tool and repairs.retried_tool:
         # The forced call declined to do this a moment ago, so the claim is
-        # invented, and the retry is no second chance to act.
-        print(f"   [WARN] retry after a failed forced {repairs.retried_tool} "
-              f"claims {hallucinated_tool} — scrubbing the claim")
-        cleaned = bt._scrub_action_claim_sentences(content, hallucinated_tool)
-        response["choices"][0]["message"]["content"] = cleaned
-        return False, None
+        # invented, and the retry is no second chance to act. Judged sentence
+        # by sentence, as the reminder claims are: the retry was told to say
+        # the mail hasn't gone, and "I haven't sent it yet — what should the
+        # email say?" matched on "sent it" and was scrubbed to "To be clear —
+        # I didn't actually send or do anything just now. What would you
+        # like to know?" (S4 final review). A denial or a question is not a
+        # claim. What a request leaves beside a claim still reads as done
+        # ("Sure!"), so there the honest line replaces it all.
+        _kept, _claimed = _claim_sentences(
+            content, bt._ACTION_CLAIM_PATTERNS.get(hallucinated_tool))
+        if not _claimed:
+            hallucinated_tool = None
+        else:
+            from blue.server.turn_completion import _substantive
+            print(f"   [WARN] retry after a failed forced {repairs.retried_tool} "
+                  f"claims {hallucinated_tool} ({_claimed[0][:80]!r}) — not shipping that")
+            if (_substantive(_kept)
+                    and not bt._user_requested_action(hallucinated_tool,
+                                                      last_user_message)):
+                response["choices"][0]["message"]["content"] = _kept
+            else:
+                _replace_reply(response, _forced_tool_honest_line(repairs.retried_tool))
+            return False, None
     if hallucinated_tool and not force_tool:
         # The force-retry below turns the claim into a REAL action —
         # only right when the user actually asked for one. A claim
@@ -1306,6 +1328,9 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
         if retry_tool:
             _offer = retry_tool not in _OUTWARD_TOOLS
+            # A retry, so no reasoning, as for the guards' regenerations. On a
+            # note or document it also has the forced call's 8,192-token
+            # room, and reasoning there is out of reach of the prose stop.
             response = bt.call_lm_studio(
                 conversation_messages,
                 include_tools=_offer,
@@ -1313,7 +1338,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 iteration=iteration,
                 on_token=on_token,
                 force_choice="auto",
-                thinking=thinking,
+                thinking=THINK_OFF if thinking else None,
             )
         else:
             _include_tools = not (_identity_kind and not force_tool)
