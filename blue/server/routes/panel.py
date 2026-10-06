@@ -37,6 +37,7 @@ from blue.llm_coordinator import llm_slot
 from blue.mood_eyes import mood_eye_color
 from blue.server.pages.panel import PANEL_HTML
 from blue.server.turn_completion import _parrot_norm, _verbatim_fraction
+from blue_reply_text import strip_tool_markup
 
 
 PANEL_ROBOTS = ("blue", "hexia", "pico")
@@ -630,6 +631,10 @@ def _clean_reply(value: Any, robot: str) -> str:
     text = re.sub(r"<think>.*?</think>", " ", text,
                   flags=re.IGNORECASE | re.DOTALL)
     text = text.replace("<think>", " ")
+    # Neither of Panel's answers passes turn_completion.finish, and a tool
+    # call written out as text is not a turn to speak: a reply that was only
+    # one comes back empty, which the route answers as retryable.
+    text = strip_tool_markup(text)
     text = re.sub(r"\s+", " ", text).strip().strip(" \t\r\n\"“”")
     names = [bt._robot_cfg(key)["name"] for key in PANEL_ROBOTS]
     text = re.sub(

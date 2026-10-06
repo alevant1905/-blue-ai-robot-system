@@ -8252,7 +8252,11 @@ def _maybe_handle_owner_composition(body: str) -> Optional[str]:
     choices = (res or {}).get('choices') or []
     if not choices:
         return None
-    text = ((choices[0].get('message') or {}).get('content') or "").strip()
+    # Neither reasoning nor a tool call written out as text is the piece. A
+    # draft that was only that falls through to the normal reply path, which
+    # strips the same, rather than mailing the markup signed "Blue".
+    text = strip_tool_markup(strip_reasoning_tags(
+        (choices[0].get('message') or {}).get('content') or "")).strip()
     if not text:
         return None
     if "blue" not in text[-40:].lower():

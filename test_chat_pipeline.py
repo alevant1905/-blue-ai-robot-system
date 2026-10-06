@@ -538,6 +538,20 @@ def test_a_lookup_written_in_the_loop_s_last_call_is_run_once(chat):
         "reading report requirements assignment instructions format DH399"]
 
 
+def test_the_answer_to_a_written_lookup_the_loop_ran_does_not_think(chat):
+    """The loop's own repair runs a written lookup; the call that answers
+    from it is asked at "none", as settle_written_call's is (review of
+    1c44491: it kept the turn's thinking)."""
+    chat.model.queue(WRITTEN_SEARCH, ANSWER)
+    reply = reply_of(chat.ask("what do you make of memory?"))
+
+    assert reply == ANSWER
+    assert chat.model.payloads[0].get("reasoning_effort") not in (None, "none"), (
+        "this turn must think, or the check below proves nothing")
+    follow = _call_after(chat, '"tool_call_id": "leaked"')
+    assert not follow.get("tools") and follow.get("reasoning_effort") == "none"
+
+
 def test_a_second_written_call_in_one_turn_is_not_run(chat):
     """The loop ran the first one (its own repair); the second is answered
     from what is there."""
@@ -567,6 +581,57 @@ def test_a_send_written_on_an_ordinary_turn_is_never_run(chat):
 
     assert not _runs(chat, "send_gmail")
     assert reply == "Memory is less a store than a practice."
+
+
+def _written(name, **params):
+    """A call in the Qwen form, every value written as text."""
+    body = "".join(f"<parameter={key}>\n{value}\n</parameter>\n"
+                   for key, value in params.items())
+    return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+@pytest.mark.parametrize("name,params", [
+    ("control_lights", {"action": "off"}),
+    ("auto_reply_emails", {"max_emails": "5"}),
+    ("write_file", {"filepath": "notes.txt", "content": "hi"}),
+    ("create_document", {"title": "Report", "content": "A reading report."}),
+    ("play_music", {"query": "jazz"}),
+    # "book" is one of create_reminder's request words.
+    ("create_reminder", {"title": "Read the book", "time": "tomorrow 9am"}),
+])
+def test_no_write_written_on_an_ordinary_turn_is_run(chat, name, params):
+    """Review of 1c44491: the loop's repair still ran any write that
+    bt._user_requested_action let through, and that takes a tool it has no
+    words for as asked. Each of these ran on a remark about a book."""
+    chat.model.queue(_written(name, **params),
+                     "Memory is less a store than a practice.")
+    reply = reply_of(chat.ask("what do you make of this book about memory?"))
+
+    assert chat.executed == []
+    assert "<tool_call>" not in reply and "<function=" not in reply
+
+
+def test_a_lookup_written_on_a_question_about_blue_is_not_run(chat):
+    """A question about Blue himself is answered without tools; the loop's
+    repair still ran a written web_search on it."""
+    chat.model.queue(_written("web_search", query="Blue robot Ohbot"),
+                     "I'm Blue, Alex's robot.")
+    reply = reply_of(chat.ask("who are you really?"))
+
+    assert chat.executed == []
+    assert "<tool_call>" not in reply
+
+
+def test_a_written_lookup_runs_with_its_schema_types(chat):
+    """The Qwen form writes "false" for a flag, which the tool's bool() reads
+    as true, and read_paper's save files the article into the library."""
+    chat.model.queue(_written("read_paper", doi="10.1/x", max_chars="4000",
+                              save="false"), ANSWER)
+    reply = reply_of(chat.ask(SYLLABUS_ASK))
+
+    assert reply == ANSWER
+    assert _runs(chat, "read_paper")[0]["args"] == {"doi": "10.1/x",
+                                                   "max_chars": 4000}
 
 
 def test_a_regeneration_that_claims_the_send_gets_the_honest_line(chat):
@@ -621,6 +686,27 @@ def test_a_written_call_from_any_path_is_never_shown_or_stored(chat, monkeypatch
 
     assert reply == "The syllabus has a reading report due in week 6."
     assert _stored(chat) == [reply]
+    assert chat.executed == []
+
+
+def test_an_owner_composition_by_email_never_mails_a_written_call(chat, monkeypatch):
+    """The email auto-reply strips a written call, but the owner-composition
+    branch returned before it: a piece that was only a call went out as the
+    markup signed "Blue" (review of 1c44491)."""
+    monkeypatch.setattr(bt, "_infer_expertise_folders", lambda body: ["Publications"])
+    monkeypatch.setattr(bt, "_gather_owner_work_sources", lambda body, folders: (
+        "[1] [memory.pdf]\nMemory is a practice.", ["memory.pdf"]))
+    drafts = []
+    monkeypatch.setattr(bt, "call_llm", lambda *a, **k: {"choices": [{
+        "message": {"content": drafts.pop(0)}}]})
+    ask = "write a critical assessment of my work on memory"
+
+    drafts.append(WRITTEN_SEARCH)
+    assert bt._maybe_handle_owner_composition(ask) is None
+    drafts.append("Your work treats memory as a practice [memory.pdf].\n\n"
+                  "Let me search for more.\n" + WRITTEN_SEARCH)
+    assert bt._maybe_handle_owner_composition(ask) == (
+        "Your work treats memory as a practice [memory.pdf].\n\nBlue")
     assert chat.executed == []
 
 

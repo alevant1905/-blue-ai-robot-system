@@ -214,10 +214,14 @@ class WrittenCall(NamedTuple):
 
 
 # A function tag opens a call only when a body follows it: "<function=x>
-# names the tool and <parameter=query> holds the query" is prose.
-_FUNCTION_TAG = r"<function=[\w.\-]+>(?=\s*(?:<parameter=|\{|</function|\Z))"
+# names the tool and <parameter=query> holds the query" is prose. A body may
+# be a tag the token cap cut off at the very end ("<tool_call>\n<funct").
+_CUT_TAG = r"<[\w=./\-]*\Z"
+_FUNCTION_TAG = (r"<function=[\w.\-]+>(?=\s*(?:<parameter=|\{|</function|"
+                 + _CUT_TAG + r"|\Z))")
 _CALL_OPEN_RE = re.compile(
-    r"<tool_call\s*>(?=\s*(?:" + _FUNCTION_TAG + r"|\{|\Z))|" + _FUNCTION_TAG,
+    r"<tool_call\s*>(?=\s*(?:" + _FUNCTION_TAG + r"|\{|" + _CUT_TAG + r"|\Z))|"
+    + _FUNCTION_TAG,
     re.I)
 _CALL_CLOSE_RE = re.compile(r"</tool_call\s*>", re.I)
 _FUNCTION_OPEN_RE = re.compile(r"\s*<function=([\w.\-]+)>", re.I)

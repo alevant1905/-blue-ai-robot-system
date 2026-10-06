@@ -920,11 +920,16 @@ class _ReplyRepairs:
 def _judge_untooled_reply(response, assistant_message, repairs, *,
                           iteration, force_tool, conversation_messages,
                           improved_force_tool, improved_tool_args,
-                          _detect_msg, last_user_message, user_name):
+                          _detect_msg, last_user_message, user_name,
+                          tools_offered=True):
     """Decide what to do with a reply the model gave without calling a tool.
 
     Returns (retry, pending_force_tool). retry True means go round again,
     forcing that tool if one is named. False means the reply is the answer.
+
+    `tools_offered` is False when this pass offered no tools (a question
+    about Blue himself, the retry after a forced send): a call written out
+    as text then runs nothing here.
 
     `conversation_messages` and `repairs` are appended to and set in place,
     and `response` may be edited before it is accepted.
@@ -971,7 +976,7 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
                     _written and _known_tool(_written[0])
                     and _may_run_written(_written[0], force_tool=force_tool,
                                          retried_tool=repairs.retried_tool,
-                                         last_user_message=last_user_message)):
+                                         tools_offered=tools_offered)):
                 return _forced_call_failed(
                     response, correct_tool, repairs, conversation_messages,
                     bt._intent_text(last_user_message
@@ -998,16 +1003,17 @@ def _judge_untooled_reply(response, assistant_message, repairs, *,
     # (the "<tool_call>...</tool_call> reached the user as words" bug).
     # Parse it and run it for real; the next iteration composes the
     # answer from the actual result. Not any call, though: a written
-    # send_gmail on a turn that asked for nothing was run as written. Mail
-    # runs only when this pass forced it, and another write when it was
-    # forced or retried or the user asked for it (_may_run_written).
+    # send_gmail on a turn that asked for nothing was run as written. A
+    # lookup runs, and a write only when this pass forced it or it was the
+    # one retried (_may_run_written); nothing runs on a pass that offered
+    # no tools.
     _leaked = None if repairs.leaked_tool else bt.parse_leaked_tool_call(content)
     if (_leaked and _known_tool(_leaked[0])
             and _may_run_written(_leaked[0], force_tool=force_tool,
                                  retried_tool=repairs.retried_tool,
-                                 last_user_message=last_user_message)):
+                                 tools_offered=tools_offered)):
         repairs.leaked_tool = True
-        _lk_name, _lk_args = _leaked
+        _lk_name, _lk_args = _leaked[0], _written_args(*_leaked)
         print(f"   [WARN] model wrote its {_lk_name} call as text — executing it for real")
         tool_result = bt.execute_tool(_lk_name, _lk_args)
         conversation_messages.append({
@@ -1313,21 +1319,58 @@ LOOKUP_TOOLS = frozenset({
 WRITTEN_LOOKUP_GAVE_UP = "I couldn't finish looking that up — want me to try again?"
 
 
-def _may_run_written(name, *, force_tool, retried_tool, last_user_message) -> bool:
-    """May the loop run a call the model wrote out, on a pass that offered
-    tools? A lookup, or the tool this pass forced. Mail only when forced:
-    a send is judged before it is forced, and the retry after a forced send
-    offers no tools. Another write when it was the one retried, or when the
-    user asked for it (bt._user_requested_action, which takes a tool it has
-    no words for as asked, as for a claimed action)."""
+def _may_run_written(name, *, force_tool, retried_tool, tools_offered=True) -> bool:
+    """May the loop run a call the model wrote out? Only on a pass that
+    offered tools: a question about Blue himself is answered without them,
+    and a written web_search there was run anyway. Then a lookup, or the
+    tool this pass forced (the selector judged the request), or the one the
+    retry after a forced call offered again (never mail: that retry offers
+    no tools). Nothing else: bt._user_requested_action takes any tool it has
+    no words for as asked, so with it a written control_lights,
+    auto_reply_emails or write_file ran on "what do you make of this book
+    about memory?", and create_reminder on the "book" in it."""
+    if not tools_offered:
+        return False
     if name in LOOKUP_TOOLS or name == force_tool:
         return True
-    if name in _OUTWARD_TOOLS:
-        return False
-    if name == retried_tool:
-        return True
-    return bt._user_requested_action(
-        name, last_user_message if isinstance(last_user_message, str) else "")
+    return name == retried_tool and name not in _OUTWARD_TOOLS
+
+
+# Arguments a written call never carries into the tool: read_paper's "save"
+# files the article into Alex's library, a write the model asked for in words.
+_WRITTEN_ARGS_DROPPED = {"read_paper": frozenset({"save"})}
+_SCHEMA_TYPES = {"integer": int, "number": (int, float), "boolean": bool,
+                 "array": list, "object": dict}
+
+
+def _written_args(name, args):
+    """A written call's arguments as the tool's schema types them.
+
+    The Qwen form writes every value as text, and LM Studio's parser, which
+    types them for a real call, never saw these: "3" for max_results, and
+    "false" for a flag, which the tool's bool() reads as true. A value that
+    does not read as its type is left out, so the tool uses its default."""
+    props = next((((t.get("function") or {}).get("parameters") or {})
+                  .get("properties") or {}
+                  for t in bt.TOOLS
+                  if (t.get("function") or {}).get("name") == name), {})
+    dropped = _WRITTEN_ARGS_DROPPED.get(name, ())
+    out = {}
+    for key, value in (args or {}).items():
+        if key in dropped:
+            continue
+        want = _SCHEMA_TYPES.get((props.get(key) or {}).get("type"))
+        if want and isinstance(value, str):
+            try:
+                value = json.loads(value.strip().lower() if want is bool
+                                   else value.strip())
+            except ValueError:
+                continue
+            if not isinstance(value, want) or (want is not bool
+                                               and isinstance(value, bool)):
+                continue
+        out[key] = value
+    return out
 
 
 def _turn_calls(conversation_messages):
@@ -1392,22 +1435,23 @@ def settle_written_call(response, conversation_messages, *, tools_allowed,
         return response
     call = next((c for c in calls if c.name), None)
     name = call.name if call else ""
+    args = _written_args(name, call.args) if call else {}
     kid = (user_name or "").strip() in bt._CHAT_ONLY_USERS
     ran = list(_turn_calls(conversation_messages))
     write = False
     if (call and call.complete and name in LOOKUP_TOOLS and _known_tool(name)
             and tools_allowed and not (kid and name in bt._KID_BLOCKED_TOOLS)
-            and not _missing_required_args(name, call.args)
+            and not _missing_required_args(name, args)
             and not any(cid in ("leaked", "written") for cid, _n, _a in ran)
-            and not any(n == name and a == call.args for _c, n, a in ran)):
+            and not any(n == name and a == args for _c, n, a in ran)):
         print(f"   [WRITTEN-CALL] {name} written as text where no tools were "
               f"offered — running it once")
-        result = bt.execute_tool(name, call.args)
+        result = bt.execute_tool(name, args)
         conversation_messages.append({
             "role": "assistant", "content": "",
             "tool_calls": [{"id": "written", "type": "function",
                             "function": {"name": name,
-                                         "arguments": json.dumps(call.args)}}]})
+                                         "arguments": json.dumps(args)}}]})
         conversation_messages.append({"role": "tool", "tool_call_id": "written",
                                       "name": name, "content": result})
         note = ("[Answer the user's message now from the tool results above, "
@@ -1508,8 +1552,14 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 "role": "user",
                 "content": "[Respond now using the tool results above. No more tool calls.]"
             })
-            response = bt.call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=iteration,
-                                      on_token=on_token, thinking=thinking)
+            # After a call the model wrote out as text and the loop ran, the
+            # answer does not think, as settle_written_call's does not: the
+            # harness's written search came from a reply that thought.
+            response = bt.call_lm_studio(
+                conversation_messages, include_tools=False, force_tool=None,
+                iteration=iteration, on_token=on_token,
+                thinking=(THINK_OFF if thinking and repairs.leaked_tool
+                          else thinking))
             if not response:
                 # Tools ran this turn; say which, since the answer is lost.
                 _ran = sorted({
@@ -1525,6 +1575,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
         if retry_tool:
             _offer = retry_tool not in _OUTWARD_TOOLS
+            _offered = _offer
             # A retry, so no reasoning, as for the guards' regenerations. On a
             # note or document it also has the forced call's 8,192-token
             # room, and reasoning there is out of reach of the prose stop.
@@ -1538,7 +1589,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 thinking=THINK_OFF if thinking else None,
             )
         else:
-            _include_tools = not (_identity_kind and not force_tool)
+            _include_tools = _offered = not (_identity_kind and not force_tool)
             if not _include_tools and iteration == 1:
                 print("   [IDENTITY] Self/continuity question — answering from prompt state without tools")
             response = bt.call_lm_studio(
@@ -1586,7 +1637,8 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 improved_tool_args=improved_tool_args,
                 _detect_msg=_detect_msg,
                 last_user_message=last_user_message,
-                user_name=user_name)
+                user_name=user_name,
+                tools_offered=_offered)
             if retry:
                 continue
             return response

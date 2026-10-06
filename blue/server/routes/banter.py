@@ -33,6 +33,7 @@ from blue.agreement import agreement_gesture
 from blue.llm_coordinator import llm_slot
 from blue.mood_eyes import mood_eye_color
 from blue.server.pages.banter import BANTER_HTML
+from blue_reply_text import strip_tool_markup
 
 
 BANTER_ROBOTS = ("blue", "hexia", "pico")
@@ -436,6 +437,9 @@ def _clean_generated_line(text: str, speaker: str) -> str:
         value = value.rsplit("</think>", 1)[-1]
     value = re.sub(r"<think>.*?</think>", " ", value, flags=re.DOTALL | re.IGNORECASE)
     value = value.replace("<think>", " ")
+    # A tool call written out as text is not a line to speak; one that was
+    # only a call comes back empty and is rejected as "an empty line".
+    value = strip_tool_markup(value)
     value = re.sub(r"\s+", " ", value).strip()
     value = _STAGE_DIRECTION_RE.sub("", value).strip()
     names = [bt._robot_cfg(robot)["name"] for robot in BANTER_ROBOTS]

@@ -872,3 +872,14 @@ def test_banter_session_routes_cover_all_three_robots(banter_module):
     assert ended.get_json()["queued"] == {"blue": 1, "hexia": 1, "pico": 1}
     assert banter_module._test_continuity.started == ["set-42"]
     assert banter_module._test_continuity.ended == ["set-42"]
+
+
+def test_a_tool_call_written_as_text_is_never_a_banter_line(banter_module):
+    """Banter passes no turn_completion.finish (review of 1c44491): a line
+    that was only a call is empty, and rejected as "an empty line"."""
+    call = ('<tool_call>{"name": "web_search", "arguments": '
+            '{"query": "toasters"}}</tool_call>')
+    assert banter_module._clean_generated_line(call, "blue") == ""
+    assert banter_module._clean_generated_line(
+        "Blue: The toaster filed a grievance. " + call, "blue"
+    ) == "The toaster filed a grievance."

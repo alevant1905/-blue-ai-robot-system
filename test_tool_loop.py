@@ -239,6 +239,18 @@ def test_the_forced_retry_still_runs_when_the_selector_supplied_arguments(loop):
     assert loop.executed[0]["args"]["name"] == "Felix"
 
 
+def test_the_forced_tool_written_as_text_runs_with_its_written_arguments(loop):
+    """The selector judged the request and forced the tool, so the call runs
+    whether the model made it or wrote it out (_may_run_written); only a
+    write nobody forced stays unrun."""
+    loop.model.queue("<tool_call>\n<function=remember_person>\n<parameter=name>\n"
+                     "Felix\n</parameter>\n</function>\n</tool_call>",
+                     "Noted — Felix it is.")
+    _forced(loop, "his name is felix", "remember_person", {})
+
+    assert loop.executed == [{"tool": "remember_person", "args": {"name": "Felix"}}]
+
+
 def test_the_forced_retry_is_skipped_when_the_selector_supplied_nothing(loop):
     loop.model.queue("Eleven weeks, not six.")
     result = _forced(loop, "that's not less than six weeks away",

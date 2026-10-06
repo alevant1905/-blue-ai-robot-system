@@ -1273,3 +1273,15 @@ def test_a_question_about_the_robot_is_not_answered_with_the_topic(panel_module)
         "Alex's exact words: introduce yourself to the class who are you"
         in pinned
     )
+
+
+def test_a_tool_call_written_as_text_is_never_a_panel_turn(panel_module):
+    """Neither Panel answer passes turn_completion.finish, so its cleanup
+    drops a call written out as text (review of 1c44491). A turn that was
+    only a call comes back empty, which the route answers as retryable."""
+    call = ("<tool_call>\n<function=web_search>\n<parameter=query>\nmemory\n"
+            "</parameter>\n</function>\n</tool_call>")
+    assert panel_module._clean_reply(call, "blue") == ""
+    assert panel_module._clean_reply(
+        "Memory is a practice. Let me look that up.\n" + call, "blue"
+    ) == "Memory is a practice."

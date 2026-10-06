@@ -27,6 +27,7 @@ from blue.mood_eyes import mood_eye_color
 from blue.server.pages.duet import DUET_HTML
 from blue.server.prompts import (DUET_REFLECT_INQUIRY_ASK,
                                  DUET_REFLECT_PROTOCOL_ASK)
+from blue_reply_text import strip_tool_markup
 
 
 _DUET_ROBOTS = frozenset(("blue", "hexia"))
@@ -5114,7 +5115,10 @@ def duet_turn():
             )
             if '</think>' in cand:           # keep only the text after the reasoning block
                 cand = cand.split('</think>')[-1]
-            cand = cand.replace('<think>', '').strip()
+            # A tool call written out as text is not a turn to speak (this
+            # passes no turn_completion.finish); one that was only a call
+            # comes back empty and gets the second attempt.
+            cand = strip_tool_markup(cand.replace('<think>', '')).strip()
             # Strip a leading "Name:" the model sometimes adds anyway.
             cand = re.sub(r'^\s*(?:%s)\s*[:\-—]\s*' % re.escape(req.sp["name"]), '', cand, flags=re.I).strip()
             if cand:

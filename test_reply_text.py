@@ -269,6 +269,10 @@ def test_a_call_cut_off_in_its_body_is_still_markup():
      "It's 4 degrees in Kitchener."),
     ("<tool_call>{not json}</tool_call>", ""),
     ("Checking.\n<tool_call>\n", "Checking."),
+    # The token cap cut a tag off at the very end (review of 1c44491: both
+    # were shown as they are).
+    ("Checking.\n<tool_call>\n<funct", "Checking."),
+    ("Checking.\n<tool_call>\n<function=web_search>\n<param", "Checking."),
     # Nothing but a fenced call.
     ("```xml\n" + HARNESS_WRITTEN_CALL + "\n```", ""),
 ])
