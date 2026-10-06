@@ -18,6 +18,14 @@ Importing bluetools also connects every robot head and resets it to neutral.
 That only failed because the running server held the serial ports; with the
 server stopped, a test run would move Blue, Hexia and Casper.
 BLUE_HEADS_DISABLED=1 stops the real board loaders (a fake board still works).
+
+Every chat payload is trimmed to the input budget, which _lm_input_budget
+reads from the loaded model with a GET to LM Studio's /api/v0/models when
+its five-minute cache is cold. The chat-page tests stub both transports but
+not that, so a test run asked Alex's live LM Studio, sized its payloads by
+whatever model was loaded (or 6,500 tokens when it was down), and wrote the
+live model's id into _lm_loaded_model (whole-branch review, 10-06). A fixed
+budget keeps the suite off the network and the same on every machine.
 """
 
 import os
@@ -28,6 +36,7 @@ os.environ.setdefault("BLUE_CONTINUITY_THREADS", "0")
 os.environ.setdefault("BLUE_EMAIL_AUTOREPLY_DISABLED", "1")
 os.environ.setdefault("BLUE_MEMORY_VECTORS", "0")
 os.environ.setdefault("BLUE_HEADS_DISABLED", "1")
+os.environ.setdefault("BLUE_LM_INPUT_BUDGET_TOKENS", "100000")
 
 
 @pytest.fixture(autouse=True)

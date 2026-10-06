@@ -191,6 +191,28 @@ def test_a_fact_about_clothes_that_is_not_a_look_is_saved_as_given(monkeypatch):
     assert written == {"emmy_dance_outfit": "blue leotard and tights"}
 
 
+@pytest.mark.parametrize("key, value", [
+    ("office_look", "dark green walls and a big oak desk"),
+    ("course_site_look", "minimal, dark background, serif fonts"),
+    ("vilda_halloween_look", "witch hat and a purple cape"),
+])
+def test_a_things_or_an_occasions_look_is_saved_as_given(monkeypatch, key, value):
+    """Whole-branch review: "remember the look I want for my office: dark
+    green walls and a big oak desk" was refused as "clothes or the scene",
+    and so were a site's design and the costume Alex asked to keep for
+    Halloween. Only a person's look sheds clothes and scene."""
+    written = {}
+    monkeypatch.setattr(bt, "save_blue_facts",
+                        lambda facts, **kw: written.update(facts) or True)
+
+    result = json.loads(bt.execute_tool(
+        "remember_fact", {"fact_key": key, "fact_value": value}))
+
+    assert written == {key: value}
+    assert result["success"] is True
+    assert "face" not in result["message"]
+
+
 def test_a_look_with_no_clothes_in_it_is_saved(monkeypatch):
     """Review of P2-1: "remember that Svetlana has a nose ring", filed as
     svetlana_appearance, was refused as "clothes or the scene" because it

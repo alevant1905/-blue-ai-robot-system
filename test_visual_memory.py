@@ -182,6 +182,10 @@ def test_a_look_fact_keeps_no_outfit():
     assert not is_look_fact_key("emmy_dance_outfit")
     assert not is_look_fact_key("alex_facebook")
     assert not is_look_fact_key("favorite_face_cream")
+    # a place's, a thing's or an occasion's look (whole-branch review)
+    for key in ("office_look", "alex_office_look", "course_site_look",
+                "kitchen_appearance", "vilda_halloween_look", "her_party_look"):
+        assert not is_look_fact_key(key), key
     assert look_fact_value(
         "TA for CS101; playful food-themed outfit — bread-bun hat and "
         "strawberry-patterned skirt, sitting in office chair by white brick "

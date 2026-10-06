@@ -90,6 +90,27 @@ _LOOK_FEATURE_RE = re.compile(
 # "favorite_face_cream").
 _LOOK_KEY_WORDS = {"appearance", "look", "looks"}
 _LOOK_KEY_LAST_WORDS = {"face", "faces"}
+# A look that is not how a person looks. A place's or a thing's:
+# "office_look" = "dark green walls and a big oak desk" and
+# "course_site_look" = "minimal, dark background, serif fonts". Or what
+# someone wears for an occasion, which the key names as an outfit, like
+# "emmy_dance_outfit": "vilda_halloween_look" = "witch hat and a purple
+# cape". All three were refused as "clothes or the scene" (whole-branch
+# review); they are saved as given, with nothing said about faces. A key
+# naming no thing or occasion stays a look, whoever it names: "clover_
+# appearance" was filed before Clover was anyone Blue knew.
+_THING_LOOK_KEY_WORDS = frozenset("""
+office offices room rooms bedroom kitchen bathroom basement garage house home
+apartment studio lab classroom hall garden yard backyard porch wall walls desk
+workspace site website webpage page homepage blog app ui interface dashboard
+slides slide deck presentation poster logo brand branding theme font fonts
+layout design newsletter signature syllabus document doc report cover book
+card invitation cake car bike
+""".split())
+_OCCASION_LOOK_KEY_WORDS = frozenset("""
+halloween costume costumes outfit outfits party wedding christmas holiday
+holidays birthday prom graduation recital concert dance gala formal uniform
+""".split())
 
 
 def lasting_appearance(text: str):
@@ -128,8 +149,11 @@ def lasting_appearance(text: str):
 
 
 def is_look_fact_key(fact_key: str) -> bool:
-    """'clover_appearance', 'what_she_looks_like', 'emmy_face'."""
+    """'clover_appearance', 'what_she_looks_like', 'emmy_face'. Not a
+    thing's or an occasion's: 'office_look', 'vilda_halloween_look'."""
     words = [w for w in re.split(r"[^a-z]+", str(fact_key or "").lower()) if w]
+    if set(words) & (_THING_LOOK_KEY_WORDS | _OCCASION_LOOK_KEY_WORDS):
+        return False
     return bool(set(words) & _LOOK_KEY_WORDS
                 or (words and words[-1] in _LOOK_KEY_LAST_WORDS))
 

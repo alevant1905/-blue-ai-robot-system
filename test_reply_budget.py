@@ -711,3 +711,55 @@ def test_panel_has_no_cap(chat):
     payload = chat.model.main[-1]
     assert payload["max_tokens"] == bt._chat_max_tokens()
     assert SHORT_TURN_NOTE not in _user_text(payload)
+
+
+# --------------------------------------------------------------------------
+# A guard's regeneration
+# --------------------------------------------------------------------------
+
+BOILERPLATE = ("As a large language model developed by OpenAI, I don't have a "
+               "body, but yes, autoGPT is a kind of harness.")
+LONG_RETRY = " ".join(f"Point {i} is a whole sentence about autoGPT as a harness."
+                      for i in range(40))
+
+
+def _system(payload):
+    return next(m["content"] for m in payload["messages"] if m.get("role") == "system")
+
+
+def test_a_retry_keeps_the_turns_system_message_cap_and_note(chat):
+    """Whole-branch review: the identity guard's retry of "is autoGPT a type
+    of harness" ran at 900 tokens on the memory blocks under the persona
+    line: no STYLE, ENDINGS or <now>, no short-message note, and 240 words
+    shipped."""
+    chat.model.queue(BOILERPLATE, LONG_RETRY)
+    reply = reply_of(chat.ask("is autoGPT a type of harness"))
+    first, retry = chat.model.payloads[0], chat.model.payloads[1]
+    assert _system(retry) == _system(first)
+    assert _system(retry).rstrip().endswith(_system(first).rstrip()[-200:])
+    assert "STYLE:" in _system(retry)
+    assert retry["max_tokens"] <= TYPED_REPLY_TOKENS
+    live = [m["content"] for m in retry["messages"] if m.get("role") == "user"][-2]
+    assert live.endswith(f"[{SHORT_TURN_NOTE}]")
+    assert "OpenAI" not in reply
+    assert len(reply) <= visible_chars(TYPED_REPLY_TOKENS)
+    assert reply.endswith("harness.")
+
+
+def test_a_spoken_retry_keeps_spoken_reply_and_its_cap(chat):
+    chat.model.queue("As a large language model developed by OpenAI, I don't "
+                     "have a body or tastes.", LONG_RETRY)
+    reply = reply_of(chat.ask("what's your favorite music?", voice=True))
+    retry = chat.model.payloads[1]
+    assert "SPOKEN REPLY" in _system(retry)[-1200:]
+    assert retry["max_tokens"] <= SPOKEN_REPLY_TOKENS
+    assert len(reply) <= visible_chars(SPOKEN_REPLY_TOKENS)
+
+
+def test_an_uncapped_retry_keeps_its_room(chat):
+    chat.model.queue(BOILERPLATE, "AutoGPT is a harness: it loops a model "
+                     "through goals and tools.")
+    chat.ask("explain in detail whether autoGPT is a type of harness")
+    retry = chat.model.payloads[1]
+    assert _system(retry) == _system(chat.model.payloads[0])
+    assert retry["max_tokens"] > TYPED_REPLY_TOKENS

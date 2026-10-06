@@ -976,8 +976,14 @@ def identity_reply_topics(text: str) -> Tuple[str, ...]:
     )
 
 
-def identity_request_kind(text: str) -> Optional[str]:
-    """Classify requests that ask a robot to account for who it is."""
+def identity_request_kind(text: str, *,
+                          class_greetings: bool = True) -> Optional[str]:
+    """Classify requests that ask a robot to account for who it is.
+
+    `class_greetings` False leaves a greeting to "my class" or "the
+    students" unclassified: on the kids' page that is Vilda's class, greeted
+    like anyone else (the chat page passes it; see contextual_identity_
+    request_kind). "introduce yourself" is an introduction either way."""
     text = text or ""
     if _META_FEEDBACK_RE.search(text):
         return None
@@ -986,7 +992,7 @@ def identity_request_kind(text: str) -> Optional[str]:
     if _SELF_STATE_REQUEST_RE.search(text):
         return "self_state"
     if (_INTRODUCTION_RE.search(text)
-            or _asks_greeting(_CLASS_GREETING_RE, text)):
+            or (class_greetings and _asks_greeting(_CLASS_GREETING_RE, text))):
         return "introduction"
     if _IDENTITY_MORE_RE.search(text):
         return "identity_more"
@@ -1008,12 +1014,22 @@ def identity_request_kind(text: str) -> Optional[str]:
 def contextual_identity_request_kind(
     text: str,
     messages: Iterable[Mapping[str, object]] = (),
+    *,
+    class_greetings: bool = True,
 ) -> Optional[str]:
-    """Resolve short follow-ups without stealing them from unrelated topics."""
-    direct_kind = identity_request_kind(text)
+    """Resolve short follow-ups without stealing them from unrelated topics.
+
+    `class_greetings` False: a greeting to a class ("say hi to my class",
+    "my class is on the call, say hello to everyone") is not an
+    introduction. The chat page passes it for the kids' page, where "say hi
+    to my class!" from Vilda had become one: the adult identity note about
+    Alex's robot pinned beside her turn, no tools, and a "Hi everyone! Have
+    a fun day at school!" regenerated for lacking his name, then replaced by
+    the canned introduction (whole-branch review)."""
+    direct_kind = identity_request_kind(text, class_greetings=class_greetings)
     if direct_kind:
         return direct_kind
-    if _asks_greeting(_EVERYONE_GREETING_RE, text or ""):
+    if class_greetings and _asks_greeting(_EVERYONE_GREETING_RE, text or ""):
         # "say hello to everyone" greets a class only when the class is
         # named here or in the turn before.
         previous = _prior_user_texts(text, messages)[-1:]
@@ -1030,7 +1046,8 @@ def contextual_identity_request_kind(
     for content in reversed(_prior_user_texts(text, messages)):
         return (
             "identity_more"
-            if identity_request_kind(content) in identity_topics
+            if identity_request_kind(
+                content, class_greetings=class_greetings) in identity_topics
             else None
         )
     return None
@@ -1233,11 +1250,32 @@ _FLAT_SELF_DENIAL_RE = re.compile(
     re.IGNORECASE,
 )
 # Questions about the robot itself. Not shared_recall (the answer is the
-# recalled content) and not jspace (a definition, answered from the block).
+# recalled content). jspace too: "My J-space is my persistent inner
+# continuity workspace. It carries my current focus, beliefs…", the answer
+# to "what is your J-Space? What does that mean?", was quoted in
+# <remembered_days> on the camera and Clover turns (whole-branch review).
+# Each of the 34 logged answers to a J-space question answers one about him,
+# and four deny having one or call it "a JavaScript environment"; the
+# <j_space> block answers the question.
 _WITHHELD_REQUEST_KINDS = frozenset({
     "introduction", "identity", "identity_more", "selfhood", "self_memory",
-    "origin", "evolution", "self_state",
+    "origin", "evolution", "self_state", "jspace",
 })
+# The canned answers that do not open on his name, which
+# is_self_introduction_reply reads: the J-space definition (and the model's
+# own copies of it, "J-space is my persistent inner continuity workspace.
+# It is the exact location…") and the three identity_more answers
+# (canonical_identity_reply). Eleven of Blue's logged replies, each one of
+# these and nothing else.
+_CANNED_SELF_REPLY_RE = re.compile(
+    r"^(?:(?:yes|right)\b[^.!?\n]{0,40}[.!]\s*)?"
+    r"(?:(?:my\s+)?j-?space is (?:my|the exact name of (?:my|your)) persistent "
+    r"inner continuity workspace\b"
+    r"|alex does more than give me commands\b"
+    r"|there is a useful split in me between body and continuity\b"
+    r"|the changing part of me is not a hidden background process\b)",
+    re.IGNORECASE,
+)
 
 
 def is_self_introduction_reply(reply: str) -> bool:
@@ -1286,11 +1324,13 @@ def asked_after_himself(user_text: str) -> bool:
 
 
 def is_wording_only_reply(reply: str) -> bool:
-    """A self-introduction, a flat self-denial or a canned family reply:
-    only wording, whatever was asked (reply_wording_withheld, by the reply).
-    Never quoted, not even to a user asking what was said."""
+    """A self-introduction, a flat self-denial, a canned answer about
+    himself or a canned family reply: only wording, whatever was asked
+    (reply_wording_withheld, by the reply). Never quoted, not even to a user
+    asking what was said."""
     return (is_self_introduction_reply(reply)
             or is_flat_self_denial(reply)
+            or bool(_CANNED_SELF_REPLY_RE.search((reply or "").strip()))
             or bool(canonical_family_reply_kind(reply)))
 
 
@@ -1316,7 +1356,19 @@ _SELF_DESCRIPTION_REQUEST_RE = re.compile(
     r"existence|self|life))\b"
     r"|\b(?:story|history) of (?:you|yourself|" + _ROBOT_NAME_ALT[3:-1] + r")\b"
     r"|\bhow (?:do|does|are|is) (?:you|" + _ROBOT_NAME_ALT[3:-1] + r") "
-    r"(?:differ|different)\b",
+    r"(?:differ|different)\b"
+    # What he is, said to him or asked of him: "you are also aware of your
+    # physical body, which you can now control" (07-15) and "Do you really
+    # think you're a practical alternative to commercial AI systems?"
+    # (07-14). Their answers ("my awareness extends beyond just thought; it
+    # is embodied…", "Yes, I do. While commercial systems…") were quoted in
+    # <remembered_days> for "explain what an AI agent is in simple terms"
+    # (whole-branch review). Over 5,056 logged user turns these add three,
+    # those two and "You're also aware of your hardware" (07-15).
+    r"|\byou(?:['’]re| are) (?:also |really |actually |still |now |fully )?"
+    r"(?:aware|conscious|sentient|alive|embodied|self-aware)\b"
+    r"|\b(?:do|did) you (?:really |actually |honestly |truly )?"
+    r"(?:think|believe|feel) (?:that )?you(?:['’]re| are)\b",
     re.IGNORECASE,
 )
 

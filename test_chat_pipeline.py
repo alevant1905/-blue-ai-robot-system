@@ -114,6 +114,10 @@ def chat(monkeypatch):
             bt._LM, "chat",
             lambda messages, **kwargs: model({"messages": messages, **kwargs}),
         )
+    # Every payload is trimmed to the input budget, read from the loaded model
+    # by a GET to LM Studio on a cold cache: one more live request, and the
+    # live model's id written into _lm_loaded_model (whole-branch review).
+    monkeypatch.setattr(bt, "_lm_input_budget", lambda: 100_000)
 
     # 3) PERSISTENCE. The real memory DB and journals must not be touched.
     saved = []

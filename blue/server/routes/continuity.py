@@ -1287,11 +1287,15 @@ class RobotContinuity:
                     f"{who} asked about the family ({asked}); you "
                     "answered from the household facts (wording omitted)."
                 )
-            elif exchange and _wording_omitted(
+            elif exchange and not issue and _wording_omitted(
                     bulk_paste_recall_words(heard) if pasted else heard,
                     replied):
                 # The summary quotes "Blue replied: …"; for a check-in that
                 # quote is only a pattern to copy. Reflection input keeps it.
+                # A reply error keeps its own summary, which quotes no reply
+                # either: "Do you have a J-space?" answered "a JavaScript
+                # environment" stays a bug episode now that a J-space
+                # question's answer is withheld too.
                 said = pasted or f"{who} said '{_clip(heard, 80)}'"
                 summary = (
                     f"{said}; your reply wording is omitted so it "

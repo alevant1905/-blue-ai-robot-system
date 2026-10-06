@@ -858,7 +858,8 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             # then replaced with a canned paragraph (2026-09-09).
             _pre_text = (bt._intent_text(last_user_msg)
                          if isinstance(last_user_msg, str) else "")
-            _pre_kind = bt.contextual_identity_request_kind(_pre_text, messages)
+            _pre_kind = bt._speaker_identity_kind(_pre_text, messages,
+                                                  user_name=user_name)
             if _pre_kind:
                 _pre_name = bt._robot_cfg(robot)["name"]
                 if (bt.identity_response_problem(_derecycled, _pre_name, request_kind=_pre_kind,
@@ -925,20 +926,55 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             if len(n) >= 40
         }
         _all_norms = _norm_recents | _wide_norms
+        # A regeneration is asked under the turn's own system message
+        # (process_with_tools keeps it), with STYLE or SPOKEN REPLY last,
+        # <now>, EMBODIMENT, the syllabus section and the kids' persona. Built
+        # on the memory blocks under the adult persona line alone, the retry
+        # of "is autoGPT a type of harness" (capped at 220 tokens, with the
+        # short-message note) came back as 240 words, and of a spoken "what's
+        # your favorite music?" (capped at 120) as 180 (whole-branch review).
+        # A short message's cap and note hold for the retry too.
+        _turn_system = getattr(bt._LM_TURN, "system", None)
+        _turn_cap = getattr(bt._LM_TURN, "reply_cap", None)
+        _turn_note = getattr(bt._LM_TURN, "reply_note", "")
+
         def _regen_once(note, max_tokens=900):
-            # The model's chat template only allows ONE system message,
-            # at position 0 (anything else → LM Studio 400): merge the
-            # persona into an existing head system message if present.
-            _retry_msgs = list(messages) + [
+            _retry_msgs = list(messages)
+            if _turn_note:
+                bt._pin_short_turn_note(_retry_msgs, _turn_note)
+            _retry_msgs += [
                 {"role": "assistant", "content": final_content},
                 {"role": "user", "content": note},
             ]
-            _persona = bt._robot_cfg(robot)["persona_line"]
-            if _retry_msgs and _retry_msgs[0].get("role") == "system":
-                _retry_msgs[0] = {"role": "system", "content": (
-                    _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
+            # The model's chat template only allows ONE system message,
+            # at position 0 (anything else → LM Studio 400).
+            if isinstance(_turn_system, str) and _turn_system.strip():
+                _head = {"role": "system", "content": _turn_system}
+                if _retry_msgs and _retry_msgs[0].get("role") == "system":
+                    _retry_msgs[0] = _head
+                else:
+                    _retry_msgs.insert(0, _head)
             else:
-                _retry_msgs.insert(0, {"role": "system", "content": _persona})
+                # No model turn ran (a grounded reply): merge the persona
+                # into an existing head system message if present.
+                _persona = bt._robot_cfg(robot)["persona_line"]
+                if _retry_msgs and _retry_msgs[0].get("role") == "system":
+                    _retry_msgs[0] = {"role": "system", "content": (
+                        _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
+                else:
+                    _retry_msgs.insert(0, {"role": "system", "content": _persona})
+            if _turn_cap:
+                max_tokens = min(max_tokens, int(_turn_cap))
+            # The turn's call was trimmed to the input budget; so is this.
+            try:
+                _kept, _dropped = bt._trim_messages_for_budget(
+                    _retry_msgs, None, bt._lm_input_budget(), min_keep_tail=4)
+                if _dropped:
+                    _retry_msgs = bt._normalize_message_alternation(_kept)
+                    print(f"   [TRIM] retry: dropped {_dropped} oldest msg(s) "
+                          "to fit budget")
+            except Exception as e:
+                bt.log.warning(f"[TRIM] retry trim failed: {e}")
             # Unpolished: the polisher compared a regeneration with the reply
             # it replaces (appended just above) and cut it to two sentences.
             # Never thinking: a rewrite against a pinned note. On 10-05 two
@@ -947,6 +983,13 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             _redo = bt._raw_call_llm(_retry_msgs, include_tools=False,
                                      temperature=0.8, max_tokens=max_tokens,
                                      reasoning_effort="none")
+            if _turn_cap:
+                # Cut by max_tokens, it ends on its last full sentence.
+                try:
+                    bt._hold_to_reply_cap(
+                        _redo, bt._reply_budget.visible_chars(_turn_cap))
+                except (AttributeError, IndexError, KeyError, TypeError):
+                    pass
             # The turn's [LM] line is already out and never saw this call.
             try:
                 print(bt._lm_retry_line(
@@ -1007,10 +1050,8 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         # above do not cover.
         _identity_text = (bt._intent_text(last_user_msg)
                           if isinstance(last_user_msg, str) else "")
-        _identity_kind = bt.contextual_identity_request_kind(
-            _identity_text,
-            messages,
-        )
+        _identity_kind = bt._speaker_identity_kind(
+            _identity_text, messages, user_name=user_name)
         # "what have you been up to?" is evolution for the context it pins
         # (the duet record, the change history), and a casual check-in for
         # what the answer must say: no J-space or continuity words demanded

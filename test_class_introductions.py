@@ -560,16 +560,89 @@ def test_how_to_greet_the_class_is_a_question_not_a_greeting(chat, monkeypatch):
     assert _reply(response) == "Bonjour à tous!"
 
 
-def test_vildas_class_greeting_has_no_alexs_students(chat, monkeypatch):
+@pytest.mark.parametrize("asked", [
+    "say hi to my class!",
+    "my class is on the call, say hello to everyone",
+])
+def test_vildas_class_greeting_is_an_ordinary_turn(chat, monkeypatch, asked):
+    """Whole-branch review: on the kids' page her class is hers. Read as an
+    introduction, the turn had the adult identity note about Alex's robot
+    beside her words and no tools, and "Hi everyone! Have a fun day at
+    school!" was regenerated for leaving out his name, then replaced by the
+    canned introduction.
+
+    Asserted on what the code builds, the turn as pinned and the tools
+    offered: the payload as a whole carries live memory text (the J-space
+    block), which may say "Alex's students" any day."""
     monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
     monkeypatch.setattr(bt, "_identify_user_from_request", lambda: "Vilda")
-    # nameless first, so the identity retry is built too
-    chat.model.queue("Hi everyone!", "Hi everyone, I'm Blue!")
-    chat.ask("say hi to my class")
-    assert chat.model.payloads
-    for payload in chat.model.payloads:
-        sent = str(payload["messages"])
-        assert "AUDIENCE:" not in sent and "Alex's students" not in sent
+    greeting = "Hi everyone! Have a fun day at school!"
+    chat.model.queue(greeting)
+    response = chat.ask(asked)
+    pinned = _pinned(chat)
+    assert "[IDENTITY GROUNDING" not in pinned
+    assert "AUDIENCE:" not in pinned and "Alex's students" not in pinned
+    assert chat.model.main[0].get("tools"), "her tools are offered"
+    assert len(chat.model.payloads) == 1, "a greeting without his name stands"
+    assert _reply(response) == greeting
+
+
+def test_a_class_greeting_introduces_him_only_to_an_adults_class():
+    """The kids' page passes class_greetings=False (_speaker_identity_kind);
+    "introduce yourself" is an introduction on any page."""
+    for asked in ("say hi to my class", "say hello to the students"):
+        assert bt._speaker_identity_kind(
+            asked, _thread(asked), user_name="Alex") == "introduction"
+        assert bt._speaker_identity_kind(
+            asked, _thread(asked), user_name="Vilda") is None
+    everyone = _thread("my class is on the call", "say hello to everyone")
+    assert bt._speaker_identity_kind(
+        "say hello to everyone", everyone, user_name="Alex") == "introduction"
+    assert bt._speaker_identity_kind(
+        "say hello to everyone", everyone, user_name="Vilda") is None
+    assert bt._speaker_identity_kind(
+        "introduce yourself to my class", _thread("introduce yourself to my class"),
+        user_name="Vilda") == "introduction"
+    # "tell me more" after her greeting is no identity follow-up either
+    after = _thread("say hi to my class", "tell me more")
+    assert bt._speaker_identity_kind(
+        "tell me more", after, user_name="Vilda") is None
+
+
+@pytest.mark.parametrize("text, kind, wanted", [
+    # the room, not the household (the 09-16 turn is the one logged turn of
+    # 403 with <family> that this changes)
+    ("we're in front of the class here in DH201. Do you want to say hello "
+     "to everyone?", "introduction", False),
+    ("tell everyone a bit about yourself", "identity", False),
+    ("say hello to everybody", "introduction", False),
+    # still the household
+    ("introduce yourself to everyone in my family", "introduction", True),
+    ("do you remember everyone's names?", None, True),
+    ("how is everyone doing at home?", None, True),
+    ("tell me about the girls", None, True),
+    ("what's the weather like?", None, False),
+])
+def test_everyone_in_an_introduction_is_the_room(text, kind, wanted):
+    assert bt._asks_about_the_family(text, kind) is wanted
+
+
+def test_a_class_introduction_carries_no_family_roster(chat, monkeypatch):
+    """Whole-branch review: the class greeting's payload carried <family>
+    (Athena's age and school, the bunk beds, where Stella teaches) beside
+    the AUDIENCE line. The block is stubbed: the live one is built from the
+    facts table."""
+    monkeypatch.setattr(bt, "_class_topic_today", lambda texts: "")
+    monkeypatch.setattr(bt, "_family_ground_truth_block",
+                        lambda: "<family>\nFAMILY ROSTER\n</family>")
+    chat.model.queue("Hi everyone, I'm Blue. Good to see you all today.")
+    chat.ask("we're in front of the DH399 class right now. do you want to say "
+             "hello to everyone?")
+    assert "AUDIENCE:" in _pinned(chat)
+    assert "FAMILY ROSTER" not in str(chat.model.main[0]["messages"])
+    chat.model.queue("Athena, Emmy and Vilda, and Nori.")
+    chat.ask("do you remember everyone's names?")
+    assert "FAMILY ROSTER" in str(chat.model.main[-1]["messages"])
 
 
 def test_tell_me_more_about_hexia_is_not_the_same_paragraph(chat):

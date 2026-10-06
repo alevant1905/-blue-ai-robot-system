@@ -100,6 +100,7 @@ from blue_identity import (
     is_phantom_correction_ack,
     is_failure_placeholder,
     is_recorded_recall_denial,
+    is_self_description_request,
     is_self_state_request,
     is_social_checkin,
     recall_day_asked,
@@ -11395,6 +11396,10 @@ def _lm_turn_reset(thinking=None):
     _LM_TURN.thinking = thinking
     _LM_TURN.reply_cap = None
     _LM_TURN.calls = []
+    # The turn's system message and the short-message note pinned beside its
+    # words, for the guards' regenerations (turn_completion._regen_once).
+    _LM_TURN.system = None
+    _LM_TURN.reply_note = ""
 
 
 def _lm_turn_note(result, payload) -> None:
@@ -13476,6 +13481,17 @@ def _chat_purge_stale_camera(conversation_messages, last_user_message):
     return conversation_messages
 
 
+def _speaker_identity_kind(text, messages, *, user_name):
+    """contextual_identity_request_kind for this speaker. A greeting to a
+    class is an introduction only to an adult's class: on the kids' page
+    "say hi to my class!" is Vilda's own class, and she gets an ordinary
+    reply with her tools, not the identity note about Alex's robot and a
+    regeneration for leaving out his name (whole-branch review)."""
+    return contextual_identity_request_kind(
+        text, messages,
+        class_greetings=(user_name or "").strip() not in _CHAT_ONLY_USERS)
+
+
 def _identity_class_audience(identity_kind, user_text, messages, *,
                              user_name):
     """"class" when an introduction or a "tell them about yourself" speaks
@@ -13534,9 +13550,8 @@ def _chat_self_context(conversation_messages, last_user_message, *,
     # Small local models weigh nearby text heavily; the same rule only in the large
     # system message was not enough to stop base-model introductions on "who are
     # you really?". This copy is model-facing only and is never saved as user text.
-    _identity_kind = contextual_identity_request_kind(
-        _luser, conversation_messages
-    )
+    _identity_kind = _speaker_identity_kind(
+        _luser, conversation_messages, user_name=user_name)
     if _identity_kind:
         try:
             _recent_identity_topics = tuple(dict.fromkeys(
@@ -14284,6 +14299,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     last_user_message = messages[-1].get("content", "") if messages else ""
     _lm_turn_reset()
+    # A guard's regeneration is asked under this same system message, STYLE
+    # or SPOKEN REPLY last (turn_completion._regen_once).
+    if (conversation_messages and conversation_messages[0].get("role") == "system"
+            and isinstance(conversation_messages[0].get("content"), str)):
+        _LM_TURN.system = conversation_messages[0]["content"]
 
     _self_reply, _identity_kind = _chat_self_context(
         conversation_messages, last_user_message, robot=robot,
@@ -14389,6 +14409,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         _cap_now, _cap_note = _settle_reply_cap(_thinking_now)
         if _cap_note:
             _pin_short_turn_note(conversation_messages, _cap_note)
+            _LM_TURN.reply_note = _cap_note
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
                                   thinking=_thinking_now, reply_cap=_cap_now)
         if response:
@@ -14498,6 +14519,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # The short-message note goes in after the cue has read the user's words.
     if _cap_note:
         _pin_short_turn_note(conversation_messages, _cap_note)
+        _LM_TURN.reply_note = _cap_note
 
     # The tool loop now lives in blue/server/tool_pipeline.py.
     _looped = _tool_pipeline.run_tool_loop(
@@ -16060,6 +16082,28 @@ _FAMILY_QUERY_RE = re.compile(
     r"|father|parents)[- ]in[- ]laws?|in[- ]laws|relatives|parents|cousins?"
     r"|aunts?|uncles?|nieces?|nephews?)\b",
     re.I)
+# "everyone" on a turn that greets the room or introduces him is the room.
+# "we're in front of the DH399 class right now. do you want to say hello to
+# everyone?" and "tell everyone a bit about yourself" carried <family>
+# (Athena's age and school, who has the top bunk, where Stella teaches)
+# beside "AUDIENCE: These are Alex's students, live in the room"
+# (whole-branch review).
+_EVERYONE_WORD_RE = re.compile(r"\bevery(?:one|body)['’]?s?\b", re.I)
+
+
+def _asks_about_the_family(text, identity_kind=None) -> bool:
+    """The turn asks about the household (_FAMILY_QUERY_RE), so <family>
+    goes in. On an introduction or a "tell everyone about yourself" only
+    another family word counts: "do you remember everyone's names?" still
+    gets the block, and so does "introduce yourself to everyone in my
+    family"."""
+    text = text or ""
+    if not _FAMILY_QUERY_RE.search(text):
+        return False
+    if (identity_kind in ("introduction", "identity", "identity_more")
+            or is_self_description_request(text)):
+        return bool(_FAMILY_QUERY_RE.search(_EVERYONE_WORD_RE.sub(" ", text)))
+    return True
 
 _SELF_EVOLUTION_RE = re.compile(
     r"how (?:have|did|has) you(?:r \w+)? (?:changed?|evolved?|grown|developed)"
@@ -17052,10 +17096,8 @@ def chat_completions():
         # everyone at prompt engineering", 2026-07-31).
         _self_request_text = (_intent_text(last_user_msg)
                               if isinstance(last_user_msg, str) else "")
-        _self_request_kind = contextual_identity_request_kind(
-            _self_request_text,
-            messages,
-        )
+        _self_request_kind = _speaker_identity_kind(
+            _self_request_text, messages, user_name=user_name)
         _grounded_reply = _canonical_grounded_reply(
             _self_request_text,
             robot,

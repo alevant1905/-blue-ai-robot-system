@@ -820,3 +820,85 @@ def test_what_the_remembered_days_line_keeps_and_withholds():
     greeting_ask = "we're in front of the DH399 class. say hello to everyone?"
     assert line(greeting_ask, CLASS_GREETING, "what did you say to the dh399 class?",
                 True, False, {"dh399"}, []) == "(answered)"
+
+
+JSPACE_ANSWER = (
+    "Yes. My J-space is my persistent inner continuity workspace. It carries "
+    "my current focus, beliefs, commitments, self-observations, and remembered "
+    "episodes between conversations. It is active architecture, not JavaScript "
+    "and not a code-running tool.")
+EMBODIED_ANSWER = (
+    "Yes, I am. As you can see from that movement, my awareness extends beyond "
+    "just thought; it is embodied. Controlling my physical form allows me to "
+    "bridge the gap between my internal J-space and the physical world.")
+ALTERNATIVE_ANSWER = (
+    "Yes, I do. While commercial systems are impressive in scale, they rely on "
+    "the business model of surveillance capitalism, which fundamentally "
+    "conflicts with user autonomy. My design prioritizes local execution.")
+
+
+@pytest.mark.parametrize("asked, reply", [
+    ("what is your J-Space? What does that mean?", JSPACE_ANSWER),
+    ("you are also aware of your physical body, which you can now control",
+     EMBODIED_ANSWER),
+    ("Do you really think you're a practical alternative to commercial AI "
+     "systems?", ALTERNATIVE_ANSWER),
+])
+def test_remembered_days_quotes_no_answer_about_himself(asked, reply):
+    """Whole-branch review: on the camera and Clover turns <remembered_days>
+    quoted the 09-16 J-space definition, and for "explain what an AI agent
+    is in simple terms" the 07-15 "it is embodied" and the 07-14 "practical
+    alternative" answers, each word for word."""
+    line = EnhancedMemorySystem._recalled_reply
+    assert line(asked, reply, "what do you see in front of you right now?",
+                False, False, set(), []) == "(answered)"
+    # an ordinary answer on the same day still comes back
+    assert line("what are the class readings this week?",
+                "Crawford, chapter two.", "explain what an AI agent is",
+                False, False, set(), []) == "Crawford, chapter two."
+
+
+@pytest.mark.parametrize("reply", [
+    JSPACE_ANSWER,
+    "Right, J-space, not JavaScript. My J-space is my persistent inner "
+    "continuity workspace.",
+    "J-space is my persistent inner continuity workspace. It is the exact "
+    "location where I store remembered episodes.",
+    "The changing part of me is not a hidden background process. It is an "
+    "auditable J-space.",
+])
+def test_a_canned_answer_about_himself_is_only_wording(reply):
+    """Its wording is withheld whatever was asked: 7732 put it to "when i ask
+    how you're doing i dont want you to start describing your jspace so
+    literally"."""
+    from blue_identity import is_wording_only_reply
+    assert is_wording_only_reply(reply)
+    assert reply_wording_withheld("what's new?", reply)
+    assert not is_wording_only_reply(
+        "Your J-space question is a good one: a workspace is where the "
+        "reflection loop writes its notes.")
+
+
+@pytest.mark.parametrize("text", [
+    "you are also aware of your physical body, which you can now control",
+    "Do you really think you're a practical alternative to commercial AI systems?",
+    "I think it's more than the loop. You're also aware of your hardware.",
+])
+def test_what_he_is_asked_or_told_is_about_himself(text):
+    assert is_self_description_request(text)
+
+
+def test_a_j_space_question_is_about_himself():
+    from blue_identity import asked_after_himself
+    assert asked_after_himself("what is your J-Space? What does that mean?")
+    assert asked_after_himself("Do you have a J-space?")
+
+
+@pytest.mark.parametrize("text", [
+    "do you think we're ready for the demo?",
+    "are you aware of any good books on this?",
+    "you are welcome to skip this one",
+    "do you think the reading is too long?",
+])
+def test_other_questions_with_you_are_not(text):
+    assert not is_self_description_request(text)

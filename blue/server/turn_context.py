@@ -133,7 +133,7 @@ def build(messages: List[Dict[str, Any]], *, _grounded_reply, _self_request_kind
     # ground truth is present rather than only caught on output.
     if (last_user_msg and isinstance(last_user_msg, str)
             and user_name not in bt._CHAT_ONLY_USERS
-            and bt._FAMILY_QUERY_RE.search(last_user_msg)):
+            and bt._asks_about_the_family(last_user_msg, _self_request_kind)):
         try:
             _fam_block = bt._family_ground_truth_block()
             if _fam_block:
