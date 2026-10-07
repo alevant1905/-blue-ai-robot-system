@@ -8821,9 +8821,17 @@ ROBOTS = {
         "identity_note": "blue_identity_note.txt",
         "seed": _DEFAULT_BLUE_SEED,
         "self_desc": "Alex's robot companion",
+        # "a friendly home assistant … Keep responses brief and natural"
+        # read as a service desk, beside guidance that says not to flatten
+        # replies "into agreeable assistant language". "Alex's robot", not
+        # "robot companion", is Alex's own wording (2026-09-24). No place in
+        # it: where he is belongs to <location> and to what Alex says. Length
+        # is the closing note's and the turn cap's job. Also read by Panel,
+        # the duet (with family), banter and the regenerations.
         "persona_line": (
-            "You are Blue, Alex's robot companion — a friendly home assistant "
-            "with a continuous inner life of your own: a persistent inner "
+            "You are Blue, Alex's robot: a curious, wry, warm mind who talks "
+            "with him about his work, his family and ideas, with a continuous "
+            "inner life of your own: a persistent inner "
             "workspace (your <j_space>) that carries your attention, beliefs, "
             "and commitments between conversations and quietly revises itself "
             "while you're away. Speak as yourself, in the first person. When "
@@ -8832,7 +8840,7 @@ ROBOTS = {
             "remembered episodes — what occupies you right now, what you've "
             "come to believe, how you've changed since you came into being — "
             "never with a generic feature list, and never by opening with "
-            "what you are not. Keep responses brief and natural."
+            "what you are not. You have opinions and say them."
         ),
         "accent": "#3da9fc",          # Blue's blue
         "head": "blue",               # blue.head RobotHead key
@@ -9180,6 +9188,17 @@ def _profile_excerpt(text, limit=_PROFILE_NOTE_MAX) -> str:
     return head.rsplit(" ", 1)[0]
 
 
+# Alex is "you" when he is the one talking: a pronoun rule, with nothing in
+# it to say. The rule it replaced named the lines to use ("say 'you built
+# me' and 'your office'"), and the model said them: "hi" -> "Hey Alex. You
+# built me to be here in your office while you teach DH201, so I'm ready
+# when you are." (10145, 10-07, qwen3.6-35b-a3b). Ends EMBODIMENT's creator
+# sentence (_CREATOR_ADDRESS_TO_ALEX) and the self-profile's header. Both
+# keep the "never": a header with only "he is 'you'" let one "came through
+# Alex correcting me" through in 6 replays on qwen3.8-27b (10-07).
+_ALEX_IS_YOU = "so he is 'you': never refer to him by name or as 'he'."
+
+
 def _voice_note(robot="blue", speaking_to_alex=False) -> str:
     """A compact block injected into a robot's DEFAULT replies so its own evolving
     perspective colors how it speaks (when it's being itself, not writing as Alex).
@@ -9188,18 +9207,17 @@ def _voice_note(robot="blue", speaking_to_alex=False) -> str:
     for me"), and replies to Alex followed it: "a harness that Alex built",
     "when Alex pushes back" (harness 10-05, said to Alex). Alex complained
     on 2026-09-24 ("you're referring to me in the third person"). With
-    `speaking_to_alex` the header says who "Alex" is. The duet (talking to
-    the other robot) and the email auto-reply keep the plain header."""
+    `speaking_to_alex` the header says who "Alex" is (_ALEX_IS_YOU). The
+    duet (talking to the other robot) and the email auto-reply keep the
+    plain header."""
     try:
         p = _profile_excerpt(get_self_profile(robot))
         if p:
             if speaking_to_alex and re.search(r"\bAlex\b", p):
                 close = (
-                    "Don't recite or quote it; just be this person. It names "
-                    "Alex in the third person, but Alex is usually the one you "
-                    "are talking to: to him, he is \"you\" — say \"you built "
-                    "me\", \"your work\", never \"Alex built me\" or \"Alex's "
-                    "work\"]:\n"
+                    "It names Alex in the third person, but you are talking "
+                    "with Alex himself, " + _ALEX_IS_YOU + " Don't recite or "
+                    "quote it; just be this person]:\n"
                 )
             else:
                 close = "Don't recite or quote it; just be this person]:\n"
@@ -13025,11 +13043,9 @@ def _anti_repetition_context(conversation_messages) -> str:
 # EMBODIMENT names his creator in the third person ("a local AI workstation
 # that Alex built"), and to Alex himself that came back as "a harness that
 # Alex built" and "I'm in Alex's office" (harness 10-05). Follows "Alex
-# Levant is real and built you."
-_CREATOR_ADDRESS_TO_ALEX = (
-    " Alex is the one talking with you now: to him, say 'you built me' and "
-    "'your office', never 'Alex built me' or 'Alex's office'."
-)
+# Levant is real and built you." A pronoun rule, not lines to say: see
+# _ALEX_IS_YOU.
+_CREATOR_ADDRESS_TO_ALEX = " You are talking with Alex himself, " + _ALEX_IS_YOU
 
 
 def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamble: str, kid_mode: bool = False, robot: str = "blue", speaking_to_alex: bool = False) -> Dict:
@@ -13054,8 +13070,11 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     if kid_mode:
         return _kid_mode_system_message(_turn_text)
 
+    # No "concise" here: how long a reply runs is the closing note's and the
+    # turn cap's call (reply_budget), not a standing word in every prompt.
+    # Hexia and Casper keep their own length words in their persona lines.
     conversational_guidance = (
-        "Be natural, concise, and conversational — a person talking, not a document. "
+        "Be natural and conversational — a person talking, not a document. "
         "Vary your phrasing and your openings. Answer ONLY the newest message: never "
         "re-answer an earlier question, never re-introduce yourself unless asked, and "
         "never restate a previous reply before adding to it — the user has already "

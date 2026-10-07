@@ -209,14 +209,42 @@ def test_the_cut_is_not_made_at_a_title():
     assert bt._profile_excerpt("Short and whole.") == "Short and whole."
 
 
+# The pronoun rule (bt._ALEX_IS_YOU), in EMBODIMENT and the profile header.
+ALEX_IS_YOU = "so he is 'you'"
+# EMBODIMENT's sentence for him.
+TO_ALEX = "You are talking with Alex himself"
+
+
 def test_the_profile_header_names_alex_as_you_only_when_he_is_listening(profile):
-    assert "you built me" in bt._voice_note("blue", speaking_to_alex=True)
-    assert "you built me" not in bt._voice_note("blue")
+    assert ALEX_IS_YOU in bt._voice_note("blue", speaking_to_alex=True)
+    assert ALEX_IS_YOU not in bt._voice_note("blue")
 
 
 def test_a_profile_without_alex_gets_no_you_clause(monkeypatch):
     monkeypatch.setattr(bt, "get_self_profile", lambda robot="blue": "I am Casper.")
-    assert "you built me" not in bt._voice_note("pico", speaking_to_alex=True)
+    assert ALEX_IS_YOU not in bt._voice_note("pico", speaking_to_alex=True)
+
+
+def _quoted(text):
+    """Quoted spans; the apostrophe in "you're" or "Don't" opens none."""
+    return re.findall(r"(?<!\w)'([^']+?)'(?!\w)|\"([^\"]+)\"", text)
+
+
+def test_the_rule_for_alex_has_no_line_to_say(profile):
+    """"hi" -> "Hey Alex. You built me to be here in your office while you
+    teach DH201, so I'm ready when you are." (10145, 10-07): the rule said
+    "to him, say 'you built me' and 'your office'", and the model said
+    both. A pronoun rule quotes single words, never a line."""
+    note = bt._voice_note("blue", speaking_to_alex=True)
+    header = note[:note.index("]:\n")]
+    for rule in (bt._CREATOR_ADDRESS_TO_ALEX, header):
+        assert ALEX_IS_YOU in rule
+        quoted = ["".join(q) for q in _quoted(rule)]
+        assert quoted and all(len(q.split()) == 1 for q in quoted), quoted
+    text = _chat_text(["hi"])
+    assert TO_ALEX in text
+    for line in ("you built me", "your office", "your work", "Alex built me"):
+        assert f"'{line}'" not in text and f'"{line}"' not in text
 
 
 CLASS_THREAD = [
@@ -243,21 +271,21 @@ def test_embodiment_tells_him_alex_is_you(profile, robot):
     (10-05 harness): on the same four payloads, 6 of 16 replies before and
     0 of 12 after."""
     text = _chat_text(["where are you right now?"], robot=robot)
-    assert "Alex is the one talking with you now" in text
-    assert "you built me" in text[text.index("[This is your own perspective"):]
+    assert TO_ALEX in text
+    assert ALEX_IS_YOU in text[text.index("[This is your own perspective"):]
 
 
 def test_in_front_of_a_class_alex_stays_alex(profile):
     text = _chat_text(CLASS_THREAD)
-    assert "Alex is the one talking with you now" not in text
-    assert "you built me" not in text
+    assert TO_ALEX not in text
+    assert ALEX_IS_YOU not in text
     assert "Alex Levant is real and built you." in text
 
 
 def test_another_speaker_hears_about_alex_in_the_third_person(profile):
     text = _chat_text(["hi"], user="Stella")
-    assert "Alex is the one talking with you now" not in text
-    assert "you built me" not in text
+    assert TO_ALEX not in text
+    assert ALEX_IS_YOU not in text
 
 
 def test_the_embodiment_text_is_the_same_on_every_turn_to_alex(profile):
@@ -334,7 +362,7 @@ def test_a_turn_answered_for_the_class_is_never_said_to_alex(chat, monkeypatch, 
     payload = chat.model.main[0]["messages"]
     pinned = [m["content"] for m in payload if m.get("role") == "user"][-1]
     assert "AUDIENCE: These are Alex's students" in pinned
-    assert "Alex is the one talking with you now" not in payload[0]["content"]
+    assert TO_ALEX not in payload[0]["content"]
 
 
 def test_alex_asking_who_blue_is_hears_you(chat):
@@ -342,7 +370,53 @@ def test_alex_asking_who_blue_is_hears_you(chat):
     payload = chat.model.main[0]["messages"]
     pinned = [m["content"] for m in payload if m.get("role") == "user"][-1]
     assert "[IDENTITY GROUNDING" in pinned and "AUDIENCE:" not in pinned
-    assert "Alex is the one talking with you now" in payload[0]["content"]
+    assert TO_ALEX in payload[0]["content"]
+
+
+def test_a_hi_from_alex_carries_the_pronoun_rule_and_no_line(chat):
+    """The whole turn: what the model is sent for Alex's "hi" (10145) says
+    he is "you" and quotes no line for him to say."""
+    chat.ask("hi")
+    system = chat.model.main[0]["messages"][0]["content"]
+    assert TO_ALEX in system and ALEX_IS_YOU in system
+    assert "'you built me'" not in system and "'your office'" not in system
+    assert "You are Blue, Alex's robot:" in system
+    assert "friendly home assistant" not in system
+    assert "Keep responses brief" not in system
+
+
+# ---- Blue's persona line (C11) ----------------------------------------------------
+
+def test_blue_is_alexs_robot_with_a_view_not_a_service_desk():
+    """"a friendly home assistant … Keep responses brief and natural" sat
+    beside "do not flatten every response into agreeable assistant
+    language". Length is the closing note's and the cap's; a place in it
+    would be one more thing to recite on "hi"."""
+    persona = bt.ROBOTS["blue"]["persona_line"]
+    assert persona.startswith("You are Blue, Alex's robot: a curious, wry, warm mind")
+    assert persona.endswith("You have opinions and say them.")
+    for gone in ("home assistant", "companion", "brief", "concise"):
+        assert gone not in persona
+    for place in ("office", "home", "Laurier", "DAWB", "house"):
+        assert place not in persona
+    # what a "who are you?" is answered from is unchanged
+    assert "(your <j_space>)" in persona and "never with a generic feature list" in persona
+
+
+def test_hexia_and_casper_keep_their_own_persona_lines():
+    """Only Blue's line changed: theirs keep their length words, which the
+    shared guidance no longer repeats."""
+    assert bt.ROBOTS["hexia"]["persona_line"].endswith(
+        "Keep responses natural and not too long.")
+    assert ("Keep responses natural and concise, and never borrow Blue's or "
+            "Hexia's identity.") in bt.ROBOTS["pico"]["persona_line"]
+
+
+@pytest.mark.parametrize("robot", ["blue", "hexia", "pico"])
+def test_the_shared_guidance_sets_no_length(robot):
+    text = _chat_text(["what do you think of that?"], robot=robot)
+    assert "Be natural and conversational — a person talking, not a document." in text
+    assert "Be natural, concise" not in text
 
 
 def test_the_class_the_identity_note_answers_is_a_class_here_too():
