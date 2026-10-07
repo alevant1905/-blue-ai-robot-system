@@ -18,6 +18,12 @@ can raise it), which is the switch LM Studio honours on this model:
 chat_template_kwargs enable_thinking and a "/no_think" suffix do not. "low"
 still reasons, only less than "medium".
 
+Whether "on" goes out as thinking depends on the model LM Studio has loaded
+(bluetools._model_thinks): only one in BLUE_THINKING_MODELS (default
+qwen/qwen3.8-27b, the measured one) is asked to think, and any other answers
+with "none". On 10-07 qwen3.6-35b-a3b, loaded for a class demo, reasoned at
+"low" for up to 12,166 characters and wrote no words on 4 of 11 chat calls.
+
 Pure text in, a word out — no bluetools import.
 """
 

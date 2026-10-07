@@ -432,6 +432,68 @@ def test_a_reply_the_reasoning_starved_is_asked_again_without_thinking(
     assert "2 calls" in bt._lm_turn_summary()
 
 
+AFTER_SEARCH = [
+    {"role": "user", "content": "wrong room"},
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "type": "function", "function": {
+            "name": "search_documents",
+            "arguments": '{"query": "DH201 room location lecture hall"}'}}]},
+    {"role": "tool", "tool_call_id": "c1", "name": "search_documents",
+     "content": "[DH201_AL_2026F.docx] Wednesday 10:00am - 12:50pm in SB107."},
+    {"role": "user", "content": "[Respond now using the tool results above. "
+                                "No more tool calls.]"},
+]
+
+
+def test_an_answer_after_a_tool_that_the_reasoning_starved_is_asked_again(
+        fresh, monkeypatch, capsys):
+    """#10151, 10-07: the answer after "wrong room"'s search has no cap, and
+    qwen3.6-35b-a3b reasoned for 12,166 characters and wrote nothing. Only a
+    short message's reply was asked again, so the empty draft went on to the
+    guards. Asked again without thinking, it keeps the chat cap and the same
+    messages, the search's results among them."""
+    sent = []
+
+    def post(payload, timeout=120):
+        sent.append(dict(payload))
+        if len(sent) == 1:
+            return _reply("", finish_reason="length", reasoning=3584)
+        return _reply("My mistake — DH201 meets in SB107, not DAWB 2-138.")
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    bt._lm_turn_reset()
+    result = bt.call_lm_studio(AFTER_SEARCH, include_tools=False, iteration=2,
+                               thinking=THINK_ON)
+
+    assert result["choices"][0]["message"]["content"].startswith("My mistake")
+    assert [(p["reasoning_effort"], p["max_tokens"]) for p in sent] == [
+        ("low", bt._chat_max_tokens() + THINKING_ALLOWANCE_TOKENS),
+        ("none", bt._chat_max_tokens())]
+    assert sent[1]["messages"] == sent[0]["messages"]
+    assert "SB107" in sent[1]["messages"][2]["content"]
+    assert "asking again without thinking" in capsys.readouterr().out
+    # What an empty draft would be asked again from (reply_guards).
+    last = bt._LM_TURN.last_call
+    assert last["messages"] is sent[1]["messages"]
+    assert (last["max_tokens"], last["visible"]) == (bt._chat_max_tokens(), None)
+
+
+def test_an_answer_after_a_tool_that_had_words_is_not_asked_again(fresh, monkeypatch):
+    """No cap to hold it to: words cut off by max_tokens are an answer, not
+    a starved one."""
+    sent = []
+
+    def post(payload, timeout=120):
+        sent.append(payload)
+        return _reply(LONG, finish_reason="length", reasoning=1500)
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    result = bt.call_lm_studio(AFTER_SEARCH, include_tools=False, iteration=2,
+                               thinking=THINK_ON)
+    assert len(sent) == 1
+    assert result["choices"][0]["message"]["content"] == LONG
+
+
 def _call(arguments, finish_reason):
     return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
         {"id": "c1", "type": "function",

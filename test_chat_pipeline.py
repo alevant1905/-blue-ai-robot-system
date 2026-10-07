@@ -118,6 +118,9 @@ def chat(monkeypatch):
     # by a GET to LM Studio on a cold cache: one more live request, and the
     # live model's id written into _lm_loaded_model (whole-branch review).
     monkeypatch.setattr(bt, "_lm_input_budget", lambda: 100_000)
+    # The model the stub stands in for: whether a turn thinks depends on the
+    # loaded model (bt._model_thinks), and one not known yet never thinks.
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": "qwen/qwen3.8-27b"})
 
     # 3) PERSISTENCE. The real memory DB and journals must not be touched.
     saved = []

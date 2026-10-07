@@ -10133,15 +10133,28 @@ def _estimate_payload_tokens(messages, tools) -> int:
 # greeting you like he just woke up (audited 2026-07-31).
 _LM_BUDGET_FALLBACK = 6500
 _LM_BUDGET_CTX_SHARE = 0.7      # Leave room for the reply
-_LM_BUDGET_TTL_SEC = 300
+# Also how stale the loaded model's id may get before it is read again: it
+# decides whether a turn thinks (_model_thinks), and on 10-07 Alex swapped
+# qwen3.8-27b for qwen3.6-35b-a3b for a class demo in the middle of a
+# morning of chat.
+_LM_BUDGET_TTL_SEC = 30
 _lm_budget_cache = {"value": None, "at": 0.0}
-# The loaded model's id, read on the same /api/v0/models call (no call of its
-# own): a reasoning_effort refusal is remembered per model.
+# The model that answers chat: read on the same /api/v0/models call (no call
+# of its own), then taken from each response, which is the ground truth.
+# Blue sends no "model" key, so whatever LM Studio has loaded answers. A
+# reasoning_effort refusal is remembered per model, and whether a turn may
+# think depends on it (_model_thinks).
 _lm_loaded_model = {"id": None}
 
 
 def _detect_lm_context_size() -> Optional[int]:
     """The loaded model's real context length, via LM Studio's REST API.
+
+    Also notes which model will answer (_lm_loaded_model). Only language
+    models count: an embedding model is listed as loaded too, and its 2,048
+    tokens of context would have sized every chat payload. With more than one
+    loaded, the one that answered last is kept if it is still there;
+    otherwise which one answers is not known until a response says so.
 
     Returns None when the endpoint is missing or nothing is loaded — older
     LM Studio builds have no /api/v0, so this must never be required.
@@ -10150,22 +10163,28 @@ def _detect_lm_context_size() -> Optional[int]:
         base = LM_STUDIO_URL.split('/v1/')[0]
         r = requests.get(f"{base}/api/v0/models", timeout=3)
         r.raise_for_status()
-        for m in r.json().get("data", []):
-            if m.get("state") == "loaded":
-                _lm_loaded_model["id"] = m.get("id") or _lm_loaded_model["id"]
-                ctx = m.get("loaded_context_length") or m.get("max_context_length")
-                if isinstance(ctx, int) and ctx > 0:
-                    return ctx
+        loaded = [m for m in r.json().get("data", [])
+                  if m.get("state") == "loaded" and m.get("type") != "embeddings"]
     except Exception:
         return None
+    if not loaded:
+        return None
+    answering = next((m for m in loaded if m.get("id") == _lm_loaded_model["id"]),
+                     loaded[0] if len(loaded) == 1 else None)
+    _lm_loaded_model["id"] = (answering or {}).get("id")
+    for m in ([answering] if answering else loaded):
+        ctx = m.get("loaded_context_length") or m.get("max_context_length")
+        if isinstance(ctx, int) and ctx > 0:
+            return ctx
     return None
 
 
 def _lm_input_budget() -> int:
     """Input-token budget for one request.
 
-    Explicit env override wins. Otherwise take a share of the loaded model's
-    real context, cached briefly so swapping models is picked up without a
+    Explicit env override wins (the loaded model is then known only from
+    the responses). Otherwise take a share of the loaded model's real
+    context, cached briefly so swapping models is picked up without a
     restart. Falls back to the old constant when the context can't be read.
     """
     env = os.environ.get('BLUE_LM_INPUT_BUDGET_TOKENS')
@@ -11206,6 +11225,34 @@ def _thinking_effort() -> str:
 
 
 _REASONING_EFFORT = {_thinking.THINK_OFF: "none", _thinking.THINK_ON: _thinking_effort()}
+
+# Which models think at all. Blue asks for no model by name (Alex, 10-07:
+# "use whatever is loaded"), so the thinking adapts to the one answering.
+# qwen/qwen3.8-27b is measured: at "low", 11 of 11 calls under the chat prompt
+# (10-05..10-07) finished reasoning in 96-2,396 chars (median 390) and
+# answered. On 10-07 Alex loaded qwen/qwen3.6-35b-a3b for a class demo, and
+# at "low" it reasoned for 2,145-12,166 chars (median 5,116): 4 of its 11
+# chat calls ran out of max_tokens with no words at all (10125, 10143, 10147,
+# 10151), each costing a second call, and 10151's empty draft went out as a
+# self-introduction. At "none" it answered 10 of 10 with no reasoning. Room
+# for 12k chars of hidden reasoning on "wrong room" would be ~3,000 tokens of
+# waiting, so a model not on this list answers without thinking, and so does
+# one not known yet. BLUE_THINKING_MODELS, comma-separated LM Studio model
+# ids, replaces the list ("" for no thinking on any model).
+_THINKING_MODELS_DEFAULT = "qwen/qwen3.8-27b"
+
+
+def _thinking_models() -> frozenset:
+    raw = os.environ.get("BLUE_THINKING_MODELS")
+    raw = _THINKING_MODELS_DEFAULT if raw is None else raw
+    return frozenset(m.strip().lower() for m in raw.split(",") if m.strip())
+
+
+def _model_thinks(model) -> bool:
+    """Whether the model with this LM Studio id may be asked to think."""
+    return bool(model) and model.strip().lower() in _thinking_models()
+
+
 # Loaded models that refused the field, each named once in the log; it is not
 # sent to them again.
 _REASONING_REFUSED_BY: set = set()
@@ -11266,7 +11313,8 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     took all 2,048 of a reading report's. None sends no field (Panel and the
     other callers that have not been decided yet keep the model default).
     A forced call ("required") never thinks; the decision is for the calls
-    after the tool has run.
+    after the tool has run. Nor does any call to a model that is not in
+    BLUE_THINKING_MODELS (_model_thinks).
 
     `reply_cap` is a short message's cap on the visible reply, in tokens
     (blue/server/reply_budget.py): it replaces the chat cap, and the
@@ -11280,6 +11328,9 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     # orphan leading assistant — those make Qwen 400 with "No user query
     # found in messages" before any inference even runs.
     messages = _normalize_message_alternation(messages)
+    # First: the same lookup reads which model is loaded (_lm_loaded_model),
+    # and that decides whether this call may think.
+    _budget = _lm_input_budget()
 
     payload = {
         "messages": messages,
@@ -11308,6 +11359,13 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     # never counts: about 4.5 minutes at the 35 tok/s measured live, the 214 s
     # of 09-27's forced send moved out of sight (S4 final review).
     if _effort and include_tools and force_tool and force_choice == "required":
+        _effort = _REASONING_EFFORT[_thinking.THINK_OFF]
+    # A model not known to finish its reasoning answers without it (see
+    # _THINKING_MODELS_DEFAULT): on 10-07 the 35B starved 4 of 11 such calls.
+    if (_effort and _effort != _REASONING_EFFORT[_thinking.THINK_OFF]
+            and not _model_thinks(_lm_loaded_model["id"])):
+        print(f"   [MODEL] {_lm_loaded_model['id'] or 'the loaded model (not known yet)'} "
+              "is not in BLUE_THINKING_MODELS — answering without thinking")
         _effort = _REASONING_EFFORT[_thinking.THINK_OFF]
     if _effort and not _reasoning_field_refused():
         payload["reasoning_effort"] = _effort
@@ -11370,8 +11428,8 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
 
     # Token-budget guard: trim oldest non-system history if the request would
     # overflow LM Studio's context. Sized from the LOADED model's real context
-    # (see _lm_input_budget); override via BLUE_LM_INPUT_BUDGET_TOKENS.
-    _budget = _lm_input_budget()
+    # (see _lm_input_budget, read above); override via
+    # BLUE_LM_INPUT_BUDGET_TOKENS.
     _trimmed, _dropped = _trim_messages_for_budget(
         payload['messages'], payload.get('tools'), _budget,
         min_keep_tail=4,   # never trim away the last ~2 exchanges
@@ -11413,14 +11471,27 @@ def _lm_turn_reset(thinking=None):
     # words, for the guards' regenerations (turn_completion._regen_once).
     _LM_TURN.system = None
     _LM_TURN.reply_note = ""
+    # The turn's last chat call (call_lm_studio): its messages, tool results
+    # included, and the room its words had. An empty draft is asked for
+    # again from there (reply_guards.guard_identity).
+    _LM_TURN.last_call = None
 
 
 def _lm_turn_note(result, payload) -> None:
-    """Record one chat call's model id and token counts for this turn."""
+    """Record one chat call's model id and token counts for this turn.
+
+    The response names the model that answered: that is the one the next
+    call's thinking is decided for (_model_thinks)."""
     usage = (result or {}).get("usage") or {}
     details = usage.get("completion_tokens_details") or {}
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-    model = (result or {}).get("model") or _lm_loaded_model["id"]
+    answered = (result or {}).get("model")
+    if answered and answered != _lm_loaded_model["id"]:
+        _lm_loaded_model["id"] = answered
+        _lm_budget_cache["at"] = 0.0    # its context may differ: read it again
+    model = answered or _lm_loaded_model["id"]
+    print(f"   [MODEL] {model or 'unknown'} "
+          f"(sent {payload.get('reasoning_effort') or 'no reasoning_effort'})")
     calls = getattr(_LM_TURN, "calls", None)
     if calls is None:
         calls = _LM_TURN.calls = []
@@ -11656,16 +11727,20 @@ def _lm_studio_recover(e, payload):
     return None
 
 def _reply_starved(result, visible_limit) -> bool:
-    """A short message's reply that the reasoning left no room: cut off by
-    max_tokens with under a third of its cap written. The allowance on top
-    of the cap is 1,536 tokens, and two of the 10-05 harness's short turns
-    reasoned for 1,945 and 2,062.
+    """A reply that the reasoning left no room: cut off by max_tokens with
+    under a third of a short message's cap (`visible_limit`, in characters)
+    written, or with no words at all where there is no cap (None). The
+    allowance on top of the cap is 1,536 tokens, and two of the 10-05
+    harness's short turns reasoned for 1,945 and 2,062. On 10-07 the answer
+    after "wrong room"'s search (#10151), which has no cap, reasoned for
+    12,166 characters and wrote nothing.
 
-    A tool call cut off there is starved too: after 1,700 tokens of
-    reasoning, a reflex call (a search, a reminder) has about 50 left for
-    its arguments, and run_tool_loop answers a cut call with "[System: that
-    was cut off at the length limit…]". Asked again without thinking, the
-    call has the whole cap."""
+    A tool call cut off under a short message's cap is starved too: after
+    1,700 tokens of reasoning, a reflex call (a search, a reminder) has about
+    50 left for its arguments, and run_tool_loop answers a cut call with
+    "[System: that was cut off at the length limit…]". Asked again without
+    thinking, the call has the whole cap. Without a cap, a cut call is more
+    likely a long body that would be cut again."""
     try:
         choice = result["choices"][0]
         message = choice["message"]
@@ -11674,9 +11749,9 @@ def _reply_starved(result, visible_limit) -> bool:
     if choice.get("finish_reason") != "length":
         return False
     if message.get("tool_calls"):
-        return True
+        return bool(visible_limit)
     words = strip_reasoning_tags(message.get("content") or "") or ""
-    return len(words.strip()) < visible_limit // 3
+    return len(words.strip()) < (visible_limit // 3 if visible_limit else 1)
 
 
 def _hold_to_reply_cap(result, visible_limit) -> None:
@@ -11804,10 +11879,12 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                 # Its own default thinking may come out of max_tokens now.
                 payload["max_tokens"] = _chat_max_tokens()
             result = _send()
-        # The reasoning ran past its allowance and left the short reply no
-        # room: asked once more, without thinking, at the cap alone.
+        # The reasoning ran past its allowance and left the reply no room:
+        # asked once more, without thinking, with the room the reply itself
+        # has (a short message's cap, or the whole chat cap after a tool) and
+        # the same messages, notes and tool results.
         _allowance = _thinking_allowance(payload)
-        if _visible and _allowance and _reply_starved(result, _visible):
+        if _allowance and _reply_starved(result, _visible):
             try:
                 _lm_turn_note(result, payload)
             except Exception as e:
@@ -11839,6 +11916,11 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
         _lm_turn_note(result, payload)
     except Exception as e:
         log.warning(f"[LM] could not record the call's usage: {e}")
+    _LM_TURN.last_call = {
+        "messages": payload["messages"],
+        "max_tokens": payload["max_tokens"] - _thinking_allowance(payload),
+        "visible": _visible,
+    }
     return result
 
 

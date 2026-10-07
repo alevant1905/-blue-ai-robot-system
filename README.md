@@ -288,6 +288,11 @@ Blue uses SQLite for persistent storage:
 # LLM Configuration
 export LM_STUDIO_URL="http://localhost:1234/v1/chat/completions"
 export LM_STUDIO_MODEL="your-model-name"
+# Chat uses whatever model LM Studio has loaded. Only these (comma-separated
+# LM Studio ids) are asked to think before a real question; any other answers
+# without thinking, so its reasoning can't use up the reply. "" = never think.
+export BLUE_THINKING_MODELS="qwen/qwen3.8-27b"
+export BLUE_THINKING_EFFORT="low"   # how much a listed model thinks: low, medium or high
 
 # Gmail
 export GMAIL_USER_EMAIL="your.email@gmail.com"

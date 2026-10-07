@@ -937,34 +937,51 @@ def _run_reply_guards(final_content, response, *, messages, robot,
         _turn_system = getattr(bt._LM_TURN, "system", None)
         _turn_cap = getattr(bt._LM_TURN, "reply_cap", None)
         _turn_note = getattr(bt._LM_TURN, "reply_note", "")
+        _turn_last = getattr(bt._LM_TURN, "last_call", None)
 
-        def _regen_once(note, max_tokens=900):
-            _retry_msgs = list(messages)
-            if _turn_note:
-                bt._pin_short_turn_note(_retry_msgs, _turn_note)
-            _retry_msgs += [
-                {"role": "assistant", "content": final_content},
-                {"role": "user", "content": note},
-            ]
-            # The model's chat template only allows ONE system message,
-            # at position 0 (anything else → LM Studio 400).
-            if isinstance(_turn_system, str) and _turn_system.strip():
-                _head = {"role": "system", "content": _turn_system}
-                if _retry_msgs and _retry_msgs[0].get("role") == "system":
-                    _retry_msgs[0] = _head
-                else:
-                    _retry_msgs.insert(0, _head)
+        def _regen_once(note, max_tokens=900, *, answer_again=False):
+            """`answer_again`: the draft came back empty, so there is nothing
+            to rewrite. The turn's last call is asked again — its system
+            message, notes and tool results, with its own room for the words
+            — rather than the page thread alone: 10151's re-ask after its
+            search had neither the search's results (SB107) nor more than
+            the short message's 220 tokens."""
+            _visible = (bt._reply_budget.visible_chars(_turn_cap)
+                        if _turn_cap else None)
+            if answer_again and _turn_last and _turn_last.get("messages"):
+                _retry_msgs = list(_turn_last["messages"]) + [
+                    {"role": "assistant", "content": final_content},
+                    {"role": "user", "content": note},
+                ]
+                max_tokens = int(_turn_last.get("max_tokens") or max_tokens)
+                _visible = _turn_last.get("visible")
             else:
-                # No model turn ran (a grounded reply): merge the persona
-                # into an existing head system message if present.
-                _persona = bt._robot_cfg(robot)["persona_line"]
-                if _retry_msgs and _retry_msgs[0].get("role") == "system":
-                    _retry_msgs[0] = {"role": "system", "content": (
-                        _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
+                _retry_msgs = list(messages)
+                if _turn_note:
+                    bt._pin_short_turn_note(_retry_msgs, _turn_note)
+                _retry_msgs += [
+                    {"role": "assistant", "content": final_content},
+                    {"role": "user", "content": note},
+                ]
+                # The model's chat template only allows ONE system message,
+                # at position 0 (anything else → LM Studio 400).
+                if isinstance(_turn_system, str) and _turn_system.strip():
+                    _head = {"role": "system", "content": _turn_system}
+                    if _retry_msgs and _retry_msgs[0].get("role") == "system":
+                        _retry_msgs[0] = _head
+                    else:
+                        _retry_msgs.insert(0, _head)
                 else:
-                    _retry_msgs.insert(0, {"role": "system", "content": _persona})
-            if _turn_cap:
-                max_tokens = min(max_tokens, int(_turn_cap))
+                    # No model turn ran (a grounded reply): merge the persona
+                    # into an existing head system message if present.
+                    _persona = bt._robot_cfg(robot)["persona_line"]
+                    if _retry_msgs and _retry_msgs[0].get("role") == "system":
+                        _retry_msgs[0] = {"role": "system", "content": (
+                            _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
+                    else:
+                        _retry_msgs.insert(0, {"role": "system", "content": _persona})
+                if _turn_cap:
+                    max_tokens = min(max_tokens, int(_turn_cap))
             # The turn's call was trimmed to the input budget; so is this.
             try:
                 _kept, _dropped = bt._trim_messages_for_budget(
@@ -983,11 +1000,10 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             _redo = bt._raw_call_llm(_retry_msgs, include_tools=False,
                                      temperature=0.8, max_tokens=max_tokens,
                                      reasoning_effort="none")
-            if _turn_cap:
+            if _visible:
                 # Cut by max_tokens, it ends on its last full sentence.
                 try:
-                    bt._hold_to_reply_cap(
-                        _redo, bt._reply_budget.visible_chars(_turn_cap))
+                    bt._hold_to_reply_cap(_redo, _visible)
                 except (AttributeError, IndexError, KeyError, TypeError):
                     pass
             # The turn's [LM] line is already out and never saw this call.

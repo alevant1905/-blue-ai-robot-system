@@ -176,6 +176,41 @@ _SALVAGEABLE_IDENTITY_KINDS = {
 # chat!" is no answer to keep).
 _INCOMPLETE_ONLY_ISSUES = MISSING_VOCABULARY_ISSUES
 
+# An empty draft is the model failing to answer, not Blue forgetting who he
+# is. On 10-07 the answer to "wrong room" after its search reasoned for
+# 12,166 characters and wrote nothing (#10151). Taken for an identity
+# failure, it was asked again under "You are Blue, a physical Ohbot robot
+# head … you DO carry memory", without the search's results, and "I'm Blue,
+# sitting right here on your desk in the office" went out instead of the room
+# the search had found (SB107). A question about the robot himself keeps its
+# own retry below.
+_EMPTY_DRAFT_NOTE = ("[Your answer didn't come through. Answer {user}'s last "
+                     "message now, from the conversation and tool results above.]")
+
+
+def _answer_empty_draft(ctx) -> str:
+    """The draft came back empty on a question that is not about the robot:
+    asked for once more, plainly, from the turn's own last call
+    (turn_completion._regen_once's answer_again). Empty twice, there is no
+    reply — the chat page says the server sent none, and nothing is stored
+    or spoken — rather than a canned self-introduction to a question about
+    something else."""
+    print("   [EMPTY] the draft came back empty — asking for the answer again")
+    redo = ctx.regen_once(
+        _EMPTY_DRAFT_NOTE.format(user=ctx.user_name or "the user"),
+        answer_again=True)
+    problem = ctx.identity_broken(redo) if redo else "empty"
+    if problem in (None, "recycles_identity_topics"):
+        final_content = redo
+    else:
+        # Real drift in the new answer: the on-topic rest of it, if any.
+        final_content = (bt.strip_drifted_sentences(redo, ctx.identity_broken)
+                         if redo else None) or ""
+        print(f"   [EMPTY] the answer came back {problem.replace('_', ' ')} — "
+              + ("kept minus the drifted sentences" if final_content else "no reply"))
+    ctx.response["choices"][0]["message"]["content"] = final_content
+    return final_content
+
 
 def guard_identity(ctx) -> Optional[str]:
     """The reply failed identity grounding — wrong name, denied body, denied memory."""
@@ -193,6 +228,8 @@ def guard_identity(ctx) -> Optional[str]:
     response = ctx.response
     if not (_identity_issue):
         return None
+    if _identity_issue == "empty" and not _identity_kind:
+        return _answer_empty_draft(ctx)
     print(f"   [IDENTITY] invalid self-description ({_identity_issue}) — regenerating once")
     if _identity_kind:
         # The retry keeps the room: Alex's class, plain words, no hardware.

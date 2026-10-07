@@ -383,6 +383,130 @@ def test_a_refused_field_is_dropped_and_the_call_made_again(fresh, monkeypatch, 
 
 
 # --------------------------------------------------------------------------
+# The loaded model decides whether thinking is asked for at all
+# --------------------------------------------------------------------------
+# Alex, 10-07: "use whatever is loaded" — no model is asked for by name. That
+# morning qwen3.6-35b-a3b, loaded for a class demo, reasoned at "low" for
+# 2,145-12,166 characters and ran out of max_tokens with no words on 4 of
+# its 11 chat calls (10125, 10143, 10147, 10151). Replayed on qwen3.8-27b at
+# "low", the three short ones finished in 287-507 characters of reasoning.
+
+THE_27B, THE_35B = "qwen/qwen3.8-27b", "qwen/qwen3.6-35b-a3b"
+
+
+@pytest.mark.parametrize("model, effort", [
+    (THE_27B, "low"),
+    ("Qwen/Qwen3.8-27B", "low"),
+    (THE_35B, "none"),
+    ("google/gemma-4-31b", "none"),
+    (None, "none"),                 # not known yet: no thinking either
+])
+def test_only_a_model_known_to_finish_its_reasoning_is_asked_to_think(
+        fresh, monkeypatch, model, effort):
+    monkeypatch.delenv("BLUE_THINKING_MODELS", raising=False)
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": model})
+    payload = _payload(THINK_ON)
+    assert payload["reasoning_effort"] == effort
+    assert payload["max_tokens"] == bt._chat_max_tokens() + (
+        THINKING_ALLOWANCE_TOKENS if effort == "low" else 0)
+    assert _payload(THINK_OFF)["reasoning_effort"] == "none"
+
+
+def test_the_short_message_cap_holds_when_the_model_may_not_think(fresh, monkeypatch):
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": THE_35B})
+    payload = _payload(THINK_ON, reply_cap=bt._reply_budget.TYPED_REPLY_TOKENS)
+    assert (payload["reasoning_effort"], payload["max_tokens"]) == (
+        "none", bt._reply_budget.TYPED_REPLY_TOKENS)
+
+
+def test_blue_thinking_models_is_the_list(fresh, monkeypatch, capsys):
+    monkeypatch.setenv("BLUE_THINKING_MODELS", f" {THE_35B.upper()} , google/gemma-4-31b")
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": THE_35B})
+    assert _payload(THINK_ON)["reasoning_effort"] == "low"
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": THE_27B})
+    assert _payload(THINK_ON)["reasoning_effort"] == "none"
+    assert (f"[MODEL] {THE_27B} is not in BLUE_THINKING_MODELS — answering "
+            "without thinking") in capsys.readouterr().out
+
+    monkeypatch.setenv("BLUE_THINKING_MODELS", "")
+    assert _payload(THINK_ON)["reasoning_effort"] == "none"
+
+
+def test_the_next_call_follows_the_model_that_answered(fresh, monkeypatch, capsys):
+    """No "model" key goes out, so a swap shows first in the response, which
+    names the model that answered; the very next call is decided for it, and
+    the context size is read again."""
+    sent = []
+    budget = {"value": 22_937, "at": 1e12}
+    monkeypatch.setattr(bt, "_lm_budget_cache", budget)
+
+    def post(payload, timeout=120):
+        sent.append(dict(payload))
+        return {"model": THE_35B, "choices": [{"message": {
+            "role": "assistant", "content": "Fine."}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    for _ in range(2):
+        bt.call_lm_studio([{"role": "user", "content": "why?"}],
+                          include_tools=False, thinking=THINK_ON)
+
+    assert [p["reasoning_effort"] for p in sent] == ["low", "none"]
+    assert not any("model" in p for p in sent)
+    assert bt._lm_loaded_model["id"] == THE_35B
+    assert budget["at"] == 0.0
+    out = capsys.readouterr().out
+    assert f"[MODEL] {THE_35B} (sent low)" in out
+    assert f"[MODEL] {THE_35B} (sent none)" in out
+
+
+class _Models:
+    status_code = 200
+
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"data": self._data}
+
+
+EMBEDDER = {"id": "text-embedding-nomic-embed-text-v1.5", "type": "embeddings",
+            "state": "loaded", "loaded_context_length": 2048}
+
+
+def _loaded(model, ctx):
+    return {"id": model, "type": "vlm", "state": "loaded", "loaded_context_length": ctx}
+
+
+def test_the_lookup_reads_the_language_model_not_the_embedder(monkeypatch):
+    """An embedding model is listed as loaded too; its 2,048 tokens would have
+    sized every chat payload, and its id decided the thinking."""
+    monkeypatch.setattr(bt.requests, "get", lambda url, timeout=None: _Models([
+        EMBEDDER, _loaded(THE_35B, 32768),
+        {"id": THE_27B, "type": "vlm", "state": "not-loaded",
+         "max_context_length": 262144}]))
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": THE_27B})
+
+    assert bt._detect_lm_context_size() == 32768
+    assert bt._lm_loaded_model["id"] == THE_35B
+
+
+def test_with_two_models_loaded_the_one_that_answered_stays(monkeypatch):
+    monkeypatch.setattr(bt.requests, "get", lambda url, timeout=None: _Models([
+        _loaded(THE_27B, 32768), _loaded(THE_35B, 65536)]))
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": THE_35B})
+    assert bt._detect_lm_context_size() == 65536
+    assert bt._lm_loaded_model["id"] == THE_35B
+
+    # Neither answered last: which one will is not known, so no thinking.
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": "google/gemma-4-31b"})
+    assert bt._detect_lm_context_size() == 32768
+    assert bt._lm_loaded_model["id"] is None
+
+
+# --------------------------------------------------------------------------
 # Retries never think — on both transports
 # --------------------------------------------------------------------------
 
@@ -562,7 +686,9 @@ def test_a_retry_that_reasons_anyway_or_comes_back_empty_is_named():
     assert "(sent -)" in bt._lm_retry_line({"choices": []}, None)
 
 
-def test_the_turn_line_warns_when_none_was_ignored():
+def test_the_turn_line_warns_when_none_was_ignored(monkeypatch):
+    # A response's model becomes the loaded model's id: kept to this test.
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": None})
     bt._lm_turn_reset()
     bt._LM_TURN.thinking = THINK_OFF
     bt._lm_turn_note({"model": "m", "usage": {
@@ -580,6 +706,7 @@ def test_the_turn_line_warns_when_none_was_ignored():
 
 def test_a_model_change_is_named_once(monkeypatch, capsys):
     monkeypatch.setattr(bt, "_LM_MODEL_SEEN", {"id": None, "warned": set()})
+    monkeypatch.setattr(bt, "_lm_loaded_model", {"id": None})
     bt._lm_turn_reset()
     for model in ("qwen/qwen3.6-27b", "qwen/qwen3.8-27b", "qwen/qwen3.8-27b"):
         bt._lm_turn_note({"model": model, "usage": {}}, {})

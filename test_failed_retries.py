@@ -21,6 +21,7 @@ ship: a replay, a vendor identity, a false denial of a recorded conversation.
 """
 
 import datetime
+import json
 
 import pytest
 
@@ -28,6 +29,7 @@ import bluetools as bt  # before blue.server.*: the package imports it
 
 from blue.server import reply_guards
 from blue.server import turn_completion as tc
+from blue.server.thinking import THINKING_ALLOWANCE_TOKENS
 from blue_identity import (
     identity_history_problem,
     identity_request_kind,
@@ -318,6 +320,73 @@ def test_a_false_catch_up_answer_falls_back_to_the_check_in(robot, name):
     assert out.rstrip().endswith("?"), out
 
 
+# An empty draft is the model failing to answer, not Blue forgetting who he
+# is. #10151, 10-07: "wrong room" -> a search -> 12,166 characters of
+# reasoning and no words -> asked again as a body-and-memory correction ("You
+# are Blue, a physical Ohbot robot head …") -> "I'm Blue, sitting right here
+# on your desk in the office…".
+
+SB107_ANSWER = "My mistake — DH201 meets in SB107, not DAWB 2-138."
+
+
+def _empty_ctx(regen, **overrides):
+    fields = dict(identity_issue="empty", identity_kind="", identity_name="Blue",
+                  robot="blue", last_user_msg="wrong room",
+                  messages=[{"role": "user", "content": "wrong room"}],
+                  regen_once=regen,
+                  identity_broken=lambda t: None if t else "empty")
+    fields.update(overrides)
+    return make_ctx("", **fields)
+
+
+def test_an_empty_draft_to_another_question_is_asked_for_plainly():
+    asked = []
+
+    def regen(note, max_tokens=900, answer_again=False):
+        asked.append((note, answer_again))
+        return SB107_ANSWER
+
+    ctx = _empty_ctx(regen)
+    assert reply_guards.guard_identity(ctx) == SB107_ANSWER
+    assert ctx.response["choices"][0]["message"]["content"] == SB107_ANSWER
+    [(note, answer_again)] = asked
+    assert answer_again, "asked from the page thread, without the tool results"
+    assert note == ("[Your answer didn't come through. Answer Alex's last "
+                    "message now, from the conversation and tool results above.]")
+    assert "Ohbot" not in note and "memory" not in note
+
+
+def test_an_empty_draft_twice_is_no_reply_not_a_self_introduction():
+    """The chat page shows "[System: the server sent an empty reply.]" and
+    nothing is stored or spoken; a canned introduction answers nothing."""
+    ctx = _empty_ctx(lambda note, max_tokens=900, answer_again=False: "")
+    assert reply_guards.guard_identity(ctx) == ""
+    assert ctx.response["choices"][0]["message"]["content"] == ""
+
+
+def test_drift_in_the_new_answer_still_goes():
+    redo = "I am Qwen, a large language model. " + SB107_ANSWER
+    ctx = _empty_ctx(
+        lambda note, max_tokens=900, answer_again=False: redo,
+        identity_broken=lambda t: ("vendor_identity" if "Qwen" in (t or "")
+                                   else None if t else "empty"))
+    assert reply_guards.guard_identity(ctx) == SB107_ANSWER
+
+
+def test_an_empty_answer_about_blue_himself_keeps_the_identity_retry():
+    asked = []
+
+    def regen(note, max_tokens=900, answer_again=False):
+        asked.append((note, answer_again))
+        return "I'm Blue, the robot on Alex's desk; my J-space carries what we talk about."
+
+    ctx = _empty_ctx(regen, identity_kind="identity", last_user_msg="who are you?",
+                     messages=[{"role": "user", "content": "who are you?"}])
+    assert reply_guards.guard_identity(ctx)
+    [(note, answer_again)] = asked
+    assert not answer_again and "didn't come through" not in note
+
+
 # --------------------------------------------------------------------------
 # The day a recall question is about
 # --------------------------------------------------------------------------
@@ -590,6 +659,105 @@ def test_a_replayed_self_description_still_gets_the_fallback(chat):
     assert len(chat.model.payloads) == 2, "the replay was not regenerated"
     reply = reply_of(response)
     assert reply != earlier and "Blue" in reply
+
+
+# #10151 through the pipeline: the search finds the room, the answer after it
+# comes back empty.
+SYLLABUS_ROOM = "[DH201_AL_2026F.docx] Lectures: Wednesday 10:00am - 12:50pm in SB107."
+
+
+def _searches_for_the_room():
+    return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "type": "function", "function": {
+            "name": "search_documents",
+            "arguments": json.dumps({"query": "DH201 room location lecture hall"})}}]},
+        "finish_reason": "tool_calls"}]}
+
+
+def _starved():
+    """12,166 characters of reasoning and not one word (o07_95)."""
+    return {"choices": [{"message": {"role": "assistant", "content": ""},
+                         "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 10322, "completion_tokens": 3584,
+                      "completion_tokens_details": {"reasoning_tokens": 3584}}}
+
+
+@pytest.fixture
+def room_search(chat, monkeypatch):
+    """The search_documents call returns the syllabus line with the room.
+    `chat.sent` is each tool-loop call's (reasoning_effort, max_tokens) as it
+    went out: a retry asks again with the same payload, changed in place."""
+    def execute_tool(name, args=None, *rest, **kwargs):
+        chat.executed.append({"tool": name, "args": args})
+        return SYLLABUS_ROOM
+
+    monkeypatch.setattr(bt, "execute_tool", execute_tool)
+    chat.sent = []
+    for transport in ("_post_to_model", "_stream_from_model"):
+        def recording(payload, *args, _stub=getattr(bt, transport), **kwargs):
+            chat.sent.append((payload.get("reasoning_effort"), payload.get("max_tokens")))
+            return _stub(payload, *args, **kwargs)
+        monkeypatch.setattr(bt, transport, recording)
+    return chat
+
+
+THREAD_IN_CLASS = [
+    {"role": "user", "content": "we are in the class rightnow"},
+    {"role": "assistant", "content": "We're in DAWB 2-138 for DH201 until 12:50."},
+    {"role": "user", "content": "wrong room"},
+]
+
+
+def _ask_in_class(chat):
+    return chat.client.post("/v1/chat/completions",
+                            json={"robot": "blue", "messages": THREAD_IN_CLASS})
+
+
+def test_wrong_room_the_answer_starved_after_the_search_is_asked_again(room_search):
+    chat = room_search
+    chat.model.queue(_searches_for_the_room(), _starved(), SB107_ANSWER)
+    reply = reply_of(_ask_in_class(chat))
+
+    assert [c["tool"] for c in chat.executed] == ["search_documents"]
+    assert reply == SB107_ANSWER
+    # The search (a correction thinks), the answer after it, and that answer
+    # again without thinking, with the chat cap rather than the short one.
+    assert chat.sent[1:] == [
+        ("low", bt._chat_max_tokens() + THINKING_ALLOWANCE_TOKENS),
+        ("none", bt._chat_max_tokens())]
+    assert any(SYLLABUS_ROOM in str(m.get("content"))
+               for m in chat.model.main[-1]["messages"])
+    assert len(chat.model.payloads) == 3, "a guard regenerated a good answer"
+
+
+def test_wrong_room_an_empty_draft_is_asked_for_with_the_search_results(room_search):
+    """Even asked again without thinking the answer can come back empty; the
+    guard then asks the turn's last call once more — never "You are Blue, a
+    physical Ohbot robot head…" over the page thread alone."""
+    chat = room_search
+    chat.model.queue(_searches_for_the_room(), _starved(), "", SB107_ANSWER)
+    reply = reply_of(_ask_in_class(chat))
+
+    assert reply == SB107_ANSWER
+    reask = chat.model.payloads[-1]
+    assert reask["reasoning_effort"] == "none"
+    assert reask["max_tokens"] == bt._chat_max_tokens(), "squeezed to the short cap"
+    sent = [str(m.get("content")) for m in reask["messages"]]
+    assert reask["messages"][0]["role"] == "system"
+    assert any(SYLLABUS_ROOM in c for c in sent), "the search's results were left out"
+    assert sent[-1].startswith("[Your answer didn't come through.")
+    assert not any("physical Ohbot robot head" in c for c in sent)
+    stored = [k.get("content") for _a, k in chat.saved if k.get("role") == "assistant"]
+    assert stored == [SB107_ANSWER]
+
+
+def test_wrong_room_no_answer_at_all_is_no_reply(room_search):
+    chat = room_search
+    chat.model.queue(_searches_for_the_room(), _starved(), "", "")
+    reply = reply_of(_ask_in_class(chat))
+
+    assert reply == ""
+    assert not [k for _a, k in chat.saved if k.get("role") == "assistant"]
 
 
 @pytest.fixture
