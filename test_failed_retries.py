@@ -35,6 +35,7 @@ from blue_identity import (
     identity_request_kind,
     identity_response_problem,
     is_casual_catch_up,
+    is_failure_placeholder,
     recall_day_asked,
     recalled_evidence_fallback,
 )
@@ -758,6 +759,60 @@ def test_wrong_room_no_answer_at_all_is_no_reply(room_search):
 
     assert reply == ""
     assert not [k for _a, k in chat.saved if k.get("role") == "assistant"]
+
+
+def _noting(monkeypatch, tools_ran):
+    noted = []
+    monkeypatch.setattr(bt._continuity_routes, "turn_has_tools", lambda: tools_ran)
+    monkeypatch.setattr(bt._continuity_routes, "note_exchange",
+                        lambda *a, **k: noted.append((a, k)))
+    return noted
+
+
+def test_no_reply_still_records_the_tool_that_ran(room_search, monkeypatch):
+    """As on a failed turn: email_snapshot may already have mailed the photo,
+    and a later "did you send it?" answers from the J-space's record of it.
+    chat_completions drops the turn's tools after finish()."""
+    chat = room_search
+    noted = _noting(monkeypatch, tools_ran=True)
+    chat.model.queue(_searches_for_the_room(), _starved(), "", "")
+    assert reply_of(_ask_in_class(chat)) == ""
+
+    [(args, kwargs)] = noted
+    assert args == ("blue", "wrong room", tc.EMPTY_REPLY_LINE)
+    assert kwargs["enqueue_reflection"] is False
+    assert is_failure_placeholder(tc.EMPTY_REPLY_LINE), "read back as Blue's words"
+
+
+def test_no_reply_and_no_tool_records_nothing(room_search, monkeypatch):
+    chat = room_search
+    noted = _noting(monkeypatch, tools_ran=False)
+    chat.model.queue(_searches_for_the_room(), _starved(), "", "")
+    assert reply_of(_ask_in_class(chat)) == ""
+    assert noted == []
+
+
+def test_the_answer_asked_for_again_goes_through_every_check(room_search):
+    """Only the identity check judged it, so the last turn's wrong room said
+    back word for word would have gone out. The replay check asks once more."""
+    chat = room_search
+    replayed = THREAD_IN_CLASS[1]["content"]
+    chat.model.queue(_searches_for_the_room(), _starved(), "", replayed, SB107_ANSWER)
+    reply = reply_of(_ask_in_class(chat))
+
+    assert reply == SB107_ANSWER
+    assert len(chat.model.payloads) == 5
+    assert "repeated an earlier reply" in chat.model.last_user_message
+    stored = [k.get("content") for _a, k in chat.saved if k.get("role") == "assistant"]
+    assert stored == [SB107_ANSWER]
+
+
+def test_an_answer_asked_for_again_is_not_asked_for_a_third_time():
+    asked = []
+    ctx = _empty_ctx(lambda note, max_tokens=900, answer_again=False:
+                     asked.append(note) or SB107_ANSWER, answered_again=True)
+    assert reply_guards.guard_identity(ctx) == ""
+    assert asked == []
 
 
 @pytest.fixture

@@ -21,11 +21,17 @@ BLUE_HEADS_DISABLED=1 stops the real board loaders (a fake board still works).
 
 Every chat payload is trimmed to the input budget, which _lm_input_budget
 reads from the loaded model with a GET to LM Studio's /api/v0/models when
-its five-minute cache is cold. The chat-page tests stub both transports but
-not that, so a test run asked Alex's live LM Studio, sized its payloads by
+its cache is cold. The chat-page tests stub both transports but not that,
+so a test run asked Alex's live LM Studio, sized its payloads by
 whatever model was loaded (or 6,500 tokens when it was down), and wrote the
 live model's id into _lm_loaded_model (whole-branch review, 10-06). A fixed
 budget keeps the suite off the network and the same on every machine.
+
+The thinking switches are the shell's, not the suite's. The README tells Alex
+to export BLUE_THINKING_MODELS: set to "" in the shell that ran pytest, 22
+tests failed, and with BLUE_THINKING_EFFORT=medium 20 (S1 review). The
+effort is read when bluetools loads, so both go before it does; the tests
+that need either set it themselves.
 """
 
 import os
@@ -37,6 +43,8 @@ os.environ.setdefault("BLUE_EMAIL_AUTOREPLY_DISABLED", "1")
 os.environ.setdefault("BLUE_MEMORY_VECTORS", "0")
 os.environ.setdefault("BLUE_HEADS_DISABLED", "1")
 os.environ.setdefault("BLUE_LM_INPUT_BUDGET_TOKENS", "100000")
+os.environ.pop("BLUE_THINKING_MODELS", None)
+os.environ.pop("BLUE_THINKING_EFFORT", None)
 
 
 @pytest.fixture(autouse=True)

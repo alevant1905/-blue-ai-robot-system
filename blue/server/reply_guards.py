@@ -93,6 +93,10 @@ class ReplyContext:
     # The reply re-issues an earlier one with a detail the user just
     # corrected: most sentences come back verbatim, and that is right.
     corrected_reissue: Callable[[str], bool] = lambda text: False
+    # The draft came back empty and was asked for again (_answer_empty_draft).
+    # turn_completion then runs every guard on that answer as a draft of its
+    # own, with this set: an empty one there is not asked for a third time.
+    answered_again: bool = False
     # Set by apply(): which guard decided the reply.
     handled_by: str = ""
 
@@ -193,8 +197,14 @@ def _answer_empty_draft(ctx) -> str:
     asked for once more, plainly, from the turn's own last call
     (turn_completion._regen_once's answer_again). Empty twice, there is no
     reply — the chat page says the server sent none, and nothing is stored
-    or spoken — rather than a canned self-introduction to a question about
-    something else."""
+    or spoken but a tool that ran (turn_completion.finish) — rather than a
+    canned self-introduction to a question about something else. The answer
+    is then checked by every guard as a draft of its own
+    (turn_completion._run_reply_guards), not by this one alone."""
+    if ctx.answered_again:
+        ctx.response["choices"][0]["message"]["content"] = ""
+        return ""
+    ctx.answered_again = True
     print("   [EMPTY] the draft came back empty — asking for the answer again")
     redo = ctx.regen_once(
         _EMPTY_DRAFT_NOTE.format(user=ctx.user_name or "the user"),

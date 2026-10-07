@@ -805,7 +805,7 @@ def _no_record_that_day(question, evidence, *, robot, user_name):
 
 def _run_reply_guards(final_content, response, *, messages, robot,
                       last_user_msg, user_messages, user_name,
-                      _grounded_reply, templated=False):
+                      _grounded_reply, templated=False, answered_again=False):
     """Check the finished reply and correct it where it went wrong.
 
     Parroting, recycled openings, identity drift, misstated ages, a dropped
@@ -813,7 +813,8 @@ def _run_reply_guards(final_content, response, *, messages, robot,
 
     Returns the text to use. `response` is updated in place as it goes, so
     a failure part-way through leaves the corrections already made rather
-    than losing the reply.
+    than losing the reply. `answered_again`: this draft is the answer to an
+    empty one, asked for again (reply_guards._answer_empty_draft).
     """
     # Anti-parrot net: if the model replayed its previous reply verbatim
     # before answering (the classroom-introduction bug), cut the replay.
@@ -1253,8 +1254,21 @@ def _run_reply_guards(final_content, response, *, messages, robot,
             denies_known_person=denies_a_known_person,
             family_refusal_re=_family_refusal_re,
             flat_denial_re=_flat_denial_re,
+            answered_again=answered_again,
         )
         final_content = bt._reply_guards.apply(_guard_ctx)
+        # The answer to an empty draft, asked for again, is a draft of its
+        # own: every check runs on it, not the identity check alone, which
+        # would have let a re-ask that says the last turn's "We're in DAWB
+        # 2-138…" back word for word, or a wrong age, go out (S1 review). A
+        # tool call written into it goes first, as from any draft.
+        if _guard_ctx.answered_again and not answered_again and final_content:
+            return _run_reply_guards(
+                _without_written_call(final_content), response,
+                messages=messages, robot=robot, last_user_msg=last_user_msg,
+                user_messages=user_messages, user_name=user_name,
+                _grounded_reply=_grounded_reply, templated=templated,
+                answered_again=True)
         # First match wins in the chain, so a guard that matched and returned
         # the reply unchanged (no syllabus text to add; a failed retry) hid a
         # replay from guard_verbatim_replay: Hexia sent the same reply twice
@@ -1285,6 +1299,12 @@ def _run_reply_guards(final_content, response, *, messages, robot,
     except Exception as e:
         bt.log.warning(f"[ANTI-PARROT] check failed: {e}")
     return final_content
+
+
+# What the chat page shows for a turn with no reply (pages/chat.py), and what
+# the J-space records for it when a tool ran.
+EMPTY_REPLY_LINE = "[System: the server sent an empty reply.]"
+
 
 def _finish_failed_turn(response, *, last_user_msg, robot, user_name):
     """The model could not answer: show why, and keep it out of every record.
@@ -1528,4 +1548,18 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
                 bt.log.warning(f"[JSPACE] could not schedule J-space pass: {e}")
             finally:
                 _continuity_turn_started = False
+    elif robot in bt._continuity_routes.ROBOTS:
+        # No reply: the draft and the answer asked for again both came back
+        # empty (reply_guards._answer_empty_draft). A tool that already ran is
+        # still recorded, as on a failed turn: email_snapshot may have mailed
+        # the photo, and "did you send it?" answers from this record, or the
+        # photo goes out twice. chat_completions drops the turn's tools after
+        # this. The exchange row is filtered out at read time.
+        try:
+            if bt._continuity_routes.turn_has_tools():
+                bt._continuity_routes.note_exchange(
+                    robot, last_user_msg, EMPTY_REPLY_LINE, user_name=user_name,
+                    enqueue_reflection=False)
+        except Exception as e:
+            bt.log.warning(f"[JSPACE] empty-reply bookkeeping: {e}")
     return response

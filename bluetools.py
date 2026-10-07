@@ -11895,7 +11895,14 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
             payload["max_tokens"] -= _allowance
             result = _send()
     except Exception as e:
-        return _lm_studio_recover(e, payload)
+        # A context overflow is sent again, trimmed. That answer is checked,
+        # noted and kept as the turn's last call like any other. Returned
+        # straight away, an empty one would be asked for again from the call
+        # before it: a forced search, with no results and 512 tokens of room
+        # (S1 review).
+        result = _lm_studio_recover(e, payload)
+        if result is None:
+            return None
     # An HTTP 200 carrying {"error": ...} or no usable message is a failure
     # too. It used to pass the fast path's truthiness check and become an
     # in-voice "Sorry, something went wrong", or a KeyError 500 on the

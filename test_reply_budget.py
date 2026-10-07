@@ -478,6 +478,47 @@ def test_an_answer_after_a_tool_that_the_reasoning_starved_is_asked_again(
     assert (last["max_tokens"], last["visible"]) == (bt._chat_max_tokens(), None)
 
 
+def _overflow():
+    import requests
+    response = requests.models.Response()
+    response.status_code = 400
+    response._content = (b'{"error":"request (9100 tokens) exceeds the available '
+                         b'context size (8192 tokens)"}')
+    return requests.HTTPError("400 Client Error", response=response)
+
+
+def test_an_answer_sent_again_after_an_overflow_is_the_turn_s_last_call(
+        fresh, monkeypatch, tmp_path):
+    """Trimmed and sent again, the answer after the search was returned
+    straight away: an empty one would have been asked for again from the
+    call before it, the forced search, without its results (S1 review)."""
+    monkeypatch.chdir(tmp_path)        # a failed recovery writes a dump here
+    sent = []
+
+    def post(payload, timeout=120):
+        sent.append(payload)
+        if len(sent) == 1:
+            raise _overflow()
+        return _reply("My mistake — DH201 meets in SB107, not DAWB 2-138.")
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    bt._lm_turn_reset()
+    forced = {"messages": AFTER_SEARCH[:1], "max_tokens": 512, "visible": None}
+    bt._LM_TURN.last_call = forced
+    earlier = [{"role": role, "content": f"Earlier {role} turn. " + "x" * 2400}
+               for _ in range(6) for role in ("user", "assistant")]
+    result = bt.call_lm_studio(earlier + AFTER_SEARCH, include_tools=False,
+                               iteration=2, thinking=THINK_ON)
+
+    assert result["choices"][0]["message"]["content"].startswith("My mistake")
+    assert len(sent[1]["messages"]) < len(earlier + AFTER_SEARCH), "not trimmed"
+    last = bt._LM_TURN.last_call
+    assert last is not forced
+    assert last["messages"] is sent[1]["messages"]
+    assert any("SB107" in str(m.get("content")) for m in last["messages"])
+    assert "1 call" in bt._lm_turn_summary()
+
+
 def test_an_answer_after_a_tool_that_had_words_is_not_asked_again(fresh, monkeypatch):
     """No cap to hold it to: words cut off by max_tokens are an answer, not
     a starved one."""
