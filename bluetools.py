@@ -5748,15 +5748,16 @@ def _format_doc_chunks(results: List[Dict], is_expertise: bool = False) -> str:
         else:
             loc = ""
         content_preview = r['content'][:800]
-        # Citation tag the model can copy inline. Putting the filename in
-        # [brackets] near the start makes it easy to weave into prose.
+        # The filename labels the passage for the model. How the reply
+        # credits it is the answer note's (tool_pipeline.source_credit_note):
+        # "Cite sources inline … like [filename.pdf]" here put brackets in
+        # conversation.
         formatted.append(
             f"[{i}] [{r['filename']}]{loc} (relevance: {score_pct})\n"
             f"{content_preview}"
         )
     header = (
-        "Here are the most relevant passages from your corpus. "
-        "Cite sources inline when you quote, like [filename.pdf]:"
+        "Here are the most relevant passages from your corpus:"
         if is_expertise else
         "Here's what I found in your documents:"
     )
@@ -12140,6 +12141,10 @@ def _build_expertise_block() -> str:
     explicitly called — and only when the model thinks to call it. With
     this block, every prompt names the corpus, so Blue knows he has
     expertise on these topics and can reach for the search tool naturally.
+
+    It credits a document in words in conversation: "cite it inline like
+    [filename.pdf]" made casual answers read as documents (as with
+    tool_pipeline.source_credit_note); a report keeps a label per section.
     """
     try:
         index = load_document_index()
@@ -12188,11 +12193,12 @@ def _build_expertise_block() -> str:
         "from them naturally. Do not claim ignorance about a topic that is "
         "obviously covered below.\n\n"
         "This is a catalogue, not a list of topics to bring up. When a claim "
-        "in your reply comes from a document's own text, cite it inline like "
-        "[filename.pdf] right after that claim — short and natural, e.g. 'as I "
-        "noted in my talk script [Job_Talk_Script7.docx], …'. Only such claims "
-        "are cited: an office number the user just told you, a class time from "
-        "the schedule, or how you yourself run are not citations.\n"
+        "in your reply comes from a document's own text, say so in words, e.g. "
+        "'as I noted in my talk script, …', never with a bracketed filename; "
+        "only a report or document you were asked to write gives each "
+        "section's source a short label. Only such claims get a source: an "
+        "office number the user just told you, a class time from the "
+        "schedule, or how you yourself run come from no document.\n"
         + "\n".join(lines) +
         "\n</expertise>"
     )
@@ -12270,8 +12276,8 @@ def _build_focus_block() -> str:
         "specific documents listed below. When a question calls for library, "
         "document, course, or reading material, treat these as your single "
         "authoritative source: answer from them — use the search_documents "
-        "tool (it is scoped to exactly these picks) and quote them, citing "
-        "[filename] after claims taken from them — and do NOT pull in any OTHER "
+        "tool (it is scoped to exactly these picks) and quote them, saying in "
+        "words which one a claim comes from — and do NOT pull in any OTHER "
         "document, course, or reading. If a document question can't be answered "
         "from them, say so plainly rather than mixing in another source. "
         "Greetings, thanks, acknowledgements, logistics and corrections are "
@@ -14837,7 +14843,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _direct, pending_force_tool = _tool_pipeline.direct_execute(
         _DIRECT_EXEC_TOOLS, conversation_messages, improved_force_tool,
         improved_tool_args, last_user_message, robot,
-        thinking=_thinking_now,
+        thinking=_thinking_now, spoken=voice,
     )
     if _direct is not None:
         return _tool_pipeline.settle_written_call(
@@ -14891,7 +14897,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         _detect_msg, _identity_kind, conversation_messages, improved_force_tool,
         improved_tool_args, is_greeting, last_user_message, max_iterations,
         on_token, user_name, pending_force_tool, thinking=_thinking_now,
-        reply_cap=_cap_now,
+        reply_cap=_cap_now, spoken=voice,
     )
     if _looped is not None:
         # A question about Blue himself is answered without tools.

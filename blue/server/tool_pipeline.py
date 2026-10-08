@@ -132,13 +132,56 @@ def template_response(tool_name, tool_args, tool_result):
     return None
 
 
+# How a reply credits what it took from the library, by what the reply is.
+# The note said "Put [filename] right after each claim taken from this text"
+# on every read, so casual answers came back as documents: "Lineages of AI…
+# The reading is Wooldridge, … "The Golden Age" [DH201_AL_2026F.docx]."
+# (10118), "…the epistemology of connectionism [DH201_AL_2026F.docx]."
+# (10129), and a reading report presented to the class carried 140-character
+# PDF names in brackets (10098). A report or document keeps a short label per
+# section; conversation says where something comes from in words; what is
+# heard, or presented to a room, has no brackets at all. Only what the text
+# says is credited (b5079b2: Alex's own office number came back with a
+# syllabus citation).
+_SOURCE_IN_WORDS = (
+    "If the user asked for a report or a document, give each section's "
+    "source one short label. Otherwise this is conversation: say in words "
+    "where something comes from when it matters (the syllabus says…), with "
+    "no brackets or filenames.")
+_SOURCE_HEARD = (
+    "This reply will be heard or presented to a room: no brackets, filenames "
+    "or source labels at all; if a source matters, name it in words.")
+_SOURCE_ONLY_TEXT = (
+    " Credit only what this text says, never something the user just told "
+    "you, the calendar, or yourself.")
+# Presenting is speaking: "present your reading report as if you were a
+# student in the class" (10079) names no class in the room.
+_PRESENTS_RE = re.compile(
+    r"\bpresent(?:ing)?\s+(?:it|this|that|them|your|my|our|the|a|an|his|her)\b"
+    r"|\b(?:read|say)\s+(?:(?:it|this|that|them)\s+)?(?:aloud|out\s+loud)\b",
+    re.I)
+
+
+def source_credit_note(last_user_message, conversation_messages, *,
+                       spoken=False) -> str:
+    """How the answer to a library read credits its source: heard (a spoken
+    turn, a class in the room, a presentation) or written (a short label
+    per section for a report, words in conversation)."""
+    heard = (spoken or bool(_PRESENTS_RE.search(last_user_message or ""))
+             or bt._told_in_class(conversation_messages))
+    return (_SOURCE_HEARD if heard else _SOURCE_IN_WORDS) + _SOURCE_ONLY_TEXT
+
+
 def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_tool,
-                   improved_tool_args, last_user_message, robot, *, thinking=None):
+                   improved_tool_args, last_user_message, robot, *, thinking=None,
+                   spoken=False):
     """The fast path. Returns (response, pending_force_tool).
 
     `thinking` is the turn's decision for bt.call_lm_studio. The two
     retries below (an answer that denied a read or dodged the results) are
     guard retries and never think; with no decision they send nothing.
+
+    `spoken` means the reply will be read aloud (source_credit_note).
 
     `response` is a finished turn, or None to fall through to the loop.
     `pending_force_tool` is the one piece of state that crosses over: when the
@@ -212,9 +255,9 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
             "[The local search_documents call above SUCCEEDED and returned "
             "text extracted from the user's real library files. Answer the "
             "user's own message, using this text where it bears on it, in the "
-            "length and form the system message asks for. Put [filename] right "
-            "after each claim taken from this text — never after something the "
-            "user just told you, the calendar, or yourself. "
+            "length and form the system message asks for. "
+            + source_credit_note(last_user_message, conversation_messages,
+                                 spoken=spoken) + " "
             "Do not claim the PDF, path, text, or reading tool is unavailable; "
             "do not fall back to training data; and do not ask for an upload. "
             f"{self_reflection_grounding} No more tools.]"
@@ -274,10 +317,12 @@ def direct_execute(_DIRECT_EXEC_TOOLS, conversation_messages, improved_force_too
                     bt._robot_cfg(robot)["persona_line"] + "\n"
                     "The local document reader has succeeded. Treat the "
                     "extract below as authoritative evidence from the user's "
-                    "own library. Answer the request substantively, cite "
-                    "[filename] after claims taken from it, and never deny access or mention "
+                    "own library. Answer the request substantively, and never "
+                    "deny access or mention "
                     "training data as a substitute for the source, uploads, "
-                    "missing tools, or invented paths."
+                    "missing tools, or invented paths. "
+                    + source_credit_note(last_user_message, conversation_messages,
+                                         spoken=spoken)
                     + clean_identity
                 )},
                 {"role": "user", "content": (
@@ -1485,10 +1530,14 @@ def settle_written_call(response, conversation_messages, *, tools_allowed,
 def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                   improved_force_tool, improved_tool_args, is_greeting,
                   last_user_message, max_iterations, on_token, user_name,
-                  pending_force_tool=None, *, thinking=None, reply_cap=None):
+                  pending_force_tool=None, *, thinking=None, reply_cap=None,
+                  spoken=False):
     """Offer the tools, run what the model asks for, then make it answer.
 
     `thinking` is the turn's decision, passed to every call of the loop.
+
+    `spoken` means the reply will be read aloud: a library read the model
+    asked for is credited as direct_execute's is (source_credit_note).
 
     `reply_cap` is a short message's cap on the visible reply
     (blue/server/reply_budget.py). It goes to the first call when no tool is
@@ -1670,6 +1719,7 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
 
         conversation_messages.append(assistant_message)
 
+        read_library = False
         for tool_call in tool_calls:
             function_name = tool_call["function"]["name"]
             try:
@@ -1690,6 +1740,9 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                 "name": function_name,
                 "content": tool_result
             })
+            read_library = read_library or (
+                function_name == "search_documents"
+                and bt._document_search_succeeded(tool_result))
 
             # Gmail operation reminders (prevents confusing read/reply/send)
             _gmail_reminders = {
@@ -1710,9 +1763,15 @@ def run_tool_loop(_detect_msg, _identity_kind, conversation_messages,
                     pass
 
         if iteration == 1:
+            # A read the model asked for ("isnt there another reading too?",
+            # 10120) is credited as the fast path's is.
+            credit = (" " + source_credit_note(
+                last_user_message, conversation_messages, spoken=spoken)
+                if read_library else "")
             conversation_messages.append({
                 "role": "user",
-                "content": "[Answer the user naturally using the tool results above. Do not call more tools.]"
+                "content": ("[Answer the user naturally using the tool results "
+                            f"above. Do not call more tools.{credit}]")
             })
 
         # CRITICAL FIX: After executing all tools, loop back to get the model's response to the tool results

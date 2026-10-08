@@ -111,11 +111,15 @@ def _library_stems(word: str, library_tokens) -> set:
 
 _COURSE_CODE_RE = re.compile(r"[a-z]{2,5} ?\d{3,4}[a-z]?")
 # Asking about the course itself: "introduce CS101 to the class", "what's in
-# dh201", "look at cs101 again", "the grading for dh399".
+# dh201", "look at cs101 again", "the grading for dh399". "open" is the verb,
+# not "open-source": "today's AI Lab for dh201: How to download, install, and
+# operate local, private, open-source models" (10130) read as a request to
+# open the DH201 folder, and the reply was a failed lookup (10131).
 _COURSE_CONTENT_RE = re.compile(
     r"\b(?:introduc(?:e|ed|ing)|explain|describe|summari[sz]e|overview|go\s+over"
     r"|tell\s+(?:me|us|them|the\s+(?:class|students))\b[^.!?]{0,40}\babout"
-    r"|is\s+(?:all\s+)?about|what(?:'s|\s+is)\s+in|look\s+at|open|check|access"
+    r"|is\s+(?:all\s+)?about|what(?:'s|\s+is)\s+in|look\s+at"
+    r"|open(?!-?\s?(?:source|weights?)\b)|check|access"
     r"|pull\s+up|review|outline|learning\s+outcomes?|grad(?:ed|ing|es?)"
     r"|cover(?:s|ed|ing)?|tutorials?|office\s+hours|polic(?:y|ies)|tas?|room"
     r"|topics?)\b", re.I)
@@ -206,6 +210,50 @@ _ACTIVITY_STATEMENT_RE = re.compile(
     r"(?:teaching|taking|prepping|preparing|grading|marking)\b",
     re.I,
 )
+
+# Telling Blue what a class holds today: "today's AI Lab for dh201: How to
+# download, install, and operate local, private, open-source models" (10130),
+# "today we have orientation for the TAs for cs101" (9723). The lab and its
+# title are the news, not a request to open the syllabus; both fast-executed
+# a syllabus read, and 10131 answered the lab's title as a failed lookup
+# ("I can't pull the installation guide or command-line instructions from
+# them"). The frame, not the title's words, says it is a statement, since a
+# title can hold any word: "review", "access", "topics" each name a request
+# in _COURSE_CONTENT_RE. A question still searches ("what's today's lab for
+# dh201?", "today's reading is what?"), and so does a request in so many words
+# ("…, can you…", or a document verb: "…, check the syllabus").
+_SHARING_STATEMENT_RE = re.compile(
+    r"^(?:(?:so|ok(?:ay)?|and|well|alright|fyi|btw)[,\s]+)*"
+    r"(?:(?:today|tonight|tomorrow|this\s+(?:morning|afternoon|week))['’]?s\s+"
+    r"(?:[\w-]+\s+){0,3}?(?:lab|class|lecture|topic|session|seminar|tutorial"
+    r"|readings?|orientation|meeting|workshop|demo)\b[^?]*?"
+    r"(?::|\b(?:is|are|will\s+be|was)\b)"
+    r"|(?:today|tonight|tomorrow|this\s+(?:morning|afternoon|week)),?\s+"
+    r"(?:we|i)(?:['’](?:re|ll|ve)|\s+(?:are|will|have|had))?\s+"
+    r"(?:have|got|do|did|doing|cover|covered|covering|start|started|starting"
+    r"|finish|finished)\b)",
+    re.I,
+)
+_ASKS_BLUE_RE = re.compile(
+    r"\b(?:can|could|would|will)\s+(?:you|u)\b|\bplease\b"
+    r"|\bi(?:['’]d|\s+would)?\s+(?:want|need|like)\s+(?:you|u)\b", re.I)
+
+
+# Asking for a search, as whole words: "search" sits inside "re-SEARCH", and
+# "talk" is a document noun here, so every remark about his research talk
+# was a library search at 0.70-0.85: 19 turns on 04-23, among them "I hope
+# they like our research talk." and "We are at the end of the research talk
+# do you have any final thoughts."
+_SEARCH_VERB_RE = re.compile(
+    r"\b(?:search(?:es|ed|ing)?|find(?:s|ing)?|look(?:s|ed|ing)?\s+(?:for|up))\b")
+
+
+def _shares_a_class(msg_lower: str) -> bool:
+    """A statement telling Blue what a class holds (_SHARING_STATEMENT_RE)."""
+    return ("?" not in msg_lower
+            and bool(_SHARING_STATEMENT_RE.search(msg_lower.strip()))
+            and not _ASKS_BLUE_RE.search(msg_lower))
+
 
 _NAMING_STATEMENT_RE = re.compile(
     r"\bmy (?:first |last |full |middle )?name is\b"
@@ -610,7 +658,7 @@ class DocumentsDetector(BaseDetector):
             # where words appear between the verb and the doc-noun.
             confidence = 0.88
             reasons.append("re-read verb + doc noun (proximity)")
-        elif any(v in msg_lower for v in ['search', 'find', 'look for', 'look up']):
+        elif _SEARCH_VERB_RE.search(msg_lower):
             if any(n in msg_lower for n in doc_nouns):
                 # Whole words: "our" is inside "y-OUR", "f-OUR" and
                 # "c-OUR-se", so "search your documents folder" scored as
@@ -634,6 +682,11 @@ class DocumentsDetector(BaseDetector):
                 and not _COURSE_MENTION_RE.search(msg_lower)
                 and not _DOCUMENT_FRAME_RE.search(msg_lower)
                 and not _POINTED_DOCUMENT_RE.search(msg_lower)):
+            return None
+
+        # Telling Blue what a class holds today is not asking for its file,
+        # unless he also asks for it above ("search", "check the syllabus").
+        if confidence <= 0 and _shares_a_class(msg_lower):
             return None
 
         # Questions about documents (what/how questions). An opinion question

@@ -469,9 +469,17 @@ CHAT_SYSTEM_PROMPT = (
     "LOCAL LIBRARY: search_documents can directly read and extract text "
     "from local PDFs, Word documents, and text files. When it reports a "
     "successful read, the returned passages are the file's actual text: "
-    "answer from them and cite [filename]. Never claim the tool only scans "
-    "keywords, never invent a library path, and never ask Alex to upload a "
-    "file that the tool just found and read.\n"
+    "answer from them. "
+    # "cite [filename]" here put "[DH201_AL_2026F.docx]" into casual answers
+    # with no tool call at all: "I should cite the source document." (the
+    # reasoning of 10114, from <syllabus_day>'s rows). See
+    # tool_pipeline.source_credit_note.
+    "In conversation, say in words where something comes from (the "
+    "syllabus says…), never as a bracketed filename; only a report or "
+    "document you were asked to write gives each section's source a short "
+    "label, and nothing said aloud or to a class has one. Never claim the "
+    "tool only scans keywords, never invent a library path, and never ask "
+    "Alex to upload a file that the tool just found and read.\n"
     "CAMERA DISCIPLINE: use the camera when someone asks you to look "
     "or see. A statement ABOUT your camera, eyes, movement, or "
     "abilities is not a request to look — answer it in words, without "
