@@ -160,14 +160,41 @@ _PRESENTS_RE = re.compile(
     r"\bpresent(?:ing)?\s+(?:it|this|that|them|your|my|our|the|a|an|his|her)\b"
     r"|\b(?:read|say)\s+(?:(?:it|this|that|them)\s+)?(?:aloud|out\s+loud)\b",
     re.I)
+# Only when Blue is the one asked to present: "you" before the verb in its
+# sentence ("i want you to present…", "pretend you are a student in the
+# class and present…", 10081), or the verb opening its clause as an
+# imperative does ("present your reading report to the class", 10097). "i
+# will present the paper at the conference, write me a report on it with
+# sources" is a written report for Alex.
+_ASKED_OF_YOU_RE = re.compile(r"\b(?:you|u)\b", re.I)
+_OPENS_ITS_CLAUSE_RE = re.compile(
+    r"(?:^|[,;:])\s*(?:(?:please|pls|now|then|so|ok(?:ay)?|and|also|just"
+    r"|go\s+ahead\s+and)\s+)*$", re.I)
+
+
+def _blue_presents(text: str) -> bool:
+    """The user's words ask Blue to present, or to read something aloud."""
+    for m in _PRESENTS_RE.finditer(text):
+        sentence = re.split(r"[.!?\n]", text[:m.start()])[-1]
+        if (_ASKED_OF_YOU_RE.search(sentence)
+                or _OPENS_ITS_CLAUSE_RE.search(sentence)):
+            return True
+    return False
 
 
 def source_credit_note(last_user_message, conversation_messages, *,
                        spoken=False) -> str:
     """How the answer to a library read credits its source: heard (a spoken
     turn, a class in the room, a presentation) or written (a short label
-    per section for a report, words in conversation)."""
-    heard = (spoken or bool(_PRESENTS_RE.search(last_user_message or ""))
+    per section for a report, words in conversation).
+
+    Presenting is read from the user's own words: every syllabus he attaches
+    or pastes says students "start off the discussion of each text by
+    presenting a Reading Report", and that made a typed "write a reading
+    report on the castelle chapter for dh399" a reply to a room. A message
+    with an image is a list of parts."""
+    words = bt._user_message_text({"content": last_user_message})
+    heard = (spoken or _blue_presents(words)
              or bt._told_in_class(conversation_messages))
     return (_SOURCE_HEARD if heard else _SOURCE_IN_WORDS) + _SOURCE_ONLY_TEXT
 

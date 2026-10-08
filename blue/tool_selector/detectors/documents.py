@@ -227,7 +227,7 @@ _SHARING_STATEMENT_RE = re.compile(
     r"(?:(?:today|tonight|tomorrow|this\s+(?:morning|afternoon|week))['’]?s\s+"
     r"(?:[\w-]+\s+){0,3}?(?:lab|class|lecture|topic|session|seminar|tutorial"
     r"|readings?|orientation|meeting|workshop|demo)\b[^?]*?"
-    r"(?::|\b(?:is|are|will\s+be|was)\b)"
+    r"(?::(?!\d)|\b(?:is|are|will\s+be|was)\b)"
     r"|(?:today|tonight|tomorrow|this\s+(?:morning|afternoon|week)),?\s+"
     r"(?:we|i)(?:['’](?:re|ll|ve)|\s+(?:are|will|have|had))?\s+"
     r"(?:have|got|do|did|doing|cover|covered|covering|start|started|starting"
@@ -248,11 +248,54 @@ _SEARCH_VERB_RE = re.compile(
     r"\b(?:search(?:es|ed|ing)?|find(?:s|ing)?|look(?:s|ed|ing)?\s+(?:for|up))\b")
 
 
+# What follows the frame can still ask, and Alex mostly leaves the "?" off
+# (39 of his 71 wh-questions since 09-01 have none): "today's topic for
+# dh201 is connectionism, introduce it to the class", "today's reading is
+# wooldridge chapter 2. what does he argue", "today we do dh399, what's the
+# assignment", "tomorrow we have dh399 what are the readings". A ":" title
+# runs to the end of its sentence and asks nothing, whatever its words:
+# 10130's "How to download, install, and operate…" is the lab's name. A
+# clock time ("at 11:30") is no title.
+_TITLE_RE = re.compile(r":(?!\d)[^.!;\n]*")
+_CLAUSE_ASKS_RE = re.compile(
+    r"\s*(?:(?:so|and|then|now|ok(?:ay)?|but|also|just)\s+)*"
+    r"(?:what|whats|which|when|where|who|why|how(?!\s+to\b)|introduce"
+    r"|summari[sz]e|explain|describe|outline|tell|remind|give|list|show"
+    r"|go\s+over|look|read|check|find|search|pull\s+up|open|prep(?:are)?|help"
+    r"|let['’]?s)\b")
+_WH_ASKS_RE = re.compile(
+    r"\b(?:what|which|when|where|who|why|how)(?:['’]s|\s+(?:is|are|was|were|do"
+    r"|does|did|should|shall|can|could|will|would|have|has|am|many|much))\b"
+    r"|\bwhats\b|\bwhat\s*$")
+_ASKS_FOR_IT_RE = re.compile(
+    r"\b(?:introduce|summari[sz]e|explain|describe|outline|go\s+over|check"
+    r"|read|look\s+(?:at|up|for)|pull\s+up|remind\s+me"
+    r"|(?:tell|give|show)\s+(?:me|us|them))"
+    r"\s+(?:it|them|this|that|the|me|us|my|our|his|her|what|how|about)\b")
+
+
 def _shares_a_class(msg_lower: str) -> bool:
-    """A statement telling Blue what a class holds (_SHARING_STATEMENT_RE)."""
-    return ("?" not in msg_lower
-            and bool(_SHARING_STATEMENT_RE.search(msg_lower.strip()))
-            and not _ASKS_BLUE_RE.search(msg_lower))
+    """A statement telling Blue what a class holds (_SHARING_STATEMENT_RE),
+    with nothing after the frame that asks for anything."""
+    text = msg_lower.strip()
+    m = _SHARING_STATEMENT_RE.search(text)
+    if not m or "?" in text or _ASKS_BLUE_RE.search(text):
+        return False
+    rest = _TITLE_RE.sub(" ", text[m.end() - m.group().endswith(":"):])
+    clauses = re.split(r"[,.!;\n]+|\s[-–—]\s", rest)[1:]
+    return not (_WH_ASKS_RE.search(rest) or _ASKS_FOR_IT_RE.search(rest)
+                or any(_CLAUSE_ASKS_RE.match(c) for c in clauses))
+
+
+# The re-read verbs, as words: "open" was inside "open-source" and "open
+# weights", "review" inside "preview". "check" keeps its endings: "read all
+# the documents that i checkmarked in the library folder" (6407).
+_RE_READ_VERB_RE = re.compile(
+    r"\b(?:review(?:s|ed|ing)?|go(?:es|ing)?\s+through"
+    r"|look(?:s|ed|ing)?\s+(?:through|at)|(?:re-?)?check\w*"
+    r"|(?:re-?)?open(?:s|ed|ing)?\b(?!-?\s?(?:source|weights?)\b)"
+    r"|go(?:es|ing)?\s+back\s+to|pull(?:s|ed|ing)?\s+up"
+    r"|bring(?:s|ing)?\s+up)\b")
 
 
 _NAMING_STATEMENT_RE = re.compile(
@@ -620,11 +663,8 @@ class DocumentsDetector(BaseDetector):
             'look back at', 'go back to the',
             'pull up the', 'bring up the',
         ]
-        # Verb signals that need a doc-noun nearby in the same message.
-        re_read_verbs = (
-            'review', 'go through', 'look through', 'look at',
-            'check', 'open', 'go back to', 'pull up', 'bring up',
-        )
+        # Verb signals that need a doc-noun nearby in the same message are
+        # _RE_READ_VERB_RE (review, go through, look at, check, open, …).
 
         doc_nouns = ['document', 'documents', 'file', 'files', 'pdf', 'contract',
                      'syllabus', 'report', 'assignment', 'essay', 'paper', 'notes',
@@ -635,35 +675,42 @@ class DocumentsDetector(BaseDetector):
         confidence = 0.0
         reasons = []
 
-        if any(s in msg_lower for s in strong_signals):
+        # A class he shares is scored on its frame, not on its title's words:
+        # "today's class for dh399: peer review of the first assignment
+        # drafts" asks to review no file, and "today's lecture for dh201:
+        # open-source models" to open none.
+        sharing = _shares_a_class(msg_lower)
+        said = _TITLE_RE.sub(" ", msg_lower) if sharing else msg_lower
+
+        if any(s in said for s in strong_signals):
             confidence = 0.95
             reasons.append("explicit document search")
-        elif any(s in msg_lower for s in list_signals):
+        elif any(s in said for s in list_signals):
             # User wants to list/count documents
             confidence = 0.90
             reasons.append("document list/count query")
-        elif any(s in msg_lower for s in re_read_signals):
+        elif any(s in said for s in re_read_signals):
             # User wants Blue to look at a specific document — this almost
             # always implies search_documents. Boost slightly if a doc noun
             # is also present (very strong signal).
-            if any(n in msg_lower for n in doc_nouns):
+            if any(n in said for n in doc_nouns):
                 confidence = 0.92
                 reasons.append("re-read/look-at + document noun")
             else:
                 confidence = 0.85
                 reasons.append("re-read / fresh-look phrasing")
-        elif any(v in msg_lower for v in re_read_verbs) and any(n in msg_lower for n in doc_nouns):
+        elif _RE_READ_VERB_RE.search(said) and any(n in said for n in doc_nouns):
             # Looser verb+noun match catches "review the job talk document",
             # "go through the talk script", "open the docx file" — anything
             # where words appear between the verb and the doc-noun.
             confidence = 0.88
             reasons.append("re-read verb + doc noun (proximity)")
-        elif _SEARCH_VERB_RE.search(msg_lower):
-            if any(n in msg_lower for n in doc_nouns):
+        elif _SEARCH_VERB_RE.search(said):
+            if any(n in said for n in doc_nouns):
                 # Whole words: "our" is inside "y-OUR", "f-OUR" and
                 # "c-OUR-se", so "search your documents folder" scored as
                 # though the user had said "our" (601 such matches in the log).
-                if has_any_word(['my', 'our'], msg_lower):
+                if has_any_word(['my', 'our'], said):
                     confidence = 0.85
                     reasons.append("search + possessive + document")
                 else:
@@ -671,7 +718,7 @@ class DocumentsDetector(BaseDetector):
                     reasons.append("search + document")
             # Whole word: "my" sits inside "em-MY" and "a-MY", so simply
             # naming Emmy scored an implicit document search at 0.75.
-            elif has_any_word(['my', 'our'], msg_lower):
+            elif has_any_word(['my', 'our'], said):
                 confidence = 0.75
                 reasons.append("search + possessive (implicit docs)")
 
@@ -686,7 +733,7 @@ class DocumentsDetector(BaseDetector):
 
         # Telling Blue what a class holds today is not asking for its file,
         # unless he also asks for it above ("search", "check the syllabus").
-        if confidence <= 0 and _shares_a_class(msg_lower):
+        if confidence <= 0 and sharing:
             return None
 
         # Questions about documents (what/how questions). An opinion question

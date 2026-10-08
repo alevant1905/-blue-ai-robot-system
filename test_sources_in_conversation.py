@@ -109,6 +109,56 @@ def test_a_question_or_request_about_a_document_still_searches(library, message)
     assert _searches(library, message)
 
 
+@pytest.mark.parametrize("message", [
+    # a request after the frame, with no "?" (review of S6)
+    "today we do dh399, what's the assignment",
+    "tomorrow we have dh399 what are the readings",
+    "today's class is dh399, remind me what the assignment is",
+    "today's topic for dh201 is connectionism, introduce it to the class",
+    "this week's reading for dh399 is reigeluth and castelle, explain the "
+    "main claim",
+    "today's reading for dh399 is toscano, summarize it for the class",
+    "today's reading for dh201 is wooldridge chapter 2. what does he argue",
+    "today's class for dh201 is about the reading report. explain the "
+    "assignment",
+    "today we have the dh201 lab, introduce the topic to the class",
+    "today's topic in dh201: connectionism. introduce it",
+    "today's lab is in the dh201 syllabus check it",
+])
+def test_a_request_after_the_frame_still_searches(library, message):
+    assert _searches(library, message)
+
+
+@pytest.mark.parametrize("message", [
+    # a ":" title's words ask nothing, whatever they are
+    "today's lecture for dh201: open-source models and the politics of open "
+    "weights",
+    "today's class for dh399: peer review of the first assignment drafts",
+    "today's lab for dh201: a closer look at transformers",
+    "today's lab for cs101: how to search your files with grep",
+    "today's ai lab for dh201: how to download, install, and operate local, "
+    "private, open-source models. what a day",
+])
+def test_a_title_s_words_are_not_a_request(library, message):
+    assert not _searches(library, message)
+
+
+def test_a_clock_time_is_no_title(library):
+    assert _searches(library, "today's class is at 11:30, check the syllabus")
+
+
+@pytest.mark.parametrize("message,searches", [
+    ("open the dh201 syllabus", True),
+    ("reopen the job talk script", True),
+    ("i opened the pdf but it was blank, check the file", True),
+    ("give me an open-source alternative to the pdf reader", False),
+    ("read all the documents that i checkmarked in the library folder", True),
+    ("the open-source release notes look solid", False),
+])
+def test_the_re_read_verbs_are_words(library, message, searches):
+    assert _searches(library, message) is searches
+
+
 def test_open_source_is_not_the_verb_open(library):
     """The source fix by itself: the lab's title alone, without "today's",
     is a passing mention of the course."""
@@ -159,9 +209,52 @@ def test_what_is_heard_or_presented_has_no_brackets_at_all(message, thread, spok
     "what is the present tense of lernen",
     "i got vilda a present for her birthday",
     "write a reading report on the reigeluth chapter",
+    # Alex presents; Blue writes
+    "i will present the paper at the conference, write me a report on it "
+    "with sources",
+    "i'm presenting the chapter at the conference, outline it for me",
+    "the students present their reading reports today",
+    "at present the reading is wooldridge chapter 2",
 ])
 def test_a_present_that_is_not_presenting_is_written(message):
     note = tool_pipeline.source_credit_note(message, _thread(message))
+    assert note.startswith("If the user asked for a report or a document")
+
+
+@pytest.mark.parametrize("message", [
+    "pretend you are a student in the class and present your reading report "
+    "on this text",                                                # 10081
+    "ok, present it",
+    "can you read that out loud",
+])
+def test_blue_asked_to_present_is_heard(message):
+    note = tool_pipeline.source_credit_note(message, _thread(message))
+    assert note.startswith("This reply will be heard or presented to a room")
+
+
+# Every syllabus Alex attaches or pastes says students "start off the
+# discussion of each text by presenting a Reading Report".
+ATTACHED_SYLLABUS = (
+    '[Attached document: DH399 AL 2026F.pdf]\n"""\nDH399: AI Agents at Work '
+    'and in Society\nReading Report (20%): Students will start off the '
+    'discussion of each text by presenting a Reading Report of 10 minutes.\n'
+    '"""\nwrite a reading report on the castelle chapter for dh399')
+
+
+def test_presenting_is_read_from_his_words_not_an_attachment():
+    note = tool_pipeline.source_credit_note(
+        ATTACHED_SYLLABUS, _thread(ATTACHED_SYLLABUS))
+    assert note.startswith("If the user asked for a report or a document")
+
+
+def test_a_message_with_an_image_is_read_from_its_text_parts():
+    parts = [{"type": "text", "text": "present it to the class"},
+             {"type": "image_url", "image_url": {"url": "data:image/png;base64,"}}]
+    note = tool_pipeline.source_credit_note(parts, [{"role": "user",
+                                                     "content": parts}])
+    assert note.startswith("This reply will be heard or presented to a room")
+    note = tool_pipeline.source_credit_note(
+        [{"type": "text", "text": "what does this page say"}], [])
     assert note.startswith("If the user asked for a report or a document")
 
 
@@ -224,6 +317,17 @@ def test_a_fast_path_read_is_answered_in_words(reads):
     assert note.startswith("[The local search_documents call above SUCCEEDED")
     assert "Put [filename]" not in note
     assert "say in words where something comes from" in note
+
+
+def test_a_typed_report_with_a_syllabus_attached_is_written(reads):
+    """The fast path's note reads presenting from his words only."""
+    reads.model.queue("Reading Report: Reigeluth and Castelle …")
+    reads.ask(ATTACHED_SYLLABUS)
+
+    assert [c["tool"] for c in reads.executed] == ["search_documents"]
+    note = _note_after_the_read(reads)
+    assert "If the user asked for a report or a document" in note
+    assert "heard or presented to a room" not in note
 
 
 def test_a_spoken_read_has_no_brackets_at_all(reads):
