@@ -733,6 +733,7 @@ def guard_robot_relationship_denial(ctx) -> Optional[str]:
                 max_lines=5,
                 include_humans=False,
                 include_robots=True,
+                include_banter_wording=False,
                 chat_turn=True,
             )
         )

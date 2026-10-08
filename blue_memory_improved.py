@@ -50,10 +50,11 @@ from blue_identity import (
     is_social_checkin,
     is_wording_only_reply,
     reply_wording_withheld,
+    speaks_to_a_class,
 )
 from blue_reply_text import (
-    cut_self_talk, is_runaway_text, quotable_reply, reads_as_deliberation,
-    written_tool_calls,
+    cut_self_talk, is_runaway_text, plain_quote, quotable_reply,
+    reads_as_deliberation, written_tool_calls,
 )
 
 
@@ -2204,6 +2205,10 @@ class EnhancedMemorySystem:
                     # The exchange stays, so the thread reads on; the words
                     # of a self-introduction or a check-in answer do not.
                     stub = "(answered)"
+                elif r["role"] == "assistant":
+                    # His words without their markdown, as the other
+                    # memory blocks quote them (plain_quote).
+                    stub = plain_quote(r["content"] or "")[:240]
                 content = stub or (r["content"] or "")[:240]
                 age = self._humanize_age(r.get("ts"), now)
                 prefix = f"[{age}] " if age else ""
@@ -2724,7 +2729,9 @@ class EnhancedMemorySystem:
             block has the real answer.
           - Runaway replies (huge, self-talking or looping).
         A reply whose wording is never quoted (reply_wording_withheld) stays,
-        marked "wording_withheld", and build_context shows it as "(answered)".
+        marked "wording_withheld", and build_context shows it as "(answered)";
+        so does a reply said to a class (speaks_to_a_class), unless the user
+        is asking what was said.
         Returns oldest-first so the LLM sees a chronological flow."""
         try:
             cutoff = (datetime.now() - timedelta(hours=RECENT_HISTORY_HOURS)).isoformat()
@@ -2751,6 +2758,7 @@ class EnhancedMemorySystem:
         other_robot_names = [
             name for key, name in robot_names.items() if key != robot_key
         ]
+        recall_ask = asks_for_recall([bulk_paste_recall_words(user_msg or "")])
         out: List[Dict[str, Any]] = []
         # Work oldest-first so a toxic assistant reply can remove the user
         # question that immediately prompted it. Keeping that question without
@@ -2798,8 +2806,13 @@ class EnhancedMemorySystem:
                     continue
                 # Said, and kept, but not quoted: a self-introduction, a
                 # flat self-denial, the answer to a check-in or to a question
-                # about himself (blue_identity.reply_wording_withheld).
-                if reply_wording_withheld(previous_user_text, content):
+                # about himself (blue_identity.reply_wording_withheld), or
+                # what he said to a class: 10127's "Welcome to Week 4…" was
+                # here, and in <conversation_memory>, when "introduce todays
+                # topic to the class" got it again (10143).
+                if (reply_wording_withheld(previous_user_text, content)
+                        or (not recall_ask
+                            and speaks_to_a_class(previous_user_text))):
                     out.append({"role": r["role"], "content": content,
                                 "ts": r["timestamp"], "wording_withheld": True})
                     continue
@@ -4014,6 +4027,8 @@ class EnhancedMemorySystem:
         - "(answered this same question; answer it fresh)" for the old answer
           to the question asked again, unless the user asks what was said
           (`recall_ask`);
+        - "(answered)" for what he said to a class (speaks_to_a_class),
+          unless the user asks what was said;
         - "(answered)" for the answer to another ask about himself
           (is_self_description_request), unless the user asks what he said
           about himself (`recall_self`) or names its question's subject;
@@ -4032,6 +4047,8 @@ class EnhancedMemorySystem:
             return "(answered)"
         if not recall_ask and is_reask(asked, intent):
             return "(answered this same question; answer it fresh)"
+        if not recall_ask and speaks_to_a_class(asked):
+            return "(answered)"
         if (is_self_description_request(asked)
                 and not (recall_self or names_it)):
             return "(answered)"

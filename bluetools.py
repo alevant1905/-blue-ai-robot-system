@@ -107,6 +107,7 @@ from blue_identity import (
     recalled_evidence_fallback,
     self_state_focus_hint,
     self_state_readout,
+    speaks_to_a_class,
     strip_drifted_sentences,
 )
 
@@ -14051,64 +14052,16 @@ def _user_message_text(message) -> str:
     return _intent_text(content) if isinstance(content, str) else ""
 
 
-# A class in the room, listening: "we're in front of the DH399 class right
-# now", "say hi to the students", "can you tell the students a bit about
-# yourself?", "introduce yourself to the class", and as logged: "Actually,
-# blue, you're speaking to the class right now." (the York class, 07-16),
-# "lets pretend we are in front of a class", "introduce the course to the
-# class right now" (Hexia and Casper, 09-09), "present your reading report
-# to the class" (10-02), "Blue, introduce yourself and the course,
-# CMDS4740, the class" (06-22). Not a class talked about ("the students
-# seemed bored", "do you want to come to class with me?", "what would you
-# say to a student who…") and not the user's own telling ("what should I
-# tell the students?"). "clas" is his typing: "i want you to introduce
-# yourself to my clas" five times on 07-13 (6765-6801), and 9771.
-_CLASS_IN_ROOM_RE = re.compile(
-    r"\bin front of (?:the|my|your|his|our|an?|all (?:the|my|your|his|our)) "
-    r"(?:\w+ )?(?:class?(?:room)?|students|lecture|audience)\b"
-    r"|\b(?:say(?:ing)? (?:hi|hello|hey|good (?:morning|afternoon))"
-    r"|introduc(?:e|ing)|wav(?:e|ing)|talk(?:ing)?|speak(?:ing)?"
-    r"|present(?:ing)?)\b[^.?!\n]{0,30}?\bto "
-    r"(?:the|my|our|these|an?|all (?:the|my|our)) (?:\w+ )?"
-    r"(?:class?|students|audience)\b"
-    r"|\bintroduc(?:e|ing) yourself\b[^.?!\n]{0,40}?\b(?:the|my|our|these) "
-    r"(?:\w+ )?(?:class?|students|audience)\b"
-    # "introduce the class to CMDS4740", said a minute before 5028.
-    r"|\bintroduc(?:e|ing) (?:the|my|our|this) (?:class?|students|audience) to\b"
-    r"|\btell (?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
-    r"(?:class?|students|audience)\b"
-    r"|\b(?:we|you)(?:['’]re| are) (?:now )?(?:in|at) (?:the |my )?(?:\w+ )?"
-    r"(?:class?(?:room)?|lecture(?: hall)?)\b"
-    r"(?! later| tomorrow| next| this (?:afternoon|evening)| on\b)"
-    r"|\b(?:the )?(?:class?|students|audience) (?:is|are) (?:here|listening"
-    r"|watching|waiting|in the room)\b"
-    r"|\b(?:class?|students)[,.!]* (?:meet|this is) "
-    r"(?:blue|hexia|casper|kasper|pico)\b",
-    re.I)
-# "what should I tell the students": the user is the one telling them. The
-# words just before the match, as _GREETING_BY_USER_RE reads them: "can I get
-# you to say hi to the students?" and "Could I ask you to introduce yourself
-# to the class?" ask it of him.
-_USER_TELLS_RE = re.compile(
-    r"(?:\b(?:should|shall|do|can|could|will|would|might|must|may) i"
-    r"|\bi(?:['’]ll| will| need to| have to| want to| am going to"
-    r"|['’]m going to| am gonna|['’]m gonna)"
-    r"|\bhow (?:to|do i|should i|would i|can i)"
-    r"|\bwhat (?:to|do i|should i)"
-    r"|\blet me"
-    r")\s+(?:(?:just|quickly|first|also|now|then|go|still)\s+)?$",
-    re.I)
-
-
 def _class_in_the_room(conversation_messages, window=8) -> bool:
     """True while a class listens in, from the last `window` user turns of
-    the thread (a class demo ran eight turns in the 10-05 harness)."""
+    the thread (a class demo ran eight turns in the 10-05 harness). One turn
+    is read by blue_identity.speaks_to_a_class, which the memory blocks
+    share."""
     users = [_user_message_text(m) for m in (conversation_messages or [])
              if isinstance(m, dict) and m.get("role") == "user"]
     for text in users[-window:]:
-        for match in _CLASS_IN_ROOM_RE.finditer(text):
-            if not _USER_TELLS_RE.search(text[:match.start()]):
-                return True
+        if speaks_to_a_class(text):
+            return True
     return False
 
 
@@ -17412,6 +17365,9 @@ def chat_completions():
                     max_lines=9,
                     include_humans=True,
                     include_robots=True,
+                    # A banter set is named, never quoted: its jokes came
+                    # back as Blue's own riff in chat (10133).
+                    include_banter_wording=False,
                     chat_turn=True,
                     # What the thread already carries is not quoted again.
                     live_thread=messages,

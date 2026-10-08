@@ -42,6 +42,7 @@ from blue_identity import (
     is_failure_placeholder,
     known_household_target,
     reply_wording_withheld,
+    speaks_to_a_class,
 )
 from blue_reply_text import quotable_reply
 
@@ -150,15 +151,26 @@ _SALIENCE_WORDS = {
 _TURN = threading.local()
 
 
-def _wording_omitted(user_text: str, reply: str = "") -> bool:
+def _wording_omitted(user_text: str, reply: str = "",
+                     recall_ask: bool = False) -> bool:
     """Exchanges whose reply wording is never quoted back: greetings and
     check-ins, questions about the robot itself, and any reply that is a
     self-introduction, a flat self-denial or the family roster — Hexia's class
     introductions came back near word for word from these quotes
     (2026-09-06..09-11), and Blue's 09-16 "Good morning, everyone. I'm Blue…"
     was a reply to "Do you want to say hello to everyone?", which names no
-    introduction (blue_identity.reply_wording_withheld)."""
-    return reply_wording_withheld(user_text or "", reply or "")
+    introduction (blue_identity.reply_wording_withheld).
+
+    Nor, unless the user asks what was said (`recall_ask`), a reply said to
+    a class: "we are in front of the class in dh201 right now" (09-16) got
+    "Understood. Since we are currently in front of the class in **SB107**…",
+    and "we are in the class rightnow" got it back with another room (10149);
+    "can you introduce this topic to the class" got "Welcome to Week 4.
+    Today we're exploring…", and "introduce todays topic to the class" got
+    it again (10143). Over the log this withholds 20 more replies, every one
+    said to a class or about being in one (blue_identity.speaks_to_a_class)."""
+    return (reply_wording_withheld(user_text or "", reply or "")
+            or (not recall_ask and speaks_to_a_class(user_text or "")))
 
 
 def _flat_words(value: Any) -> str:
@@ -198,6 +210,10 @@ def _is_failure_exchange(episode: Dict[str, Any]) -> bool:
 
 # What note_exchange keeps of the user's words for the reflection worker.
 _USER_TEXT_KEEP = 5000
+
+# A banter set's opening line, as the banter route records it: "Topic: AI Lab
+# 3: How to download… Source: DH201_AL_2026F.pdf (pdf)."
+_BANTER_TOPIC_RE = re.compile(r"^Topic:\s*(.+?)(?:\s+Source:\s.*)?$")
 
 
 def _pasted_stub(episode: Dict[str, Any], who: str = "") -> str:
@@ -1260,6 +1276,46 @@ class RobotContinuity:
 
     # ---- the chat-facing block ------------------------------------------
 
+    def _banter_set(self, run: Sequence[Dict[str, Any]]) -> tuple:
+        """(the fellow robots, a sentence) for a run of comedic banter lines
+        in a memory block: who it was with and what it was on, never its
+        jokes.
+
+        10-07 09:36-09:41, Blue and Casper did a set on the DH201 AI lab, and
+        Blue's line "the only thing more private than the model is the fan
+        on your laptop" sat in <j_space> and <conversation_memory>. Two
+        minutes later, Alex's "we will do that in class" got "my local
+        hardware is already at its thermal limit… my office fan sound like
+        a jet engine" (10133), and the hardware motif ran on through 10135
+        and 10141."""
+        names = {
+            str(cfg.get("name") or "").strip()
+            for cfg in getattr(bt, "ROBOTS", {}).values()
+        } or {"Blue", "Hexia", "Casper"}
+        partners: List[str] = []
+        topics: List[str] = []
+        for episode in run:
+            for person in episode.get("participants") or []:
+                person = str(person).strip()
+                if (person in names and person != self.name
+                        and person not in partners):
+                    partners.append(person)
+            heard = " ".join(str(
+                (episode.get("details") or {}).get("user_text") or "").split())
+            match = _BANTER_TOPIC_RE.match(heard)
+            if match:
+                topic = _clip(match.group(1).rstrip("."), 80)
+                if topic not in topics:
+                    topics.append(topic)
+        about = " and ".join(f"'{topic}'" for topic in topics[:2])
+        sentence = (
+            (" on " + about if about else "")
+            + (f" ({len(run)} lines)" if len(run) > 1 else "")
+            + ". Its jokes are left out: they were a performance, not "
+            "things to say again."
+        )
+        return " and ".join(partners), sentence
+
     def jspace_context_block(self) -> str:
         workspace = self.store.get_workspace()
         drives = self.store.get_drives()
@@ -1269,9 +1325,27 @@ class RobotContinuity:
             for name in DEFAULT_DRIVES
         ]
         episode_lines = []
+        banter_run: List[Dict[str, Any]] = []
+
+        def end_banter_run() -> None:
+            if banter_run:
+                partners, sentence = self._banter_set(banter_run)
+                episode_lines.append(
+                    f"- [{_age_text(banter_run[-1]['occurred_at'])}; banter] "
+                    "A comedic banter set"
+                    + (f" with {partners}" if partners else "") + sentence)
+                banter_run.clear()
+
         for item in episodes:
             if item.get("kind") == "deletion" or _is_failure_exchange(item):
                 continue
+            if (item.get("kind") == "exchange"
+                    and str(item.get("source") or "") == "banter"):
+                # Chat is the only reader of this block: a banter line is
+                # never quoted here, and a set is one line (_banter_set).
+                banter_run.append(item)
+                continue
+            end_banter_run()
             summary, issue = self._episode_context_summary(item)
             details = item.get("details") or {}
             heard = str(details.get("user_text") or "").strip()
@@ -1306,8 +1380,8 @@ class RobotContinuity:
                 # A chat exchange is named by what was asked. Its reply is in
                 # <conversation_memory> once, marked as already said, and the
                 # browser's thread carries this window's; a third copy here
-                # was one more invitation to say it again. Duet and banter
-                # lines keep theirs: the live talk builds on them.
+                # was one more invitation to say it again. Duet lines keep
+                # theirs; banter lines are a set above.
                 one_line = " ".join(heard.split())
                 asked = pasted or f"{who} asked: '{_clip(one_line, 120)}'"
                 summary = f"{asked} — you answered."
@@ -1315,6 +1389,7 @@ class RobotContinuity:
                 f"- [{_age_text(item['occurred_at'])}; {item['kind']}; "
                 f"salience {item['salience']:.2f}] {summary}"
             )
+        end_banter_run()
         visual_people = ""
         if getattr(bt, "VISUAL_MEMORY_AVAILABLE", False):
             try:
@@ -1623,6 +1698,18 @@ class RobotContinuity:
             [bulk_paste_recall_words(text) for text in live_users[-2:]]
             or [searched])
         lines: List[str] = []
+        banter_runs: Dict[int, List[Dict[str, Any]]] = {}
+        if not include_banter_wording:
+            # A run of banter lines with no other line between them is one
+            # set, on one line, at its newest (_banter_set).
+            run: List[Dict[str, Any]] = []
+            for episode in chosen + [{}]:
+                if str(episode.get("source") or "") == "banter":
+                    run.append(episode)
+                    continue
+                if run:
+                    banter_runs[id(run[-1])] = run
+                run = []
         for episode in chosen:
             people = counterparts(episode)
             partner = " and ".join(people) or "someone"
@@ -1635,11 +1722,18 @@ class RobotContinuity:
             else:
                 stamp = "time unknown"
             if source == "banter" and not include_banter_wording:
-                lines.append(
-                    f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; prior "
-                    f"comedic banter with {partner}] You performed a set together. "
-                    "Its wording is omitted so an old joke cannot overwrite the live set."
-                )
+                # Chat, the panel and the banter route itself: who and what
+                # on, never an old joke to tell again.
+                run = banter_runs.get(id(episode))
+                if run:
+                    partners, sentence = self._banter_set(run)
+                    lines.append(
+                        f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; "
+                        "prior comedic banter"
+                        + (f" with {partners}] You performed a set together"
+                           if partners else "] You performed a set")
+                        + sentence
+                    )
                 continue
             details = episode.get("details") or {}
             heard = re.sub(r"\s+", " ", str(details.get("user_text") or "")).strip()
@@ -1673,9 +1767,9 @@ class RobotContinuity:
                 # <family> block in the prompt (2026-08-19 22:21 and 22:22).
                 reply_part = (" You answered from the household facts "
                               "(wording omitted).")
-            elif _wording_omitted(heard, replied):
-                # A check-in answer or a self-introduction carries no
-                # information, only wording to copy.
+            elif _wording_omitted(heard, replied, recall_ask=recall_ask):
+                # A check-in answer, a self-introduction or a reply said to a
+                # class carries no information, only wording to copy.
                 reply_part = (" (Your reply wording is omitted so it is never "
                               "reused.)")
             elif not recall_ask and is_reask(heard, searched):

@@ -169,7 +169,7 @@ def test_private_banter_memory_can_exclude_human_chat(continuity_module):
         include_banter_wording=False,
     )
     assert "prior comedic banter with Blue" in relationship_only
-    assert "wording is omitted" in relationship_only
+    assert "jokes are left out" in relationship_only
     assert "toaster wants tenure" not in relationship_only
     assert "dossier is mostly crumbs" not in relationship_only
 

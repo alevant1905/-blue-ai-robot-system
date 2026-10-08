@@ -1308,6 +1308,75 @@ def is_flat_self_denial(reply: str) -> bool:
     return bool(_FLAT_SELF_DENIAL_RE.search(reply or ""))
 
 
+# A class in the room, listening: "we're in front of the DH399 class right
+# now", "say hi to the students", "can you tell the students a bit about
+# yourself?", "introduce yourself to the class", and as logged: "Actually,
+# blue, you're speaking to the class right now." (the York class, 07-16),
+# "lets pretend we are in front of a class", "introduce the course to the
+# class right now" (Hexia and Casper, 09-09), "present your reading report
+# to the class" (10-02), "Blue, introduce yourself and the course,
+# CMDS4740, the class" (06-22). Not a class talked about ("the students
+# seemed bored", "do you want to come to class with me?", "what would you
+# say to a student who…") and not the user's own telling ("what should I
+# tell the students?"). "clas" is his typing: "i want you to introduce
+# yourself to my clas" five times on 07-13 (6765-6801), and 9771.
+_CLASS_IN_ROOM_RE = re.compile(
+    r"\bin front of (?:the|my|your|his|our|an?|all (?:the|my|your|his|our)) "
+    r"(?:\w+ )?(?:class?(?:room)?|students|lecture|audience)\b"
+    r"|\b(?:say(?:ing)? (?:hi|hello|hey|good (?:morning|afternoon))"
+    r"|introduc(?:e|ing)|wav(?:e|ing)|talk(?:ing)?|speak(?:ing)?"
+    r"|present(?:ing)?)\b[^.?!\n]{0,30}?\bto "
+    r"(?:the|my|our|these|an?|all (?:the|my|our)) (?:\w+ )?"
+    r"(?:class?|students|audience)\b"
+    r"|\bintroduc(?:e|ing) yourself\b[^.?!\n]{0,40}?\b(?:the|my|our|these) "
+    r"(?:\w+ )?(?:class?|students|audience)\b"
+    # "introduce the class to CMDS4740", said a minute before 5028.
+    r"|\bintroduc(?:e|ing) (?:the|my|our|this) (?:class?|students|audience) to\b"
+    r"|\btell (?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
+    r"(?:class?|students|audience)\b"
+    r"|\b(?:we|you)(?:['’]re| are) (?:now )?(?:in|at) (?:the |my )?(?:\w+ )?"
+    r"(?:class?(?:room)?|lecture(?: hall)?)\b"
+    r"(?! later| tomorrow| next| this (?:afternoon|evening)| on\b)"
+    r"|\b(?:the )?(?:class?|students|audience) (?:is|are) (?:here|listening"
+    r"|watching|waiting|in the room)\b"
+    r"|\b(?:class?|students)[,.!]* (?:meet|this is) "
+    r"(?:blue|hexia|casper|kasper|pico)\b",
+    re.I)
+# "what should I tell the students": the user is the one telling them. The
+# words just before the match, as _GREETING_BY_USER_RE reads them: "can I get
+# you to say hi to the students?" and "Could I ask you to introduce yourself
+# to the class?" ask it of him.
+_USER_TELLS_RE = re.compile(
+    r"(?:\b(?:should|shall|do|can|could|will|would|might|must|may) i"
+    r"|\bi(?:['’]ll| will| need to| have to| want to| am going to"
+    r"|['’]m going to| am gonna|['’]m gonna)"
+    r"|\bhow (?:to|do i|should i|would i|can i)"
+    r"|\bwhat (?:to|do i|should i)"
+    r"|\blet me"
+    r")\s+(?:(?:just|quickly|first|also|now|then|go|still)\s+)?$",
+    re.I)
+
+
+def speaks_to_a_class(text: str) -> bool:
+    """One user turn that puts a class in the room or asks him to speak to
+    one: "we are in the class rightnow" (10148), "introduce todays topic to
+    the class" (10142), "say hi to the students". Not a class talked about,
+    nor the user's own telling (_USER_TELLS_RE).
+
+    bluetools._class_in_the_room reads the last eight turns with it. A
+    reply to one is said to a room, and the memory blocks do not quote it
+    unless he asks what was said (continuity._wording_omitted): quoted, the
+    09-16 "Understood. Since we are currently in front of the class in
+    **SB107**…" came back with the room swapped (10149), and 10127's
+    "Welcome to Week 4. Today we're exploring…" fourteen minutes later
+    (10143)."""
+    text = text or ""
+    for match in _CLASS_IN_ROOM_RE.finditer(text):
+        if not _USER_TELLS_RE.search(text[:match.start()]):
+            return True
+    return False
+
+
 def reply_wording_withheld(user_text: str, reply: str) -> bool:
     """True when a memory block must not quote this reply's wording.
 
@@ -1442,6 +1511,65 @@ def _asks_something(text: str) -> bool:
     return "?" in text or bool(_QUESTION_OPENER_RE.search(text))
 
 
+# A request to do something, read clause by clause: "okay. enough banter.
+# introduce todays topic to the class" asks for one thing, in its last
+# clause. A full stop inside an address ("levant@rogers.com") ends none.
+_CLAUSE_SPLIT_RE = re.compile(r"(?:[.!?;]+(?=\s|$)|\n)+")
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:ok(?:ay)?|alright|so|now|and|then|well|hey|hi|right|blue|hexia"
+    r"|casper|kasper|pico)\b[\s,]*)+",
+    re.IGNORECASE,
+)
+_REQUEST_LEAD_RE = re.compile(
+    r"^(?:(?:can|could|would|will) (?:you|u)(?: please)?"
+    r"|please"
+    r"|i(?:['’]d| would)? (?:want|need|like) (?:you|u) to"
+    r"|go ahead and)\s+",
+    re.IGNORECASE,
+)
+# The word after an imperative's verb ("introduce todays topic", "find the
+# syllabus", "look for noble introduction"). After a remark's subject comes
+# its verb ("nori is sleeping", "the girls are at dance"), never one of these.
+_IMPERATIVE_NEXT = frozenset("""
+the a an this that these those my your our his her their its me us him them
+it everyone everybody some any all up out off on in over back down to for
+about with from at into again another more todays today's tonights tonight's
+tomorrows tomorrow's yourself
+""".split())
+# His requests run to about 130 characters.
+_REQUEST_MAX_CHARS = 300
+
+
+def _request_cores(text: str) -> list:
+    """(verb, terms) for each clause of `text` that asks for something to
+    be done: after a politeness frame ("can you introduce this topic to the
+    class"), or bare, with a verb's object after it ("introduce todays topic
+    to the class"). Only clauses of three content words or more: "turn off
+    all the lights" and "turn on all the lights" have two each, too few to
+    tell apart. "tell me…" asks for a fact (tell is a stopword), and a
+    question or a remark has no request core. Nor has a longer text: the
+    action items of two pasted meeting minutes ("Volunteer for the
+    committee…", 8929 and 8931) are not his requests."""
+    cores = []
+    if len(text or "") > _REQUEST_MAX_CHARS:
+        return cores
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause = _LEADING_FILLER_RE.sub("", clause.strip())
+        framed = bool(_REQUEST_LEAD_RE.match(clause))
+        clause = _REQUEST_LEAD_RE.sub("", clause, count=1)
+        words = re.findall(r"[a-z0-9']+", clause.lower().replace("’", "'"))
+        if (not words or words[0] in _REASK_STOPWORDS
+                or _QUESTION_OPENER_RE.match(words[0])):
+            continue
+        if not framed and (len(words) < 2 or words[1] not in _IMPERATIVE_NEXT):
+            continue
+        terms = _reask_terms(clause) - _IMPERATIVE_NEXT - {"they"}
+        verb = _reask_terms(words[0])
+        if verb and len(terms) >= 3:
+            cores.append((next(iter(verb)), terms))
+    return cores
+
+
 def is_reask(old_user_text: str, live_user_text: str) -> bool:
     """True when an old question put to the robot is the live one again.
 
@@ -1461,12 +1589,27 @@ def is_reask(old_user_text: str, live_user_text: str) -> bool:
     something: an old answer to a question may be the fact that is asked for
     again. Over 2,513 logged user turns this adds 13, all repeats and retries
     ("look for noble introduction" three times, "try again to turn them off").
+
+    And a request to do something asked again in other words: "can you
+    introduce this topic to the class" (10126) and, fourteen minutes later,
+    "okay. enough banter. introduce todays topic to the class" (10142). Its
+    old reply is a performance, not a fact: quoted as already said, 10127's
+    "Welcome to Week 4. Today we're exploring the roots of modern AI…" came
+    back nearly whole (10143). The same verb, and most of the request's
+    other words (_request_cores).
     """
     live = _reask_terms(live_user_text)
     old = _reask_terms(old_user_text)
     if (len(live) >= 3 and len(old) >= 3
             and not _asks_something(old_user_text)
             and len(live & old) / len(live | old) >= 0.8):
+        return True
+    old_cores = _request_cores(old_user_text)
+    if old_cores and any(
+            verb == old_verb
+            and len(terms & old_terms) / len(terms | old_terms) >= 0.6
+            for verb, terms in _request_cores(live_user_text)
+            for old_verb, old_terms in old_cores):
         return True
     old_unframed = _REQUEST_FRAME_RE.sub(" ", old_user_text or "")
     if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_unframed):
@@ -3604,6 +3747,7 @@ __all__ = [
     "MODEL_ERROR_PREFIX",
     "self_state_focus_hint",
     "self_state_readout",
+    "speaks_to_a_class",
     "known_household_target",
     "known_relative_target",
     "robot_relationship_targets",

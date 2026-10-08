@@ -814,8 +814,9 @@ def test_what_the_remembered_days_line_keeps_and_withholds():
                 []) == "(answered)"
     assert line(PASQUINELLI_ASK, PASQUINELLI, about_me, True, True,
                 {"pasquinelli"}, []).startswith(PASQUINELLI_OPENING)
+    # Quoted plain: its "**The Ideal in the Machine…**" heading loses the bold.
     assert line(ESSAY_ASK, ESSAY, about_me, True, True, set(),
-                []).startswith("**The Ideal in the Machine")
+                []).startswith("The Ideal in the Machine: An Ilyenkovian")
     # A reply that is only wording never comes back, named or not.
     greeting_ask = "we're in front of the DH399 class. say hello to everyone?"
     assert line(greeting_ask, CLASS_GREETING, "what did you say to the dh399 class?",

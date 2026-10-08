@@ -3,7 +3,7 @@
 Blue's past replies are quoted back to him in up to five memory blocks
 (<conversation_memory>, the J-space episodes, <remembered_days>,
 <earlier_answers>, <recent_history>), and whatever those quotes carry, he says
-again. Three kinds of debris travel with them:
+again. Four kinds of debris travel with them:
 
 - instruction-block citations: "…Scarborough [known_facts]." (17 of 5,000
   logged replies, every one a citation of a prompt block);
@@ -11,7 +11,9 @@ again. Three kinds of debris travel with them:
   after the real answer. The 2026-09-23 Clover reply ran to 99,666 characters
   this way and was later read aloud from <earlier_answers>;
 - closing asks: "Do you want me to dim the hallway lights…, or are we calling
-  it a night completely?" — quoted, an old menu becomes the next reply's menu.
+  it a night completely?" — quoted, an old menu becomes the next reply's menu;
+- markdown and offer lists: "in front of the class in **SB107**" came back
+  as "**DAWB 2-138**" (10149).
 
 The first two also clean the live reply before it is shown, spoken or stored
 (turn_completion.finish, with the narrower live self-talk pattern), so the
@@ -478,6 +480,85 @@ def strip_closing_asks(text: str) -> str:
 
 
 # ================================================================================
+# MARKDOWN AND OFFER MENUS
+# ================================================================================
+
+# A quote's formatting is copied with its words. The 09-16 "…in front of the
+# class in **SB107** for DH201" came back as "**DAWB 2-138**" (10149), and
+# <earlier_answers> put "### **1. Political Purpose…**" headings and
+# numbered lists into the prompt of a "we are in the class" turn. 1,180 of
+# Blue's 5,057 logged replies have bold, 254 a numbered list, 61 headings.
+_MD_HEADING_RE = re.compile(r"(?m)^[ \t]*#{1,6}[ \t]+")
+# A rule ("---", "* * *"), or a bullet with nothing after it.
+_MD_RULE_RE = re.compile(r"(?m)^[ \t]*(?:[-*_•][ \t\xa0]*)+$")
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+_MD_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.S)
+# *italics* and *stage directions*, not a "* " bullet.
+_MD_STAR_RE = re.compile(
+    r"(?<![*\w])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![*\w])")
+_LIST_MARK_RE = re.compile(r"(?m)^([ \t]*)(?:[-*+•]|\d+[.)])[ \t]+")
+# An offer put as a list, the offer right before its colon: "Would you like
+# me to:", "I can help with a variety of tasks, including:", "Here are some
+# ways I could help:", and the items under it (45 logged replies). Not a list
+# he was asked for: "What I CAN remember:", "I can see 3 documents in your
+# library:", "I can infer that the readings likely center on:".
+_MENU_LEAD_RE = re.compile(
+    r"(?:\b(?:would you like|do you want|want)(?: me)? to"
+    r"|\bI (?:can|could)(?: also)?"
+    r"|\bI (?:can|could)(?: also)? (?:help|assist|support)\b[^:\n.!?]{0,60}"
+    r"|\b(?:what|how|ways) I (?:can|could) (?:do|help|assist|support|offer"
+    r"|be useful)\b[^:\n.!?]{0,40})\s*:\s*$",
+    re.I,
+)
+
+
+def _without_offer_menus(text: str) -> str:
+    """The text minus each offer menu: from its lead-in to its last item."""
+    lines = text.split("\n")
+    kept: List[str] = []
+    index = 0
+    while index < len(lines):
+        lead = _MENU_LEAD_RE.search(lines[index])
+        if lead:
+            end = index + 1
+            while end < len(lines) and (not lines[end].strip()
+                                        or _LIST_ITEM_RE.match(lines[end])):
+                end += 1
+            if any(_LIST_ITEM_RE.match(line) for line in lines[index + 1:end]):
+                # "That is exciting! Since …, would you like me to:" keeps
+                # the sentences before the one that offers.
+                before = lines[index][:lead.start()]
+                stops = [m.end() for m in _SENTENCE_END_RE.finditer(before)]
+                if stops:
+                    kept.append(before[:stops[-1]].rstrip())
+                index = end
+                continue
+        kept.append(lines[index])
+        index += 1
+    return "\n".join(kept)
+
+
+def plain_quote(text: str) -> str:
+    """A past reply as plain lines: no bold, headings, rules or list marks,
+    and no offer menu. Every other item stays, one to a line, so "what were
+    those four ideas?" still has them. Never returns empty: a reply that is
+    all menu keeps its items, unmarked."""
+    if not text or not text.strip():
+        return text
+    # A pair, then any left unclosed ("**Subject: …" with no end).
+    out = _MD_BOLD_RE.sub(r"\1", text).replace("**", "")
+    out = _MD_STAR_RE.sub(r"\1", out)
+    out = _MD_RULE_RE.sub("", out)
+    out = _MD_HEADING_RE.sub("", out)
+    plain = _without_offer_menus(out)
+    if not plain.strip():
+        plain = out
+    plain = _LIST_MARK_RE.sub(r"\1", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+    return plain or text.strip()
+
+
+# ================================================================================
 # WHOLE-REPLY CHECKS
 # ================================================================================
 
@@ -526,5 +607,8 @@ def is_runaway_text(text: str) -> bool:
 
 
 def quotable_reply(text: str) -> str:
-    """Blue's past reply as a memory block may quote it."""
-    return strip_closing_asks(strip_block_citations(cut_self_talk(text, live=False)))
+    """Blue's past reply as a memory block may quote it: plain words, with
+    no citations of the prompt, self-talk, closing asks, markdown or offer
+    menus."""
+    return plain_quote(strip_closing_asks(strip_block_citations(
+        cut_self_talk(text, live=False))))
