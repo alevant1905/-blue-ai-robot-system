@@ -29,6 +29,7 @@ from blue.llm_coordinator import (
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue_identity import (
+    asks_for_class_reply,
     asks_for_recall,
     bulk_paste_recall_words,
     bulk_paste_stub,
@@ -152,7 +153,7 @@ _TURN = threading.local()
 
 
 def _wording_omitted(user_text: str, reply: str = "",
-                     recall_ask: bool = False) -> bool:
+                     class_recall: bool = False) -> bool:
     """Exchanges whose reply wording is never quoted back: greetings and
     check-ins, questions about the robot itself, and any reply that is a
     self-introduction, a flat self-denial or the family roster — Hexia's class
@@ -161,8 +162,9 @@ def _wording_omitted(user_text: str, reply: str = "",
     was a reply to "Do you want to say hello to everyone?", which names no
     introduction (blue_identity.reply_wording_withheld).
 
-    Nor, unless the user asks what was said (`recall_ask`), a reply said to
-    a class: "we are in front of the class in dh201 right now" (09-16) got
+    Nor, unless the user asks what was said or to hear it again
+    (`class_recall`, blue_identity.asks_for_class_reply), a reply said to a
+    class: "we are in front of the class in dh201 right now" (09-16) got
     "Understood. Since we are currently in front of the class in **SB107**…",
     and "we are in the class rightnow" got it back with another room (10149);
     "can you introduce this topic to the class" got "Welcome to Week 4.
@@ -170,7 +172,7 @@ def _wording_omitted(user_text: str, reply: str = "",
     it again (10143). Over the log this withholds 20 more replies, every one
     said to a class or about being in one (blue_identity.speaks_to_a_class)."""
     return (reply_wording_withheld(user_text or "", reply or "")
-            or (not recall_ask and speaks_to_a_class(user_text or "")))
+            or (not class_recall and speaks_to_a_class(user_text or "")))
 
 
 def _flat_words(value: Any) -> str:
@@ -214,6 +216,32 @@ _USER_TEXT_KEEP = 5000
 # A banter set's opening line, as the banter route records it: "Topic: AI Lab
 # 3: How to download… Source: DH201_AL_2026F.pdf (pdf)."
 _BANTER_TOPIC_RE = re.compile(r"^Topic:\s*(.+?)(?:\s+Source:\s.*)?$")
+
+
+def _banter_session(episode: Dict[str, Any]) -> str:
+    """The banter set a banter line belongs to (note_banter_line)."""
+    return str((episode.get("details") or {}).get("banter_session_id") or "")
+
+
+# Sets started again within minutes are one sitting, one line in a memory
+# block: on 10-07 Alex started the DH201 banter five times between 09:36 and
+# 09:41 (two starts never got past their topic line), and a line per set put
+# four "You performed a set…" lines in 10133's <conversation_memory>, two of
+# them the same. Sets further apart are a line each, at their own time:
+# adjacent in <conversation_memory>, a set from the day before read as part
+# of the later one, at the later one's time.
+_BANTER_SITTING_GAP = timedelta(minutes=10)
+
+
+def _one_banter_sitting(previous: Dict[str, Any], episode: Dict[str, Any]) -> bool:
+    """Whether a banter line goes on the line of the one before it."""
+    session = _banter_session(episode)
+    if session and session == _banter_session(previous):
+        return True
+    before = _parse_time(previous.get("occurred_at"))
+    after = _parse_time(episode.get("occurred_at"))
+    return bool(before and after
+                and abs(after - before) <= _BANTER_SITTING_GAP)
 
 
 def _pasted_stub(episode: Dict[str, Any], who: str = "") -> str:
@@ -1277,9 +1305,9 @@ class RobotContinuity:
     # ---- the chat-facing block ------------------------------------------
 
     def _banter_set(self, run: Sequence[Dict[str, Any]]) -> tuple:
-        """(the fellow robots, a sentence) for a run of comedic banter lines
-        in a memory block: who it was with and what it was on, never its
-        jokes.
+        """(the fellow robots, how many sets, a sentence) for a sitting of
+        comedic banter lines in a memory block (_one_banter_sitting): who it
+        was with and what it was on, never its jokes.
 
         10-07 09:36-09:41, Blue and Casper did a set on the DH201 AI lab, and
         Blue's line "the only thing more private than the model is the fan
@@ -1308,13 +1336,15 @@ class RobotContinuity:
                 if topic not in topics:
                     topics.append(topic)
         about = " and ".join(f"'{topic}'" for topic in topics[:2])
+        sets = len({_banter_session(episode) for episode in run})
         sentence = (
             (" on " + about if about else "")
             + (f" ({len(run)} lines)" if len(run) > 1 else "")
-            + ". Its jokes are left out: they were a performance, not "
-            "things to say again."
+            + (". Its" if sets == 1 else ". Their")
+            + " jokes are left out: they were a performance, not things to "
+            "say again."
         )
-        return " and ".join(partners), sentence
+        return " and ".join(partners), sets, sentence
 
     def jspace_context_block(self) -> str:
         workspace = self.store.get_workspace()
@@ -1329,10 +1359,11 @@ class RobotContinuity:
 
         def end_banter_run() -> None:
             if banter_run:
-                partners, sentence = self._banter_set(banter_run)
+                partners, sets, sentence = self._banter_set(banter_run)
                 episode_lines.append(
                     f"- [{_age_text(banter_run[-1]['occurred_at'])}; banter] "
-                    "A comedic banter set"
+                    + ("A comedic banter set" if sets == 1
+                       else f"{sets} comedic banter sets")
                     + (f" with {partners}" if partners else "") + sentence)
                 banter_run.clear()
 
@@ -1342,7 +1373,9 @@ class RobotContinuity:
             if (item.get("kind") == "exchange"
                     and str(item.get("source") or "") == "banter"):
                 # Chat is the only reader of this block: a banter line is
-                # never quoted here, and a set is one line (_banter_set).
+                # never quoted here, and a sitting is one line (_banter_set).
+                if banter_run and not _one_banter_sitting(banter_run[-1], item):
+                    end_banter_run()
                 banter_run.append(item)
                 continue
             end_banter_run()
@@ -1694,22 +1727,31 @@ class RobotContinuity:
             newer_quotes.append((opening, vocabulary))
         # "What did you tell me last week about how you're different from
         # chat gpt?" asks for the old answer: it is kept, quoted once.
-        recall_ask = asks_for_recall(
-            [bulk_paste_recall_words(text) for text in live_users[-2:]]
-            or [searched])
+        live_asks = ([bulk_paste_recall_words(text) for text in live_users[-2:]]
+                     or [searched])
+        recall_ask = asks_for_recall(live_asks)
+        # "can you repeat the introduction you gave the class?" asks for
+        # what was said to a class, which is otherwise withheld below.
+        class_recall = asks_for_class_reply(live_asks)
+        # Asked in chat what was said ("what was the joke you told Casper
+        # about the fan?"), the set's lines are quoted: the journal is the
+        # only record of them. The panel and the banter route never are.
+        banter_wording = include_banter_wording or (chat_turn and recall_ask)
         lines: List[str] = []
         banter_runs: Dict[int, List[Dict[str, Any]]] = {}
-        if not include_banter_wording:
-            # A run of banter lines with no other line between them is one
-            # set, on one line, at its newest (_banter_set).
+        if not banter_wording:
+            # A run of banter lines from one sitting with no other line
+            # between them is one line, at its newest (_banter_set).
             run: List[Dict[str, Any]] = []
             for episode in chosen + [{}]:
-                if str(episode.get("source") or "") == "banter":
+                if (str(episode.get("source") or "") == "banter"
+                        and (not run or _one_banter_sitting(run[-1], episode))):
                     run.append(episode)
                     continue
                 if run:
                     banter_runs[id(run[-1])] = run
-                run = []
+                run = ([episode] if str(episode.get("source") or "") == "banter"
+                       else [])
         for episode in chosen:
             people = counterparts(episode)
             partner = " and ".join(people) or "someone"
@@ -1721,17 +1763,19 @@ class RobotContinuity:
                 stamp = local_when.strftime("%Y-%m-%d %I:%M %p %Z").replace(" 0", " ")
             else:
                 stamp = "time unknown"
-            if source == "banter" and not include_banter_wording:
+            if source == "banter" and not banter_wording:
                 # Chat, the panel and the banter route itself: who and what
                 # on, never an old joke to tell again.
                 run = banter_runs.get(id(episode))
                 if run:
-                    partners, sentence = self._banter_set(run)
+                    partners, sets, sentence = self._banter_set(run)
+                    performed = ("You performed a set" if sets == 1
+                                 else f"You performed {sets} sets")
                     lines.append(
                         f"- [{stamp}; {_age_text(episode.get('occurred_at'))}; "
                         "prior comedic banter"
-                        + (f" with {partners}] You performed a set together"
-                           if partners else "] You performed a set")
+                        + (f" with {partners}] {performed} together"
+                           if partners else f"] {performed}")
                         + sentence
                     )
                 continue
@@ -1767,7 +1811,7 @@ class RobotContinuity:
                 # <family> block in the prompt (2026-08-19 22:21 and 22:22).
                 reply_part = (" You answered from the household facts "
                               "(wording omitted).")
-            elif _wording_omitted(heard, replied, recall_ask=recall_ask):
+            elif _wording_omitted(heard, replied, class_recall=class_recall):
                 # A check-in answer, a self-introduction or a reply said to a
                 # class carries no information, only wording to copy.
                 reply_part = (" (Your reply wording is omitted so it is never "

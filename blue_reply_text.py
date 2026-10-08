@@ -497,23 +497,30 @@ _MD_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.S)
 _MD_STAR_RE = re.compile(
     r"(?<![*\w])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![*\w])")
 _LIST_MARK_RE = re.compile(r"(?m)^([ \t]*)(?:[-*+•]|\d+[.)])[ \t]+")
-# An offer put as a list, the offer right before its colon: "Would you like
-# me to:", "I can help with a variety of tasks, including:", "Here are some
-# ways I could help:", and the items under it (45 logged replies). Not a list
-# he was asked for: "What I CAN remember:", "I can see 3 documents in your
-# library:", "I can infer that the readings likely center on:".
+# An offer put as a list: a lead-in that asks the listener what to do, right
+# before its colon ("Would you like me to:", "Since …, would you like me
+# to:", "If you'd like, I can:", "What would you like me to look at? I
+# can:"), and the items under it (11 logged replies). Not a list he gave as
+# an answer, "I can" or not: "Here are a few ways I could support the
+# Laurier meeting:" (the 07-31 recall asked for those ideas), "Here is how I
+# can be useful:" (9702, to "how can you be helpful in this class"), "What I
+# CAN remember:", "I can see 3 documents in your library:". Nor what the
+# listener can do: "If you want me to look, you can:" (4659).
 _MENU_LEAD_RE = re.compile(
-    r"(?:\b(?:would you like|do you want|want)(?: me)? to"
-    r"|\bI (?:can|could)(?: also)?"
-    r"|\bI (?:can|could)(?: also)? (?:help|assist|support)\b[^:\n.!?]{0,60}"
-    r"|\b(?:what|how|ways) I (?:can|could) (?:do|help|assist|support|offer"
-    r"|be useful)\b[^:\n.!?]{0,40})\s*:\s*$",
+    r"(?:\b(?:would you (?:like|prefer)|do you want|you(?:['’]d| would) like"
+    r"|want)(?: me)? to\b(?:(?!\byou\b)[^:\n.!?]){0,40}"
+    r"|\bif you(?:['’]d| would)? (?:like|want|prefer),? I (?:can|could)"
+    r"(?: also)?\b[^:\n.!?]{0,40}"
+    r"|\?[ \t]*I (?:can|could)(?: also)?\b[^:\n.!?]{0,40}"
+    r"|\b(?:shall|should) I)\s*:\s*$",
     re.I,
 )
 
 
 def _without_offer_menus(text: str) -> str:
-    """The text minus each offer menu: from its lead-in to its last item."""
+    """The text minus each offer menu: from its lead-in to its last item,
+    with the lines an item runs on to ("1. Search the web" and "   for more
+    on this", indented or carried on in lower case)."""
     lines = text.split("\n")
     kept: List[str] = []
     index = 0
@@ -521,10 +528,22 @@ def _without_offer_menus(text: str) -> str:
         lead = _MENU_LEAD_RE.search(lines[index])
         if lead:
             end = index + 1
-            while end < len(lines) and (not lines[end].strip()
-                                        or _LIST_ITEM_RE.match(lines[end])):
+            items = 0
+            after_blank = False
+            while end < len(lines):
+                line = lines[end]
+                if not line.strip():
+                    after_blank = True
+                elif _LIST_ITEM_RE.match(line):
+                    items += 1
+                    after_blank = False
+                elif items and (line[:1] in " \t\xa0"
+                                or (not after_blank and line[:1].islower())):
+                    after_blank = False
+                else:
+                    break
                 end += 1
-            if any(_LIST_ITEM_RE.match(line) for line in lines[index + 1:end]):
+            if items:
                 # "That is exciting! Since …, would you like me to:" keeps
                 # the sentences before the one that offers.
                 before = lines[index][:lead.start()]

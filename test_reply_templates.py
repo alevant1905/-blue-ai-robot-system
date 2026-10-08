@@ -27,11 +27,14 @@ import pytest
 
 import bluetools as bt  # before blue.server.*: the package imports it
 
-from blue_identity import is_reask, speaks_to_a_class
+from blue_identity import (
+    asks_for_class_reply, asks_for_recall, is_reask, speaks_to_a_class,
+)
 from blue_memory_improved import EnhancedMemorySystem
 from blue_reply_text import plain_quote, quotable_reply
 from test_bluejspace import continuity_module  # noqa: F401  (fixture)
 from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
+from test_memory_recall import FOUR_IDEAS_ASK, _ask, _at, _seed
 
 BANTER_TOPIC = ("Topic: AI Lab 3: How to download, install, and operate local, "
                 "private, open-source models Source: DH201_AL_2026F.pdf (pdf).")
@@ -54,16 +57,16 @@ IN_CLASS_REPLY = ("Understood. Since we are currently in front of the class in "
                   "to assist with the lecture materials.")                 # 9860
 
 
-def _banter_set(route, robot="blue"):
+def _banter_set(route, robot="blue", session="banter-1", topic=BANTER_TOPIC):
     hub = route.HUB[robot]
-    for heard, said, other in ((BANTER_TOPIC, "To earn my respect this week you "
+    for heard, said, other in ((topic, "To earn my respect this week you "
                                 "must define connectionism in one sentence.",
                                 "Alex's topic"),
                                (CASPER_LINE, BLUE_ROAST, "Casper"),
-                               (BANTER_TOPIC, BANTER_JOKE, "Alex's topic")):
+                               (topic, BANTER_JOKE, "Alex's topic")):
         hub.note_exchange(heard, said, user_name=other, tools=[],
                           source="banter", enqueue_reflection=False,
-                          extra_details={"banter_session_id": "banter-1",
+                          extra_details={"banter_session_id": session,
                                          "memory_status": "playful_performance"})
 
 
@@ -114,6 +117,81 @@ def test_conversation_memory_names_a_banter_set_once(continuity_module):
     # The duet still quotes them: its talk is had with the lines.
     quoted = route.conversation_memory_block("blue", query="lasagna")
     assert "lasagna" in quoted
+
+
+WEEK5_TOPIC = ("Topic: Week 5: Pasquinelli, The Eye of the Master Source: "
+               "DH201_AL_2026F.pdf (pdf).")
+
+
+def _recorded_at(monkeypatch, stamp):
+    """The journal's clock, for the lines recorded next."""
+    import blue.continuity as store
+    monkeypatch.setattr(store, "_now", lambda: stamp)
+
+
+def test_banter_sets_started_again_within_minutes_are_one_line(
+        continuity_module, monkeypatch):
+    """10-07: Alex started the DH201 banter five times between 09:36 and
+    09:41. One sitting is one line, and it says how many sets."""
+    route = continuity_module
+    _recorded_at(monkeypatch, "2026-10-07T13:36:30+00:00")
+    _banter_set(route)
+    _recorded_at(monkeypatch, "2026-10-07T13:38:03+00:00")
+    _banter_set(route, session="banter-2", topic=WEEK5_TOPIC)
+
+    block = route.jspace_context_block("blue")
+    assert block.count("; banter] ") == 1
+    assert "] 2 comedic banter sets with Casper on 'AI Lab 3: How to" in block
+    assert ("and 'Week 5: Pasquinelli, The Eye of the Master' (6 lines). Their "
+            "jokes are left out") in block
+
+    block = route.conversation_memory_block(
+        "blue", query="we will do that in class", include_banter_wording=False,
+        chat_turn=True)
+    lines = [line for line in block.splitlines() if "comedic banter" in line]
+    assert len(lines) == 1
+    assert "] You performed 2 sets together on 'AI Lab 3" in lines[0]
+
+
+def test_banter_sets_on_two_days_are_a_line_each_at_their_own_time(
+        continuity_module, monkeypatch):
+    """Adjacent in <conversation_memory>, a set from the day before read as
+    part of the later one, at the later one's time."""
+    route = continuity_module
+    _recorded_at(monkeypatch, "2026-10-06T13:36:30+00:00")
+    _banter_set(route, session="banter-0", topic=WEEK5_TOPIC)
+    _recorded_at(monkeypatch, "2026-10-07T13:36:30+00:00")
+    _banter_set(route)
+
+    block = route.jspace_context_block("blue")
+    assert block.count("; banter] A comedic banter set with Casper on ") == 2
+
+    block = route.conversation_memory_block(
+        "blue", query="we will do that in class", include_banter_wording=False,
+        chat_turn=True)
+    lines = [line for line in block.splitlines() if "comedic banter" in line]
+    assert len(lines) == 2
+    assert "2026-10-06" in lines[0] and "Week 5" in lines[0]
+    assert "2026-10-07" in lines[1] and "AI Lab 3" in lines[1]
+
+
+def test_asked_in_chat_what_was_said_in_a_set_he_has_its_lines(continuity_module):
+    """The journal is the only record of a set: asked what was said, chat
+    quotes it. The panel and the banter route never do."""
+    route = continuity_module
+    _banter_set(route)
+    ask = "what was the joke you told Casper about the fan?"
+
+    block = route.conversation_memory_block(
+        "blue", query=ask, include_banter_wording=False, chat_turn=True,
+        live_thread=[{"role": "user", "content": ask}])
+    assert "fan on your laptop" in block
+    assert "already said — don't re-say it" in block
+
+    block = route.conversation_memory_block(
+        "blue", query=ask, include_banter_wording=False)
+    assert "fan on your laptop" not in block
+    assert "You performed a set together" in block
 
 
 @pytest.fixture
@@ -264,6 +342,59 @@ def test_remembered_days_withholds_a_class_reply_unless_asked():
                 False, set(), []) == "(answered)"
     assert line(INTRO_ASK, INTRO, "what did you tell the class?", True,
                 False, set(), []).startswith("\"Welcome to Week 4.")
+    # Asked to hear it again, in words that are no recall ask elsewhere.
+    assert line(INTRO_ASK, INTRO, "repeat the intro you gave the class "
+                "yesterday", False, False, set(), []).startswith(
+                    "\"Welcome to Week 4.")
+
+
+@pytest.mark.parametrize("text", [
+    "can you repeat the introduction you gave the class?",
+    "repeat what you told the students",
+    "say that intro again",
+    "what was your intro to the class yesterday?",
+    "the students liked your intro about connectionism yesterday",
+    "what did we cover in class this morning?",
+    "what did you tell the class?",
+])
+def test_asked_for_what_was_said_to_a_class(text):
+    assert asks_for_class_reply(text)
+
+
+@pytest.mark.parametrize("text", [
+    INTRO_AGAIN, "we are in the class rightnow",
+    "don't repeat the intro you gave yesterday",
+    "I want you to stop repeating that",                  # 529
+    "introduce the topic again",
+])
+def test_not_asked_for_what_was_said_to_a_class(text):
+    assert not asks_for_class_reply(text)
+
+
+def test_repeat_is_no_recall_ask_for_the_other_blocks():
+    """Only a reply said to a class is kept for "repeat …": the re-ask and
+    the answers about himself keep their own, wide, recall cue."""
+    assert not asks_for_recall("can you repeat the introduction you gave the class?")
+
+
+REPEAT_INTRO = "can you repeat the introduction you gave the class?"
+
+
+def test_asked_to_repeat_the_class_intro_recent_history_has_it(log, monkeypatch):
+    assert "Welcome to Week 4" in _recent_history(log, monkeypatch, REPEAT_INTRO)
+    # Told not to, he is not shown it.
+    assert "Welcome to Week 4" not in _recent_history(
+        log, monkeypatch, "don't repeat the intro you gave the class")
+
+
+def test_asked_to_repeat_the_class_intro_conversation_memory_has_it(
+        continuity_module):
+    route = continuity_module
+    route.note_exchange("blue", INTRO_ASK, INTRO)
+    block = route.conversation_memory_block(
+        "blue", query=REPEAT_INTRO, chat_turn=True,
+        live_thread=[{"role": "user", "content": REPEAT_INTRO}])
+    assert "Welcome to Week 4" in block
 
 
 def test_a_class_reply_through_the_chat_route_is_not_quoted(chat, journal):
@@ -307,11 +438,49 @@ def test_a_request_asked_again_in_other_words_is_a_reask(old, live):
      "tell me the class schedule for the course"),
     # Another request with the same verb.
     (INTRO_ASK, "introduce yourself to the class"),
+    ("introduce the class to CMDS4740",
+     "i want you to introduce yourself to the class cmds4740"),       # 5026, 5378
     # A remark has no request in it.
     ("the girls are at dance tonight", "the girls are at dance practice tonight"),
+    # The same words for something else: a word in place of one of them, a
+    # number, a colour, or the other way.
+    ("Navigate to the star and tell me the current headlines for today.",
+     "I want you to navigate to the guardian and tell me the current "
+     "headlines for today."),                                         # 120, 171
+    ("Navigate to thestar.com and summarize today's headlines.",
+     "I want you to navigate to theguardian.com and summarize today's "
+     "headlines."),                                                   # 175, 491
+    ("give me three ideas for the dh201 lab on local models",
+     "give me three ideas for the dh399 lab on local models"),
+    ("introduce the course to thte class",
+     "can you introduce the course DH399 to the class?"),             # 9799, 9887
+    ("remind me to call mom at 5pm tomorrow",
+     "remind me to call dad at 5pm tomorrow"),
+    ("play some jazz music in the office", "play some rock music in the office"),
+    ("draft an email to the class about the lab tomorrow",
+     "draft an email to the class about the quiz tomorrow"),
+    ("set the living room lights to 20 percent",
+     "set the living room lights to 80 percent"),
+    ("set the living room lights to green", "set the living room lights to red"),
+    ("turn off the living room lights", "turn on the living room lights"),
+    ("turn on the living room lights", "turn off the living room lights"),
+    ("turn the bedroom lights off at ten", "turn the bedroom lights on at ten"),
+    ("coffee with sarah this morning was lovely",
+     "coffee with sarah this morning was awkward"),
 ])
 def test_another_request_or_a_remark_is_not(old, live):
     assert not is_reask(old, live)
+
+
+@pytest.mark.parametrize("old, live", [
+    # "on" as a preposition on one side only (7197, 7205).
+    ("cmds4740 ends august 4. revise my calendar",
+     "revise my calendar to end cmds4740 on august 4"),
+    # His name at the end, not a colour (5974, 148).
+    ("Turn off all the lights.", "Turn off all the lights blue."),
+])
+def test_a_request_asked_again_keeps_its_marks(old, live):
+    assert is_reask(old, live)
 
 
 def test_a_pasted_text_is_no_request():
@@ -361,18 +530,96 @@ def test_a_quote_loses_an_offer_menu_but_keeps_what_came_before():
     # Only a menu: its items stay, unmarked.
     assert plain_quote("Would you like me to:\n- Draft it\n- Send it") == (
         "Would you like me to:\nDraft it\nSend it")
-    # A list of what he can do, offered, is a menu (6654, 7290).
-    assert plain_quote("I'm Blue. I can help with a wide variety of tasks, "
-                       "including:\n*   Reminders.\n*   Email.\n\nAsk away.") == (
-        "I'm Blue.\nAsk away.")
     assert plain_quote("If you'd like, I can:\n- Write a story\n\nOr not.") == (
         "Or not.")
-    # A content list is not a menu, "I can" or not (4-ideas, 602, 2024, 1900).
-    for lead in ("Here are four ideas:", "What I CAN remember:",
-                 "I can see 3 documents in your library:",
-                 "I can infer that the readings likely center on:"):
-        assert plain_quote(f"{lead}\n1. A cluster.\n2. A library.") == (
-            f"{lead}\nA cluster.\nA library.")
+    assert plain_quote("What would you like me to look at? I can:\n- Read it\n"
+                       "- Sum it up\n\nAnyway.") == "Anyway."
+    # An item that runs on to a second line goes with it, not left behind
+    # as a statement.
+    assert plain_quote("Done. Would you like me to:\n1. Search the web\n"
+                       "   for more on this\n2. Email it\nto you\n\nThat's all.") == (
+        "Done.\nThat's all.")
+
+
+@pytest.mark.parametrize("lead", [
+    "Here are four ideas:", "What I CAN remember:",
+    "I can see 3 documents in your library:",
+    "I can infer that the readings likely center on:",
+    # What he can do, said as the answer, is content too: "how can you be
+    # helpful in this class" (9702), "What role do you think you could play
+    # in this course" (1946), and the capability lists of 6654 and 7290.
+    "Here is how I can be useful:",
+    "Here's how I can support CS240J-VS:",
+    "Here are a few ways I could support the Laurier meeting:",
+    "I can help with a wide variety of tasks, including:",
+    "I can:",
+    # What the listener can do (4659).
+    "If you want me to look, you can:",
+])
+def test_a_list_he_gave_as_an_answer_is_no_menu(lead):
+    assert plain_quote(f"Good timing. {lead}\n1. A cluster.\n2. A library.") == (
+        f"Good timing. {lead}\nA cluster.\nA library.")
+
+
+# 9702, to "how can you be helpful in this class" (09-10).
+HELPFUL = (
+    "As your assistant for CS101A: Canadian Communication in Context, I’m here "
+    "to help you stay sharp and organized. Here is how I can be useful:\n\n"
+    "* **Syllabus Navigation:** I can pull specific details from the course "
+    "document.\n"
+    "* **Lecture Prep:** I can help draft discussion questions based on the "
+    "weekly readings.\n"
+    "* **Schedule Management:** I can set reminders for when assignments are "
+    "due.\n\n"
+    "Essentially, I handle the retrieval and organization so you can focus on "
+    "the delivery.")
+
+
+def test_what_he_said_he_could_do_for_the_class_is_quoted_whole():
+    quoted = quotable_reply(HELPFUL)
+    for item in ("Syllabus Navigation: I can pull", "Lecture Prep: I can help",
+                 "Schedule Management: I can set"):
+        assert item in quoted
+    assert "**" not in quoted and "* " not in quoted
+
+
+# The 07-29 Laurier ideas, as a list under a lead-in (test_memory_recall has
+# them as prose). Asked for them back on 07-31, Blue invented four others.
+IDEAS_LIST = (
+    "Good timing. Here are a few ways I could support the Laurier meeting on "
+    "local open-source AI:\n"
+    "1. **A campus inference cluster**: a small sovereign compute pool that "
+    "runs open-weight models for teaching, so student data never leaves the "
+    "province.\n"
+    "2. **A cooperative model library** shared with Waterloo and Conestoga, "
+    "with a common evaluation harness and a licensing review.\n"
+    "3. **A humanities-led pilot** where DH399 students audit a local model's "
+    "training data and write its documentation.\n"
+    "4. **A public workshop series** on running open-source models on modest "
+    "hardware, for nonprofits and municipal offices in the region.")
+
+
+def test_the_july_31_recall_has_the_ideas_given_as_a_list(tmp_path):
+    memory = EnhancedMemorySystem(str(tmp_path / "memory.db"))
+    _seed(memory, [(_at(68, 9, 10), "user", FOUR_IDEAS_ASK),
+                   (_at(68, 9, 11), "assistant", IDEAS_LIST)])
+    _seed(memory, [
+        (_at(40, 6, minute), "assistant",
+         f"Here is the plan for chore list {minute}: " + " ".join(
+             f"Step {step}: we can tidy the kitchen, water the garden and sort "
+             "the recycling before the weekend." for step in range(8)))
+        for minute in range(30)])
+    thread = ["the laurier meeting on local open-source ai went well",
+              "I'm glad the Laurier meeting went well.",
+              "what were those ideas you gave me?"]
+
+    block = memory._build_past_answers_block(_ask(*thread), thread[-1],
+                                             chat_turn=True)
+
+    for idea in ("A campus inference cluster", "A cooperative model library",
+                 "A humanities-led pilot", "A public workshop series"):
+        assert idea in block
+    assert "**" not in block
 
 
 def test_the_sb107_quote_comes_without_bold():

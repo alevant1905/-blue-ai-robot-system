@@ -1538,18 +1538,51 @@ tomorrows tomorrow's yourself
 """.split())
 # His requests run to about 130 characters.
 _REQUEST_MAX_CHARS = 300
+# The words that say which one of a kind is meant, too short or too common
+# for _reask_terms: a number or a course code ("5pm", "20", "dh399"), a
+# colour and "yourself", which must be the same on both sides, and on or
+# off, up or down, which must not be each other's opposite. "turn off the
+# living room lights" and "turn on the living room lights", "set the lights
+# to 20 percent" and "…to 80 percent", "…lights to green" and "…to red"
+# share every other word; so do "i want you to introduce yourself to the
+# class cmds4740" and "introduce the class to CMDS4740" (5378, 5026). "on"
+# alone is mostly a preposition ("revise my calendar to end cmds4740 on
+# august 4", 7205, asked again from 7197), and "blue" is his name.
+_REQUEST_WHICH = frozenset("""
+red green yellow orange purple pink white violet cyan magenta teal amber gold
+warm cool yourself
+""".split())
+_REQUEST_OPPOSITES = (frozenset({"on", "off"}), frozenset({"up", "down"}))
+_REQUEST_POLARITY = frozenset().union(*_REQUEST_OPPOSITES)
+
+
+def _request_marks(text: str) -> frozenset:
+    """The numbers, colours, "yourself" and on/off/up/down words of `text`."""
+    return frozenset(
+        word for word in re.findall(r"[a-z0-9']+", (text or "").lower())
+        if word in _REQUEST_WHICH or word in _REQUEST_POLARITY
+        or re.search(r"\d", word))
+
+
+def _marks_differ(marks: frozenset, old_marks: frozenset) -> bool:
+    """Another number, colour or object, or the opposite way
+    (_request_marks)."""
+    differ = marks ^ old_marks
+    return (any(pair <= differ for pair in _REQUEST_OPPOSITES)
+            or bool(differ - _REQUEST_POLARITY))
 
 
 def _request_cores(text: str) -> list:
-    """(verb, terms) for each clause of `text` that asks for something to
-    be done: after a politeness frame ("can you introduce this topic to the
-    class"), or bare, with a verb's object after it ("introduce todays topic
-    to the class"). Only clauses of three content words or more: "turn off
-    all the lights" and "turn on all the lights" have two each, too few to
-    tell apart. "tell me…" asks for a fact (tell is a stopword), and a
-    question or a remark has no request core. Nor has a longer text: the
-    action items of two pasted meeting minutes ("Volunteer for the
-    committee…", 8929 and 8931) are not his requests."""
+    """(verb, terms, marks) for each clause of `text` that asks for
+    something to be done: after a politeness frame ("can you introduce this
+    topic to the class"), or bare, with a verb's object after it ("introduce
+    todays topic to the class"). Only clauses of three content words or
+    more: "turn off all the lights" and "turn on all the lights" have two
+    each. `marks` are the clause's numbers, colours and on/off words, and
+    "yourself" (_request_marks). "tell me…" asks for a fact (tell is a
+    stopword), and a question or a remark has no request core. Nor has a
+    longer text: the action items of two pasted meeting minutes ("Volunteer
+    for the committee…", 8929 and 8931) are not his requests."""
     cores = []
     if len(text or "") > _REQUEST_MAX_CHARS:
         return cores
@@ -1566,8 +1599,24 @@ def _request_cores(text: str) -> list:
         terms = _reask_terms(clause) - _IMPERATIVE_NEXT - {"they"}
         verb = _reask_terms(words[0])
         if verb and len(terms) >= 3:
-            cores.append((next(iter(verb)), terms))
+            cores.append((next(iter(verb)), terms, _request_marks(clause)))
     return cores
+
+
+def _same_request(live_cores: list, old_cores: list) -> bool:
+    """One request in two wordings: the same verb and marks (_marks_differ),
+    and one side's words all among the other's, most of them shared. "can you
+    introduce this topic to the class" and "introduce todays topic to the
+    class" (10126, 10142) differ by "todays" alone. Requests that differ in
+    what they are for are not: "navigate to thestar.com and summarize
+    today's headlines" and "…theguardian.com…" (175, 491), "call mom at 5pm"
+    and "call dad at 5pm", the dh201 lab and the dh399 one."""
+    return any(
+        verb == old_verb and not _marks_differ(marks, old_marks)
+        and (terms <= old_terms or old_terms <= terms)
+        and len(terms & old_terms) / len(terms | old_terms) >= 0.6
+        for verb, terms, marks in live_cores
+        for old_verb, old_terms, old_marks in old_cores)
 
 
 def is_reask(old_user_text: str, live_user_text: str) -> bool:
@@ -1589,27 +1638,28 @@ def is_reask(old_user_text: str, live_user_text: str) -> bool:
     something: an old answer to a question may be the fact that is asked for
     again. Over 2,513 logged user turns this adds 13, all repeats and retries
     ("look for noble introduction" three times, "try again to turn them off").
+    Nor when a number or colour differs, or the way: "turn off the living
+    room lights" is not "turn on the living room lights" said again
+    (_marks_differ).
 
     And a request to do something asked again in other words: "can you
     introduce this topic to the class" (10126) and, fourteen minutes later,
     "okay. enough banter. introduce todays topic to the class" (10142). Its
     old reply is a performance, not a fact: quoted as already said, 10127's
     "Welcome to Week 4. Today we're exploring the roots of modern AI…" came
-    back nearly whole (10143). The same verb, and most of the request's
-    other words (_request_cores).
+    back nearly whole (10143). The same verb, and the request's other words
+    with nothing in place of one of them (_request_cores, _same_request).
     """
     live = _reask_terms(live_user_text)
     old = _reask_terms(old_user_text)
     if (len(live) >= 3 and len(old) >= 3
             and not _asks_something(old_user_text)
-            and len(live & old) / len(live | old) >= 0.8):
+            and len(live & old) / len(live | old) >= 0.8
+            and not _marks_differ(_request_marks(live_user_text),
+                                  _request_marks(old_user_text))):
         return True
     old_cores = _request_cores(old_user_text)
-    if old_cores and any(
-            verb == old_verb
-            and len(terms & old_terms) / len(terms | old_terms) >= 0.6
-            for verb, terms in _request_cores(live_user_text)
-            for old_verb, old_terms in old_cores):
+    if old_cores and _same_request(_request_cores(live_user_text), old_cores):
         return True
     old_unframed = _REQUEST_FRAME_RE.sub(" ", old_user_text or "")
     if len(live) < 2 or not _ADDRESSES_ROBOT_RE.search(old_unframed):
@@ -1666,6 +1716,52 @@ def asks_for_recall(user_texts) -> bool:
         if (_RECALL_CUE_RE.search(text)
                 or identity_request_kind(text) == "shared_recall"):
             return True
+    return False
+
+
+# What was said to a class, asked for again or about in words _RECALL_CUE_RE
+# leaves out: "can you repeat the introduction you gave the class?", "say
+# that intro again", "what was your intro to the class yesterday?", "what
+# did we cover in class this morning?", "the students liked your intro about
+# connectionism yesterday". Only for a reply said to a class
+# (asks_for_class_reply): "repeat" is no recall ask elsewhere.
+_CLASS_TALK = (r"(?:intro(?:duction)?s?|lectures?|talks?|presentations?"
+               r"|speech(?:es)?|welcome|greetings?)")
+_CLASS_RECALL_CUE_RE = re.compile(
+    r"\brepeat (?:the|your|that|this|it|what (?:you|u))\b"
+    r"|\b(?:say|give|read|do) (?:that|the|your|this|it) (?:\w+ ){0,2}again\b"
+    r"|\bwhat (?:was|were) (?:in )?your (?:\w+ ){0,2}" + _CLASS_TALK + r"\b"
+    r"|\b(?:the|your|that) (?:\w+ ){0,2}" + _CLASS_TALK
+    + r" (?:you|u) (?:gave|did|made|said|read|delivered|told|wrote)\b"
+    r"|\bwhat did (?:we|you|u) (?:cover|go over|present|teach)\b"
+    r"|\byour (?:\w+ ){0,2}" + _CLASS_TALK + r"\b[^.?!\n]{0,60}"
+    r"\b(?:yesterday|earlier|this morning|last (?:time|week|class|night))\b",
+    re.IGNORECASE,
+)
+# "don't repeat the intro", "no need to say that again".
+_NOT_BEFORE_RE = re.compile(
+    r"\b(?:don['’]?t|do not|never|not|no need to|stop|without)\s+(?:\w+\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def asks_for_class_reply(user_texts) -> bool:
+    """True when either of the last two user turns asks what was said
+    (asks_for_recall), or asks to hear again or talks about what was said to
+    a class (_CLASS_RECALL_CUE_RE). What keeps a reply said to a class
+    (speaks_to_a_class) in the memory blocks, which withhold it otherwise:
+    asked "can you repeat the introduction you gave the class?", he needs
+    its words, or he makes up an introduction and gives it as the one he
+    gave."""
+    if asks_for_recall(user_texts):
+        return True
+    if isinstance(user_texts, str):
+        user_texts = [user_texts]
+    for text in list(user_texts or [])[-2:]:
+        text = str(text or "")
+        for match in _CLASS_RECALL_CUE_RE.finditer(text):
+            if not _NOT_BEFORE_RE.search(text[:match.start()]):
+                return True
     return False
 
 
@@ -3748,6 +3844,7 @@ __all__ = [
     "self_state_focus_hint",
     "self_state_readout",
     "speaks_to_a_class",
+    "asks_for_class_reply",
     "known_household_target",
     "known_relative_target",
     "robot_relationship_targets",

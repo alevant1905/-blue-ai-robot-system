@@ -36,6 +36,7 @@ from blue_identity import (
     _BIRTHDATE_KEY_RE,
     age_on,
     asked_after_himself,
+    asks_for_class_reply,
     asks_for_recall,
     bulk_paste_recall_words,
     bulk_paste_stub,
@@ -2731,7 +2732,7 @@ class EnhancedMemorySystem:
         A reply whose wording is never quoted (reply_wording_withheld) stays,
         marked "wording_withheld", and build_context shows it as "(answered)";
         so does a reply said to a class (speaks_to_a_class), unless the user
-        is asking what was said.
+        asks what was said or to hear it again (asks_for_class_reply).
         Returns oldest-first so the LLM sees a chronological flow."""
         try:
             cutoff = (datetime.now() - timedelta(hours=RECENT_HISTORY_HOURS)).isoformat()
@@ -2758,7 +2759,8 @@ class EnhancedMemorySystem:
         other_robot_names = [
             name for key, name in robot_names.items() if key != robot_key
         ]
-        recall_ask = asks_for_recall([bulk_paste_recall_words(user_msg or "")])
+        class_recall = asks_for_class_reply(
+            [bulk_paste_recall_words(user_msg or "")])
         out: List[Dict[str, Any]] = []
         # Work oldest-first so a toxic assistant reply can remove the user
         # question that immediately prompted it. Keeping that question without
@@ -2811,7 +2813,7 @@ class EnhancedMemorySystem:
                 # here, and in <conversation_memory>, when "introduce todays
                 # topic to the class" got it again (10143).
                 if (reply_wording_withheld(previous_user_text, content)
-                        or (not recall_ask
+                        or (not class_recall
                             and speaks_to_a_class(previous_user_text))):
                     out.append({"role": r["role"], "content": content,
                                 "ts": r["timestamp"], "wording_withheld": True})
@@ -4028,7 +4030,8 @@ class EnhancedMemorySystem:
           to the question asked again, unless the user asks what was said
           (`recall_ask`);
         - "(answered)" for what he said to a class (speaks_to_a_class),
-          unless the user asks what was said;
+          unless the user asks what was said or to hear it again
+          (`recall_ask`, or asks_for_class_reply on the live turn);
         - "(answered)" for the answer to another ask about himself
           (is_self_description_request), unless the user asks what he said
           about himself (`recall_self`) or names its question's subject;
@@ -4047,7 +4050,8 @@ class EnhancedMemorySystem:
             return "(answered)"
         if not recall_ask and is_reask(asked, intent):
             return "(answered this same question; answer it fresh)"
-        if not recall_ask and speaks_to_a_class(asked):
+        if (speaks_to_a_class(asked)
+                and not (recall_ask or asks_for_class_reply(intent))):
             return "(answered)"
         if (is_self_description_request(asked)
                 and not (recall_self or names_it)):
