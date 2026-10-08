@@ -5175,19 +5175,36 @@ _DAY_PUSHBACK_RE = re.compile(
 # classes keeps the rows, since a question answered from memory is the
 # 09-24 failure ("AI Lab 5").
 _DAY_TELLS_RE = re.compile(r"^(?:i|we|i'm|im|we're|i'll|ill|we'll|i've|we've|i'd|we'd)\b")
+# A request after a statement with no stop between them, as he dictates:
+# "I have a meeting today at 11:00 AM with Aaron can you schedule that in"
+# (2246); asks_something only reads a request at the start of a sentence.
 _DAY_ASKS_RE = re.compile(
     r"\?|n't\b|\b(?:what|whats|which|when|where|who|how|why|whether|if|tell|"
     r"remind|show|give|list|check|find|look|need|want|wanna|forgot|forget|"
     r"remember|wonder|wondering|know|confirm|sure|not|wrong|actually|right|"
-    r"correct)\b")
+    r"correct|please|let'?s)\b|\b(?:can|could|would|will) (?:you|u)\b")
+# Telling him what the syllabus says, against what he said: "we already did
+# lab 5", "i think it's lab 2", "we're on week 6". That is the 09-24
+# correction ("its not lab 5") in the first person, and the rows are what
+# checks it. "class", "session" and "course" alone don't count: "we will do
+# that in class" (10132) is news.
+_DAY_CONTENT_CLAIM_RE = re.compile(
+    r"\b(?:lab|labs|week|reading|readings|topic|syllabus|assigned)\b"
+    r"[^.?!]*\b(?:already|think|thought|meant|believe|supposed)\b"
+    r"|\b(?:already|think|thought|meant|believe|supposed)\b[^.?!]*"
+    r"\b(?:lab|labs|week|reading|readings|topic|syllabus|assigned)\b"
+    r"|\b(?:on|at|up to) (?:week|lab) \d")
 
 
 def _tells_not_asks(text: str) -> bool:
     """A plain statement of his: "we will do that in class", not "we have
-    dh201 tomorrow right" or "i need the readings for friday"."""
+    dh201 tomorrow right", "i need the readings for friday", "i meant the
+    other reading" or "we already did lab 5"."""
     t = _thinking._normalise(text)
     return bool(_DAY_TELLS_RE.match(t) and not _DAY_ASKS_RE.search(t)
-                and not _thinking.asks_something(t))
+                and not _thinking.asks_something(t)
+                and not _thinking._CORRECTION_RE.search(t)
+                and not _DAY_CONTENT_CLAIM_RE.search(t))
 
 
 def _asks_after_a_day(text: str) -> bool:
@@ -12596,12 +12613,13 @@ def _place_current_fresh(place: Dict) -> Optional[str]:
     return cur
 
 
-def _build_location_block() -> str:
+def _build_location_block(conversation_messages=None) -> str:
     """Render <location> — where Blue and Alex are right now.
 
     Home by default (Blue is a home robot); a fresh manual override from the
     chat Context panel wins. Alex chose 'home + manual override' over device
-    geolocation, so there is no tracking here.
+    geolocation, so there is no tracking here. The room of his class only
+    once he has said in this thread that a class is in the room.
     """
     place = _load_place()
     home = (place.get("home") or "home").strip() or "home"
@@ -12615,11 +12633,18 @@ def _build_location_block() -> str:
             f"(away from {home_phrase}). If he asks where you are, say {cur}.\n"
             "</location>"
         )
+    # Not from the calendar alone: most lectures Blue stays in the office
+    # ("I'm keeping u in my office for teaching this year", 9921), and with
+    # the line on for every lecture "where are you right now?" got "I'm in
+    # SB107 with you for the DH201 lecture" 3/3 on o07_90, nothing in the
+    # thread saying so (S3 review). That is the failure 6ed8db0 fixed. Its
+    # "If he says you're in class" condition did not hold the model.
+    class_line = ""
     try:
-        class_line = _class_room_line()
+        if _told_in_class(conversation_messages):
+            class_line = _class_room_line()
     except Exception as e:
         log.warning(f"[PLACE] class room check failed: {e}")
-        class_line = ""
     return (
         "<location>\n"
         # Not "you and Alex are at home": Blue goes to Alex's office and
@@ -12643,25 +12668,66 @@ _ROOM_CODE = r"[A-Z]{2,5} ?\d[\dA-Z]*(?:-\d+[A-Z]?)?"
 _ROOM_IN_RE = re.compile(r"\bin (" + _ROOM_CODE + r")\b")
 _ROOM_FIELD_RE = re.compile(r"\b(?i:location|room)\s*:\s*(" + _ROOM_CODE + r")\b")
 _CLASS_TITLE_RE = re.compile(r"\b(?:lecture|class|seminar|tutorial|lab)\b", re.I)
+# His desk work under a course's name, not the class meeting: "DH201 office
+# hours" is in DAWB 2-138, "DH399 lab prep" and "DH201 grading" anywhere.
+_NOT_A_CLASS_RE = re.compile(
+    r"\b(?:office hours?|grading|marking|prep|preparation|prepping|planning|"
+    r"meeting|admin|deadline|due|cancell?ed|no class|reading week)\b", re.I)
+# "we're in BH399", "we are in cmds4740" (9885, 5350): the course, or its
+# room, named as where they are. Not "we're in dh201 tomorrow".
+_WE_ARE_IN_CODE_RE = re.compile(
+    r"\b(?:we|you)(?:['’]re| are) (?:now |currently |right ?now )?(?:in|at) "
+    r"(?:the )?([a-z]{2,5} ?-?\d{3,4}[a-z]?)\b"
+    r"(?! (?:later|tomorrow|next|this (?:afternoon|evening)|on)\b)", re.I)
 
 
-def _lecture_room(when_where: str) -> str:
+def _told_in_class(conversation_messages) -> bool:
+    """Alex has said in the thread that a class is in the room: "we are in
+    the class rightnow" (10148), "say hi to the students", "we're in BH399".
+    Not "i'm in class" (he may be on his phone) or "were there now" (10146).
+    The same eight turns that make him "Alex" to a class
+    (_class_in_the_room)."""
+    if _class_in_the_room(conversation_messages):
+        return True
+    users = [_user_message_text(m) for m in (conversation_messages or [])
+             if isinstance(m, dict) and m.get("role") == "user"]
+    for text in users[-8:]:
+        for m in _WE_ARE_IN_CODE_RE.finditer(text):
+            if _syllabus_sections.written_course_codes(m.group(1)):
+                return True
+    return False
+
+
+def _room_in(text: str, courses=()) -> str:
+    """The first room the text names that is not a course: "Location: VH
+    1154", "Lecture in ART 1E1", but not the DH201 of "Week 6 in DH201".
+    A room has a course code's shape (SB107), so only the courses known
+    here are skipped."""
+    for rx in (_ROOM_FIELD_RE, _ROOM_IN_RE):
+        for m in rx.finditer(text or ""):
+            if not set(_syllabus_sections.written_course_codes(m.group(1))) & set(courses):
+                return m.group(1)
+    return ""
+
+
+def _lecture_room(when_where: str, courses=()) -> str:
     """'SB107' from a syllabus's "Lecture and location" part ("Wednesday
     10:00am - 12:50pm in SB107."), skipping the office hours line under it
     ("... in DAWB 2-138 or by appointment")."""
     for line in (when_where or "").splitlines():
         if re.match(r"\s*(?:office hours?|instructor|e-?mail)\b", line, re.I):
             continue
-        m = _ROOM_FIELD_RE.search(line) or _ROOM_IN_RE.search(line)
-        if m:
-            return m.group(1)
+        room = _room_in(line, courses)
+        if room:
+            return room
     return ""
 
 
 def _class_room_line(now=None) -> str:
     """One <location> line while Alex's class is on the calendar: "Alex is
     teaching DH201 in SB107 until 12:50 PM. If he says you're in class,
-    you're in SB107."
+    you're in SB107." _build_location_block adds it only once he has said
+    a class is in the room (_told_in_class).
 
     On 10-07 during the DH201 lecture <location> only named his office
     (DAWB 2-138), and "we are in the class rightnow" got "Since we are
@@ -12670,8 +12736,8 @@ def _class_room_line(now=None) -> str:
     description ("Location: VH 1154", "Lecture in ART 1E1") or else the
     course syllabus's "Lecture and location" line (e897c8b). A class is an
     event whose title starts with a course code or names a lecture, class,
-    seminar, tutorial or lab. No room known, no line: the calendar alone
-    never says where he is.
+    seminar, tutorial or lab, and isn't office hours, grading or prep. No
+    room known, no line.
     """
     event = _calendar_event_now(now)
     if not event:
@@ -12684,18 +12750,20 @@ def _class_room_line(now=None) -> str:
     if not (_CLASS_TITLE_RE.search(title)
             or _syllabus_sections.COURSE_CODE_RE.match(title)):
         return ""
+    if _NOT_A_CLASS_RE.search(title):
+        return ""
     code = codes[0]
-    desc = str(event.get("description") or "")
-    m = _ROOM_FIELD_RE.search(desc) or _ROOM_IN_RE.search(desc)
-    room = m.group(1) if m else ""
+    syllabi = _syllabi_by_course()
+    courses = set(codes) | set(syllabi)
+    room = _room_in(str(event.get("description") or ""), courses)
     if not room:
-        for d in _syllabi_by_course().get(code, []):
+        for d in syllabi.get(code, []):
             fp = d.get("filepath", "")
             if not fp or not os.path.exists(fp):
                 continue
             for _label, part in _syllabus_sections.sections(
                     _syllabus_file_text(fp), "when_where"):
-                room = _lecture_room(part)
+                room = _lecture_room(part, courses)
                 if room:
                     break
             if room:
@@ -13314,7 +13382,7 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
         expertise_section = f"\n{expertise_block}\n" if expertise_block else ""
 
     now_block = _build_now_block(_turn_text)
-    location_block = _build_location_block()
+    location_block = _build_location_block(conversation_messages)
     activity_block = _build_current_activity_block()
     schedule_block = _build_upcoming_schedule_block()
     schedule_section = f"{schedule_block}\n\n" if schedule_block else ""

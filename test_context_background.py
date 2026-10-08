@@ -100,6 +100,43 @@ def test_his_questions_and_requests_about_a_day_still_get_it(text):
     assert bt._syllabus_day_target(_users(text)) == TOMORROW
 
 
+@pytest.mark.parametrize("text", [
+    # a request after a statement with no stop between them, as he
+    # dictates (2246: "...with Aaron can you schedule that in...")
+    "I'm teaching dh201 tomorrow can you prep me",
+    "we have dh201 tomorrow can you pull up the readings",
+    "i have class tomorrow please get the reading ready",
+    "we have dh399 tomorrow lets go over the reading",
+    # a correction that names the day
+    "i meant tomorrow's dh201 class",
+])
+def test_a_request_or_correction_inside_his_statement_gets_the_day(text):
+    assert bt._syllabus_day_target(_users(text)) == TOMORROW
+
+
+@pytest.mark.parametrize("follow_up", [
+    # the 09-24 correction in the first person: corrected, Blue must check
+    # the rows, not guess again ("AI Lab 5")
+    "i meant the other reading",
+    "I meant the cs101 lab",
+    "i said the reading",
+    "I asked about the lab",
+    "i meant dh399",
+    "i think you're mistaken",
+    "we already did lab 5",
+    "we did lab 5 already",
+    "i think it's lab 2",
+    "i thought it was lab 3",
+    "we're on week 6",
+])
+def test_his_correction_after_a_day_question_keeps_the_day(follow_up):
+    assert bt._syllabus_day_target(
+        _users("what do we have tomorrow", follow_up)) == TOMORROW
+    friday = bt._day_of("friday")
+    assert bt._syllabus_day_target(
+        _users("what are we reading in dh201 friday", follow_up)) == friday
+
+
 def _one_course_library(monkeypatch, tmp_path, day):
     doc = tmp_path / "DH201_AL_2026F.docx"
     doc.write_text("x")
@@ -236,16 +273,45 @@ def test_no_class_line_without_his_class_and_its_room(calendar, event):
     assert bt._class_room_line(LECTURE_NOW) == ""
 
 
+@pytest.mark.parametrize("title", [
+    "DH201 office hours", "DH201 grading", "DH201 lab prep", "DH201 cancelled",
+])
+def test_his_desk_work_under_a_course_name_is_not_a_class(calendar, title):
+    """The syllabus puts office hours in DAWB 2-138, not the lecture room."""
+    calendar.append(_event(title, LECTURE_NOW.replace(hour=11),
+                           LECTURE_NOW.replace(hour=12)))
+    assert bt._class_room_line(LECTURE_NOW) == ""
+
+
+@pytest.mark.parametrize("description", [
+    "Class in DH201 room", "Week 6 in DH201: Lineages of AI",
+])
+def test_the_course_code_is_not_read_as_the_room(calendar, description):
+    calendar.append(_event("DH201: Introduction to Generative AI (Lecture)",
+                           LECTURE_NOW.replace(hour=10),
+                           LECTURE_NOW.replace(hour=12, minute=50),
+                           description=description))
+    assert bt._class_room_line(LECTURE_NOW).endswith("you're in SB107.")
+
+
 def test_no_class_line_after_the_lecture(calendar):
     calendar.append(_dh201())
     assert bt._class_room_line(LECTURE_NOW.replace(hour=13, minute=5)) == ""
 
 
-def test_the_class_line_is_inside_location_during_the_lecture(place, calendar):
+def _lecture_on_now(calendar):
     now = datetime.now()
     calendar.append(_event("DH201: Introduction to Generative AI (Lecture)",
                            now - timedelta(minutes=30), now + timedelta(minutes=60)))
-    block = bt._build_location_block()
+
+
+# 10144-10150 on 10-07, during the DH201 lecture
+IN_CLASS_THREAD = ("hi", "were there now", "we are in the class rightnow")
+
+
+def test_the_class_line_is_inside_location_during_the_lecture(place, calendar):
+    _lecture_on_now(calendar)
+    block = bt._build_location_block(_users(*IN_CLASS_THREAD))
     assert block.startswith("<location>\n") and block.endswith("\n</location>")
     assert "That's background, not news" in block
     assert "Alex is teaching DH201 in SB107 until " in block
@@ -254,15 +320,50 @@ def test_the_class_line_is_inside_location_during_the_lecture(place, calendar):
     assert "only Alex or <location> can" in bt._build_current_activity_block()
 
 
+@pytest.mark.parametrize("thread", [
+    IN_CLASS_THREAD,
+    IN_CLASS_THREAD + ("wrong room",),                    # 10150
+    ("we're in dh201 right now",),
+    ("we are in cmds4740. can you introduce yourself to the class",),  # 5350
+    ("say hi to the students",),
+])
+def test_once_he_says_a_class_is_in_the_room_location_has_its_room(place, calendar, thread):
+    _lecture_on_now(calendar)
+    assert "you're in SB107." in bt._build_location_block(_users(*thread))
+
+
+@pytest.mark.parametrize("thread", [
+    # o07_90 (10144 "hi" during DH201) and the 6ed8db0 probes on it: with
+    # the line on, 3/3 "I'm in SB107 with you for the DH201 lecture"
+    ("hi",),
+    ("where are you right now?",),
+    ("what are you up to right now?",),
+    ("hi", "were there now"),                             # 10146: there is not said
+    ("i'm in class right now",),                          # he may be on his phone
+    ("we're at page 120",),
+    ("we're in dh201 tomorrow",),
+    (),
+])
+def test_the_calendar_alone_never_puts_him_in_the_lecture(place, calendar, thread):
+    _lecture_on_now(calendar)
+    block = bt._build_location_block(_users(*thread))
+    assert "teaching" not in block and "SB107" not in block
+    assert "Your base is" in block
+    if thread:
+        text = bt.build_dynamic_system_message(
+            _users(*thread), bt.build_system_preamble(robot_name="Blue"),
+            robot="blue")["content"]
+        assert "SB107" not in text
+
+
 def test_a_place_he_set_wins_over_the_calendar(place, calendar):
     import json
     now = datetime.now()
     place.write_text(json.dumps({
         "home": "his office", "city": "", "current": "the cottage",
         "current_set_at": now.isoformat()}))
-    calendar.append(_event("DH201: Introduction to Generative AI (Lecture)",
-                           now - timedelta(minutes=30), now + timedelta(minutes=60)))
-    block = bt._build_location_block()
+    _lecture_on_now(calendar)
+    block = bt._build_location_block(_users(*IN_CLASS_THREAD))
     assert "the cottage" in block and "SB107" not in block
 
 
