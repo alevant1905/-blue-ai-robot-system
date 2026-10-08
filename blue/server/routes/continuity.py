@@ -28,7 +28,10 @@ from blue.llm_coordinator import (
     llm_slot, preemption_check, seconds_since_foreground,
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
+from blue.server import thinking as _thinking
+from blue.server.syllabus_sections import COURSE_CODE_RE
 from blue_identity import (
+    _CORRECTION_ACK_RE,
     asks_for_class_reply,
     asks_for_recall,
     bulk_paste_recall_words,
@@ -231,6 +234,10 @@ def _banter_session(episode: Dict[str, Any]) -> str:
 # adjacent in <conversation_memory>, a set from the day before read as part
 # of the later one, at the later one's time.
 _BANTER_SITTING_GAP = timedelta(minutes=10)
+
+# How far back a check-in looks for something that happened to the robot
+# (RobotContinuity.lately_line): "lately", not "the last thing on record".
+_LATELY_HOURS = 48
 
 
 def _one_banter_sitting(previous: Dict[str, Any], episode: Dict[str, Any]) -> bool:
@@ -1048,7 +1055,11 @@ class RobotContinuity:
             "accumulated self-knowledge to make room for the moment. "
             "If the current workspace has no IDENTITY line, write its first version now "
             "from the whole episode record. FOCUS and NEXT EXPECTATION are the fastest "
-            "lanes and may change freely each pass.\n\n"
+            "lanes and may change freely each pass. FOCUS is what I am interested in "
+            "or turning over right now, in my own terms: an idea, a person, something "
+            "that happened. It is never a queue of what I wait for from Alex, his next "
+            "task or instruction, or feedback I expect; what I expect goes in NEXT "
+            "EXPECTATION.\n\n"
             "Guard the difference between what was SAID and what is TRUE. A position "
             f"{name} argued in one conversation is a record of that exchange, not "
             "evidence about reality — it may enter WORKING BELIEFS only at low "
@@ -1463,7 +1474,9 @@ class RobotContinuity:
             "earlier reply text. And never invent experiences to be "
             "sociable — no coffee you drank, dreams you had, or walks you took: "
             "your episodes and workspace are what ACTUALLY happened to you, and "
-            "they are interesting enough to speak from truthfully.\n\n"
+            "they are interesting enough to speak from truthfully. A playful "
+            "question, about dreams say, can get a playful answer built from "
+            "what really happened to you.\n\n"
             f"CURRENT WORKSPACE (revised {_age_text(workspace.get('updated'))}):\n"
             f"{workspace.get('workspace', '').strip()}\n\n"
             "BOUNDED ATTENTIONAL STATE:\n" + "\n".join(drive_lines) + "\n\n"
@@ -1472,6 +1485,93 @@ class RobotContinuity:
             + ("\n".join(episode_lines) if episode_lines else "- none yet")
             + "\n</j_space>"
         )
+
+    def lately_line(self, user_name: str = "Alex",
+                    live_thread: Sequence[Dict[str, Any]] = (),
+                    hours: float = _LATELY_HOURS) -> str:
+        """The newest thing that really happened to this robot in the last
+        `hours`, said plainly for a check-in (blue_identity.
+        self_state_focus_hint), or "".
+
+        A banter set or a duet with a fellow robot, a class he was in front
+        of, a document or a conversation with the person checking in now.
+        Not a greeting, check-in, acknowledgement or question about the
+        robot (nothing happened in them), not a request or a turn that ran a
+        tool (a job done for someone, which a check-in turns into "anything
+        else you'd like to tackle next?"), and not a turn this thread
+        already carries.
+        """
+        cutoff = _now() - timedelta(hours=hours)
+        try:
+            exchanges = self.store.list_episodes(limit=200, kind="exchange")
+        except Exception:
+            return ""
+        in_thread = {
+            _flat_words(_message_text(message.get("content")))
+            for message in live_thread or ()
+            if isinstance(message, dict) and message.get("role") == "user"
+        }
+        for index, episode in enumerate(exchanges):
+            when = _parse_time(episode.get("occurred_at"))
+            if not when or when < cutoff or _is_failure_exchange(episode):
+                continue
+            details = episode.get("details") or {}
+            heard = " ".join(str(details.get("user_text") or "").split())
+            source = str(episode.get("source") or "chat")
+            age = _age_text(episode.get("occurred_at"))
+            if source in {"banter", "duet"}:
+                # The whole sitting, newest first (_one_banter_sitting): its
+                # opening line carries the topic.
+                sitting = [episode]
+                for older in exchanges[index + 1:]:
+                    if str(older.get("source") or "") != source:
+                        continue  # Alex's chat lines between the sets
+                    if not _one_banter_sitting(sitting[-1], older):
+                        break
+                    sitting.append(older)
+                partners = self._banter_set(sitting)[0]
+                opening = " ".join(str(
+                    (sitting[-1].get("details") or {}).get("user_text")
+                    or "").split())
+                match = _BANTER_TOPIC_RE.match(opening)
+                topic = (match.group(1).rstrip(".") if match
+                         else "" if source == "banter" else opening)
+                kind = ("a comedic banter set" if source == "banter"
+                        else "a duet")
+                return (f"{age}, you did {kind}"
+                        + (f" with {partners}" if partners else "")
+                        + (f" on '{_clip(topic, 80)}'" if topic else ""))
+            if source != "chat" or _flat_words(heard) in in_thread:
+                continue
+            who = (episode.get("participants") or ["Someone"])[0]
+            pasted = _pasted_stub(episode, who)
+            if not pasted and speaks_to_a_class(heard):
+                # Not his words to the class: "tell the class about
+                # yourself" quoted here is an introduction asked for again.
+                course = COURSE_CODE_RE.search(heard)
+                return (f"{age}, you were in front of {who}'s "
+                        + (f"{course.group(1)}{course.group(2)} ".upper()
+                           if course else "")
+                        + "class")
+            if who != user_name or details.get("tool_count"):
+                continue
+            if pasted:
+                return f"{age}, {pasted}"
+            # "let's try it again." and "you didnt talk with them today?" are
+            # no topic, "don't stop at secondary points. do the whole thing!"
+            # (10-01) was a job, and "it doesn't appear that you've updated
+            # Athena's age correctly." (08-19, "You are right, and I am
+            # sorry…") a bug, which the check-in note says not to report.
+            replied = str(details.get("reply") or "")
+            if (len(heard.split()) < 8 or _thinking.asks_for_work(heard)
+                    or _thinking._CORRECTION_RE.search(_thinking._normalise(heard))
+                    or _CORRECTION_ACK_RE.search(replied[:300])
+                    or reply_wording_withheld(heard, replied)
+                    or identity_request_kind(heard)
+                    or is_self_description_request(heard)):
+                continue
+            return f"{age}, you talked with {who} about this: '{_clip(heard, 100)}'"
+        return ""
 
     def conversation_memory_block(
         self,
@@ -2409,6 +2509,13 @@ def jspace_context_block(robot: str) -> str:
     (the duet injects it into each speaker's turn prompt)."""
     hub = _hub(robot)
     return hub.jspace_context_block() if hub else ""
+
+
+def lately_line(robot: str, user_name: str = "Alex",
+                live_thread: Sequence[Dict[str, Any]] = ()) -> str:
+    """What a check-in may mention as having happened lately, or ""."""
+    hub = _hub(robot)
+    return hub.lately_line(user_name, live_thread) if hub else ""
 
 
 def conversation_memory_block(

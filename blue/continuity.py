@@ -32,7 +32,10 @@ DRIVE_LABELS: Dict[str, str] = {
     "uncertainty": "how much currently feels unresolved",
     "connection": "attention to relationships and shared context",
     "commitment": "pressure from promises and unfinished intentions",
-    "energy": "available attention for continued work",
+    # Not "available attention for continued work": every chat turn carried
+    # it, beside a FOCUS of "awaiting next instruction", and a check-in came
+    # back as a work queue (10110, 2026-10-06).
+    "energy": "how much you have in you right now",
 }
 
 _EPISODE_KINDS = {

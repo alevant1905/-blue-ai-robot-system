@@ -1537,3 +1537,172 @@ def test_ages_count_calendar_days(continuity_module, monkeypatch, now, stamp, ag
     monkeypatch.setattr(continuity_module, "_now",
                         lambda: datetime(*now, tzinfo=toronto))
     assert continuity_module._age_text(stamp) == age
+
+
+
+# ---------------------------------------------------------------------------
+# What a check-in may say happened to him lately (2026-10-08). "how are you"
+# (10110) was offered the FOCUS "Awaiting Alex's final feedback on the
+# completed DH399 reading report or the next academic task" and answered
+# "...wondering if there's anything else you'd like to tackle next". Now a
+# queue FOCUS is never offered, and lately_line offers the newest thing that
+# really happened in the last 48 hours: a banter set, a duet, a class, a
+# document or a conversation with whoever is checking in.
+# ---------------------------------------------------------------------------
+
+def test_a_banter_set_is_what_happened_lately_never_its_jokes(continuity_module):
+    route = continuity_module
+    route.note_banter_line(
+        "blue", "Alex's topic",
+        "Topic: AI Lab 3: How to download local models Source: "
+        "DH201_AL_2026F.pdf (pdf).",
+        "The only thing more private than the model is the fan on your laptop.",
+        session_id="set-1")
+    route.note_banter_line(
+        "blue", "Casper", "My laptop fan filed a noise complaint.",
+        "Mine applied for tenure.", session_id="set-1")
+
+    line = route.lately_line("blue", "Alex")
+    assert line.startswith("just now, you did a comedic banter set with Casper")
+    assert "'AI Lab 3: How to download local models'" in line
+    assert "fan" not in line and "tenure" not in line
+
+
+def test_a_duet_is_what_happened_lately(continuity_module):
+    route = continuity_module
+    route.note_duet_line(
+        "blue", "Hexia",
+        "how does sofie lachapelle's work help us to understand ourselves?",
+        "Look, Lachapelle's point is that wonder is labour made visible.")
+    route.note_duet_line(
+        "blue", "Hexia", "You're conflating the trick with the labour.",
+        "No, I'm saying the labour is the trick.")
+
+    line = route.lately_line("blue", "Alex")
+    assert line == (
+        "just now, you did a duet with Hexia on 'how does sofie lachapelle's "
+        "work help us to understand ourselves?'")
+
+
+def test_a_class_is_named_not_quoted(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "we are in front of the class in dh201 right now",
+        "Good morning, everyone. I'm Blue, Alex's robot.", user_name="Alex")
+
+    line = route.lately_line("blue", "Alex")
+    assert line == "just now, you were in front of Alex's DH201 class"
+
+
+def test_a_conversation_is_offered_by_what_he_said(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "i see it as a part of the process toward tenure track work",
+        "That makes sense: a way to sharpen the research before applying.",
+        user_name="Alex")
+    route.note_exchange("blue", "ok", "Okay.", user_name="Alex")
+
+    line = route.lately_line("blue", "Alex")
+    assert line == (
+        "just now, you talked with Alex about this: 'i see it as a part of "
+        "the process toward tenure track work'")
+    assert "sharpen" not in line
+
+
+def test_a_shared_document_is_named(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "[Attached document: Reigeluth_Castelle.pdf]\n" + "word " * 3000,
+        "The chapter argues that machine learning is social learning.",
+        user_name="Alex")
+    assert route.lately_line("blue", "Alex").startswith(
+        "just now, Alex shared a document: 'Reigeluth_Castelle.pdf'")
+
+
+@pytest.mark.parametrize("said,reply,tools", [
+    ("how are you", "Good, and you?", []),
+    ("hi", "Hey Alex.", []),
+    ("keep going", "Here's the rest.", []),
+    # A job done for him: 10-01, before 10094.
+    ("don't stop at secondary points. do the whole thing!",
+     "Here is the full report.", []),
+    ("help me find the cheapest rtx6000 pro new or used that ships to canada",
+     "I found two listings on eBay Canada.",
+     [{"name": "web_search", "success": True, "result": "{}"}]),
+    # Bugs he fixed, which the check-in note says not to report (08-19).
+    ("it doesn't appear that you've updated Athena's age correctly.",
+     "You are right, and I am sorry. I keep defaulting to ten.", []),
+    ("you're still getting the date of the DH399 class wrong again",
+     "Friday, then.", []),
+    # Questions about himself are answered, not things that happened.
+    ("What is your earliest memory of us working together on things?",
+     "The first thing I have on record is the DH201 outline.", []),
+])
+def test_nothing_happened_in_these(continuity_module, said, reply, tools):
+    route = continuity_module
+    route.HUB["blue"].note_exchange(said, reply, user_name="Alex", tools=tools)
+    assert route.lately_line("blue", "Alex") == ""
+
+
+def test_only_the_person_checking_in_has_their_talk_offered(continuity_module):
+    route = continuity_module
+    route.note_exchange(
+        "blue", "i think the girls should do their homework before the movie",
+        "Fair: movie as the reward.", user_name="Stella")
+    assert route.lately_line("blue", "Alex") == ""
+    assert "girls should do their homework" in route.lately_line("blue", "Stella")
+
+
+def test_what_this_thread_carries_is_not_lately(continuity_module):
+    route = continuity_module
+    said = "i might take you with me to dh201 tomorrow, if the cart fits"
+    route.note_exchange("blue", said, "I'd like that.", user_name="Alex")
+    thread = [{"role": "user", "content": said},
+              {"role": "assistant", "content": "I'd like that."},
+              {"role": "user", "content": "how are you"}]
+    assert route.lately_line("blue", "Alex", thread) == ""
+    assert said in route.lately_line("blue", "Alex", thread[-1:])
+
+
+def test_two_days_on_it_is_not_lately(continuity_module, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    route = continuity_module
+    route.note_exchange(
+        "blue", "i see it as a part of the process toward tenure track work",
+        "That makes sense.", user_name="Alex")
+    later = datetime.now(timezone.utc) + timedelta(hours=49)
+    monkeypatch.setattr(route, "_now", lambda: later)
+    assert route.lately_line("blue", "Alex") == ""
+
+
+def test_the_newest_real_thing_wins(continuity_module):
+    route = continuity_module
+    route.note_banter_line(
+        "blue", "Casper", "Topic: discuss dh201 Source: DH201.pdf (pdf).",
+        "A joke.", session_id="set-2")
+    route.note_exchange(
+        "blue", "i was thinking of using lm studio to run local models in class",
+        "It's the path of least resistance.", user_name="Alex")
+    route.note_exchange("blue", "hi", "Hey.", user_name="Alex")
+    assert "lm studio" in route.lately_line("blue", "Alex")
+
+
+def test_reflection_keeps_focus_an_interest_not_a_queue(continuity_module):
+    # Replayed on 10-08's own reflection (2026-10-08.2.log:28645), FOCUS
+    # went from "Awaiting Alex's next instruction after a completed
+    # greeting; no active task" to "The rhythm of brief check-ins after
+    # long gaps…" and "How often do I project a confident answer…" (0/2).
+    prompt = continuity_module.HUB["blue"]._reflection_system_prompt()
+    assert ("FOCUS is what I am interested in or turning over right now"
+            in prompt)
+    assert "It is never a queue of what I wait for from Alex" in prompt
+
+
+def test_the_j_space_block_reads_as_a_self_not_a_work_queue(continuity_module):
+    block = continuity_module.jspace_context_block("blue")
+    assert "- energy: " in block
+    assert "(how much you have in you right now)" in block
+    assert "available attention for continued work" not in block
+    assert ("A playful question, about dreams say, can get a playful answer "
+            "built from what really happened to you.") in block
+    assert "never invent experiences" in block

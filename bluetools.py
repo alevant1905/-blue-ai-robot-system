@@ -13915,9 +13915,14 @@ def _chat_self_context(conversation_messages, last_user_message, *,
                         _ws = _hub.store.get_workspace()
                         _focus = re.search(r"(?mi)^FOCUS:\s*(.+)$",
                                            _ws.get("workspace") or "")
+                        # A FOCUS that is a queue ("Awaiting Alex's final
+                        # feedback…", 10110) gives way to something that
+                        # really happened to him lately.
                         _state_hint = self_state_focus_hint(
                             _focus.group(1) if _focus else "",
-                            _ws.get("updated") or "")
+                            _ws.get("updated") or "",
+                            lately=_hub.lately_line(
+                                user_name, conversation_messages))
                 except Exception as _hint_e:
                     log.warning(f"[IDENTITY] check-in state hint failed: {_hint_e}")
             _audience, _class_topic = _identity_audience_for_turn(

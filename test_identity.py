@@ -1600,6 +1600,71 @@ def test_an_unreadable_timestamp_counts_as_stale():
     assert self_state_focus_hint("", "2026-08-09T14:28:00+00:00") == ""
 
 
+# "how are you" (10110, 2026-10-06) was offered a FOCUS 11 minutes old,
+# "Awaiting Alex's final feedback on the completed DH399 reading report or the
+# next academic task", and answered "...wondering if there's anything else
+# you'd like to tackle next". A FOCUS that is a queue is never offered; what
+# really happened lately (continuity lately_line) goes in its place.
+QUEUE_FOCUS_LINES = [
+    "Awaiting Alex's final feedback on the completed DH399 reading report or "
+    "the next academic task.",                                        # 10110
+    "Maintaining presence during Alex's repeated checks; awaiting the next "
+    "specific instruction.",                                          # 10094
+    "Post-banter cleanup; awaiting next instruction",
+    "Holding the completed greeting and DH201 logistics while waiting for "
+    "Alex's next instruction.",                                       # 10-08
+    "RTX 6000 Pro Canada price search if Alex resumes; verify any listing "
+    "before treating it as a fact.",                                  # 10-08
+    "Idle; awaiting new directive.",
+    "Responding to Alex's check-in with reciprocal care.",
+    "Monitor Alex's reaction to the musical/lights response",
+    "...",
+]
+
+
+@pytest.mark.parametrize("focus", QUEUE_FOCUS_LINES)
+def test_a_queue_focus_is_never_offered(focus):
+    fresh = datetime(2026, 10, 6, 15, 37, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 6, 15, 48, tzinfo=timezone.utc)
+    assert self_state_focus_hint(focus, fresh.isoformat(), now=now) == ""
+    hint = self_state_focus_hint(
+        focus, fresh.isoformat(), now=now,
+        lately="yesterday, you did a comedic banter set with Casper")
+    assert "banter set with Casper" in hint
+    assert focus not in hint
+    assert "turning over" not in hint
+
+
+@pytest.mark.parametrize("focus", [
+    "DH201/DH399 course outline development",
+    "finding out what having a place to think does to a spark.",
+    "The rhythm of brief check-ins after long gaps — what it tells me "
+    "about how we actually use each other.",
+    "How often do I project a confident answer from partial information "
+    "before checking?",
+])
+def test_a_fresh_interest_is_still_offered_over_what_happened(focus):
+    hint = self_state_focus_hint(
+        focus, "2026-10-08T15:57:00+00:00",
+        now=datetime(2026, 10, 8, 16, 30, tzinfo=timezone.utc),
+        lately="yesterday, you were in front of Alex's class")
+    assert focus in hint and "class" not in hint.replace(focus, "")
+
+
+def test_a_stale_focus_is_named_stale_and_what_happened_offered():
+    hint = self_state_focus_hint(
+        "Athena's age update loop and its resolution.",
+        "2026-08-19T11:49:35+00:00",
+        now=datetime(2026, 9, 15, 19, 15, tzinfo=timezone.utc),
+        lately="yesterday, you were in front of Alex's DH201 class")
+    assert "Athena" not in hint
+    assert "old" in hint
+    assert hint.endswith(
+        "something that really happened to you lately, in your own plain "
+        "words, never quoted: yesterday, you were in front of Alex's DH201 "
+        "class.")
+
+
 def test_the_check_in_note_carries_the_hint_and_no_longer_demands_focus():
     note = identity_grounding_note(
         "Blue", "Alex's robot companion", "self_state", state_hint="HINT-XYZ")

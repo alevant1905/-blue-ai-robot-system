@@ -48,3 +48,56 @@ def test_the_identity_retry_is_told_the_question(chat):
     assert "Ilyenkov" in reply_of(response)
     retry_note = chat.model.payloads[-1]["messages"][-1]["content"]
     assert "in light of ilyenkov" in retry_note.lower()
+
+
+def test_a_check_in_is_offered_what_happened_not_the_work_queue(
+        chat, monkeypatch):
+    """10110, 2026-10-06: "how are you" was pinned "If it fits naturally,
+    you may mention what you've been turning over lately…: Awaiting Alex's
+    final feedback on the completed DH399 reading report or the next
+    academic task" (FOCUS 11 minutes old), and Blue answered "…wondering if
+    there's anything else you'd like to tackle next"."""
+    from datetime import datetime, timezone
+
+    import bluetools as bt
+
+    real = bt._continuity_routes.HUB["blue"]
+    asked = {}
+
+    class Store:
+        def __getattr__(self, name):
+            return getattr(real.store, name)
+
+        def get_workspace(self):
+            return {
+                "workspace": (
+                    "IDENTITY: I am Blue.\nFOCUS: Awaiting Alex's final "
+                    "feedback on the completed DH399 reading report or the "
+                    "next academic task.\nNEXT EXPECTATION: Alex will reply."),
+                "updated": datetime.now(timezone.utc).isoformat(),
+            }
+
+    class Hub:
+        store = Store()
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def lately_line(self, user_name, live_thread=()):
+            asked["who"] = user_name
+            return ("yesterday, you did a comedic banter set with Casper on "
+                    "'AI Lab 3'")
+
+    monkeypatch.setitem(bt._continuity_routes.HUB, "blue", Hub())
+    chat.model.queue("Pretty good. Still grinning about Casper's set. You?")
+    response = chat.ask("how are you")
+
+    note = chat.model.payloads[0]["messages"][-1]["content"]
+    assert "Answer this social check-in" in note
+    assert "Awaiting Alex's final feedback" not in note
+    assert "next academic task" not in note
+    assert ("something that really happened to you lately, in your own plain "
+            "words, never quoted: yesterday, you did a comedic banter set with "
+            "Casper on 'AI Lab 3'.") in note
+    assert asked["who"] == "Alex"
+    assert reply_of(response).startswith("Pretty good.")

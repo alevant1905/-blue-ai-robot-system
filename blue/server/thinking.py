@@ -269,6 +269,30 @@ def asks_something(text: str) -> bool:
     return _asks_something(_bare(text))
 
 
+# Imperatives thinking needs no cue for, so _REQUEST_START_RE leaves them
+# out: "don't stop at secondary points. do the whole thing!" (10-01).
+_WORK_START_RE = re.compile(
+    r"^(?:do|don'?t|stop|keep|continue|go on|go ahead|finish|repeat|redo"
+    r"|start|put|turn|set|call|get)\b")
+
+
+def asks_for_work(text: str) -> bool:
+    """A request in any sentence of the message ("do the whole thing!",
+    "help me find…", "let me what you remember about me"), not a question
+    or a remark. A check-in mentions what really happened to the robot
+    lately (continuity.RobotContinuity.lately_line), and a job done for
+    someone comes back as "anything else you'd like to tackle next?"."""
+    text = _bare(text)
+    if _INDIRECT_REQUEST_RE.search(text):
+        return True
+    for sentence in re.split(r"(?<=[.!;?])\s+", text):
+        bare = _FILLER_PREFIX_RE.sub("", sentence.strip())
+        bare = _SPOKEN_NAME_RE.sub("", bare)
+        if _REQUEST_START_RE.match(bare) or _WORK_START_RE.match(bare):
+            return True
+    return False
+
+
 def offer_accepted(text: str, prev_reply: str = "") -> bool:
     """"sure" after "want me to draft it?": the go-ahead for the work Blue
     just offered, not an acknowledgement."""

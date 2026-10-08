@@ -725,3 +725,35 @@ def test_the_thinking_setting_is_low_unless_overridden(monkeypatch):
                             ("none", "low"), ("max", "low"), ("", "low")):
         monkeypatch.setenv("BLUE_THINKING_EFFORT", value)
         assert bt._thinking_effort() == expected
+
+
+# --------------------------------------------------------------------------
+# A request for work, which a check-in must not offer as "what happened to
+# you lately" (continuity lately_line, 2026-10-08)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "don't stop at secondary points. do the whole thing!",       # 10-01
+    "help me find the cheapest rtx6000 pro new or used that ships to canada",
+    "Let me what you remember about me",
+    "blue, can you write the intro for tomorrow's lecture",
+    "great. now summarize the second chapter for me",
+    "keep going with the reading report",
+    "I'd like a lesson plan for friday's DH399 class",
+])
+def test_a_request_for_work_is_work(text):
+    from blue.server.thinking import asks_for_work
+    assert asks_for_work(text)
+
+
+@pytest.mark.parametrize("text", [
+    "i see it as a part of the process toward tenure track work",
+    "i was thinking of using lm studio to run local models. what do yo think?",
+    "what is the difference between a chatbot and an AI agent?",
+    "anyways lm studio is sufficient. not a computer science class",
+    "i might take you with me to dh201 tomorrow",
+    "that means i may have a chance to apply for a permanent position next year",
+])
+def test_a_remark_or_a_question_is_not_work(text):
+    from blue.server.thinking import asks_for_work
+    assert not asks_for_work(text)

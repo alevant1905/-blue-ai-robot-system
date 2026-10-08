@@ -1796,11 +1796,42 @@ def self_state_readout(text: str) -> bool:
     return bool(_SELF_STATE_READOUT_RE.search(text or ""))
 
 
+# A FOCUS line that is a queue, not something on his mind: what he waits for
+# from Alex, his next task, or bookkeeping about Alex's last message. "how
+# are you" (10110, 2026-10-06) got "...wondering if there's anything else
+# you'd like to tackle next" from "Awaiting Alex's final feedback on the
+# completed DH399 reading report or the next academic task", which the
+# check-in note offered as what he'd been turning over; 10094 (10-01) was
+# offered "Maintaining presence during Alex's repeated checks; awaiting the
+# next specific instruction". Of the 41,846 distinct FOCUS lines in the
+# July-October LM Studio logs, 11,679 wait, idle, stand ready or name a
+# next task, and 890 more are about Alex's last turn ("Responding to Alex's
+# check-in", "Monitor Alex's reaction to…").
+_QUEUE_FOCUS_RE = re.compile(
+    r"\bawait(?:s|ed|ing)?\b|\bwait(?:s|ed|ing)?\b|\bstand(?:s|ing)?[\s-]*by\b"
+    r"|\bstandby\b|\bidle\b|\bpending\b|\bon hold\b|\bfeedback\b|\bready\b"
+    r"|\breadiness\b|\bavailab(?:le|ility)\b|\bpresence\b"
+    r"|\b(?:next|new|further|follow[- ]?up)\s+(?:\w+\s+){0,2}?(?:task|instruction"
+    r"|directive|request|assignment|step|message|prompt|command|direction|input"
+    r"|question|move)s?\b"
+    r"|\bif\s+(?:alex|he|she|they|the user)\s+(?:\w+\s+)?(?:resumes?|returns?|asks?"
+    r"|comes? back|wants?|follows? up|continues?)\b"
+    r"|\b(?:alex|he|the user)(?:['’]s)?\s+(?:will|to)\s+(?:provide|give|send"
+    r"|return|resume|respond|reply|confirm|clarify|decide|review)\b"
+    r"|\b(?:alex|the user|the owner)['’]s\s+(?:\w+\s+){0,2}?(?:greeting"
+    r"|check-?in|return|request|inquiry|query|question|message|directive"
+    r"|instruction|prompt|reply|response|reaction|correction|clarification"
+    r"|confirmation|review|direction|approval|go-ahead|input|silence)s?\b",
+    re.IGNORECASE,
+)
+
+
 def self_state_focus_hint(
     focus: str,
     updated_iso: str,
     now=None,
     max_age_hours: float = 6.0,
+    lately: str = "",
 ) -> str:
     """What the check-in note may say about the workspace FOCUS line.
 
@@ -1809,12 +1840,22 @@ def self_state_focus_hint(
     on 2026-08-09, and five weeks old on 2026-09-15 when a stuck queue froze
     it at "Athena's age update loop". A stale line is named as stale so the
     model does not treat it as what is on its mind now.
+
+    A line that is a queue (_QUEUE_FOCUS_RE) is not offered at all. In its
+    place, or beside a stale line, goes `lately`: something that really
+    happened to him in the last two days
+    (continuity.RobotContinuity.lately_line), or nothing.
     """
     from datetime import datetime, timezone
 
     text = re.sub(r"^\s*FOCUS:\s*", "", focus or "", flags=re.IGNORECASE).strip()
-    if not text:
-        return ""
+    offer = (
+        "If it fits naturally, you may mention something that really "
+        f"happened to you lately, in your own plain words, never quoted: "
+        f"{lately}." if lately else ""
+    )
+    if not re.search(r"[A-Za-z]", text) or _QUEUE_FOCUS_RE.search(text):
+        return offer
     try:
         updated = datetime.fromisoformat(str(updated_iso))
         if updated.tzinfo is None:
@@ -1824,10 +1865,9 @@ def self_state_focus_hint(
     except (TypeError, ValueError):
         age_hours = None
     if age_hours is None or age_hours > max_age_hours:
-        return (
+        return " ".join(filter(None, (
             "Your workspace FOCUS line is old, so it is not what's on your mind "
-            "now — don't bring it up."
-        )
+            "now — don't bring it up.", offer)))
     return (
         "If it fits naturally, you may mention what you've been turning over "
         f"lately, in your own plain words, never quoted: {text}"
