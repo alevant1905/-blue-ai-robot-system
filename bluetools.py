@@ -5159,7 +5159,51 @@ _DAY_SCHEDULE_ASK_RE = re.compile(
     r"teach|teaching|seminar|tutorial)\b|\b[a-z]{2,4}\s?\d{3}\b", re.I)
 _DAY_FOLLOWUP_RE = re.compile(
     r"\b(?:lab|labs|topic|reading|readings|class|session|lecture|syllabus|"
-    r"assigned|week|schedule)\b|\bnot\b|\bwrong\b|\bsure\b", re.I)
+    r"assigned|week|schedule)\b|(?<!of )\bcourses?\b|\bnot\b|\bwrong\b|\bsure\b",
+    re.I)
+# Pushing back on the rows he was given: "You're making those things up.",
+# "you do have it", "Keep looking until you find it." (3932, 7761, 3928).
+_DAY_PUSHBACK_RE = re.compile(
+    r"\bma(?:ke|kes|king|de)\b[^.?!]{0,20}\bup\b|\b(?:do|does) (?:have|know)\b"
+    r"|\bkeep (?:looking|checking|trying)\b|\b(?:look|check|try) again\b", re.I)
+# He tells, he doesn't ask: "i might take you with me to dh201 tomorrow"
+# (10111) got the day's rows and came back as "I was thinking about the
+# syllabus for DH201—specifically the connectionism vs. symbolic AI bit"
+# (10112); "we will do that in class" (10132) kept the rows of the turn
+# before. Narrow on purpose: a message that opens on I or we with nothing in
+# it that asks, wants, checks or corrects. Anything else about a day's
+# classes keeps the rows, since a question answered from memory is the
+# 09-24 failure ("AI Lab 5").
+_DAY_TELLS_RE = re.compile(r"^(?:i|we|i'm|im|we're|i'll|ill|we'll|i've|we've|i'd|we'd)\b")
+_DAY_ASKS_RE = re.compile(
+    r"\?|n't\b|\b(?:what|whats|which|when|where|who|how|why|whether|if|tell|"
+    r"remind|show|give|list|check|find|look|need|want|wanna|forgot|forget|"
+    r"remember|wonder|wondering|know|confirm|sure|not|wrong|actually|right|"
+    r"correct)\b")
+
+
+def _tells_not_asks(text: str) -> bool:
+    """A plain statement of his: "we will do that in class", not "we have
+    dh201 tomorrow right" or "i need the readings for friday"."""
+    t = _thinking._normalise(text)
+    return bool(_DAY_TELLS_RE.match(t) and not _DAY_ASKS_RE.search(t)
+                and not _thinking.asks_something(t))
+
+
+def _asks_after_a_day(text: str) -> bool:
+    """A follow-up that keeps the day of the question before it: one about
+    the classes ("yup lab 2", "course content"), a correction or pushback
+    ("its not lab 5", "you do have it"), or a short question ("what lab
+    #?", "are you sure?"). Not "ok thanks", "hi" or "we will do that in
+    class": a message of 60 characters or fewer used to keep the day
+    whatever it said."""
+    if _tells_not_asks(text):
+        return False
+    if _DAY_FOLLOWUP_RE.search(text) or _DAY_PUSHBACK_RE.search(text):
+        return True
+    return len(text) <= 60 and bool(
+        "?" in text or _thinking.asks_something(text)
+        or _thinking._CORRECTION_RE.search(_thinking._normalise(text)))
 
 
 def _day_of(text: str):
@@ -5178,29 +5222,44 @@ def _day_of(text: str):
     return None
 
 
+def _syllabus_day_target(conversation_messages):
+    """The day whose syllabus rows the newest user turn asks about, or None.
+
+    A question about a day's classes names it; a follow-up that asks or
+    corrects ("its not lab 5", "what lab #?") keeps the day of the question
+    before it; a statement of his gets none (_tells_not_asks). Any message
+    of 60 characters or fewer used to keep the day, so "ok thanks" carried
+    the rows on.
+    """
+    users = [m.get("content") for m in (conversation_messages or [])
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    if not users:
+        return None
+    newest = _intent_text(users[-1])
+    if _tells_not_asks(newest):
+        return None
+    target = _day_of(newest) if _DAY_SCHEDULE_ASK_RE.search(newest) else None
+    if target is None and _day_of(newest) is None and _asks_after_a_day(newest):
+        for earlier in reversed(users[-4:-1]):
+            ask = _intent_text(earlier)
+            # "what's the reading?" after "i might take you to dh201
+            # tomorrow" asks about that day: a statement still sets it.
+            if _DAY_SCHEDULE_ASK_RE.search(ask):
+                target = _day_of(ask)
+                if target:
+                    break
+    return target
+
+
 def _syllabus_day_note(conversation_messages) -> str:
     """The course syllabus rows for the day the user is asking about.
 
     Blue answered "what do we have tomorrow" from a belief his own wrong
     reply had become ("AI Lab 5", 0.95) and never looked (2026-09-24). The
     rows come straight from the files, for every course that meets that day,
-    and override memory. A short follow-up ("its not lab 5", "what lab #?")
-    keeps the day of the question before it.
+    and override memory. Which day, if any: _syllabus_day_target.
     """
-    users = [m.get("content") for m in (conversation_messages or [])
-             if m.get("role") == "user" and isinstance(m.get("content"), str)]
-    if not users:
-        return ""
-    newest = _intent_text(users[-1])
-    target = _day_of(newest) if _DAY_SCHEDULE_ASK_RE.search(newest) else None
-    if (target is None and _day_of(newest) is None
-            and (len(newest) <= 60 or _DAY_FOLLOWUP_RE.search(newest))):
-        for earlier in reversed(users[-4:-1]):
-            ask = _intent_text(earlier)
-            if _DAY_SCHEDULE_ASK_RE.search(ask):
-                target = _day_of(ask)
-                if target:
-                    break
+    target = _syllabus_day_target(conversation_messages)
     if target is None:
         return ""
     try:
@@ -12556,15 +12615,97 @@ def _build_location_block() -> str:
             f"(away from {home_phrase}). If he asks where you are, say {cur}.\n"
             "</location>"
         )
+    try:
+        class_line = _class_room_line()
+    except Exception as e:
+        log.warning(f"[PLACE] class room check failed: {e}")
+        class_line = ""
     return (
         "<location>\n"
         # Not "you and Alex are at home": Blue goes to Alex's office and
         # classes, and that claim contradicted "we're at Laurier"
         # (2026-09-15/16). What Alex says in the thread comes first.
-        f"Your base is {home_phrase}. If Alex has said where you are now, "
-        "that is where you are.\n"
-        "</location>"
+        # "background, not news": a bare "hi" got "I'm here in your
+        # office, ready for DH201 in about an hour" (10123) and "You
+        # built me to be here in your office while you teach DH201"
+        # (10145).
+        f"Your base is {home_phrase}. That's background, not news: say where "
+        "you are only when Alex asks or when it matters to what he said. If "
+        "Alex has said where you are now, that is where you are.\n"
+        + (class_line + "\n" if class_line else "")
+        + "</location>"
     )
+
+
+# A room as the syllabus or the calendar writes it: "SB107", "ART 1E1",
+# "VH 1154", "DAWB 2-138". Capitals only: "in 2026" is not a room.
+_ROOM_CODE = r"[A-Z]{2,5} ?\d[\dA-Z]*(?:-\d+[A-Z]?)?"
+_ROOM_IN_RE = re.compile(r"\bin (" + _ROOM_CODE + r")\b")
+_ROOM_FIELD_RE = re.compile(r"\b(?i:location|room)\s*:\s*(" + _ROOM_CODE + r")\b")
+_CLASS_TITLE_RE = re.compile(r"\b(?:lecture|class|seminar|tutorial|lab)\b", re.I)
+
+
+def _lecture_room(when_where: str) -> str:
+    """'SB107' from a syllabus's "Lecture and location" part ("Wednesday
+    10:00am - 12:50pm in SB107."), skipping the office hours line under it
+    ("... in DAWB 2-138 or by appointment")."""
+    for line in (when_where or "").splitlines():
+        if re.match(r"\s*(?:office hours?|instructor|e-?mail)\b", line, re.I):
+            continue
+        m = _ROOM_FIELD_RE.search(line) or _ROOM_IN_RE.search(line)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _class_room_line(now=None) -> str:
+    """One <location> line while Alex's class is on the calendar: "Alex is
+    teaching DH201 in SB107 until 12:50 PM. If he says you're in class,
+    you're in SB107."
+
+    On 10-07 during the DH201 lecture <location> only named his office
+    (DAWB 2-138), and "we are in the class rightnow" got "Since we are
+    currently in front of the class in **DAWB 2-138**" (10149); "wrong
+    room" got the office again (10151). The room comes from the event's
+    description ("Location: VH 1154", "Lecture in ART 1E1") or else the
+    course syllabus's "Lecture and location" line (e897c8b). A class is an
+    event whose title starts with a course code or names a lecture, class,
+    seminar, tutorial or lab. No room known, no line: the calendar alone
+    never says where he is.
+    """
+    event = _calendar_event_now(now)
+    if not event:
+        return ""
+    who = str(event.get("user_name") or "Alex").strip()
+    title = str(event.get("title") or "").strip()
+    codes = _syllabus_sections.written_course_codes(title)
+    if not who.lower().startswith("alex") or not codes:
+        return ""
+    if not (_CLASS_TITLE_RE.search(title)
+            or _syllabus_sections.COURSE_CODE_RE.match(title)):
+        return ""
+    code = codes[0]
+    desc = str(event.get("description") or "")
+    m = _ROOM_FIELD_RE.search(desc) or _ROOM_IN_RE.search(desc)
+    room = m.group(1) if m else ""
+    if not room:
+        for d in _syllabi_by_course().get(code, []):
+            fp = d.get("filepath", "")
+            if not fp or not os.path.exists(fp):
+                continue
+            for _label, part in _syllabus_sections.sections(
+                    _syllabus_file_text(fp), "when_where"):
+                room = _lecture_room(part)
+                if room:
+                    break
+            if room:
+                break
+    if not room:
+        return ""
+    until = (" until " + event["end"].strftime("%I:%M %p").lstrip("0")
+             if event.get("end") else "")
+    return (f"Alex is teaching {code.upper()} in {room}{until}. If he says "
+            f"you're in class, you're in {room}.")
 
 
 def _calendar_event_now(now=None):

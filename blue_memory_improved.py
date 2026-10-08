@@ -3617,14 +3617,20 @@ class EnhancedMemorySystem:
             elapsed = f"{delta} days ago (~{delta // 7} weeks)"
         else:
             elapsed = f"{delta} days ago (~{delta // 30} months)"
+        # "answer with this figure directly" also answered "hi": "Hey Alex,
+        # it's been a few days since we last talked." (10108, 10070; Hexia's
+        # "It's been ten days since we last spoke", 9912). The figure is for
+        # the question; the temporal-denial guard still feeds it back when
+        # he is told there is no record.
         return (
             "<last_conversation>\n"
             f"Your last conversation with {user_name} was on {last_day} — "
             f"{elapsed}. This is a factual record from the conversation log, "
             "not a guess. When asked when you last spoke, how many days it has "
-            "been, or how long since we last talked, answer with this figure "
-            "directly. Never say you have no log of past conversations or no "
-            "way to tell — you do, and it is right here.\n"
+            "been, or how long since we last talked, answer with this figure; "
+            "it is not news to open a greeting with. Never say you have no log "
+            "of past conversations or no way to tell — you do, and it is right "
+            "here.\n"
             "</last_conversation>"
         )
 
