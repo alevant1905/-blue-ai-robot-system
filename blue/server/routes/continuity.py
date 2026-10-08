@@ -311,7 +311,15 @@ def _call(messages: List[Dict[str, str]], temperature: float = 0.5,
         # ('{"curiosity": ..., "energy": ...}}' — the object's last value plus
         # its orphaned closing brace) and 35 had no content at all. Rebuilding
         # the inline form gives the existing parser the whole reply to search.
-        if reasoning:
+        #
+        # Not for a reply cut at the cap: its reasoning is an unfinished
+        # DRAFT. On 2026-10-07/08 (LM Studio defaulting to "Extra High") all
+        # eight reflections that ran out of tokens mid-thought were committed
+        # from it anyway — one workspace became the raw thinking ("…This is
+        # okay, not routine request as ongoing?…", v2429), another every
+        # section "..." (v2446), wiping the DH399 and DH201 beliefs. Such a
+        # pass now fails and is retried instead.
+        if reasoning and choice.get("finish_reason") != "length":
             return f"<think>{reasoning}</think>\n{text}".strip()
         return text.strip()
     except ReflectionPreempted:
@@ -419,6 +427,8 @@ def _workspace_lines(text: str) -> Dict[str, str]:
 _WS_BUDGET = 6000
 _WS_SECTION_FLOOR = 80
 _WS_PLACEHOLDER = "(not yet recorded)"
+# A section body that is only the template's ellipsis: not filled in.
+_WS_UNFILLED = re.compile(r"^\s*(?:\.{2,}|…+)\s*$")
 
 
 def _clip_workspace(text: str, limit: int = _WS_BUDGET) -> str:
@@ -468,8 +478,15 @@ def _merge_workspace(new_ws: str, current_ws: str) -> str:
     moved (or none at all, just drive deltas) — previously each of those was
     rejected outright ("missing required sections", 3 attempts, job failed,
     both robots, every idle window). Lines absent from the new workspace now
-    carry over from the current one."""
-    new_lines = _workspace_lines(new_ws)
+    carry over from the current one.
+
+    So do lines the model left as the template's "..." (or "…"): that is a
+    section it didn't fill, not one it emptied. On 2026-10-08 a pass wrote
+    every section as "..." (v2446) and the merge kept the dots over the
+    DH201 beliefs; a clean pass with thinking off still writes
+    "OPEN QUESTIONS: ..." when nothing changed there."""
+    new_lines = {label: line for label, line in _workspace_lines(new_ws).items()
+                 if not _WS_UNFILLED.match(line.split(":", 1)[1])}
     cur_lines = _workspace_lines(current_ws)
     if not new_lines and not cur_lines:
         return ""
