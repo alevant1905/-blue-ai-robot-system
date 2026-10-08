@@ -24,10 +24,14 @@ The cap alone would cut those essays off mid-thought; the note is what makes
 the model write a short answer that fits. It does not offer to go deeper:
 asked to ("offer to go deeper in one clause if there's more"), one reply in
 four closed on "If you want, I can…" or "Happy to go deeper…" — against
-ENDINGS — and the lengths were the same without it ("what could go wrong?"
-116-166 words with the offer, 133-146 without). "go on" lifts the cap.
+the closing note's ban on offers — and the lengths were the same without
+it ("what could go wrong?" 116-166 words with the offer, 133-146 without).
+"go on" lifts the cap.
 
-Pure text in, a number out — no bluetools import.
+Blue's previous reply ending on a question adds NO_QUESTION_NOTE to the
+same pinned note (turn_note).
+
+Pure text in, a number or a note out — no bluetools import.
 """
 
 from __future__ import annotations
@@ -322,6 +326,41 @@ def short_turn_note(text: str, *, voice: bool = False, kid: bool = False,
     if voice or kid or thinking != _thinking.THINK_ON:
         return ""
     return SHORT_TURN_NOTE if _thinking.asks_something(text) else ""
+
+
+# Questions back are rare and never two replies in a row (Alex, 10-07: "rarely,
+# specific only"). The closing note allows one short question about what he
+# just said; when Blue's last reply already ended on one, the turn says so
+# beside his words, where the model weighs a note most (see SHORT_TURN_NOTE).
+# A nudge, not a net: nothing counts or cuts questions in the reply.
+# Replayed on qwen3.8-27b over two 10-05 harness turns whose previous reply
+# ended on a question ("pretty tired, long week of teaching", typed; "i don't
+# know, maybe the material is too dense", spoken), n=3 each: "No question
+# this time." still ended 3 of 6 on one ("Have you had a chance to
+# decompress…?", "Have you tried breaking that Reigeluth chapter…?"); this
+# wording, 0 of 6.
+NO_QUESTION_NOTE = "End this reply on a statement, with no question."
+# What may follow the "?" at the end of a reply: closing quotes, brackets,
+# markdown emphasis.
+_TRAILING_RE = re.compile(r"[\s\"'”’)\]*_~]+$")
+
+
+def ends_on_question(reply: str) -> bool:
+    """Blue's reply ended on a question: "…what model did you point it at?",
+    also inside closing quotes or markdown. A question earlier in the reply
+    does not count."""
+    return _TRAILING_RE.sub("", reply or "").endswith("?")
+
+
+def no_question_note(prev_reply: str) -> str:
+    """NO_QUESTION_NOTE when Blue's previous reply ended on a question."""
+    return NO_QUESTION_NOTE if ends_on_question(prev_reply) else ""
+
+
+def turn_note(*notes: str) -> str:
+    """The notes for beside the user's words, as one: "[A short message: …
+    End this reply on a statement, with no question.]", not two brackets."""
+    return " ".join(n.strip() for n in notes if n and n.strip())
 
 
 def visible_chars(cap_tokens: int) -> int:

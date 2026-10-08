@@ -97,13 +97,14 @@ def _system_text(user="Alex", voice=False, heard=False, text="hi", robot="blue")
 def test_the_adult_style_note_comes_last_and_limits_questions():
     text = _system_text()
     assert text.rstrip().endswith("No emoji.")
-    assert "never an either/or menu" in text
-    assert "if their short reply accepts something you offered, do it" in text
+    assert "no either/or choices" in text
+    assert "if his short reply takes up something you offered, do it" in text
 
 
 def test_the_kids_style_note_is_unchanged():
     text = _system_text(user="Vilda")
-    assert "never an either/or menu" not in text
+    assert "either/or" not in text
+    assert "End on your own words" not in text
 
 
 def test_spoken_adult_replies_end_on_the_answer_and_note_the_transcription():
@@ -118,13 +119,15 @@ def test_spoken_adult_replies_end_on_the_answer_and_note_the_transcription():
 def test_the_adult_style_note_says_how_to_end_and_what_a_feeling_is():
     """Either/or menus and unasked offers ("do you want me to dim the
     lights…?") 9 of 12 -> 1 of 9 in qwen3.8-27b replays; stock riddles 3/3
-    -> 0/3."""
+    -> 0/3. One plain note since S7: no ENDINGS, FEELINGS or HUMOUR labels."""
     text = _system_text()
     note = text[text.rindex("\nSTYLE:"):]
-    for part in ("ENDINGS:", "FEELINGS:", "HUMOUR:", "A feeling is not a request",
-                 "an appointment", "never an either/or menu",
-                 "clearly shorter"):
+    for part in ("A feeling is not a request", "something to remember",
+                 "no either/or choices", "no checking whether he agrees",
+                 "dimming the lights", "clearly shorter", "never a stock riddle"):
         assert part in note, part
+    for label in ("ENDINGS:", "FEELINGS:", "HUMOUR:"):
+        assert label not in text, label
     assert "a need the user just raised" not in text
     assert "lip motors" not in note, "the note is Hexia's and Casper's too"
     assert text.rstrip().endswith("No emoji.")
@@ -133,7 +136,8 @@ def test_the_adult_style_note_says_how_to_end_and_what_a_feeling_is():
 @pytest.mark.parametrize("voice,heard", [(False, False), (True, True)])
 def test_the_kids_notes_get_no_endings(voice, heard):
     text = _system_text(user="Vilda", voice=voice, heard=heard)
-    assert "ENDINGS:" not in text and "FEELINGS:" not in text
+    assert "End on your own words" not in text
+    assert "A feeling is not a request" not in text
 
 
 def _system_text_in(language, voice=False, heard=False, user="Alex"):
@@ -151,27 +155,28 @@ def test_the_style_note_stays_last_when_the_language_is_set():
     assert text.rstrip().endswith("No emoji.")
 
 
+SPOKEN_END = "a question only rarely, one short one about what he just said."
+
+
 def test_a_heard_turn_ends_on_the_spoken_note():
     """HEARD, NOT TYPED used to come after SPOKEN REPLY on every heard turn.
-    The ENDINGS and FEELINGS lines sit between them: told "i had a rough
-    day" aloud, no menu and no "I'm here if…" in 3/3 replays, where the
-    same words inside SPOKEN REPLY changed nothing."""
+    The typed note's turn rules sit between them: told "i had a rough day"
+    aloud, the same rules inside SPOKEN REPLY changed nothing (P2-5)."""
     text = _system_text_in("fr", voice=True, heard=True)
     spoken = text.rindex("\nSPOKEN REPLY:")
     assert text.index("LANGUAGE:") < spoken
-    assert text.index("HEARD, NOT TYPED") < text.index("\nENDINGS:") < spoken
-    assert text.index("\nFEELINGS:") < spoken
-    assert "HUMOUR:" not in text
-    assert text.rstrip().endswith(
-        "no follow-up question unless you need one to go on.")
+    assert text.index("HEARD, NOT TYPED") < text.index("\nSTYLE:") < spoken
+    assert text.index("A feeling is not a request") < spoken
+    assert "never a stock riddle" not in text
+    assert "Small talk gets a sentence or two" not in text, "SPOKEN REPLY has the length"
+    assert text.rstrip().endswith(SPOKEN_END)
 
 
 def test_panel_keeps_the_short_spoken_note():
     """Panel passes voice=True without `heard`, for brevity only."""
     text = _system_text(voice=True, heard=False)
-    assert "ENDINGS:" not in text and "FEELINGS:" not in text
-    assert text.rstrip().endswith(
-        "no follow-up question unless you need one to go on.")
+    assert "\nSTYLE:" not in text and "A feeling is not a request" not in text
+    assert text.rstrip().endswith(SPOKEN_END)
 
 
 # ---- Alex is "you" when he is the one talking (P2-5) ------------------------------
@@ -643,7 +648,7 @@ def test_a_face_request_is_told_nothing_here_saves_a_face(people):
 def test_a_spoken_face_request_keeps_the_spoken_note_last(people):
     text = _thread_system_text(CLOVER_THREAD, voice=True)
     assert text.index("FACE REQUEST:") < text.index("SPOKEN REPLY:")
-    assert text.rstrip().endswith("no follow-up question unless you need one to go on.")
+    assert text.rstrip().endswith(SPOKEN_END)
 
 
 def test_the_name_is_found_when_it_is_typed_in_lower_case(people):

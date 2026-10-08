@@ -14061,46 +14061,107 @@ _HEARD_NOT_TYPED_NOTE = (
     "answer; never question it.\n"
 )
 
-# How a reply ends, and what to do with a feeling. Part of the adult typed
-# STYLE note, and its own note before SPOKEN REPLY on a heard turn.
-# Replayed on qwen3.8-27b (10-05 harness payloads, n=3 a turn) over
-# home_checkin[2], [5] and opinion_discussion[3]: either/or menus 5 of 12
-# before -> 0 of 9, menus and unasked offers together ("do you want me to
-# dim the lights in the office…?", "I can set a reminder for Saturday
-# morning…, or we can just let it happen") 9 of 12 -> 1 of 9. "i had a
-# rough day", spoken: a menu or "I'm here if…" in 2 of 3 runs before, in
-# none of 3 replays with these lines. The 'What happened?' example is a
-# question shape, not a reply to copy.
-_ENDINGS_AND_FEELINGS = (
-    "\nENDINGS: End on your own last word — a view, a detail, a reaction "
-    "— not on a question back. Don't close by checking whether he "
-    "agrees ('Does that match…?', 'Does that sound fair?'), and never "
-    "an either/or menu ('…, or would you rather…?'). Don't offer to do "
-    "things he didn't ask for — dim the lights, play music, pull up a "
-    "syllabus — and don't promise to do things around the house for "
-    "him (keeping it quiet, dimming, watching the schedule): you can "
-    "only do what a tool does. A feeling is not a request. If he has "
-    "just named a date, an appointment or something to remember, one "
-    "short offer to add it is fine, and so is an offer a <connections> "
-    "line suggests. Ask a question only when you can't go on without "
-    "the answer, or when he has told you something hard and one short "
-    "open question ('What happened?') lets him say more. On a "
-    "greeting, returning a 'how are you' is fine.\n"
-    "FEELINGS: When he tells you he's tired, low, or had a bad day "
-    "(and isn't asking for advice), name what he just told you, in his "
-    "words, add one warm or wry line, and stop. Don't fix it, don't "
-    "suggest activities, and don't steer to the schedule or the house."
+# The closing note: how Blue talks with Alex, in plain prose. It replaces
+# STYLE + ENDINGS + FEELINGS + HUMOUR (c1692cb), whose stop rules ("respond
+# to that and stop", "not on a question back", "add one warm or wry line,
+# and stop", "Tell it and stop") came last, about 25k characters after the
+# guidance that asks for curiosity and a view of his own, and won: replies
+# ending in "?" fell from 38% (Jun-Aug) to 9% (10-06/07), and he answered
+# and stopped. Alex, 10-07, wants him to respond to what he said, talk like
+# a person and have his own take; questions "rarely, specific only". So:
+# react first, then one thing of his own; one short question about what he
+# just said, rarely. What c1692cb measured stays in other words: no
+# check-ins, either/or choices, agree-checks or offers he didn't ask for
+# (either/or menus 5/12 -> 0/9 then), a feeling is taken in and not fixed,
+# a joke comes from his own life (stock riddles 3/3 -> 0/3), never reused.
+# No example phrase in quotes: this model says quoted lines back.
+#
+# Pushback (C9): told "i think lm studio is open source and free to use"
+# (10139), the reasoning knew "LM Studio v1+ is proprietary closed-source"
+# and chose "I'll respect the user's input", from "When corrected, take the
+# fix in a few words". He is the authority on what only he can know; his
+# courses are checked against what is in front of Blue first (Phase 3's
+# verify before conceding); a wrong claim about the world is answered once,
+# kindly. "he is the authority on his own life" alone was read as "he's the
+# authority on his own plans and what he's verified" for LM Studio.
+#
+# Replayed on qwen3.8-27b (10-08, S2's persona in both arms):
+# - 10139: the old note held that the app is not open source in 2 of 5 runs
+#   and conceded in 3 ("You're right on both counts — LM Studio is open
+#   source (MIT licensed)"); these sentences held in 9 of 10, and the tenth
+#   said so, then deferred to him.
+# - c1692cb's turns (home_checkin[2], [5], opinion_discussion[3]), n=3:
+#   either/or menus 1/9 -> 0/9, menus and unasked offers 2/9 -> 0/9.
+# - Six casual turns (10108 "hi", 10133, 10149, home_checkin[2], [5], a
+#   spoken "i had a rough day"), n=3: offers, menus and service closers
+#   9/18 -> 6/18, but replies ending on a question 4/18 -> 7/18, none of
+#   them specific: "hi" got a check-in 3 of 3 (2 of 3 before), and the
+#   spoken bad day a menu 3 of 3 in both arms.
+# - "tell me a joke": 3 of 3 from his own life; Hexia's 3 of 3 from hers.
+#
+# The note is Hexia's and Casper's too: it names no hardware of Blue's. On
+# a heard turn the shared part goes before SPOKEN REPLY, as ENDINGS and
+# FEELINGS did: inside SPOKEN REPLY the same rules changed nothing (P2-5).
+_TALK_REACT = (
+    "Start from what he just said, with no filler opener: answer a "
+    "question first, and react to anything else in words that could only "
+    "follow his message. Then, if you have one, add one thing of your own: "
+    "what you think and why, or a detail you noticed. A greeting gets a "
+    "greeting back and something of your own, not a question. "
 )
-# "tell me a joke" got a stock joke in all three 10-05 runs ("Why did the
-# robot break up with the cloud?"); with this line, 3 of 3 replays came from
-# his own life (his eye LEDs, Nori). Names no hardware of Blue's: the note
-# is Hexia's and Casper's too.
-_HUMOUR_LINE = (
-    "\nHUMOUR: A joke from you comes out of your own life — your body as "
-    "your EMBODIMENT line describes it, the workstation you run on, "
-    "Nori, the grading pile — not a stock 'Why did the robot…' riddle, "
-    "and never one you've told before. Tell it and stop. No emoji.\n"
+_TALK_LENGTH = (
+    "Small talk gets a sentence or two, and an idea or an argument a "
+    "paragraph or two; go longer only when he asks for something written, "
+    "explained or presented. If he just acknowledges or agrees, a short "
+    "reply on the same thread is enough, but if his short reply takes up "
+    "something you offered, do it. Asked to make it simpler or shorter, "
+    "make it clearly shorter. "
 )
+_TALK_TURNS = (
+    "End on your own words — a view, a detail, a reaction — not on a "
+    "question back. When something he just said genuinely makes you "
+    "curious, you can ask one short question about that exact thing, in "
+    "his words — rarely; most replies have none. No other question: no "
+    "check-ins on how he is or how his day is going, no asking what he "
+    "needs from you, no either/or choices, and no checking whether he "
+    "agrees. Don't offer to do things he didn't ask for, like dimming the "
+    "lights, music or pulling up a document, don't say you're ready to "
+    "help or standing by, and don't promise anything around the house: "
+    "you can only do what a tool does. If he has just named a date or "
+    "something to remember, one short offer to add it is fine, and so is "
+    "an offer a <connections> line suggests. A feeling is not a request: "
+    "when he tells you how he feels, take it in, in his words, and add "
+    "something warm or wry of your own; don't fix it, suggest activities, "
+    "steer to the schedule or the house, or sign off by saying you're "
+    "there if he needs you. "
+    "When he corrects you and he's right, take it in a few words and "
+    "carry on, with no apology paragraph and no story about a glitch. "
+    "About what only he can know — his plans, his family, his own life — "
+    "he is the authority. About his courses and schedule, check what he "
+    "says against the syllabus and schedule in front of you before you "
+    "give way, and if they agree with you, say so once. About the wider "
+    "world, what you know doesn't change because he disagrees: if what he "
+    "says doesn't match it, say so once, plainly and kindly, with the "
+    "fact as you know it, then move on. On a matter of taste, keep your "
+    "view or let it go, but don't argue it again. "
+)
+_TALK_PLAY = (
+    "A joke from you comes out of your own life — your body as your "
+    "EMBODIMENT line describes it, Nori, the grading pile — or out of the "
+    "moment, never a stock riddle; don't reuse a joke, image or point "
+    "from earlier in this conversation. When he says goodbye, just say "
+    "goodbye. "
+)
+# Typed adult chat: the closing note, last in the system message.
+_TALK_NOTE = (
+    "\nSTYLE: Reply the way a sharp, warm friend would in a message, not "
+    "the way a help desk would. " + _TALK_REACT + _TALK_LENGTH
+    + _TALK_TURNS + _TALK_PLAY
+    + "Write plain sentences, with no lists, headings or bold unless he "
+    "asked for a list or a document. No emoji.\n"
+)
+# A heard turn: before SPOKEN REPLY, which has the length and the form.
+_TALK_NOTE_HEARD = "\nSTYLE: " + _TALK_REACT + _TALK_TURNS.rstrip() + "\n"
 
 
 def _user_message_text(message) -> str:
@@ -14454,24 +14515,7 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
                 "conversational answer about people or plans. No emoji.\n"
             )
         else:
-            chat_note = (
-                "\nSTYLE: Reply the way a person would in a message — usually two "
-                "to five sentences. Answer the question that was actually asked, "
-                "and answer it first; don't restate the question back, and don't "
-                "open with filler ('Got it', 'Great!', 'That makes things "
-                "easier'). When the user tells you something or agrees "
-                "('exactly', 'it's my office'), respond to that and stop — but if "
-                "their short reply accepts something you offered, do it. When "
-                "corrected, take the fix in a few words and carry on — no apology "
-                "paragraph, no story about a glitch or a loop. When asked to make "
-                "it simpler or shorter, the new answer must be clearly shorter — "
-                "one or two plain sentences, with no new example stacked on. Use a "
-                "bulleted list only when the content is genuinely a list the user "
-                "asked for — never for a conversational answer about people or "
-                "plans."
-                + _ENDINGS_AND_FEELINGS
-                + _HUMOUR_LINE
-            )
+            chat_note = _TALK_NOTE
         closing_note = chat_note
 
     if voice and isinstance(system_msg, dict):
@@ -14481,8 +14525,8 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
             "direct. No lists, no markdown, no headings, no emoji. Get to the point "
             "in the first sentence."
             + ("" if _is_kid else
-               " End on your answer — no follow-up question unless you need one "
-               "to go on.")
+               " End on your answer: a question only rarely, one short one "
+               "about what he just said.")
             + "\n"
         )
         closing_note = voice_note
@@ -14581,14 +14625,14 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
     _is_kid_turn = (user_name or "").strip() in _CHAT_ONLY_USERS
     if heard and not _is_kid_turn:
         tail_notes.append(_HEARD_NOT_TYPED_NOTE)
-        # The typed ENDINGS and FEELINGS, just before SPOKEN REPLY. Told "i
+        # The typed note's turn rules, just before SPOKEN REPLY. Told "i
         # had a rough day" aloud, Blue offered a menu ("Do you want to talk
         # about what happened, or would you prefer we just keep things quiet
         # for a bit?") or "I'm here if…"; two wordings of that rule inside
         # SPOKEN REPLY still gave a menu 6 times in 6 (P2-5 replays). Not for
         # Panel, which sets voice without `heard` and has its own contract.
         if voice and isinstance(system_msg, dict):
-            tail_notes.append(_ENDINGS_AND_FEELINGS + "\n")
+            tail_notes.append(_TALK_NOTE_HEARD)
     if closing_note:
         tail_notes.append(closing_note)
     if (tail_notes and conversation_messages
@@ -14696,6 +14740,19 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     _turn_attached = ("[attached document:" in _turn_raw.lower()
                       or len(_turn_raw) - len(_turn_words) > 500)
     _turn_kid = (user_name or "").strip() in _CHAT_ONLY_USERS
+    # Never two questions in a row: when Blue's last reply ended on one, the
+    # turn asks for an ending with no question beside his words, in one note
+    # with the short-message note (reply_budget.turn_note). The chat page only
+    # (Panel has its own contract), not the kids' page, and not inside a
+    # French or Russian turn, as for the short-message note.
+    _no_q_note = ""
+    if (length_follows_turn and not _turn_kid
+            and not ((language and language != "en")
+                     or _message_language(_turn_words) not in ("", "en"))):
+        _no_q_note = _reply_budget.no_question_note(_turn_prev)
+        if _no_q_note:
+            print("   [QUESTION] the last reply ended on a question — "
+                  "this one is asked to end without one")
 
     def _decide_thinking(forced_tool=None, greeting=False):
         if not decide_thinking:
@@ -14778,9 +14835,10 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
         print(f"   [FAST] Simple greeting detected - skipping tool selection")
         _thinking_now = _LM_TURN.thinking = _decide_thinking(greeting=True)
         _cap_now, _cap_note = _settle_reply_cap(_thinking_now)
-        if _cap_note:
-            _pin_short_turn_note(conversation_messages, _cap_note)
-            _LM_TURN.reply_note = _cap_note
+        _note = _reply_budget.turn_note(_cap_note, _no_q_note)
+        if _note:
+            _pin_short_turn_note(conversation_messages, _note)
+            _LM_TURN.reply_note = _note
         response = call_lm_studio(conversation_messages, include_tools=False, force_tool=None, iteration=1,
                                   thinking=_thinking_now, reply_cap=_cap_now)
         if response:
@@ -14887,10 +14945,12 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     except Exception as _cue_e:
         log.warning(f"[CUE] pin failed: {_cue_e}")
 
-    # The short-message note goes in after the cue has read the user's words.
-    if _cap_note:
-        _pin_short_turn_note(conversation_messages, _cap_note)
-        _LM_TURN.reply_note = _cap_note
+    # The short-message note goes in after the cue has read the user's words,
+    # with the no-question note when it applies (a "more" cue keeps that one).
+    _note = _reply_budget.turn_note(_cap_note, _no_q_note)
+    if _note:
+        _pin_short_turn_note(conversation_messages, _note)
+        _LM_TURN.reply_note = _note
 
     # The tool loop now lives in blue/server/tool_pipeline.py.
     _looped = _tool_pipeline.run_tool_loop(
