@@ -247,6 +247,78 @@ def test_the_rule_for_alex_has_no_line_to_say(profile):
         assert f"'{line}'" not in text and f'"{line}"' not in text
 
 
+def test_the_rule_is_about_what_he_is_told(profile):
+    """Unscoped, "never refer to him by name or as 'he'" also governed what
+    Blue writes for Alex to someone else: "email Stella that I'll be home
+    late" wants "Alex will be home late", and a bio is in the third person
+    (S2 review)."""
+    # The rule as measured in S2, word for word, then the exception.
+    scoped = ("so he is 'you': never refer to him by name or as 'he', except "
+              "in something you write for him for other people to read")
+    assert scoped in bt._CREATOR_ADDRESS_TO_ALEX
+    assert scoped in bt._voice_note("blue", speaking_to_alex=True)
+
+
+def test_the_prompt_never_says_both_he_and_never_he(profile):
+    """Position 0 said "always refer to Alex as he/him, never as she/her";
+    the rule for Alex, later in the same message, says never 'he' (S2
+    review). The opening states the fact, and the "she" stays ruled out."""
+    text = _chat_text(["hi"])
+    assert ALEX_IS_YOU in text
+    assert "always refer to Alex as he/him" not in text
+    assert "Alex uses he/him pronouns, never she/her." in text
+    assert "always refer to" not in bt.build_system_preamble("Hexia")
+
+
+def test_dont_quote_it_is_about_the_perspective(profile):
+    """After the rule, "Don't recite or quote it" could be read as the rule's;
+    the perspective is what must not be recited on "hi"."""
+    note = bt._voice_note("blue", speaking_to_alex=True)
+    header = note[:note.index("]:\n")]
+    assert (header.index("Don't recite or quote it; just be this person.")
+            < header.index("It names Alex") < header.index(ALEX_IS_YOU))
+    assert header.endswith("such as an email or a bio")
+
+
+@pytest.mark.parametrize("thread", [
+    ["introduce yourself to a group of people who are not familiar with ai"],  # 8651
+    ["imagine you meet a person who doesnt know what ai is. introduce "
+     "yourself to them"],  # 8845
+    ["I want you to introduce yourself to doctor la chapelle."],  # 1665
+    ["i want you to introduce yourself to my clas"],  # 6765
+    ["Hey Blue, introduce yourself briefly."],  # 4516
+    ["i want you to introduce yourself to a new group of people", "go on"],  # 6701
+])
+def test_an_introduction_is_not_said_to_alex(profile, thread):
+    """Its identity note asks for "Blue, Alex's robot" to whoever is named,
+    and the rule for Alex said never to name him: "I'm Blue, you built me"
+    to a guest, or no creator at all (S2 review)."""
+    text = _chat_text(thread)
+    assert TO_ALEX not in text and ALEX_IS_YOU not in text
+    assert "Alex Levant is real and built you." in text
+    assert not bt._speaking_to_alex(
+        [{"role": "user", "content": t} for t in thread], "Alex")
+
+
+@pytest.mark.parametrize("thread", [
+    ["who are you?", "go on"],
+    ["how would you introduce me to the dean?"],
+    ["tell me more"],
+])
+def test_his_own_questions_are_still_said_to_him(profile, thread):
+    assert TO_ALEX in _chat_text(thread)
+
+
+def test_his_clas_is_his_class():
+    """"i want you to introduce yourself to my clas", five times on 07-13
+    (6765-6801), and "introduce yourself to the clas" to Hexia (9771)."""
+    from blue_identity import class_audience, identity_request_kind
+    assert class_audience("i want you to introduce yourself to my clas") == "class"
+    assert identity_request_kind("say hi to my clas") == "introduction"
+    assert identity_request_kind("say hi to the clas") == "introduction"
+    assert class_audience("what clas of ai are you?") is None
+
+
 CLASS_THREAD = [
     "can you hear me?",
     "we're in front of the DH399 class right now. do you want to say hello to everyone?",
@@ -314,6 +386,9 @@ def test_the_embodiment_text_is_the_same_on_every_turn_to_alex(profile):
     "introduce yourself",  # 8655
     "present your reading report to the class",  # 10097
     "introduce yourself to an audience",  # 6591
+    "i want you to introduce yourself to my clas",  # 6765
+    "introduce yourself to the clas",  # 9771
+    "we are in the clas right now",
     "you're talking to my students now",
     "students, meet Blue. Blue, who are you?",
     # asked of him, not the user's own telling
@@ -399,6 +474,9 @@ def test_blue_is_alexs_robot_with_a_view_not_a_service_desk():
         assert gone not in persona
     for place in ("office", "home", "Laurier", "DAWB", "house"):
         assert place not in persona
+    # Banter's no_family mode and an introduction to a class read it as is
+    # (S2 review); the family reaches chat through <known_facts>.
+    assert "family" not in persona
     # what a "who are you?" is answered from is unchanged
     assert "(your <j_space>)" in persona and "never with a generic feature list" in persona
 

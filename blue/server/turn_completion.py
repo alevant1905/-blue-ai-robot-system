@@ -38,6 +38,15 @@ def _without_written_call(text):
     return kept
 
 
+# A regeneration with no model turn behind it (a grounded reply) has the
+# persona line alone for its system message, and since 10-07 Blue's sets no
+# length: "Keep responses brief and natural" left it for the closing note
+# and the turn cap (S2), neither of which that retry has. It says it here.
+# Hexia's and Casper's lines carry their own length words.
+_PERSONA_ONLY_LENGTH = "Keep the reply brief and natural."
+_PERSONA_LENGTH_RE = re.compile(r"\b(?:brief|concise|short|too long)\b", re.I)
+
+
 # Compiled once. These were rebuilt on every single turn, and living inside
 # finish() meant the only way to check one was to drive a whole request.
 _family_refusal_re = re.compile(
@@ -976,6 +985,8 @@ def _run_reply_guards(final_content, response, *, messages, robot,
                     # No model turn ran (a grounded reply): merge the persona
                     # into an existing head system message if present.
                     _persona = bt._robot_cfg(robot)["persona_line"]
+                    if not _PERSONA_LENGTH_RE.search(_persona):
+                        _persona += " " + _PERSONA_ONLY_LENGTH
                     if _retry_msgs and _retry_msgs[0].get("role") == "system":
                         _retry_msgs[0] = {"role": "system", "content": (
                             _persona + "\n\n" + (_retry_msgs[0].get("content") or ""))}
@@ -1422,10 +1433,11 @@ def finish(response: Dict[str, Any], *, _grounded_reply, last_user_msg, messages
         templated=_templated)
 
     # Strip the closing offer and the emoji. Done here rather than by
-    # instruction because the persona has asked for concise replies all
-    # along and still gets "Is there anything specific you'd like me to
-    # help with? 😊" on one turn in five. The kids' chat keeps its
-    # emoji — Vilda's page is meant to be friendly.
+    # instruction because asking did not stop it: with "Keep responses
+    # brief and natural" in Blue's persona (until 10-07) he still said "Is
+    # there anything specific you'd like me to help with? 😊" on one turn
+    # in five. The kids' chat keeps its emoji — Vilda's page is meant to
+    # be friendly.
     try:
         if final_content:
             _styled = bt.strip_conversational_filler(

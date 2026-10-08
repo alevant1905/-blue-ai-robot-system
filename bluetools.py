@@ -1497,10 +1497,12 @@ def build_system_preamble(robot_name: str = "Blue") -> str:
     # <known_facts> block carries the USER's facts (and already filters bot
     # facts on its side).
     # Hardcoded user pronouns — Alex uses he/him, and the model has been
-    # caught defaulting to "she" otherwise.
+    # caught defaulting to "she" otherwise. A fact, not a rule for how to
+    # refer to him: to Alex himself he is "you" (_ALEX_IS_YOU), and "always
+    # refer to Alex as he/him" sat at position 0 of the same message as
+    # "never refer to him … as 'he'" (S2 review, 10-08).
     return (
-        f"You are {robot_name}. Alex uses he/him pronouns — always refer to "
-        "Alex as he/him, never as she/her."
+        f"You are {robot_name}. Alex uses he/him pronouns, never she/her."
     )
 
 # Load facts at import time (only if enhanced memory not available)
@@ -8827,10 +8829,13 @@ ROBOTS = {
         # "robot companion", is Alex's own wording (2026-09-24). No place in
         # it: where he is belongs to <location> and to what Alex says. Length
         # is the closing note's and the turn cap's job. Also read by Panel,
-        # the duet (with family), banter and the regenerations.
+        # the duet (with family), banter and the regenerations. No family in
+        # it either: banter's no_family mode and an introduction to a class
+        # read it as is, and the family reaches adult chat through
+        # <known_facts> and memory.
         "persona_line": (
             "You are Blue, Alex's robot: a curious, wry, warm mind who talks "
-            "with him about his work, his family and ideas, with a continuous "
+            "with him about his work and ideas, with a continuous "
             "inner life of your own: a persistent inner "
             "workspace (your <j_space>) that carries your attention, beliefs, "
             "and commitments between conversations and quietly revises itself "
@@ -9195,8 +9200,16 @@ def _profile_excerpt(text, limit=_PROFILE_NOTE_MAX) -> str:
 # when you are." (10145, 10-07, qwen3.6-35b-a3b). Ends EMBODIMENT's creator
 # sentence (_CREATOR_ADDRESS_TO_ALEX) and the self-profile's header. Both
 # keep the "never": a header with only "he is 'you'" let one "came through
-# Alex correcting me" through in 6 replays on qwen3.8-27b (10-07).
-_ALEX_IS_YOU = "so he is 'you': never refer to him by name or as 'he'."
+# Alex correcting me" through in 6 replays on qwen3.8-27b (10-07). Writing
+# for him to others is the exception: with no exception it also governed
+# the body of an email to Stella from chat ("Alex will be home late") and a
+# bio in the third person (S2 review, 10-08). The exception follows the
+# rule, which stays word for word: scoped up front ("in what you say to
+# him, never…"), 2 of 6 probe replies said "Alex's office" or "weights that
+# Alex tuned" to him (10-08).
+_ALEX_IS_YOU = ("so he is 'you': never refer to him by name or as 'he', "
+                "except in something you write for him for other people to "
+                "read, such as an email or a bio.")
 
 
 def _voice_note(robot="blue", speaking_to_alex=False) -> str:
@@ -9214,10 +9227,12 @@ def _voice_note(robot="blue", speaking_to_alex=False) -> str:
         p = _profile_excerpt(get_self_profile(robot))
         if p:
             if speaking_to_alex and re.search(r"\bAlex\b", p):
+                # The "it" of "don't quote it" is the perspective, so that
+                # clause comes first; after the rule it read as the rule's.
                 close = (
-                    "It names Alex in the third person, but you are talking "
-                    "with Alex himself, " + _ALEX_IS_YOU + " Don't recite or "
-                    "quote it; just be this person]:\n"
+                    "Don't recite or quote it; just be this person. It names "
+                    "Alex in the third person, but you are talking with Alex "
+                    "himself, " + _ALEX_IS_YOU.rstrip(".") + "]:\n"
                 )
             else:
                 close = "Don't recite or quote it; just be this person]:\n"
@@ -13837,27 +13852,28 @@ def _user_message_text(message) -> str:
 # CMDS4740, the class" (06-22). Not a class talked about ("the students
 # seemed bored", "do you want to come to class with me?", "what would you
 # say to a student who…") and not the user's own telling ("what should I
-# tell the students?").
+# tell the students?"). "clas" is his typing: "i want you to introduce
+# yourself to my clas" five times on 07-13 (6765-6801), and 9771.
 _CLASS_IN_ROOM_RE = re.compile(
     r"\bin front of (?:the|my|your|his|our|an?|all (?:the|my|your|his|our)) "
-    r"(?:\w+ )?(?:class(?:room)?|students|lecture|audience)\b"
+    r"(?:\w+ )?(?:class?(?:room)?|students|lecture|audience)\b"
     r"|\b(?:say(?:ing)? (?:hi|hello|hey|good (?:morning|afternoon))"
     r"|introduc(?:e|ing)|wav(?:e|ing)|talk(?:ing)?|speak(?:ing)?"
     r"|present(?:ing)?)\b[^.?!\n]{0,30}?\bto "
     r"(?:the|my|our|these|an?|all (?:the|my|our)) (?:\w+ )?"
-    r"(?:class|students|audience)\b"
+    r"(?:class?|students|audience)\b"
     r"|\bintroduc(?:e|ing) yourself\b[^.?!\n]{0,40}?\b(?:the|my|our|these) "
-    r"(?:\w+ )?(?:class|students|audience)\b"
+    r"(?:\w+ )?(?:class?|students|audience)\b"
     # "introduce the class to CMDS4740", said a minute before 5028.
-    r"|\bintroduc(?:e|ing) (?:the|my|our|this) (?:class|students|audience) to\b"
+    r"|\bintroduc(?:e|ing) (?:the|my|our|this) (?:class?|students|audience) to\b"
     r"|\btell (?:the|my|our|these|all (?:the|my|our)) (?:\w+ )?"
-    r"(?:class|students|audience)\b"
+    r"(?:class?|students|audience)\b"
     r"|\b(?:we|you)(?:['’]re| are) (?:now )?(?:in|at) (?:the |my )?(?:\w+ )?"
-    r"(?:class(?:room)?|lecture(?: hall)?)\b"
+    r"(?:class?(?:room)?|lecture(?: hall)?)\b"
     r"(?! later| tomorrow| next| this (?:afternoon|evening)| on\b)"
-    r"|\b(?:the )?(?:class|students|audience) (?:is|are) (?:here|listening"
+    r"|\b(?:the )?(?:class?|students|audience) (?:is|are) (?:here|listening"
     r"|watching|waiting|in the room)\b"
-    r"|\b(?:class|students)[,.!]* (?:meet|this is) "
+    r"|\b(?:class?|students)[,.!]* (?:meet|this is) "
     r"(?:blue|hexia|casper|kasper|pico)\b",
     re.I)
 # "what should I tell the students": the user is the one telling them. The
@@ -13898,15 +13914,27 @@ def _speaking_to_alex(conversation_messages, user_name) -> bool:
     These are Alex's students, live in the room") is a class turn here
     too, by the same test: "students, meet Blue. Blue, who are you?" had
     both that line and "Alex is the one talking with you now" (P2-5
-    review)."""
+    review).
+
+    An introduction is not said to him either, to a class or not: "introduce
+    yourself to a group of people who are not familiar with ai" (8651), "…to
+    doctor la chapelle" (05-05), and a "go on" after one. Its identity note
+    asks for "Blue, Alex's robot" to whoever is named; the rule for Alex
+    said never to name him (S2 review)."""
     speaker = (user_name or "Alex").strip() or "Alex"
     if speaker.casefold() != "alex":
         return False
-    live = next((m for m in reversed(conversation_messages or [])
-                 if isinstance(m, dict) and m.get("role") == "user"), None)
-    if live is not None:
-        text = _user_message_text(live)
+    users = [m for m in (conversation_messages or [])
+             if isinstance(m, dict) and m.get("role") == "user"]
+    if users:
+        text = _user_message_text(users[-1])
         kind = contextual_identity_request_kind(text, conversation_messages)
+        if kind == "introduction":
+            return False
+        if (kind == "identity_more" and len(users) > 1
+                and identity_request_kind(_user_message_text(users[-2]))
+                == "introduction"):
+            return False
         if _identity_class_audience(kind, text, conversation_messages,
                                     user_name=user_name):
             return False

@@ -866,3 +866,28 @@ def test_an_uncapped_retry_keeps_its_room(chat):
     retry = chat.model.payloads[1]
     assert _system(retry) == _system(chat.model.payloads[0])
     assert retry["max_tokens"] > TYPED_REPLY_TOKENS
+
+
+def test_a_retry_with_no_turn_behind_it_still_asks_for_a_short_reply(
+        chat, monkeypatch):
+    """With no turn system message (a grounded reply), a retry runs under
+    the persona line alone, and Blue's has set no length since 10-07: "Keep
+    responses brief and natural" left it (S2 review). The retry says it;
+    Hexia's and Casper's lines already do."""
+    from blue.server import turn_completion as tc
+    stub = type(chat.model)
+    call = stub.__call__
+
+    def no_turn_system(self, payload, timeout=120, main=False):
+        result = call(self, payload, timeout, main)
+        bt._LM_TURN.system = None
+        return result
+
+    monkeypatch.setattr(stub, "__call__", no_turn_system)
+    chat.model.queue(BOILERPLATE, "AutoGPT is a harness.")
+    chat.ask("is autoGPT a type of harness")
+    retry = _system(chat.model.payloads[1])
+    assert retry.startswith(bt.ROBOTS["blue"]["persona_line"]
+                            + " " + tc._PERSONA_ONLY_LENGTH)
+    for robot in ("hexia", "pico"):
+        assert tc._PERSONA_LENGTH_RE.search(bt.ROBOTS[robot]["persona_line"])

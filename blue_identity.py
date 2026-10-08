@@ -27,9 +27,11 @@ _GREETING_TO = (
     r"\b(?:say|wave)\s+(?:a\s+)?(?:hello|hi|hey|good\s+morning|"
     r"good\s+afternoon)(?:\s+to)?\s+"
 )
+# "clas" is how he types it (6765-6801, 9771): read as "class" here, in
+# _NAMES_CLASS_RE and in _CLASS_AUDIENCE_RE.
 _CLASS_GREETING_RE = re.compile(
-    _GREETING_TO + r"(?:the\s+(?:class|students|audience|room)|"
-    r"my\s+(?:class|students))\b",
+    _GREETING_TO + r"(?:the\s+(?:class?|students|audience|room)|"
+    r"my\s+(?:class?|students))\b",
     re.IGNORECASE,
 )
 _EVERYONE_GREETING_RE = re.compile(
@@ -103,7 +105,7 @@ _GREETING_WRITING_AFTER_RE = re.compile(
 # With a space in any case, "there are 150 people at Stella's party" named a
 # course ("are 150"), and "say hello to everyone" next was an introduction.
 _NAMES_CLASS_RE = re.compile(
-    r"\b(?:class(?:room)?|students?|audience|lecture|seminar|tutorial)\b"
+    r"\b(?:class?(?:room)?|students?|audience|lecture|seminar|tutorial)\b"
     r"|\b[a-z]{2,4}-?\d{3}[a-z]?\b"
     r"|(?-i:\b[A-Z]{2,4}\s\d{3}[A-Z]?\b)",
     re.IGNORECASE,
@@ -1093,9 +1095,9 @@ def _prior_user_texts(text: str, messages: Iterable[Mapping[str, object]]):
 # "the students seemed bored" is Alex asking. Nor "what class of AI are
 # you?", a kind and not a room; "the class of cmds4740" is his.
 _CLASS_AUDIENCE_RE = re.compile(
-    r"(?<!\bwhat\s)(?<!\bwhich\s)(?<!\bnew\s)\bclass(?:room)?\b"
+    r"(?<!\bwhat\s)(?<!\bwhich\s)(?<!\bnew\s)\bclass?(?:room)?\b"
     r"|\bstudents?\b(?!['’])"
-    r"|\bin front of (?:the|my|your|his) (?:class|students|lecture)\b",
+    r"|\bin front of (?:the|my|your|his) (?:class?|students|lecture)\b",
     re.IGNORECASE,
 )
 _ROOM_ADDRESS_RE = re.compile(
