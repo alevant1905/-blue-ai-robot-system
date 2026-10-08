@@ -2192,7 +2192,12 @@ class LMStudioClient:
         ``reasoning_effort`` ("none", "low", "medium") is sent as that request field
         and is declared for the same reason: callers pass it by name, and a
         model that refuses it is asked again without it (see
-        _reasoning_refused). None sends nothing — the model's own default.
+        _reasoning_refused). None sends "none": a call that doesn't ask to
+        think doesn't. Left out, the field falls to whatever LM Studio's
+        per-model default is — on 2026-10-08 that was "Extra High", and 7 of
+        11 J-space reflections spent their whole 3,200 tokens reasoning and
+        wrote nothing, holding the model up to a minute each while Alex's
+        replies queued behind them.
         """
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -2213,8 +2218,10 @@ class LMStudioClient:
             payload.update(extra)
         if kwargs:
             payload.update(kwargs)
-        if reasoning_effort and not _reasoning_field_refused():
-            payload["reasoning_effort"] = reasoning_effort
+        if not _reasoning_field_refused():
+            payload["reasoning_effort"] = (reasoning_effort
+                                           or payload.get("reasoning_effort")
+                                           or _REASONING_EFFORT[_thinking.THINK_OFF])
 
         if should_cancel is not None:
             # Background priority: this call exists to be interrupted, so it
@@ -11263,10 +11270,11 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
     `thinking` is the turn's decision (blue/server/thinking.py), sent as
     reasoning_effort. Thinking on gets THINKING_ALLOWANCE_TOKENS on top of
     the cap: the reasoning is generated inside max_tokens, and on 10-05 it
-    took all 2,048 of a reading report's. None sends no field (Panel and the
-    other callers that have not been decided yet keep the model default).
-    A forced call ("required") never thinks; the decision is for the calls
-    after the tool has run.
+    took all 2,048 of a reading report's. None (Panel and the other callers
+    that don't decide) sends "none": with no field the call took LM Studio's
+    per-model default, "Extra High" on 2026-10-08. A forced call
+    ("required") never thinks; the decision is for the calls after the tool
+    has run.
 
     `reply_cap` is a short message's cap on the visible reply, in tokens
     (blue/server/reply_budget.py): it replaces the chat cap, and the
@@ -11301,7 +11309,7 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
     }
-    _effort = _REASONING_EFFORT.get(thinking)
+    _effort = _REASONING_EFFORT.get(thinking) or _REASONING_EFFORT[_thinking.THINK_OFF]
     # A forced call's answer is the call. With "medium" a forced send_gmail
     # had 9,728 tokens of room, and this model's reasoning streams as
     # delta.reasoning_content, which the stop on prose in _stream_from_model
@@ -11707,7 +11715,7 @@ def call_lm_studio(messages: List[Dict], include_tools: bool = True, force_tool:
                    force_choice: str = "required", thinking: Optional[str] = None,
                    reply_cap: Optional[int] = None) -> Dict:
     """One chat call. `thinking` is the turn's decision (see
-    _lm_studio_payload); None leaves the model's default. `reply_cap` is a
+    _lm_studio_payload); None means no thinking. `reply_cap` is a
     short message's cap on the visible reply, in tokens
     (blue/server/reply_budget.py); None for none."""
 

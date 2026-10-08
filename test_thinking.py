@@ -220,8 +220,12 @@ def test_thinking_off_asks_for_none_and_keeps_the_cap(fresh):
     assert payload["max_tokens"] == bt._chat_max_tokens()
 
 
-def test_no_decision_sends_no_field(fresh):
-    assert "reasoning_effort" not in _payload(None)
+def test_no_decision_means_no_thinking(fresh):
+    """With no field the call took LM Studio's per-model default — "Extra
+    High" on 2026-10-08 — so a caller that hasn't decided says "none"."""
+    payload = _payload(None)
+    assert payload["reasoning_effort"] == "none"
+    assert payload["max_tokens"] == bt._chat_max_tokens()
 
 
 @pytest.mark.parametrize("tool", ["create_document", "send_gmail"])
@@ -348,11 +352,13 @@ def test_a_spoken_correction_thinks_like_a_typed_one(chat, text):
     assert chat.model.main[-1]["reasoning_effort"] == "low"
 
 
-def test_panel_keeps_the_model_default(chat):
-    """Panel calls process_with_tools too, and is a separate change."""
+def test_panel_does_not_think(chat):
+    """Panel calls process_with_tools without a decision; it used to send no
+    field and so took whatever LM Studio's default was ("Extra High" on
+    2026-10-08)."""
     bt.process_with_tools([{"role": "user", "content": "what do you make of memory?"}],
                           user_name="Alex", voice=True)
-    assert "reasoning_effort" not in chat.model.main[-1]
+    assert chat.model.main[-1]["reasoning_effort"] == "none"
 
 
 def test_a_refused_field_is_dropped_and_the_call_made_again(fresh, monkeypatch, capsys):
@@ -440,6 +446,102 @@ def test_call_llm_names_the_field_rather_than_passing_it_through(monkeypatch):
     bt.call_llm([{"role": "user", "content": "hi"}], include_tools=False,
                 reasoning_effort="none")
     assert seen["reasoning_effort"] == "none"
+
+
+def _capture_client_bodies(monkeypatch):
+    """The real bluetools LMStudioClient with requests.post replaced."""
+    monkeypatch.setattr(bt._LM, "chat", types.MethodType(bt.LMStudioClient.chat, bt._LM))
+    bodies = []
+
+    def post(url, json=None, timeout=None, **kwargs):
+        bodies.append(dict(json))
+        return _Reply({"choices": [{"message": {"role": "assistant", "content": "{}"},
+                                    "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(bt.requests, "post", post)
+    return bodies
+
+
+def test_a_background_call_that_does_not_ask_to_think_sends_none(fresh, monkeypatch):
+    """J-space reflection, duet, banter, panel helpers and the search-query
+    rewrite call call_llm without a decision. On 2026-10-08 they took LM
+    Studio's "Extra High" default: 7 of 11 reflections spent all 3,200
+    tokens reasoning and wrote nothing."""
+    bodies = _capture_client_bodies(monkeypatch)
+    bt.call_llm([{"role": "user", "content": "integrate this exchange"}],
+                include_tools=False, temperature=0.5, max_tokens=3200)
+    assert bodies[-1]["reasoning_effort"] == "none"
+
+
+def test_a_call_that_asks_to_think_still_does(fresh, monkeypatch):
+    bodies = _capture_client_bodies(monkeypatch)
+    bt.call_llm([{"role": "user", "content": "why?"}], include_tools=False,
+                reasoning_effort="low")
+    assert bodies[-1]["reasoning_effort"] == "low"
+
+
+def test_a_model_that_refused_the_field_is_not_sent_it(fresh, monkeypatch):
+    bt._REASONING_REFUSED_BY.add("qwen/qwen3.8-27b")
+    bodies = _capture_client_bodies(monkeypatch)
+    bt.call_llm([{"role": "user", "content": "hi"}], include_tools=False)
+    assert "reasoning_effort" not in bodies[-1]
+
+
+def test_the_abandonable_reflection_call_sends_none(fresh, monkeypatch):
+    """The reflection's own path: should_cancel streams through blue/llm.py."""
+    monkeypatch.setattr(bt._LM, "chat", types.MethodType(bt.LMStudioClient.chat, bt._LM))
+    sent = {}
+
+    def stream(url, payload, timeout, should_cancel):
+        sent.update(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": "{}"}}]}
+
+    monkeypatch.setattr(bt._blue_llm, "stream_abandonable", stream)
+    bt.call_llm([{"role": "user", "content": "integrate"}], include_tools=False,
+                should_cancel=lambda: False)
+    assert sent["reasoning_effort"] == "none"
+
+
+def test_the_fact_extractor_sends_none_and_survives_a_refusal(monkeypatch):
+    """blue_memory_improved posts on its own, outside both clients."""
+    import blue_memory_improved as bmi
+    bodies = []
+
+    class R:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    def post(url, json=None, timeout=None, **kwargs):
+        bodies.append(dict(json))
+        if len(bodies) == 1:
+            return R(400, {"error": "Invalid 'reasoning_effort' value: 'none'."})
+        return R(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr(requests, "post", post)
+    assert bmi._llm_extract("extract") == '{"ok": true}'
+    assert bodies[0]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in bodies[1]
+
+
+def test_the_other_client_sends_none_too(monkeypatch):
+    """blue/llm.py's LMStudioClient (the email helper's) — the second copy."""
+    from blue import llm as blue_llm
+    bodies = []
+
+    def post(url, json=None, timeout=None, **kwargs):
+        bodies.append(dict(json))
+        return _Reply({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    monkeypatch.setattr(blue_llm.requests, "post", post)
+    client = blue_llm.LMStudioClient(base_url="http://127.0.0.1:9/v1/chat/completions")
+    client.chat([{"role": "user", "content": "summarise"}], max_tokens=500)
+    client.chat([{"role": "user", "content": "why?"}], reasoning_effort="low")
+    assert [b["reasoning_effort"] for b in bodies] == ["none", "low"]
 
 
 def test_a_tool_answer_retry_sends_none(monkeypatch):

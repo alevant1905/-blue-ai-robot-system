@@ -440,21 +440,28 @@ def _get_memory_collection():
 # ---------------------------------------------------------------------------
 
 def _llm_extract(prompt: str, timeout: float = 30) -> Optional[str]:
-    """Send a short prompt to LM Studio and return the response text."""
+    """Send a short prompt to LM Studio and return the response text.
+
+    The call says it doesn't think ("reasoning_effort": "none"). Without the
+    field it takes LM Studio's per-model default: on 2026-10-08 that was
+    "Extra High", and the extraction spent all 512 tokens reasoning and
+    returned nothing. A model that refuses the field is asked again without it.
+    """
     try:
         import requests
-        resp = requests.post(
-            LM_STUDIO_URL,
-            json={
-                "messages": [
-                    {"role": "system", "content": "You are a concise JSON extractor. Output only valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 512,
-            },
-            timeout=timeout,
-        )
+        body = {
+            "messages": [
+                {"role": "system", "content": "You are a concise JSON extractor. Output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 512,
+            "reasoning_effort": "none",
+        }
+        resp = requests.post(LM_STUDIO_URL, json=body, timeout=timeout)
+        if 400 <= resp.status_code < 500 and "reasoning_effort" in (resp.text or ""):
+            body.pop("reasoning_effort", None)
+            resp = requests.post(LM_STUDIO_URL, json=body, timeout=timeout)
         if resp.status_code == 200:
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
