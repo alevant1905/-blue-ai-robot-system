@@ -739,6 +739,8 @@ def test_the_thinking_setting_is_low_unless_overridden(monkeypatch):
     "blue, can you write the intro for tomorrow's lecture",
     "great. now summarize the second chapter for me",
     "keep going with the reading report",
+    "do the whole thing!",
+    "don't summarize it, quote the syllabus",
     "I'd like a lesson plan for friday's DH399 class",
 ])
 def test_a_request_for_work_is_work(text):
@@ -753,6 +755,10 @@ def test_a_request_for_work_is_work(text):
     "anyways lm studio is sufficient. not a computer science class",
     "i might take you with me to dh201 tomorrow",
     "that means i may have a chance to apply for a permanent position next year",
+    # "do" before who does it asks what he thinks (S5 review)
+    "Do you think local models will change how students write?",
+    "don't you think the second reading was too long for first years?",
+    "do students even read the syllabus anymore",
 ])
 def test_a_remark_or_a_question_is_not_work(text):
     from blue.server.thinking import asks_for_work

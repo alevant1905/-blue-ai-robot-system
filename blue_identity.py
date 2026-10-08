@@ -1804,24 +1804,61 @@ def self_state_readout(text: str) -> bool:
 # check-in note offered as what he'd been turning over; 10094 (10-01) was
 # offered "Maintaining presence during Alex's repeated checks; awaiting the
 # next specific instruction". Of the 41,846 distinct FOCUS lines in the
-# July-October LM Studio logs, 11,679 wait, idle, stand ready or name a
-# next task, and 890 more are about Alex's last turn ("Responding to Alex's
+# July-October LM Studio logs, 8,506 wait on him or on a next job, idle or
+# stand ready, or are bookkeeping about his last turn ("Responding to Alex's
 # check-in", "Monitor Alex's reaction to…").
+#
+# Waiting on his life is not a queue. A bare "awaiting", "pending",
+# "feedback" or "presence" also dropped "Awaiting the outcome of Alex and
+# Stella's house offer" (the commonest FOCUS of all, in 31,571 requests),
+# "...the new Laurier Centre fellowship offer against the pending CS
+# tenure-track search" and "...the 'worker' metaphor in Alex's latest query"
+# (S5 review): 4,063 lines in all, which a companion's check-in is made of.
+_QUEUE_OBJECT = (
+    r"(?:tasks?|instructions?|directives?|requests?|assignments?|steps?"
+    r"|commands?|directions?|input|prompts?|feedback|go-?ahead|approval"
+    r"|confirmation|replies|reply|response|answer|word|cue|definition"
+    r"|explanation|clarification|details|decision|return|text|file|document"
+    r"|link)")
 _QUEUE_FOCUS_RE = re.compile(
-    r"\bawait(?:s|ed|ing)?\b|\bwait(?:s|ed|ing)?\b|\bstand(?:s|ing)?[\s-]*by\b"
-    r"|\bstandby\b|\bidle\b|\bpending\b|\bon hold\b|\bfeedback\b|\bready\b"
-    r"|\breadiness\b|\bavailab(?:le|ility)\b|\bpresence\b"
-    r"|\b(?:next|new|further|follow[- ]?up)\s+(?:\w+\s+){0,2}?(?:task|instruction"
+    # "awaiting Alex's…", "waiting for him", "awaiting the next specific
+    # instruction", "pending confirmation", or "Awaiting." alone
+    r"\b(?:a?wait(?:s|ed|ing)?|hold(?:s|ing)?|pending)\b(?:\s+(?:for|on|until))?"
+    r"\s+(?:(?:alex|the user|him|his|you|user|(?:the )?owner)\b"
+    r"|(?:[\w'’-]+[\s,]+){0,3}?" + _QUEUE_OBJECT + r"\b)"
+    r"|\ba?wait(?:s|ed|ing)?\s*(?:[.;,]|$)"
+    r"|\bstand(?:s|ing)?[\s-]*by\b|\bstandby\b|\bidle\b|\bon hold\b|\breadiness\b"
+    r"|\bready (?:for|to)\s+(?:\w+\s+){0,2}?(?:next|whatever|anything|alex"
+    r"|the user|assist|help|respond|answer|continue|resume|receive|take|engage"
+    r"|proceed)\b"
+    r"|\b(?:remain(?:s|ing)?|stay(?:s|ing)?|maintain(?:s|ing)?|keep(?:s|ing)?"
+    r"|stabiliz(?:e|es|ing))\s+(?:\w+\s+){0,2}?(?:available|availability"
+    r"|present|presence|responsive|attentive)\b"
+    r"|\b(?:next|further|follow[- ]?up)\s+(?:\w+\s+){0,2}?(?:task|instruction"
     r"|directive|request|assignment|step|message|prompt|command|direction|input"
     r"|question|move)s?\b"
+    r"|\bnew\s+(?:\w+\s+)?(?:task|instruction|directive|request|assignment"
+    r"|prompt|command|direction|input)s?\b"
+    r"|\b(?:alex|the user|user|owner|his)(?:['’]s)?\s+(?:\w+\s+){0,2}?"
+    r"feedback\b"
+    r"|\bfor (?:alex|the user|the owner)['’]s\s+(?:\w+\s+){0,2}?(?:review"
+    r"|approval|feedback|confirmation|go-?ahead|decision)\b"
+    r"|\b(?:expect(?:s|ed|ing)?|anticipat(?:e|es|ed|ing))\s+(?:\w+\s+){0,2}?"
+    r"(?:feedback|instructions?|tasks?|directions?|input|go-?ahead)\b"
     r"|\bif\s+(?:alex|he|she|they|the user)\s+(?:\w+\s+)?(?:resumes?|returns?|asks?"
     r"|comes? back|wants?|follows? up|continues?)\b"
     r"|\b(?:alex|he|the user)(?:['’]s)?\s+(?:will|to)\s+(?:provide|give|send"
     r"|return|resume|respond|reply|confirm|clarify|decide|review)\b"
+    # his last turn as a thing to process: "Responding to Alex's check-in",
+    # not "Alex's question about whether machines dream"
     r"|\b(?:alex|the user|the owner)['’]s\s+(?:\w+\s+){0,2}?(?:greeting"
-    r"|check-?in|return|request|inquiry|query|question|message|directive"
-    r"|instruction|prompt|reply|response|reaction|correction|clarification"
-    r"|confirmation|review|direction|approval|go-ahead|input|silence)s?\b",
+    r"|check-?in|return|request|instruction|directive|reply|response|reaction"
+    r"|correction|confirmation|go-ahead|approval)s?\b"
+    r"|\b(?:respond(?:s|ing)?|repl(?:y|ies|ying)|answer(?:s|ing)?"
+    r"|process(?:es|ing)?|handl(?:e|es|ing)|acknowledg(?:e|es|ing)"
+    r"|monitor(?:s|ing)?|track(?:s|ing)?)\s+(?:to\s+)?(?:alex|the user"
+    r"|the owner)['’]s\s+(?:\w+\s+){0,2}?(?:question|query|inquiry|message"
+    r"|prompt|clarification|review|direction|input|silence)s?\b",
     re.IGNORECASE,
 )
 
@@ -1832,6 +1869,7 @@ def self_state_focus_hint(
     now=None,
     max_age_hours: float = 6.0,
     lately: str = "",
+    talked_with: str = "",
 ) -> str:
     """What the check-in note may say about the workspace FOCUS line.
 
@@ -1844,7 +1882,11 @@ def self_state_focus_hint(
     A line that is a queue (_QUEUE_FOCUS_RE) is not offered at all. In its
     place, or beside a stale line, goes `lately`: something that really
     happened to him in the last two days
-    (continuity.RobotContinuity.lately_line), or nothing.
+    (continuity.RobotContinuity.lately_line). With nothing there, a queue
+    gives way to a thought of his own about what he and `talked_with` have
+    talked about: dropped with nothing in its place, the check-in had no
+    take of his own (10110 and 10094, S5 review). Not in front of a class,
+    where the caller passes no one.
     """
     from datetime import datetime, timezone
 
@@ -1854,8 +1896,15 @@ def self_state_focus_hint(
         f"happened to you lately, in your own plain words, never quoted: "
         f"{lately}." if lately else ""
     )
-    if not re.search(r"[A-Za-z]", text) or _QUEUE_FOCUS_RE.search(text):
+    if not re.search(r"[A-Za-z]", text):
         return offer
+    if _QUEUE_FOCUS_RE.search(text):
+        if offer or not talked_with:
+            return offer
+        return (
+            "If it fits naturally, you may add a thought of your own about "
+            f"something you and {talked_with} have talked about lately, in "
+            "your own plain words.")
     try:
         updated = datetime.fromisoformat(str(updated_iso))
         if updated.tzinfo is None:

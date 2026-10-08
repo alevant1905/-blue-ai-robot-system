@@ -12743,17 +12743,10 @@ def _class_room_line(now=None) -> str:
     event = _calendar_event_now(now)
     if not event:
         return ""
-    who = str(event.get("user_name") or "Alex").strip()
-    title = str(event.get("title") or "").strip()
-    codes = _syllabus_sections.written_course_codes(title)
-    if not who.lower().startswith("alex") or not codes:
+    code = _class_course_of(event)
+    if not code:
         return ""
-    if not (_CLASS_TITLE_RE.search(title)
-            or _syllabus_sections.COURSE_CODE_RE.match(title)):
-        return ""
-    if _NOT_A_CLASS_RE.search(title):
-        return ""
-    code = codes[0]
+    codes = _syllabus_sections.written_course_codes(str(event.get("title") or ""))
     syllabi = _syllabi_by_course()
     courses = set(codes) | set(syllabi)
     room = _room_in(str(event.get("description") or ""), courses)
@@ -12775,6 +12768,57 @@ def _class_room_line(now=None) -> str:
              if event.get("end") else "")
     return (f"Alex is teaching {code.upper()} in {room}{until}. If he says "
             f"you're in class, you're in {room}.")
+
+
+def _class_course_of(event) -> str:
+    """'dh201' when a calendar occurrence is a meeting of one of Alex's
+    classes: its title starts with a course code or names a lecture, class,
+    seminar, tutorial or lab, and isn't office hours, grading or prep
+    (_class_room_line, _class_met_at). "" otherwise."""
+    who = str(event.get("user_name") or "Alex").strip()
+    title = str(event.get("title") or "").strip()
+    codes = _syllabus_sections.written_course_codes(title)
+    if not who.lower().startswith("alex") or not codes:
+        return ""
+    if not (_CLASS_TITLE_RE.search(title)
+            or _syllabus_sections.COURSE_CODE_RE.match(title)):
+        return ""
+    if _NOT_A_CLASS_RE.search(title):
+        return ""
+    return codes[0]
+
+
+# He is in the room before the hour: "introduce yhourself to the class" at
+# 09:31 on 09-16 and "can you introduce this topic to the class" at 09:32 on
+# 10-07, for the 10:00 DH201 lecture. Not more: on Fridays CS101 ends at
+# 10:20 and his office hour in DAWB 2-138 runs 10:30-11:30 before DH399,
+# where "present your reading report to the class" was said at 10:45 (10-02).
+_CLASS_EARLY_MINUTES = 30
+
+
+def _class_met_at(when, user_name="Alex") -> str:
+    """The course ('dh201') of `user_name`'s class on the calendar at
+    `when`, a naive local time, from half an hour before it starts to its
+    end; "" when none was or the calendar can't be read.
+
+    What makes a class turn in the journal one he was in front of
+    (continuity._class_that_met): "tell the class about yourself" (9837)
+    was said on Tuesday 09-15, practising in Alex's office, and a check-in
+    the next morning was offered "17 hours ago, you were in front of Alex's
+    class" (S5 review). A finished one-off class still met."""
+    from datetime import timedelta
+    if not globals().get("ENHANCED_TOOLS_AVAILABLE", False) or not when:
+        return ""
+    from blue_tools_enhanced import occurrences_in_window
+    early = timedelta(minutes=_CLASS_EARLY_MINUTES)
+    for o in occurrences_in_window(when - timedelta(hours=12), when + early,
+                                   user_name=user_name or None,
+                                   include_completed=True):
+        if o["start"] - early <= when <= (o["end"] or o["start"]):
+            code = _class_course_of(o)
+            if code:
+                return code
+    return ""
 
 
 def _calendar_event_now(now=None):
@@ -13917,12 +13961,17 @@ def _chat_self_context(conversation_messages, last_user_message, *,
                                            _ws.get("workspace") or "")
                         # A FOCUS that is a queue ("Awaiting Alex's final
                         # feedback…", 10110) gives way to something that
-                        # really happened to him lately.
+                        # really happened to him lately, or to a thought of
+                        # his own about what they've talked about. With a
+                        # class in the room, nothing of the speaker's own.
+                        _in_class = _told_in_class(conversation_messages)
                         _state_hint = self_state_focus_hint(
                             _focus.group(1) if _focus else "",
                             _ws.get("updated") or "",
                             lately=_hub.lately_line(
-                                user_name, conversation_messages))
+                                user_name, conversation_messages,
+                                in_class=_in_class),
+                            talked_with="" if _in_class else user_name)
                 except Exception as _hint_e:
                     log.warning(f"[IDENTITY] check-in state hint failed: {_hint_e}")
             _audience, _class_topic = _identity_audience_for_turn(

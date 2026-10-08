@@ -1584,8 +1584,10 @@ def test_a_duet_is_what_happened_lately(continuity_module):
         "work help us to understand ourselves?'")
 
 
-def test_a_class_is_named_not_quoted(continuity_module):
+def test_a_class_is_named_not_quoted(continuity_module, monkeypatch):
     route = continuity_module
+    monkeypatch.setattr(route.bt, "_class_met_at",
+                        lambda when, who: "dh201", raising=False)
     route.note_exchange(
         "blue", "we are in front of the class in dh201 right now",
         "Good morning, everyone. I'm Blue, Alex's robot.", user_name="Alex")
@@ -1706,3 +1708,231 @@ def test_the_j_space_block_reads_as_a_self_not_a_work_queue(continuity_module):
     assert ("A playful question, about dreams say, can get a playful answer "
             "built from what really happened to you.") in block
     assert "never invent experiences" in block
+
+
+
+# ---------------------------------------------------------------------------
+# S5 review: a class offered as "you were in front of Alex's class" must have
+# met, nothing private is offered with a class in the room, a duet is its own
+# topic, and an offer his replies in the thread already spoke of is not
+# offered again.
+# ---------------------------------------------------------------------------
+
+def _toronto():
+    from zoneinfo import ZoneInfo
+    return ZoneInfo("America/Toronto")
+
+
+def _dh201_calendar(when, who):
+    """Alex's calendar: DH201, Wednesdays 10:00-12:50 (bluetools._class_met_at
+    allows half an hour before the hour)."""
+    minutes = when.hour * 60 + when.minute
+    if (who == "Alex" and when.weekday() == 2
+            and 9 * 60 + 30 <= minutes <= 12 * 60 + 50):
+        return "dh201"
+    return ""
+
+
+def _said_at(store, local, user_text, reply, who="Alex"):
+    from datetime import datetime
+    stamp = datetime(*local, tzinfo=_toronto()).isoformat()
+    store.append_episode(
+        kind="exchange", source="chat", summary=user_text[:80],
+        details={"user_text": user_text, "reply": reply},
+        participants=[who], occurred_at=stamp)
+
+
+# Tuesday 09-15, Alex's office (conversation_log 9797-9837).
+_OFFICE_REHEARSAL = [
+    ((2026, 9, 15, 15, 15), "let's practice. introduce yourself to the class",
+     "Hello everyone, I'm Blue."),
+    ((2026, 9, 15, 15, 22), "its my office in the dr. alvin woods building "
+     "(DAWB 2-138)", "Got it, your office."),
+    ((2026, 9, 15, 15, 24), "i will bring you to sb107 tomorrow morning for "
+     "class", "I'll be ready."),
+    ((2026, 9, 15, 15, 30), "can you make it shorter and friendlier for "
+     "first year students", "Sure."),
+    ((2026, 9, 15, 15, 36), "tell the class about yourself",
+     "Hi everyone, I'm Blue, Alex's robot."),
+]
+
+
+@pytest.fixture
+def at_toronto(continuity_module, monkeypatch):
+    from datetime import datetime
+    route = continuity_module
+    monkeypatch.setattr(route, "_LOCAL_TZ", _toronto())
+    monkeypatch.setattr(route.bt, "_class_met_at", _dh201_calendar,
+                        raising=False)
+
+    def at(*local):
+        monkeypatch.setattr(route, "_now",
+                            lambda: datetime(*local, tzinfo=_toronto()))
+    return at
+
+
+def test_a_rehearsal_in_his_office_is_no_class_he_was_in_front_of(
+        continuity_module, at_toronto, monkeypatch):
+    """9841, Wednesday 09-16 09:29, "good morning, how are you doing?" was
+    offered "17 hours ago, you were in front of Alex's class": the
+    afternoon before was a practice in his office, and DH201 met at 10:00."""
+    route = continuity_module
+    store = route.HUB["blue"].store
+    for local, said, reply in _OFFICE_REHEARSAL:
+        _said_at(store, local, said, reply)
+    at_toronto(2026, 9, 16, 9, 29)
+    assert "in front of" not in route.lately_line("blue", "Alex")
+    # Practice in the hour of a class is no class either.
+    monkeypatch.setattr(route.bt, "_class_met_at",
+                        lambda when, who: "dh201", raising=False)
+    assert "in front of" not in route.lately_line("blue", "Alex")
+
+
+@pytest.mark.parametrize("said", [
+    "hi blue, lets pretend we are in front of a class. i want you to "
+    "introduce yourself",                                             # 8655
+    "imagine you're in front of my class and you have to introduce yourself",
+    "let's practice. introduce yourself to the class",                # 9797
+    "show me how you will introduce yourself to the class of cs101",  # 9565
+    "Did you introduce yourself to the class.",                       # 2039
+    "When we're in class tomorrow, introduce yourself to the students",
+])
+def test_a_class_practised_or_planned_did_not_meet(
+        continuity_module, at_toronto, said):
+    """Even inside the hour of a class on the calendar."""
+    route = continuity_module
+    _said_at(route.HUB["blue"].store, (2026, 10, 7, 11, 40), said,
+             "Hello all.")
+    at_toronto(2026, 10, 7, 15, 0)
+    assert route.lately_line("blue", "Alex") == ""
+
+
+def test_a_class_on_the_calendar_is_named_by_the_calendar(
+        continuity_module, at_toronto):
+    """10148 "we are in the class rightnow" (10-07 11:45, DH201). The
+    course is the calendar's: "we're in BH399" (9885) was a typo, and SB107
+    is a room."""
+    route = continuity_module
+    store = route.HUB["blue"].store
+    _said_at(store, (2026, 10, 7, 9, 32),
+             "can you introduce this topic to the class", "Welcome to Week 4.")
+    _said_at(store, (2026, 10, 7, 11, 45), "we're in BH399. say hi to the "
+             "students in SB107", "Hi everyone!")
+    at_toronto(2026, 10, 8, 9, 0)
+    assert route.lately_line("blue", "Alex") == (
+        "21 hours ago, you were in front of Alex's DH201 class")
+
+
+def test_no_class_on_the_calendar_no_class(continuity_module, at_toronto):
+    """Friday 10:45 (10-02), between CS101 and DH399, is his office hour."""
+    route = continuity_module
+    _said_at(route.HUB["blue"].store, (2026, 10, 2, 10, 45),
+             "present your reading report to the class", "Hi everyone.")
+    at_toronto(2026, 10, 2, 16, 0)
+    assert route.lately_line("blue", "Alex") == ""
+
+
+def test_without_a_calendar_no_class_is_offered(continuity_module,
+                                                monkeypatch):
+    route = continuity_module
+    monkeypatch.delattr(route.bt, "_class_met_at", raising=False)
+    route.note_exchange(
+        "blue", "we are in front of the class in dh201 right now",
+        "Good morning, everyone.", user_name="Alex")
+    assert route.lately_line("blue", "Alex") == ""
+
+
+def test_in_class_nothing_private_is_offered(continuity_module):
+    """9855 "how was your day going today?" (09-16 09:34) came in front of
+    DH201: what Alex said to him alone, or shared, is not for the room."""
+    route = continuity_module
+    route.note_exchange(
+        "blue", "that means i may have a chance to apply for a permanent "
+        "position next year", "That's big news.", user_name="Alex")
+    assert "permanent position" in route.lately_line("blue", "Alex")
+    assert route.lately_line("blue", "Alex", in_class=True) == ""
+    route.note_exchange(
+        "blue", "[Attached document: JSpace.docx]\n" + "word " * 3000,
+        "It describes the workspace.", user_name="Alex")
+    assert "JSpace" in route.lately_line("blue", "Alex")
+    assert route.lately_line("blue", "Alex", in_class=True) == ""
+    route.note_banter_line(
+        "blue", "Casper", "Topic: discuss dh201 Source: DH201.pdf (pdf).",
+        "A joke.", session_id="set-9")
+    assert route.lately_line("blue", "Alex", in_class=True).startswith(
+        "just now, you did a comedic banter set with Casper")
+
+
+def test_back_to_back_duets_are_two_topics(continuity_module):
+    """08-03: c4b696b4 (00:26-00:28) and 1a398a24 (00:31), three minutes
+    apart; the newer duet was named by the older one's topic."""
+    route = continuity_module
+    route.note_duet_line(
+        "blue", "Hexia", "is another ai possible? an ai not based on "
+        "extraction but oriented on human flourishing", "Yes.",
+        session_id="c4b696b4")
+    route.note_duet_line("blue", "Hexia", "Only if it's owned in common.",
+                         "Agreed.", session_id="c4b696b4")
+    route.note_duet_line(
+        "blue", "Hexia", "how does sofie lachapelle's work help us to "
+        "understand ourselves?", "Wonder is labour.", session_id="1a398a24")
+    assert route.lately_line("blue", "Alex") == (
+        "just now, you did a duet with Hexia on 'how does sofie lachapelle's "
+        "work help us to understand ourselves?'")
+
+
+@pytest.mark.parametrize("opening, named", [
+    ("discuss this article", ""),
+    ("discuss this post", ""),
+    ("discuss jodi dean's post", " on 'jodi dean's post'"),
+])
+def test_a_duet_on_an_attachment_names_no_topic(continuity_module, opening,
+                                                named):
+    route = continuity_module
+    route.note_duet_line("blue", "Hexia", opening, "Dean's point is that…",
+                         session_id="d-1")
+    assert route.lately_line("blue", "Alex") == (
+        "just now, you did a duet with Hexia" + named)
+
+
+def test_what_his_replies_here_already_said_is_not_offered_again(
+        continuity_module, monkeypatch):
+    """9841 and 9855, five minutes apart in one thread, were offered the
+    same class, and 9881 and 9883 the same again on 09-18."""
+    route = continuity_module
+    monkeypatch.setattr(route.bt, "_class_met_at",
+                        lambda when, who: "dh201", raising=False)
+    route.note_exchange(
+        "blue", "i see it as a part of the process toward tenure track work",
+        "That makes sense.", user_name="Alex")
+    route.note_exchange(
+        "blue", "we are in front of the class in dh201 right now",
+        "Good morning, everyone.", user_name="Alex")
+    thread = [{"role": "user", "content": "good morning, how are you doing?"}]
+    assert "DH201 class" in route.lately_line("blue", "Alex", thread)
+
+    thread += [{"role": "assistant",
+                "content": "Good! Still thinking about yesterday's class."},
+               {"role": "user", "content": "how was your day going today?"}]
+    line = route.lately_line("blue", "Alex", thread)
+    assert "class" not in line and "tenure track" in line
+
+    thread += [{"role": "assistant", "content": (
+        "Quiet. I keep coming back to the tenure track question and how the "
+        "process could work for you.")},
+        {"role": "user", "content": "how are you now?"}]
+    assert route.lately_line("blue", "Alex", thread) == ""
+
+
+def test_a_banter_set_already_mentioned_is_not_offered_again(
+        continuity_module):
+    route = continuity_module
+    route.note_banter_line(
+        "blue", "Casper", "Topic: AI Lab 3 Source: DH201.pdf (pdf).",
+        "A joke.", session_id="set-3")
+    thread = [{"role": "assistant",
+               "content": "Still grinning about Casper's last set."},
+              {"role": "user", "content": "how are you"}]
+    assert route.lately_line("blue", "Alex", thread[-1:]).startswith(
+        "just now, you did a comedic banter set with Casper")
+    assert route.lately_line("blue", "Alex", thread) == ""

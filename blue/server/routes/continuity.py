@@ -29,9 +29,9 @@ from blue.llm_coordinator import (
 )
 from blue.server.pages.continuity import CONTINUITY_HTML
 from blue.server import thinking as _thinking
-from blue.server.syllabus_sections import COURSE_CODE_RE
 from blue_identity import (
     _CORRECTION_ACK_RE,
+    _reask_terms,
     asks_for_class_reply,
     asks_for_recall,
     bulk_paste_recall_words,
@@ -249,6 +249,113 @@ def _one_banter_sitting(previous: Dict[str, Any], episode: Dict[str, Any]) -> bo
     after = _parse_time(episode.get("occurred_at"))
     return bool(before and after
                 and abs(after - before) <= _BANTER_SITTING_GAP)
+
+
+def _one_duet_sitting(previous: Dict[str, Any], episode: Dict[str, Any]) -> bool:
+    """Whether two duet lines are one duet: by their session when both carry
+    one, else minutes apart (_one_banter_sitting). A banter set restarted is
+    the same set; a duet started again is a new topic: on 08-03 c4b696b4 ran
+    00:26-00:28 on "is another ai possible?…" and 1a398a24 began at 00:31 on
+    Lachapelle, and as one sitting the newer duet took the older topic."""
+    session = str((episode.get("details") or {}).get("duet_session_id") or "")
+    earlier = str((previous.get("details") or {}).get("duet_session_id") or "")
+    if session and earlier:
+        return session == earlier
+    return _one_banter_sitting(previous, episode)
+
+
+# A duet opened on whatever was attached: "discuss this post" (11 duets on
+# 07-18), "discuss this article". No topic to name; "discuss jodi dean's
+# post" is named by what it discusses.
+_DUET_NO_TOPIC_RE = re.compile(
+    r"^(?:(?:let'?s|please)\s+)?(?:discuss|talk about|debate|go over)\s+"
+    r"(?:this|that|the|my)\s+(?:post|article|paper|piece|reading|text|chapter"
+    r"|document|essay|link|file)\W*$", re.I)
+_DUET_ASK_RE = re.compile(
+    r"^(?:(?:let'?s|please)\s+)?(?:discuss|talk about|debate)\s+", re.I)
+
+
+# A class asked of him that did not meet: "let's practice. introduce yourself
+# to the class" (9797), "its my office" (9813), "i will bring you to sb107
+# tomorrow morning for class" (9815) and "tell the class about yourself"
+# (9837) were one sitting in his office on Tuesday 09-15, and a check-in the
+# next morning was offered "17 hours ago, you were in front of Alex's
+# class" (S5 review). Of the 158 turns in the log that speak to a class
+# (pastes aside), 38 practise, pretend, imagine, plan or ask in the turn
+# itself: "lets pretend we are in front of a class" (8655), "show me how
+# you will introduce yourself…" (9565), "Did you introduce yourself to the
+# class." (2039). 9837 says so only in its sitting.
+_REHEARSAL_RE = re.compile(
+    r"\b(?:practi[cs](?:e|es|ed|ing)|rehears\w*|pretend\w*|imagin(?:e|ing)"
+    r"|role[- ]?play\w*|dry run|run[- ]?through)\b"
+    r"|\btomorrow\b|\b(?:my|our) office\b"
+    r"|\bshow me how\b|\bhow (?:would|will|should) you\b|^\W*did you\b",
+    re.I)
+
+
+def _class_that_met(exchanges: Sequence[Dict[str, Any]], index: int,
+                    who: str) -> str:
+    """The course ('dh201') of the class a chat line put him in front of
+    (blue_identity.speaks_to_a_class), or "" when none met.
+
+    `exchanges` is newest first. A class met when the speaker's calendar had
+    one of his classes at that time (bluetools._class_met_at) and nothing in
+    the sitting, the chat lines minutes apart around it, practises, pretends,
+    plans for tomorrow or says it is his office (_REHEARSAL_RE). The course
+    is the calendar's, never a code in his words: "we're in BH399" (9885)
+    is a typo, "the class in SB107" a room."""
+    episode = exchanges[index]
+    when = _parse_time(episode.get("occurred_at"))
+    met = getattr(bt, "_class_met_at", None)
+    if not when or not callable(met):
+        return ""
+    sitting = [episode]
+    for step in (-1, 1):
+        edge = episode
+        position = index + step
+        while 0 <= position < len(exchanges):
+            other = exchanges[position]
+            position += step
+            if str(other.get("source") or "chat") != "chat":
+                continue
+            if not _one_banter_sitting(edge, other):
+                break
+            sitting.append(other)
+            edge = other
+    for item in sitting:
+        heard = " ".join(str(
+            (item.get("details") or {}).get("user_text") or "").split())
+        if _REHEARSAL_RE.search(heard):
+            return ""
+    try:
+        local = when.astimezone(_LOCAL_TZ).replace(tzinfo=None)
+        return str(met(local, who) or "")
+    except Exception as exc:
+        bt.log.warning(f"[JSPACE] class calendar check failed: {exc}")
+        return ""
+
+
+# The words of a file name that say nothing of what it is about.
+_FILE_WORDS = frozenset((
+    "docx", "html", "jpeg", "text", "copy", "final", "draft", "file", "files",
+    "document", "chapter", "notes", "version", "scan", "attached"))
+
+
+def _already_said(replies: Sequence[str], names: Sequence[str] = (),
+                  terms: frozenset = frozenset(), need: int = 0) -> bool:
+    """Whether one of his replies in this thread already speaks of an offer:
+    any of `names` (a partner, "banter", a course, a document's name) is a
+    word of it, or it shares `need` of `terms` (_reask_terms) with what was
+    said. A second "how's it going" five minutes on was offered the same
+    class (9841, 9855) and gave the motif again."""
+    wanted = {name.lower() for name in names if name}
+    for reply in replies:
+        words = set(_flat_words(reply).split())
+        if wanted & words:
+            return True
+        if need and terms and len(terms & _reask_terms(reply)) >= need:
+            return True
+    return False
 
 
 def _pasted_stub(episode: Dict[str, Any], who: str = "") -> str:
@@ -1488,56 +1595,73 @@ class RobotContinuity:
 
     def lately_line(self, user_name: str = "Alex",
                     live_thread: Sequence[Dict[str, Any]] = (),
-                    hours: float = _LATELY_HOURS) -> str:
+                    hours: float = _LATELY_HOURS,
+                    in_class: bool = False) -> str:
         """The newest thing that really happened to this robot in the last
         `hours`, said plainly for a check-in (blue_identity.
         self_state_focus_hint), or "".
 
         A banter set or a duet with a fellow robot, a class he was in front
-        of, a document or a conversation with the person checking in now.
-        Not a greeting, check-in, acknowledgement or question about the
-        robot (nothing happened in them), not a request or a turn that ran a
-        tool (a job done for someone, which a check-in turns into "anything
-        else you'd like to tackle next?"), and not a turn this thread
-        already carries.
+        of (_class_that_met), a document or a conversation with the person
+        checking in now. Not a greeting, check-in, acknowledgement or
+        question about the robot (nothing happened in them), not a request
+        or a turn that ran a tool (a job done for someone, which a check-in
+        turns into "anything else you'd like to tackle next?"), not a turn
+        this thread already carries, and nothing his replies in it have
+        already spoken of (_already_said). `in_class`: a class is listening,
+        so not what the speaker said or shared with him in private either.
         """
         cutoff = _now() - timedelta(hours=hours)
         try:
             exchanges = self.store.list_episodes(limit=200, kind="exchange")
         except Exception:
             return ""
+        thread = [message for message in live_thread or ()
+                  if isinstance(message, dict)]
         in_thread = {
             _flat_words(_message_text(message.get("content")))
-            for message in live_thread or ()
-            if isinstance(message, dict) and message.get("role") == "user"
+            for message in thread if message.get("role") == "user"
         }
+        replies = [_message_text(message.get("content")) for message in thread
+                   if message.get("role") == "assistant"]
+        offered = set()
         for index, episode in enumerate(exchanges):
             when = _parse_time(episode.get("occurred_at"))
-            if not when or when < cutoff or _is_failure_exchange(episode):
+            if (not when or when < cutoff or _is_failure_exchange(episode)
+                    or episode.get("id") in offered):
                 continue
             details = episode.get("details") or {}
             heard = " ".join(str(details.get("user_text") or "").split())
             source = str(episode.get("source") or "chat")
             age = _age_text(episode.get("occurred_at"))
             if source in {"banter", "duet"}:
-                # The whole sitting, newest first (_one_banter_sitting): its
-                # opening line carries the topic.
+                # The whole sitting, newest first: its opening line carries
+                # the topic.
+                same = (_one_banter_sitting if source == "banter"
+                        else _one_duet_sitting)
                 sitting = [episode]
                 for older in exchanges[index + 1:]:
                     if str(older.get("source") or "") != source:
                         continue  # Alex's chat lines between the sets
-                    if not _one_banter_sitting(sitting[-1], older):
+                    if not same(sitting[-1], older):
                         break
                     sitting.append(older)
+                offered.update(item.get("id") for item in sitting)
                 partners = self._banter_set(sitting)[0]
                 opening = " ".join(str(
                     (sitting[-1].get("details") or {}).get("user_text")
                     or "").split())
                 match = _BANTER_TOPIC_RE.match(opening)
-                topic = (match.group(1).rstrip(".") if match
-                         else "" if source == "banter" else opening)
+                if match:
+                    topic = match.group(1).rstrip(".")
+                elif source == "banter" or _DUET_NO_TOPIC_RE.match(opening):
+                    topic = ""
+                else:
+                    topic = _DUET_ASK_RE.sub("", opening)
                 kind = ("a comedic banter set" if source == "banter"
                         else "a duet")
+                if _already_said(replies, [source] + partners.split(" and ")):
+                    continue
                 return (f"{age}, you did {kind}"
                         + (f" with {partners}" if partners else "")
                         + (f" on '{_clip(topic, 80)}'" if topic else ""))
@@ -1548,14 +1672,21 @@ class RobotContinuity:
             if not pasted and speaks_to_a_class(heard):
                 # Not his words to the class: "tell the class about
                 # yourself" quoted here is an introduction asked for again.
-                course = COURSE_CODE_RE.search(heard)
-                return (f"{age}, you were in front of {who}'s "
-                        + (f"{course.group(1)}{course.group(2)} ".upper()
-                           if course else "")
-                        + "class")
-            if who != user_name or details.get("tool_count"):
+                course = _class_that_met(exchanges, index, who)
+                if not course or _already_said(
+                        replies, ["class", "classes", course]):
+                    continue
+                return f"{age}, you were in front of {who}'s {course.upper()} class"
+            if in_class or who != user_name or details.get("tool_count"):
                 continue
             if pasted:
+                name = re.search(r"shared [^:']*: '(.*?)'(?: \(|, saying|$)",
+                                 pasted)
+                if _already_said(replies, [
+                        word for word in _flat_words(
+                            name.group(1) if name else "").split()
+                        if len(word) >= 4 and word not in _FILE_WORDS]):
+                    continue
                 return f"{age}, {pasted}"
             # "let's try it again." and "you didnt talk with them today?" are
             # no topic, "don't stop at secondary points. do the whole thing!"
@@ -1569,6 +1700,10 @@ class RobotContinuity:
                     or reply_wording_withheld(heard, replied)
                     or identity_request_kind(heard)
                     or is_self_description_request(heard)):
+                continue
+            terms = frozenset(_reask_terms(heard))
+            if _already_said(replies, terms=terms,
+                             need=max(2, (len(terms) + 1) // 2)):
                 continue
             return f"{age}, you talked with {who} about this: '{_clip(heard, 100)}'"
         return ""
@@ -2512,10 +2647,12 @@ def jspace_context_block(robot: str) -> str:
 
 
 def lately_line(robot: str, user_name: str = "Alex",
-                live_thread: Sequence[Dict[str, Any]] = ()) -> str:
+                live_thread: Sequence[Dict[str, Any]] = (),
+                in_class: bool = False) -> str:
     """What a check-in may mention as having happened lately, or ""."""
     hub = _hub(robot)
-    return hub.lately_line(user_name, live_thread) if hub else ""
+    return (hub.lately_line(user_name, live_thread, in_class=in_class)
+            if hub else "")
 
 
 def conversation_memory_block(

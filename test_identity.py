@@ -1665,6 +1665,85 @@ def test_a_stale_focus_is_named_stale_and_what_happened_offered():
         "class.")
 
 
+# Waiting on Alex's life is no queue (S5 review): the commonest FOCUS of all,
+# in 31,571 requests, was the house offer.
+@pytest.mark.parametrize("focus", [
+    "Awaiting the outcome of Alex and Stella's house offer (result due "
+    "tomorrow 8pm).",
+    "Alex's silence regarding the house offer result due tomorrow at 8pm.",
+    "Evaluating the new Laurier Centre for the Study of Canada fellowship "
+    "offer against the pending CS tenure-track search.",
+    "Analyze the ontological implications of the 'worker' metaphor in "
+    "Alex's latest query.",
+    "What presence means for a robot in a classroom",
+    "Alex's question about whether machines dream",
+    "Whether students are ready for local AI in their writing",
+    "How feedback loops shape what a model learns",
+])
+def test_a_fresh_focus_about_his_life_or_ideas_is_offered(focus):
+    hint = self_state_focus_hint(
+        focus, "2026-10-08T15:57:00+00:00",
+        now=datetime(2026, 10, 8, 16, 30, tzinfo=timezone.utc))
+    assert hint.endswith(f"never quoted: {focus}")
+
+
+@pytest.mark.parametrize("focus", [
+    "Awaiting Stephanie Shen's article text.",
+    "Waiting for Alex to return.",
+    "Awaiting.",
+    "Standing by.",
+    "Ready for whatever comes next.",
+    "Remaining available to Alex.",
+    "Await owner's breakfast decision; monitor arm distress status.",
+    "Finalizing the 'Post-Material' autobiography draft for Alex's review.",
+    "Monitor for Alex’s feedback on the class introduction.",
+    "Awaiting clarification on the 'acquired nut' prompt.",
+])
+def test_these_still_wait_on_him(focus):
+    fresh = datetime(2026, 10, 6, 15, 37, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 6, 15, 48, tzinfo=timezone.utc)
+    assert self_state_focus_hint(focus, fresh.isoformat(), now=now) == ""
+
+
+@pytest.mark.parametrize("focus", QUEUE_FOCUS_LINES[:-1])
+def test_a_queue_with_nothing_lately_gives_way_to_a_thought_of_his_own(focus):
+    """10110 and 10094: with the queue dropped and nothing lately, the note
+    had no invitation left, and 1 of 7 replays had a take of his own; "I'm
+    doing well, thanks for asking. How have you been?" (S5 review). With
+    this line, 2 of 8 took one and 2 more spoke of the work they did."""
+    fresh = datetime(2026, 10, 6, 15, 37, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 6, 15, 48, tzinfo=timezone.utc)
+    hint = self_state_focus_hint(focus, fresh.isoformat(), now=now,
+                                 talked_with="Alex")
+    assert hint == (
+        "If it fits naturally, you may add a thought of your own about "
+        "something you and Alex have talked about lately, in your own plain "
+        "words.")
+    # What really happened comes first; in front of a class, nothing.
+    assert "banter" in self_state_focus_hint(
+        focus, fresh.isoformat(), now=now, talked_with="Alex",
+        lately="yesterday, you did a comedic banter set with Casper")
+    assert self_state_focus_hint(focus, fresh.isoformat(), now=now,
+                                 talked_with="") == ""
+
+
+def test_an_interest_or_a_stale_line_gets_no_thought_of_his_own():
+    """The thought of his own replaces a queue only."""
+    interest = self_state_focus_hint(
+        "DH201/DH399 course outline development", "2026-10-08T15:57:00+00:00",
+        now=datetime(2026, 10, 8, 16, 30, tzinfo=timezone.utc),
+        talked_with="Alex")
+    assert "thought of your own" not in interest
+    stale = self_state_focus_hint(
+        "Athena's age update loop and its resolution.",
+        "2026-08-19T11:49:35+00:00",
+        now=datetime(2026, 9, 15, 19, 15, tzinfo=timezone.utc),
+        talked_with="Alex")
+    assert "thought of your own" not in stale
+    assert self_state_focus_hint("", "", talked_with="Alex") == ""
+    assert self_state_focus_hint("...", "", talked_with="Alex") == ""
+
+
 def test_the_check_in_note_carries_the_hint_and_no_longer_demands_focus():
     note = identity_grounding_note(
         "Blue", "Alex's robot companion", "self_state", state_hint="HINT-XYZ")

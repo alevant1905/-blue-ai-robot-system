@@ -299,6 +299,52 @@ def test_no_class_line_after_the_lecture(calendar):
     assert bt._class_room_line(LECTURE_NOW.replace(hour=13, minute=5)) == ""
 
 
+# Whether a class turn in his journal was said in front of one
+# (continuity._class_that_met, S5 review): "tell the class about yourself"
+# (9837) was practice in Alex's office on Tuesday 09-15, and the next
+# morning's check-in was offered "17 hours ago, you were in front of Alex's
+# class".
+@pytest.mark.parametrize("hour, minute, course", [
+    (9, 29, ""),          # 31 minutes early
+    (9, 31, "dh201"),     # 9849 "introduce yhourself to the class" (09-16)
+    (11, 45, "dh201"),    # 10148 "we are in the class rightnow"
+    (12, 50, "dh201"),
+    (12, 55, ""),
+])
+def test_a_class_met_from_half_an_hour_before_to_its_end(
+        calendar, hour, minute, course):
+    calendar.append(_dh201())
+    assert bt._class_met_at(LECTURE_NOW.replace(hour=hour, minute=minute)) == course
+
+
+@pytest.mark.parametrize("title", [
+    "DH201 office hours", "DH201 grading", "Dentist",
+    "Meeting about DH201 next term",
+])
+def test_desk_work_or_no_class_is_no_class_met(calendar, title):
+    calendar.append(_event(title, LECTURE_NOW.replace(hour=11),
+                           LECTURE_NOW.replace(hour=12)))
+    assert bt._class_met_at(LECTURE_NOW) == ""
+
+
+def test_only_the_speakers_own_class_counts(calendar, monkeypatch):
+    """Vilda telling him to say hi to her class during Alex's lecture is not
+    Alex's class. A one-off class marked done still met."""
+    import blue_tools_enhanced as bte
+    asked = {}
+
+    def window(start, end, user_name=None, **flags):
+        asked.update(flags)
+        return [e for e in [_dh201()]
+                if not user_name or e["user_name"] == user_name]
+    monkeypatch.setattr(bte, "occurrences_in_window", window)
+    assert bt._class_met_at(LECTURE_NOW, "Alex") == "dh201"
+    assert bt._class_met_at(LECTURE_NOW, "Vilda") == ""
+    assert asked.get("include_completed") is True
+    monkeypatch.setattr(bt, "ENHANCED_TOOLS_AVAILABLE", False)
+    assert bt._class_met_at(LECTURE_NOW, "Alex") == ""
+
+
 def _lecture_on_now(calendar):
     now = datetime.now()
     calendar.append(_event("DH201: Introduction to Generative AI (Lecture)",

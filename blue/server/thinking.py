@@ -270,9 +270,11 @@ def asks_something(text: str) -> bool:
 
 
 # Imperatives thinking needs no cue for, so _REQUEST_START_RE leaves them
-# out: "don't stop at secondary points. do the whole thing!" (10-01).
+# out: "don't stop at secondary points. do the whole thing!" (10-01). "Do
+# you think local models will change how students write?" is a question.
 _WORK_START_RE = re.compile(
-    r"^(?:do|don'?t|stop|keep|continue|go on|go ahead|finish|repeat|redo"
+    r"^(?:(?:do|don'?t)(?!\s+(?:you|u|we|i|they|he|she|people|students)\b)"
+    r"|stop|keep|continue|go on|go ahead|finish|repeat|redo"
     r"|start|put|turn|set|call|get)\b")
 
 

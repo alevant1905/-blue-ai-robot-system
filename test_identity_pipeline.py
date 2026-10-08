@@ -83,8 +83,9 @@ def test_a_check_in_is_offered_what_happened_not_the_work_queue(
         def __getattr__(self, name):
             return getattr(real, name)
 
-        def lately_line(self, user_name, live_thread=()):
+        def lately_line(self, user_name, live_thread=(), in_class=False):
             asked["who"] = user_name
+            asked["in_class"] = in_class
             return ("yesterday, you did a comedic banter set with Casper on "
                     "'AI Lab 3'")
 
@@ -99,5 +100,75 @@ def test_a_check_in_is_offered_what_happened_not_the_work_queue(
     assert ("something that really happened to you lately, in your own plain "
             "words, never quoted: yesterday, you did a comedic banter set with "
             "Casper on 'AI Lab 3'.") in note
-    assert asked["who"] == "Alex"
+    assert asked["who"] == "Alex" and asked["in_class"] is False
     assert reply_of(response).startswith("Pretty good.")
+
+
+def _queue_focus_hub(monkeypatch, lately, asked):
+    from datetime import datetime, timezone
+
+    import bluetools as bt
+
+    real = bt._continuity_routes.HUB["blue"]
+
+    class Store:
+        def __getattr__(self, name):
+            return getattr(real.store, name)
+
+        def get_workspace(self):
+            return {
+                "workspace": (
+                    "IDENTITY: I am Blue.\nFOCUS: Maintaining presence during "
+                    "Alex's repeated checks; awaiting the next specific "
+                    "instruction.\nNEXT EXPECTATION: Alex will reply."),
+                "updated": datetime.now(timezone.utc).isoformat(),
+            }
+
+    class Hub:
+        store = Store()
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def lately_line(self, user_name, live_thread=(), in_class=False):
+            asked["in_class"] = in_class
+            return "" if in_class else lately
+
+    monkeypatch.setitem(bt._continuity_routes.HUB, "blue", Hub())
+
+
+def test_a_check_in_with_nothing_lately_gets_a_thought_of_his_own(
+        chat, monkeypatch):
+    """10094 (10-01): the queue FOCUS dropped and nothing lately left the
+    check-in with no take of his own (S5 review)."""
+    asked = {}
+    _queue_focus_hub(monkeypatch, "", asked)
+    chat.model.queue("Good. Still chewing on the Reigeluth chapter. You?")
+    chat.ask("how are you doing?")
+
+    note = chat.model.payloads[0]["messages"][-1]["content"]
+    assert "awaiting the next specific instruction" not in note
+    assert ("you may add a thought of your own about something you and Alex "
+            "have talked about lately") in note
+    assert asked["in_class"] is False
+
+
+def test_a_check_in_in_front_of_the_class_offers_nothing_private(
+        chat, monkeypatch):
+    """9855 "how was your day going today?" (09-16 09:34) came right after
+    "we are in DH21 right now" and three introductions to the class."""
+    asked = {}
+    _queue_focus_hub(
+        monkeypatch, "18 hours ago, you talked with Alex about this: 'that "
+        "means i may have a chance to apply for a permanent position'", asked)
+    chat.model.queue("Doing well, and happy to be here with all of you.")
+    chat.ask("how was your day going today?", messages=[
+        {"role": "user", "content": "I want you to introduce yourself to the class."},
+        {"role": "assistant", "content": "Hi everyone, I'm Blue, Alex's robot."},
+        {"role": "user", "content": "how was your day going today?"},
+    ])
+
+    note = chat.model.payloads[0]["messages"][-1]["content"]
+    assert asked["in_class"] is True
+    assert "permanent position" not in note
+    assert "thought of your own" not in note
