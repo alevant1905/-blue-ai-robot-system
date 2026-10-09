@@ -1098,6 +1098,43 @@ def test_an_empty_content_reply_still_yields_its_reflection(continuity_module,
     assert parsed["changed"] == "noted the lab decision"
 
 
+def test_a_reply_cut_at_the_cap_is_not_salvaged_from_its_draft(continuity_module,
+                                                               monkeypatch):
+    """2026-10-07/08, LM Studio on "Extra High": all eight reflections that
+    ran out of tokens mid-thought were committed from the unfinished
+    thinking — v2429 became the raw thinking, v2446 every section "...".
+    A pass cut at the cap fails (and is retried) instead."""
+    route = continuity_module
+    monkeypatch.setattr(route.bt, "call_llm", lambda messages, **kw: {
+        "choices": [{"message": {
+            "role": "assistant", "content": "",
+            "reasoning_content": ("Draft: IDENTITY: ...\nFOCUS: ...\nWORKING BELIEFS: ...\n"
+                                  "OPEN QUESTIONS: ...\nCOMMITMENTS: ...\n"
+                                  "SELF-OBSERVATIONS: ...\nNEXT EXPECTATION: ... Need not"),
+        }, "finish_reason": "length"}],
+    })
+
+    assert route._call([{"role": "user", "content": "reflect"}]) == ""
+
+
+def test_a_section_left_as_dots_keeps_what_was_there(continuity_module):
+    """The template's "..." is a section the model didn't fill, not one it
+    emptied — a clean pass with thinking off still writes "OPEN QUESTIONS:
+    ..." when nothing changed there."""
+    raw = (
+        '{"workspace": "IDENTITY: ...\\nFOCUS: a new focus\\nWORKING BELIEFS: ...\\n'
+        'OPEN QUESTIONS: ...\\nCOMMITMENTS: \\u2026\\nSELF-OBSERVATIONS: ...\\n'
+        'NEXT EXPECTATION: ...", "changed": "focus moved", "episode_summary": "s", '
+        '"salience": 0.4, "valence": 0.0, "drive_deltas": {"curiosity": 0.0}}'
+    )
+    ws = continuity_module._parse_reflection(raw, "Blue", _CURRENT_WS)["workspace"]
+    assert "FOCUS: a new focus" in ws
+    assert "WORKING BELIEFS: x (0.5)" in ws
+    assert "OPEN QUESTIONS: q?" in ws
+    assert "COMMITMENTS: c" in ws
+    assert ": ..." not in ws and "…" not in ws
+
+
 def test_the_reflection_budget_leaves_room_for_thinking(continuity_module):
     """88% of completion tokens are reasoning; 1900 ran out before the JSON."""
     import inspect

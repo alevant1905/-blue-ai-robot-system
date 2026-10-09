@@ -170,6 +170,7 @@ class LMStudioClient:
         temperature: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        reasoning_effort: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Send a chat completion request to LM Studio.
@@ -180,6 +181,12 @@ class LMStudioClient:
         caller gets ``{"cancelled": True}`` and no reply. It is declared here
         rather than left to **kwargs because everything in kwargs is sent to
         LM Studio as a payload field.
+
+        ``reasoning_effort`` is always sent ("none" unless the caller asks
+        for thinking): without it the call takes LM Studio's per-model
+        default, which on 2026-10-08 was "Extra High" — background calls
+        spent their whole budget reasoning and returned nothing. A model
+        that refuses the field is asked again without it.
         """
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -196,6 +203,8 @@ class LMStudioClient:
             payload.update(extra)
         if kwargs:
             payload.update(kwargs)
+        payload["reasoning_effort"] = (reasoning_effort
+                                       or payload.get("reasoning_effort") or "none")
 
         if should_cancel is not None:
             return self._chat_abandonable(payload, should_cancel)
@@ -226,6 +235,10 @@ class LMStudioClient:
 
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code < 500:
+                    if ("reasoning_effort" in payload
+                            and "reasoning_effort" in (e.response.text or "")):
+                        payload.pop("reasoning_effort", None)
+                        continue
                     return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
                 last_error = e
                 wait_time = 2 ** attempt

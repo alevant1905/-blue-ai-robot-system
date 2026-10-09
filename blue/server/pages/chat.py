@@ -31,34 +31,6 @@ CHAT_HTML = """
             background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
             box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
         }
-        /* Phone: full-screen chat, input bar above the URL bar (100dvh).
-           The input row REFLOWS: icon buttons get their own row, and the
-           textarea + Send share a full-width row below — on an iPhone the
-           old single row squeezed the textarea to nothing. */
-        @media (max-width: 640px) {
-            body { padding: 0; }
-            .container { height: 100dvh; max-width: 100%; border: none; border-radius: 0; }
-            .header { padding: 10px 14px 8px; }
-            .header::before { width: 40px; height: 2px; margin-bottom: 8px; }
-            .header h1 { font-size: 1.22em; }
-            .header p { font-size: 0.85em; }
-            .navlinks { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
-                        scrollbar-width: none; padding-bottom: 2px; }
-            .navlinks::-webkit-scrollbar { display: none; }
-            .messages { padding: 14px; gap: 14px; }
-            .row { max-width: 92%; }
-            .composer { padding: 10px 10px calc(12px + env(safe-area-inset-bottom)); }
-            .input-bar { flex-wrap: wrap; gap: 8px; }
-            .iconbtn { width: 42px; height: 42px; font-size: 1.05em; }
-            .iconbtn svg { width: 20px; height: 20px; }
-            /* iOS zooms the page on focus when an input's font is < 16px. */
-            textarea { order: 10; flex: 1 1 calc(100% - 90px); font-size: 16px;
-                       min-height: 44px; max-height: 120px; padding: 11px 12px; }
-            .sendbtn { order: 11; height: 44px; padding: 0 16px; }
-            .hint { display: none; }
-            .cam-card { max-width: 100%; }
-            .voice-card { max-height: 82vh; }
-        }
         .header { padding: 24px 30px 20px; border-bottom: 1px solid var(--line); }
         .header::before {
             content: ""; display: block; width: 56px; height: 3px;
@@ -89,7 +61,7 @@ CHAT_HTML = """
         .row.user .bubble .att { color: #d9e6d9; }
         .empty { color: var(--slate); text-align: center; margin: auto; max-width: 380px; }
         .empty .big { font-family: 'Playfair Display', Georgia, serif; font-size: 1.3em; color: var(--ink); margin-bottom: 8px; }
-        .composer { border-top: 1px solid var(--line); padding: 16px 22px 20px; background: var(--paper); }
+        .composer { position: relative; border-top: 1px solid var(--line); padding: 14px 22px 16px; background: var(--paper); }
         .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
         .chip {
             display: inline-flex; align-items: center; gap: 8px; background: var(--cream);
@@ -98,21 +70,42 @@ CHAT_HTML = """
         }
         .chip.err { border-color: #e2c4be; color: #7a2e22; background: #f7ece9; }
         .chip button { background: none; border: none; color: inherit; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0; }
-        .input-bar { display: flex; gap: 10px; align-items: flex-end; }
-        textarea {
-            flex: 1; resize: none; min-height: 48px; max-height: 180px; padding: 13px 15px;
-            border: 1px solid var(--sage); border-radius: 8px; font-family: inherit; font-size: 1em;
-            color: var(--ink); background: var(--paper); line-height: 1.5;
+        /* The message box and its tools share one card: the box gets the full
+           width (three lines to start, growing as you type), the tools sit in a
+           row underneath. The old single row put ten buttons beside the box and
+           squeezed it to a sliver. */
+        .input-card { border: 1px solid var(--sage); border-radius: 14px; background: var(--paper);
+                      transition: border-color 0.2s, box-shadow 0.2s; }
+        .input-card:focus-within { border-color: var(--forest); box-shadow: 0 0 0 3px rgba(96,165,250,0.14); }
+        /* max-height: what the screen can spare, so a long draft on a laptop
+           never pushes the conversation out of view (clamp: 200px on old Safari). */
+        #input {
+            display: block; width: 100%; resize: none; min-height: 96px;
+            max-height: 200px; max-height: clamp(96px, calc(100vh - 480px), 360px);
+            padding: 14px 16px 6px; border: none; border-radius: 14px 14px 0 0; outline: none;
+            font-family: inherit; font-size: 1.02em; line-height: 1.5; color: var(--ink);
+            background: transparent; overflow-y: auto;
         }
-        textarea:focus { outline: none; border-color: var(--forest); }
+        #input::placeholder { color: var(--slate); opacity: 1; }
+        .input-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 8px 8px; }
+        .tools-more { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        .tools-more .tl { display: none; }
+        .input-bar .morebtn { display: none; position: relative; }
+        .morebtn.has-active::after { content: ''; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px;
+                                     border-radius: 50%; background: var(--blue); }
         .iconbtn {
-            flex-shrink: 0; width: 48px; height: 48px; border-radius: 8px; cursor: pointer;
-            border: 1px solid var(--sage); background: var(--paper); color: var(--forest);
+            flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px; cursor: pointer;
+            border: 1px solid transparent; background: transparent; color: var(--forest);
             font-size: 1.2em; transition: background 0.2s, border-color 0.2s;
+            display: inline-flex; align-items: center; justify-content: center;
         }
-        .iconbtn:hover { background: var(--cream); border-color: var(--forest); }
-        .iconbtn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+        .iconbtn:hover { background: var(--cream); border-color: var(--line); }
+        .iconbtn svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; flex: none; }
         .iconbtn.active { background: var(--forest); border-color: var(--forest); color: #fff; }
+        /* On midnight the "on" fill is a light blue: dark text reads, white didn't. */
+        :root:not([data-theme="light"]) .iconbtn.active,
+        :root:not([data-theme="light"]) #camBtn.active,
+        :root:not([data-theme="light"]) .tools-more .iconbtn.active .tl { color: #0b1630; }
         .hf-status { margin-top: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 0.78em; color: var(--forest); text-align: center; display: flex; align-items: center; justify-content: center; gap: 8px; }
         .hf-status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--forest); display: inline-block; }
         .hf-status.voicing::before { background: #e9534e; animation: hf-pulse 0.9s infinite; }
@@ -126,7 +119,7 @@ CHAT_HTML = """
         .micbtn.big { width: 60px; height: 60px; }
         .micbtn.big svg { width: 28px; height: 28px; }
         .sendbtn {
-            flex-shrink: 0; height: 48px; padding: 0 24px; border-radius: 8px; border: none;
+            flex-shrink: 0; height: 40px; padding: 0 22px; margin-left: auto; border-radius: 10px; border: none;
             background: var(--ink); color: #fff; font-weight: 500; font-size: 0.95em; cursor: pointer;
             transition: background 0.2s;
         }
@@ -139,7 +132,7 @@ CHAT_HTML = """
         .bubble.draft::after { content: " \\00b7  drafting\\2026"; font-family: 'IBM Plex Mono', monospace; font-size: 0.75em; color: var(--slate); }
         .bubble.draft[data-phase="checking"]::after { content: " \\00b7  checking\\2026"; }
         .bubble.sys-error { font-family: 'IBM Plex Mono', monospace; font-size: 0.85em; color: var(--slate); }
-        .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 8px; }
+        .hint { font-family: 'IBM Plex Mono', monospace; font-size: 0.72em; color: var(--slate); margin-top: 7px; padding-left: 4px; }
         .voice-panel { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(26,46,26,0.45);
                        display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
         .voice-card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
@@ -196,9 +189,16 @@ CHAT_HTML = """
         body.kid .bubble { font-size: 1.15em; border-radius: 20px; padding: 16px 20px; line-height: 1.5; }
         body.kid .row.blue .bubble { background: #fffdf7; border-color: #e7dcc2; }
         body.kid .empty .big { font-size: 1.8em; }
-        body.kid textarea { font-size: 1.12em; border-radius: 14px; }
+        /* Vilda talks more than she types: her box stays IN the button row
+           (it is rendered inside .input-bar for kid mode), so the big mic
+           row doesn't eat her conversation. */
+        body.kid .input-bar { flex-wrap: nowrap; padding: 8px; }
+        body.kid #input { flex: 1 1 auto; width: auto; min-width: 0; min-height: 54px; max-height: 160px;
+                          padding: 14px 12px; font-size: 1.12em; border-radius: 12px; }
+        body.kid .input-card { border-radius: 18px; }
         body.kid #attachBtn { display: none; }
-        body.kid .iconbtn { width: 54px; height: 54px; }
+        body.kid .iconbtn { width: 54px; height: 54px; border-color: var(--sage); }
+        body.kid .sendbtn { height: 54px; padding: 0 26px; margin-left: 0; }
         body.kid .micbtn.big { width: 84px; height: 84px; border-width: 2px; }
         body.kid .micbtn.big svg { width: 40px; height: 40px; }
         body.kid .sendbtn { font-size: 1.05em; border-radius: 14px; }
@@ -249,7 +249,7 @@ CHAT_HTML = """
         #eyeBtn.active { background: #ff7eb3; border-color: #ff7eb3; color: #fff; }
         /* Small floating preview (picture-in-picture) so the chat text below it
            stays fully visible. Sits just above the composer, out of the layout. */
-        .eye-panel { display: none; position: fixed; right: 12px; bottom: 124px; width: 118px; z-index: 60; }
+        .eye-panel { display: none; position: absolute; right: 12px; bottom: 100%; margin-bottom: 8px; width: 118px; z-index: 60; }
         .eye-panel.on { display: block; }
         .eye-panel video { width: 100%; border-radius: 14px; border: 2px solid #ff7eb3; background: #000; display: block; transform: scaleX(-1); box-shadow: 0 4px 16px rgba(0,0,0,0.22); }
         .eye-panel.rear video { transform: none; }
@@ -325,8 +325,86 @@ CHAT_HTML = """
             .hist-close { display: block; }
             .navlinks a.hist-toggle { display: inline; }
         }
+        /* Short screens (a phone held sideways): the chat fills the screen and
+           the header shrinks, or the messages get no room at all. */
+        /* Just above the sidebar breakpoint the chat column is ~550px wide:
+           slimmer buttons keep the tools and Send on one row. */
+        @media (min-width: 641px) and (max-width: 920px) {
+            .input-bar, .tools-more { gap: 2px; }
+            .input-bar .iconbtn { width: 36px; }
+        }
+        @media (max-height: 520px) {
+            html { scroll-behavior: auto; }
+            body, body.has-history { padding: 0; }
+            .container { height: 100vh; height: 100dvh; max-width: 100%; border: none; border-radius: 0; }
+            .header { padding: 8px calc(64px + env(safe-area-inset-right)) 6px calc(68px + env(safe-area-inset-left)) !important; }
+            .header::before, .header p { display: none; }
+            .header h1 { font-size: 1.15em !important; }
+            .navlinks { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+            .navlinks::-webkit-scrollbar { display: none; }
+            /* Held sideways, the notch takes a strip off one side. */
+            .messages { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+            .composer { padding: 8px calc(10px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom))
+                                 calc(10px + env(safe-area-inset-left)); }
+            #input { min-height: 52px; max-height: 32vh; }
+            .hint { display: none; }
+            .blue-theme-toggle { top: 8px; bottom: auto !important; right: calc(10px + env(safe-area-inset-right)) !important;
+                                 width: 40px; height: 40px; }
+            .blue-nav-fab { top: 8px !important; }
+        }
+        /* Phone (iPhone): full-screen chat. These rules come LAST so they beat
+           the base rules above — at the top of the sheet they lost to them and
+           most never applied. The header is one compact block clear of the
+           menu button (left) and the theme button (moved top right, off Send);
+           the rarely used tools fold into "More". */
         @media (max-width: 640px) {
-            body.has-history { padding-left: 0; }
+            html { scroll-behavior: auto; }   /* the keyboard snap-back must jump, not glide */
+            body, body.has-history { padding: 0; }
+            body { overscroll-behavior: none; }
+            .container { height: 100vh; height: 100dvh; max-width: 100%; border: none; border-radius: 0; }
+            html.vv .container { height: var(--app-h); }
+            .header { padding: calc(10px + env(safe-area-inset-top)) 60px 8px 66px !important; }
+            .header::before { display: none; }
+            .header h1 { font-size: 1.2em !important; line-height: 1.25; }
+            .header p { display: none; }
+            .navlinks { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+                        scrollbar-width: none; gap: 4px 16px; margin-top: 4px; padding-bottom: 2px; font-size: 0.9em; }
+            .navlinks::-webkit-scrollbar { display: none; }
+            .messages { padding: 14px 12px; gap: 14px; overscroll-behavior: contain; }
+            .row { max-width: 90%; }
+            .bubble { padding: 11px 14px; }
+            .composer { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+            html.kb-open .composer { padding-bottom: 8px; }
+            .input-card { border-radius: 16px; }
+            /* iOS zooms the page on focus when an input's font is < 16px. */
+            #input { font-size: 16px; min-height: 68px; max-height: 34vh; padding: 12px 14px 4px; }
+            /* With the keyboard up, vh still counts the hidden half of the screen. */
+            html.vv.kb-open #input { max-height: calc(var(--app-h) * 0.3); }
+            .input-bar { padding: 2px 6px 6px; gap: 4px; }
+            .iconbtn { width: 42px; height: 42px; }
+            .sendbtn { height: 42px; padding: 0 18px; }
+            .input-bar .morebtn { display: inline-flex; }
+            .morebtn[aria-expanded="true"] { background: var(--cream); border-color: var(--line); }
+            /* "More": the tools drop into a labelled two-column tray under the row. */
+            .tools-more { display: none; order: 20; flex-basis: 100%; }
+            .composer.more-open .tools-more { display: grid; grid-template-columns: 1fr 1fr; grid-gap: 6px;
+                                              padding: 6px 2px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+            .tools-more .iconbtn { width: auto; height: 44px; justify-content: flex-start; padding: 0 12px;
+                                   border-color: var(--line); font-size: 0.92em; }
+            .tools-more .iconbtn svg { margin-right: 10px; }
+            .tools-more .tl { display: inline; color: var(--ink); font-family: inherit; }
+            .tools-more .iconbtn.active .tl { color: #fff; }
+            /* Vilda's iPad in Split View: nothing of hers hides behind "More";
+               her box takes the first row, the buttons wrap under it. */
+            body.kid .input-bar { flex-wrap: wrap; }
+            body.kid .input-bar .morebtn { display: none; }
+            body.kid .tools-more { display: flex; order: 0; flex-basis: auto; }
+            body.kid #input { flex-basis: 100%; order: -1; }
+            .hint { display: none; }
+            .cam-card { max-width: 100%; }
+            .voice-card { max-height: 82vh; }
+            .blue-theme-toggle { top: calc(10px + env(safe-area-inset-top)); bottom: auto !important; right: 10px !important;
+                                 width: 40px; height: 40px; }
         }
     </style>
 </head>
@@ -376,48 +454,62 @@ CHAT_HTML = """
                 {% endif %}
             </div>
         </div>
-        <div class="composer">
+        <div class="composer" id="composer">
             <div class="chips" id="chips"></div>
+            <div class="input-card">
+            {% if not kid %}
+            <textarea id="input" placeholder="Message {{ robot_name }}..." rows="1" enterkeyhint="send" aria-label="Message {{ robot_name }}"></textarea>
+            {% endif %}
             <div class="input-bar">
                 <input type="file" id="fileInput" multiple style="display:none"
                        accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff,.pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.rtf,.pptx,.xlsx">
-                <button class="iconbtn" id="attachBtn" title="Attach files" aria-label="Attach files">+</button>
+                <button class="iconbtn" id="attachBtn" title="Attach files" aria-label="Attach files">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5 12.6 19.9a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg>
+                </button>
                 <button class="iconbtn micbtn" id="micBtn" title="Tap and talk to {{ robot_name }}" aria-label="Talk to {{ robot_name }}">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg>
                 </button>
+                {% if kid %}
+                <textarea id="input" placeholder="Message {{ robot_name }}..." rows="1" enterkeyhint="send" aria-label="Message {{ robot_name }}"></textarea>
+                {% endif %}
+                <button class="iconbtn morebtn" id="moreBtn" type="button" title="More tools" aria-label="More tools" aria-expanded="false" aria-controls="toolsMore">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/></svg>
+                </button>
+                <div class="tools-more" id="toolsMore">
                 {% if not kid %}
                 <button class="iconbtn" id="camBtn" title="See through {{ robot_name }}'s camera" aria-label="Live camera preview" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3.2L9 5.5h6L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.4"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3.2L9 5.5h6L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.4"/></svg><span class="tl">Camera</span>
                 </button>
                 <button class="iconbtn" id="researchBtn" title="Research mode: {{ robot_name }} searches the web before answering" aria-label="Toggle web research" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></svg><span class="tl">Web research</span>
                 </button>
                 <button class="iconbtn" id="wikiBtn" title="Consult Wikipedia: {{ robot_name }} reads the encyclopedia on your topic before answering" aria-label="Toggle Wikipedia consult" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4.5 5v13c3.5-.5 6 0 7.5 1.5 1.5-1.5 4-2 7.5-1.5V5C16 4.5 13.5 5 12 6.5z"/><path d="M12 6.5v13"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5 8 4.5 4.5 5v13c3.5-.5 6 0 7.5 1.5 1.5-1.5 4-2 7.5-1.5V5C16 4.5 13.5 5 12 6.5z"/><path d="M12 6.5v13"/></svg><span class="tl">Wikipedia</span>
                 </button>
-                <button class="iconbtn" id="contextBtn" title="Focus {{ robot_name }} on specific library documents" aria-label="Context and document focus" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+                <button class="iconbtn" id="contextBtn" title="Focus {{ robot_name }} on specific library documents" aria-label="Focus &amp; place: library documents and location" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 13l9 5 9-5"/></svg><span class="tl">Focus &amp; place</span>
                 </button>
                 {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg><span class="tl">Blue's eyes</span>
                 </button>
                 {% endif %}
                 <button class="iconbtn" id="hfBtn" title="Hands-free: say '{{ robot_name }}' to start" aria-label="Hands-free listening" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 10c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5v3.5a3 3 0 0 1-3 3h-1"/><path d="M6.5 10v2.5a3 3 0 0 0 2 2.8"/><path d="M9.5 18c.7.8 1.7 1.4 3 1.4"/></svg><span class="tl">Hands-free</span>
                 </button>
-                <textarea id="input" placeholder="Message {{ robot_name }}..." rows="1"></textarea>
                 <button class="iconbtn" id="voiceBtn" title="Choose {{ robot_name }}'s voice" aria-label="Choose {{ robot_name }}'s voice">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c0-3.6 3-5.5 6.5-5.5s6.5 1.9 6.5 5.5"/></svg><span class="tl">Voice</span>
                 </button>
-                <button class="iconbtn" id="speakBtn" title="{{ robot_name }} reads answers out loud" aria-label="Toggle spoken replies" aria-pressed="false">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg>
+                <button class="iconbtn" id="speakBtn" title="{{ robot_name }} reads answers out loud" aria-label="Read aloud: spoken replies" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8a5 5 0 0 1 0 8"/></svg><span class="tl">Read aloud</span>
                 </button>
                 <button class="iconbtn" id="connHeadBtn" title="Drive {{ robot_name }}'s head from this device's USB-C port" aria-label="Connect a USB-C head" aria-pressed="false" style="display:none">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="7" rx="1.5"/><path d="M11 9.5v3"/><path d="M13 9.5v3"/><path d="M8 12.5h8v3.5a4 4 0 0 1-8 0z"/><path d="M12 20v2"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="7" rx="1.5"/><path d="M11 9.5v3"/><path d="M13 9.5v3"/><path d="M8 12.5h8v3.5a4 4 0 0 1-8 0z"/><path d="M12 20v2"/></svg><span class="tl">USB-C head</span>
                 </button>
+                </div>
                 <button class="sendbtn" id="sendBtn">Send</button>
+            </div>
             </div>
             {% if kid %}
             <div class="eye-panel" id="eyePanel">
@@ -608,11 +700,102 @@ CHAT_HTML = """
             }
         });
 
+        // The box grows with what you type, up to its CSS max-height (which
+        // differs on a phone and a desktop), then scrolls inside.
+        // When the composer changes height, the latest message stays in view
+        // if it was in view before (the same test the keyboard fit uses).
+        function keepLatestInView(change) {
+            const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+            change();
+            if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
         function autoGrow() {
-            inputEl.style.height = 'auto';
-            inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
+            keepLatestInView(function () {
+                inputEl.style.height = 'auto';
+                const cap = parseFloat(getComputedStyle(inputEl).maxHeight) || 360;
+                inputEl.style.height = Math.min(inputEl.scrollHeight, cap) + 'px';
+            });
         }
         inputEl.addEventListener('input', autoGrow);
+
+        // ---- "More" tools (phone): the secondary buttons fold into a tray ----
+        // On a wide screen the tray is just part of the row and this does
+        // nothing visible. A dot on "More" (and its name) shows when a folded
+        // tool is on.
+        const composerEl = document.getElementById('composer');
+        const moreBtn = document.getElementById('moreBtn');
+        const toolsMoreEl = document.getElementById('toolsMore');
+        function moreIsOpen() { return !!moreBtn && moreBtn.getAttribute('aria-expanded') === 'true'; }
+        function setMoreOpen(open) {
+            if (!composerEl || !moreBtn || open === moreIsOpen()) return;
+            keepLatestInView(function () {
+                composerEl.classList.toggle('more-open', open);
+                moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+        }
+        function paintMoreDot() {
+            if (!moreBtn || !toolsMoreEl) return;
+            const on = toolsMoreEl.querySelectorAll('.active').length;
+            moreBtn.classList.toggle('has-active', on > 0);
+            moreBtn.setAttribute('aria-label', on ? 'More tools, ' + on + ' on' : 'More tools');
+        }
+        // These open a panel of their own, so the tray folds away behind them;
+        // switches (research, Wikipedia, read aloud, hands-free) leave it open
+        // so you can see what you just turned on.
+        const MORE_CLOSERS = ['camBtn', 'contextBtn', 'voiceBtn', 'eyeBtn', 'connHeadBtn'];
+        if (moreBtn && toolsMoreEl) {
+            moreBtn.addEventListener('click', function () {
+                const open = !moreIsOpen();
+                // The keyboard and the tray don't both fit on a phone screen.
+                if (open && document.activeElement === inputEl) inputEl.blur();
+                setMoreOpen(open);
+            });
+            toolsMoreEl.addEventListener('click', function (e) {
+                const b = e.target.closest ? e.target.closest('button') : null;
+                if (!b || !moreIsOpen() || MORE_CLOSERS.indexOf(b.id) < 0) return;
+                setTimeout(function () { setMoreOpen(false); moreBtn.focus(); }, 0);
+            });
+            // Typing, or a tap anywhere else, folds the tray.
+            inputEl.addEventListener('focus', function () { setMoreOpen(false); });
+            document.addEventListener('click', function (e) {
+                if (moreIsOpen() && composerEl && !composerEl.contains(e.target)) setMoreOpen(false);
+            });
+            if (window.MutationObserver) {
+                new MutationObserver(paintMoreDot).observe(toolsMoreEl, { subtree: true, attributes: true, attributeFilter: ['class'] });
+            }
+            paintMoreDot();
+        }
+
+        // ---- iPhone keyboard: keep the message box just above it ----
+        // iOS shrinks only the VISUAL viewport when the keyboard opens, so a
+        // 100dvh page leaves the box hidden behind the keyboard or scrolled
+        // half off screen. On a phone the page is sized to the visual viewport
+        // instead, and the latest message stays in view.
+        (function () {
+            const vv = window.visualViewport;
+            if (!vv || !window.matchMedia) return;
+            const phone = window.matchMedia('(max-width: 640px)');
+            const root = document.documentElement;
+            function fit() {
+                if (!phone.matches) { root.classList.remove('vv'); root.classList.remove('kb-open'); return; }
+                if (vv.scale && vv.scale > 1.01) return;   // pinch-zoomed: leave the layout alone
+                const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+                root.style.setProperty('--app-h', Math.round(vv.height) + 'px');
+                root.classList.add('vv');
+                // The layout viewport doesn't shrink for the iOS keyboard; the
+                // visual one does. Their difference is the keyboard.
+                root.classList.toggle('kb-open', root.clientHeight - vv.height > 120);
+                // Pin the page only for the chat box: a field in a panel (voice
+                // search) needs iOS's own scroll to stay above the keyboard.
+                const ae = document.activeElement;
+                if (window.scrollY && (!ae || ae === document.body || ae === inputEl)) window.scrollTo(0, 0);
+                if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+            vv.addEventListener('resize', fit);
+            vv.addEventListener('scroll', fit);
+            window.addEventListener('orientationchange', function () { setTimeout(fit, 250); });
+            fit();
+        })();
         inputEl.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
         });
@@ -654,6 +837,7 @@ CHAT_HTML = """
 
             inputEl.value = '';
             autoGrow();
+            setMoreOpen(false);
             pending = [];
             renderChips();
 
