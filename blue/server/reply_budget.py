@@ -28,6 +28,14 @@ the closing note's ban on offers — and the lengths were the same without
 it ("what could go wrong?" 116-166 words with the offer, 133-146 without).
 "go on" lifts the cap.
 
+Within the short messages the length follows the kind of turn (turn_kind).
+Asked what he thinks ("what do you think we should cover for this topic",
+10134), Blue gets IDEA_REPLY_TOKENS and IDEA_TURN_NOTE: a paragraph or two
+with his reasons, not five sentences. A greeting, an acknowledgement, a
+check-in or a bit of news gets SOCIAL_TURN_NOTE, a reply at about his
+length. Any other question keeps SHORT_TURN_NOTE, and a class introduction
+stays brief.
+
 Blue's previous reply ending on a question adds NO_QUESTION_NOTE to the
 same pinned note (turn_note), unless the turn's own request may end on one.
 
@@ -67,6 +75,62 @@ CHARS_PER_TOKEN = 4.3
 # "where are you right now?" stayed at 28-47 words (24-39 before).
 SHORT_TURN_NOTE = ("A short message: answer it in at most five sentences and "
                    "under 100 words, as plain paragraphs.")
+
+# An idea turn (turn_kind) gets a paragraph or two with his reasons (Alex,
+# 10-07: "has his own take"; he asked for more depth some 25 times and never
+# for less in a discussion). Replayed on qwen3.8-27b, n=3 an arm, over
+# #10134 "what do you think we should cover for this topic": under
+# SHORT_TURN_NOTE and 220 tokens, 79, 85 and 93 words, each a lab plan; with
+# this note and cap, 117, 134 and 152, each with its reasons and the week's
+# reading in it. The cap leaves about 300 words of room for a reply asked to
+# stay under about 150, so one that runs over still ends whole.
+IDEA_REPLY_TOKENS = 450
+IDEA_TURN_NOTE = ("Say what you think and why: a paragraph or two of plain "
+                  "prose, under about 150 words.")
+# A social turn (turn_kind): a greeting, an acknowledgement, a check-in, news.
+# No number in it: with a size in the note "hi blue" got 27-40 words, 12-15
+# without. Replayed the same way: "ok" after a long answer about good
+# lectures (the 10-05 harness's short_acks[2]) got 28, 57 and 64 words with no
+# note, two of them carrying the answer on; with it, 10, 10 and 25, on the
+# same thread. "we are in the class rightnow" (#10148) got 8-43 words and
+# no offer or "ready for whatever comes up" in 3 runs; without the note,
+# under c81485b's closing note, each of 3 had one. It does not stop a
+# question back: that turn and "hi" (#10107) still ended on one in 2 of 3.
+SOCIAL_TURN_NOTE = "Reply to his last message at about his length; react first."
+
+# He asks what Blue thinks: the cues of an opinion asked for (spec S8, C8),
+# and their plain variants in the log ("Do you really think you're a
+# practical alternative to commercial AI systems?", 7435; "do you believe
+# in God?", 7465; "How do you feel about the research talk.", 971).
+# "where do you think we are right now?", "who do you think i am" and "which
+# one do you think it is?" (6373, 6505, 8027) ask for a guess at a fact.
+_OPINION_CUE_RE = re.compile(
+    r"\b(?<!where )(?<!who )(?<!which one )(?<!which )(?<!when )"
+    r"(?:do|did|would) (?:you|u|yo|ya) (?:really |honestly |actually )?"
+    r"(?:think|believe)\b"
+    r"|\bworth\b|\bshould we\b|\bi wonder\b|\bwhat if\b"
+    r"|\bany (?:ideas|thoughts|advice|suggestions)\b|\bhow would (?:you|u|we)\b"
+    r"|\byour (?:thoughts|take|opinion|view)\b|\bwhat do (?:you|u) make of\b"
+    r"|\bhow do (?:you|u) feel about\b")
+# "why" opening a question ("why is that distinction so decisive?", 8145;
+# "why", 9189), not "as to why we named him nori" (781). About what he did
+# it asks for no view: "why did you change lights to red" (7727), "why cant
+# you access the text" (6831).
+_WHY_RE = re.compile(r"(?:^|[.?!,;]\s*)(?:(?:and|but|so|ok(?:ay)?|then)\s+)?why\b")
+_WHY_YOU_DID_RE = re.compile(
+    r"\bwhy (?:did|didn'?t|do|don'?t|dont|can'?t|cant|couldn'?t|won'?t|wont"
+    r"|are|aren'?t|were|have|haven'?t) (?:you|u)\b(?! think)")
+# A class introduction stays brief, however it is asked: "how would you
+# introduce yourself to a audience of students" (2876).
+_INTRODUCTION_RE = re.compile(r"\bintroduc\w*|\b(?:describe|about) yourself\b")
+# Telling Blue to do something is no social turn, in any clause: "drawing
+# on ilyenkov's texts in your library, describe who you are succinctly"
+# (7277), "focus on other aspects of yourself" (7417). The verbs thinking's
+# request openers leave out.
+_IMPERATIVE_RE = re.compile(
+    r"^(?:focus|remember|forget|say|be|act|pretend|answer|respond|speak|talk"
+    r"|wait|listen|ignore|skip|move|sing|dance|name|pick|choose|guess|stay"
+    r"|hold|note|mention|share|consider|recall)\b")
 
 # Something whose length is the point, asked for by name.
 _ARTIFACT_RE = re.compile(
@@ -288,10 +352,51 @@ def accepts_offer(text: str, prev_reply: str = "") -> bool:
     return True
 
 
+def turn_kind(text: str) -> str:
+    """"idea", "social" or "" for a short message, from his words alone.
+
+    idea: he asks what Blue thinks (_OPINION_CUE_RE, or a question opening
+    on "why"), or wonders aloud ("i wonder if it would be better than our
+    current system", 9375).
+    social: a greeting, an acknowledgement, a check-in, or news, a plan or a
+    feeling that asks for nothing ("we are in the class rightnow", 10148).
+    "": any other question or request, a correction ("wrong room", "its not
+    lab 5"), a remark that argues ("i'm not so sure. a lot of it seems like
+    hype to me"), and a class introduction, which stays brief."""
+    t = _thinking._normalise(text)
+    rest = _thinking._bare(t)
+    if not rest or _thinking._NAME_ONLY_RE.match(rest):
+        return "social" if t else ""
+    if (_thinking._CLASS_GREETING_RE.search(rest) or _INTRODUCTION_RE.search(rest)
+            or _thinking._CORRECTION_RE.search(rest)):
+        return ""
+    asks = _thinking._asks_something(rest)
+    if asks or re.search(r"\b(?:i wonder|what if)\b", rest):
+        if _OPINION_CUE_RE.search(rest) or (
+                _WHY_RE.search(rest) and not _WHY_YOU_DID_RE.search(rest)):
+            return "idea"
+    if _thinking._ACK_RE.match(rest) or _thinking._CHECKIN_RE.match(rest):
+        return "social"
+    # "I'm doing okay. What about you?" — a check-in handed back.
+    last = re.split(r"(?<=[.!?,;])\s+", rest)[-1]
+    if _thinking._CHECKIN_RE.match(last) or re.search(
+            r"\b(?:and|what about|how about) (?:you|u)\s*\??$", rest):
+        return "social"
+    if asks or _thinking._DISCUSSION_RE.search(rest):
+        return ""
+    for clause in re.split(r"[,.!?;:]+\s*", rest):
+        bare = _thinking._FILLER_PREFIX_RE.sub("", clause.strip())
+        if (_thinking._REQUEST_START_RE.match(bare)
+                or _thinking._WORK_START_RE.match(bare) or _IMPERATIVE_RE.match(bare)):
+            return ""
+    return "social"
+
+
 def reply_budget(text: str, *, voice: bool = False,
                  has_attachment: bool = False,
                  depth_cue: bool = False,
-                 prev_reply: str = "") -> Optional[int]:
+                 prev_reply: str = "",
+                 kid: bool = False) -> Optional[int]:
     """The visible reply's cap in tokens for this turn, or None for no cap.
 
     `text` is the user's own words (attachments stripped). `voice` means the
@@ -299,7 +404,9 @@ def reply_budget(text: str, *, voice: bool = False,
     an image. `depth_cue` is the caller's own sign that length is wanted (the
     chat page's "more" continuation cue). `prev_reply` is Blue's previous
     reply: a go-ahead for what it offered is not capped (accepts_offer).
-    Missing a cue only brings back the uncapped reply of before.
+    Missing a cue only brings back the uncapped reply of before. A typed
+    idea turn (turn_kind) gets IDEA_REPLY_TOKENS, but not on the kids'
+    page (`kid`), whose STYLE keeps every answer short.
     """
     if has_attachment or depth_cue:
         return None
@@ -310,20 +417,34 @@ def reply_budget(text: str, *, voice: bool = False,
         return None
     if accepts_offer(text, prev_reply):
         return None
-    return SPOKEN_REPLY_TOKENS if voice else TYPED_REPLY_TOKENS
+    if voice:
+        return SPOKEN_REPLY_TOKENS
+    if not kid and turn_kind(text) == "idea":
+        return IDEA_REPLY_TOKENS
+    return TYPED_REPLY_TOKENS
 
 
 def short_turn_note(text: str, *, voice: bool = False, kid: bool = False,
                     thinking: Optional[str] = None) -> str:
-    """SHORT_TURN_NOTE for a capped turn that needs it, else "".
+    """The note for a capped turn beside his words, by its kind (turn_kind),
+    else "".
 
-    Only where the long replies were: a typed question or request the turn
-    thinks about (all 20 of the 10-05 harness's were). A greeting, an
-    acknowledgement or a correction is short already, and a size in the
-    note could pad it ("hi blue" got 27-40 words with one, 12-15 in the
-    runs). Spoken turns have SPOKEN REPLY, and the kids' page its own STYLE.
+    social: SOCIAL_TURN_NOTE, typed or spoken. idea: IDEA_TURN_NOTE, typed
+    (SPOKEN REPLY sets a spoken reply's length). Otherwise SHORT_TURN_NOTE,
+    only where the long replies were: a typed question or request the turn
+    thinks about (all 20 of the 10-05 harness's were). A correction or a
+    class introduction gets none. The kids' page has its own STYLE.
     """
-    if voice or kid or thinking != _thinking.THINK_ON:
+    if kid:
+        return ""
+    kind = turn_kind(text)
+    if kind == "social":
+        return SOCIAL_TURN_NOTE
+    if voice:
+        return ""
+    if kind == "idea":
+        return IDEA_TURN_NOTE
+    if thinking != _thinking.THINK_ON:
         return ""
     return SHORT_TURN_NOTE if _thinking.asks_something(text) else ""
 

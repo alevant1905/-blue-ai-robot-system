@@ -27,8 +27,8 @@ import pytest
 
 import bluetools as bt
 from blue.server.reply_budget import (NO_QUESTION_NOTE, NO_QUESTION_NOTE_HEARD,
-                                      SHORT_TURN_NOTE, ends_on_question,
-                                      no_question_note,
+                                      SHORT_TURN_NOTE, SOCIAL_TURN_NOTE,
+                                      ends_on_question, no_question_note,
                                       questions_are_the_content, turn_note)
 from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
 
@@ -278,14 +278,17 @@ def test_after_a_question_the_turn_asks_for_none(chat):
     treating you?", "pretty tired…" got an either/or menu or a check-in."""
     _thread(chat, ASKED, "the dh399 crowd mostly")
     text = _user_text(chat.model.main[-1])
-    assert text == f"the dh399 crowd mostly\n\n[{NO_QUESTION_NOTE}]"
+    # One bracket with the social note (spec S8).
+    assert text == (f"the dh399 crowd mostly\n\n"
+                    f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE}]")
     # The note is not his words: neither stored nor replayed.
     assert NO_QUESTION_NOTE not in json.dumps(chat.saved)
 
 
-def test_after_a_statement_nothing_is_added(chat):
+def test_after_a_statement_no_question_note_is_added(chat):
     _thread(chat, SAID, "the dh399 crowd mostly")
-    assert _user_text(chat.model.main[-1]) == "the dh399 crowd mostly"
+    assert _user_text(chat.model.main[-1]) == (
+        f"the dh399 crowd mostly\n\n[{SOCIAL_TURN_NOTE}]")
 
 
 def test_a_short_question_after_a_question_gets_one_note(chat):
@@ -298,14 +301,15 @@ def test_a_short_question_after_a_question_gets_one_note(chat):
 def test_a_greeting_after_a_question_gets_the_note(chat):
     """The greeting fast path pins it too."""
     _thread(chat, ASKED, "hi blue")
-    assert _user_text(chat.model.main[-1]).endswith(f"[{NO_QUESTION_NOTE}]")
+    assert _user_text(chat.model.main[-1]).endswith(
+        f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE}]")
 
 
 def test_a_spoken_turn_after_a_question_gets_the_note(chat):
     """The heard note, which leaves room for HEARD, NOT TYPED's check-back."""
     _thread(chat, ASKED, "i don't know, maybe the material is too dense", voice=True)
     text = _user_text(chat.model.main[-1])
-    assert text.endswith(f"[{NO_QUESTION_NOTE_HEARD}]")
+    assert text.endswith(f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE_HEARD}]")
     assert "HEARD, NOT TYPED" in chat.model.main[-1]["messages"][0]["content"]
 
 

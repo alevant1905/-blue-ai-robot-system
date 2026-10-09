@@ -14795,8 +14795,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     def _settle_reply_cap(thinking_now, forced_tool=None, offered=()):
         """(cap, note): the visible reply's cap for this turn, or None, and
-        the short-message note a typed question under it gets beside its
-        words, or "". The caller pins the note (_pin_short_turn_note) after
+        the note its kind of turn gets beside his words under it
+        (reply_budget.short_turn_note: a greeting or news, an idea, a
+        question), or "". The caller pins the note (_pin_short_turn_note) after
         the "more" cue has read the turn: that cue reads the user's words
         alone, and returns None for anything over 60 characters.
 
@@ -14813,7 +14814,7 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
                 has_attachment=(_turn_attached or _vision_queue.has_images()
                                 or isinstance((messages[-1] if messages else {})
                                               .get("content"), list)),
-                depth_cue=_more, prev_reply=_turn_prev)
+                depth_cue=_more, prev_reply=_turn_prev, kid=_turn_kid)
             _long = sorted(set(offered or ()) & _LONG_ARGUMENT_TOOLS)
             if cap and _long:
                 print(f"   [LENGTH] short message, but {', '.join(_long)} is offered "
@@ -14829,8 +14830,11 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             if note and ((language and language != "en")
                          or _message_language(_turn_words) not in ("", "en")):
                 note = ""
+            _kinds = {_reply_budget.SOCIAL_TURN_NOTE: "the social note",
+                      _reply_budget.IDEA_TURN_NOTE: "the idea note",
+                      _reply_budget.SHORT_TURN_NOTE: "the short-message note"}
             print(f"   [LENGTH] short message — reply capped at {cap} tokens"
-                  + (", with the short-message note" if note else ""))
+                  + (f", with {_kinds.get(note, 'a note')}" if note else ""))
         return cap, note
 
     conversation_messages = _chat_purge_stale_camera(

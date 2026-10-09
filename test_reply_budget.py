@@ -25,9 +25,11 @@ import pytest
 
 import bluetools as bt
 from blue.server import runaway
-from blue.server.reply_budget import (SHORT_TURN_NOTE, SPOKEN_REPLY_TOKENS,
-                                      TYPED_REPLY_TOKENS, reply_budget,
-                                      short_turn_note, visible_chars)
+from blue.server.reply_budget import (IDEA_REPLY_TOKENS, IDEA_TURN_NOTE,
+                                      SHORT_TURN_NOTE, SOCIAL_TURN_NOTE,
+                                      SPOKEN_REPLY_TOKENS, TYPED_REPLY_TOKENS,
+                                      reply_budget, short_turn_note, turn_kind,
+                                      visible_chars)
 from blue.server.thinking import THINK_OFF, THINK_ON, THINKING_ALLOWANCE_TOKENS
 from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
 
@@ -39,10 +41,7 @@ from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
 CAPPED = [
     # the harness's long replies to short questions
     ("what could go wrong?", {}),
-    ("how would you grade something like that?", {}),
     ("would you do it differently?", {}),
-    ("what do you think makes a good lecture?", {}),
-    ("any ideas for making the lab more hands-on?", {}),
     ("explain what an AI agent is in simple terms", {}),
     ("give me an example from everyday life", {}),
     ("do you ever disagree with me?", {}),
@@ -228,12 +227,13 @@ def test_the_more_cue_asked_politely_lifts_the_cap(text):
 
 
 def test_the_note_goes_with_a_typed_question_that_thinks():
-    """Where the long replies were. A greeting or a correction is short
-    already, and a size in the note could pad it."""
+    """Where the long replies were. A correction is short already, and a
+    size in the note could pad it. A greeting gets the social note, which
+    names no size."""
     assert short_turn_note("what could go wrong?", thinking=THINK_ON) == SHORT_TURN_NOTE
     assert short_turn_note("ok, push back on something I've said today",
                            thinking=THINK_ON) == SHORT_TURN_NOTE
-    assert short_turn_note("hi blue", thinking=THINK_OFF) == ""
+    assert short_turn_note("hi blue", thinking=THINK_OFF) == SOCIAL_TURN_NOTE
     assert short_turn_note("its not lab 5", thinking=THINK_ON) == ""
     assert short_turn_note("how are you different from chat gpt?", voice=True,
                            thinking=THINK_ON) == ""
@@ -246,6 +246,135 @@ def test_the_note_asks_for_a_ceiling_and_no_offer():
     offer to go deeper closed one reply in four on "If you want, I can…"."""
     assert "under 100 words" in SHORT_TURN_NOTE
     assert "offer" not in SHORT_TURN_NOTE.lower()
+
+
+# --------------------------------------------------------------------------
+# The kind of turn (spec S8): an idea gets room, small talk a reply its size
+# --------------------------------------------------------------------------
+
+IDEA_TURNS = [
+    "what do you think we should cover for this topic",      # 10134
+    "what do yo think?",                                      # 10136's typo
+    "Do u think it’s worth fixing",                           # 10051
+    "I wonder if it would be better than our current system", # 9375
+    "why is that distinction so decisive?",                   # 8145
+    "Why",                                                    # 9189
+    "how would you grade something like that?",
+    "what do you think makes a good lecture?",
+    "any ideas for making the lab more hands-on?",
+    "Do you really think you're a practical alternative to commercial AI systems?",
+    "hi blue, what do you think of hexia?",
+    "what if we skipped the install and used the browser?",
+    "should we let them pick their own model?",
+]
+
+SOCIAL_TURNS = [
+    "hi", "hi blue", "good morning.", "ok", "hmm", "cool", "never mind",
+    "how are you", "how is your day going",
+    "I'm doing okay. How about you?",                         # 9419
+    "we are in the class rightnow",                           # 10148
+    "we will do that in class",                               # 10132
+    "i might take you with me to dh201 tomorrow",             # 10111
+    "anyways lm studio is sufficient. not a computer science class",  # 10140
+    "pretty tired, long week of teaching",
+    "maybe. nori would like a long walk",
+    "i had a rough day",
+    "nori is here sleeping on the floor. everything is quiet",  # 9983
+]
+
+NEITHER = [
+    # a question for a fact, or a guess at one
+    "what could go wrong?",
+    "what are we doing in class today",                       # 10124
+    "Okay, but where do you think we are right now?",         # 6373
+    "who do you think i am",                                  # 6505
+    "Which one do you think it is?",                          # 8027
+    # what he wants to know is why Blue did something
+    "why did you change lights to red",                       # 7727
+    "why cant you access the text",                           # 6831
+    # a correction, or a remark that argues
+    "wrong room",                                             # 10150
+    "its not lab 5",                                          # 10021
+    "i'm not so sure. a lot of it seems like hype to me",
+    # a class introduction stays brief
+    "can you introduce this topic to the class",              # 10126
+    "how would you introduce yourself to a audience of students",  # 2876
+    "say hi to the students",
+    # telling Blue to do something
+    "focus on other aspects of yourself",                     # 7417
+    "drawing on ilyenkov's texts in your library, describe who you are "
+    "succinctly",                                             # 7277
+    "turn off all the lights",
+]
+
+
+@pytest.mark.parametrize("text", IDEA_TURNS)
+def test_asked_what_he_thinks_is_an_idea_turn(text):
+    assert turn_kind(text) == "idea"
+
+
+@pytest.mark.parametrize("text", SOCIAL_TURNS)
+def test_a_greeting_an_ack_or_news_is_a_social_turn(text):
+    assert turn_kind(text) == "social"
+
+
+@pytest.mark.parametrize("text", NEITHER)
+def test_a_question_a_correction_or_a_request_is_neither(text):
+    assert turn_kind(text) == ""
+
+
+def test_why_inside_a_sentence_asks_for_no_view():
+    """781: a guessing game, small talk, not a view asked for."""
+    assert turn_kind("you wanna take a guess as to why we named him nori.") != "idea"
+
+
+@pytest.mark.parametrize("text", IDEA_TURNS)
+def test_an_idea_turn_gets_room_typed_but_not_spoken(text):
+    """A paragraph or two with his reasons: SHORT_TURN_NOTE held "what do
+    you think we should cover for this topic" to 79-93 words of plan. Spoken,
+    SPOKEN REPLY's one or two sentences and its cap still hold, and the kids'
+    page keeps its own short STYLE."""
+    assert reply_budget(text) == IDEA_REPLY_TOKENS
+    assert reply_budget(text, voice=True) == SPOKEN_REPLY_TOKENS
+    assert reply_budget(text, kid=True) == TYPED_REPLY_TOKENS
+
+
+def test_the_idea_room_still_lifts_for_length_asked_for():
+    """The idea cap is a short message's: depth asked for lifts it."""
+    assert reply_budget("what do you think, in detail?") is None
+    assert reply_budget("what do you think of this https://example.org/a") is None
+
+
+def test_each_kind_gets_its_note():
+    assert short_turn_note("what do you think we should cover for this topic",
+                           thinking=THINK_ON) == IDEA_TURN_NOTE
+    # Whether the turn thinks or not: on a model that doesn't, the note is
+    # what gives the reply its shape.
+    assert short_turn_note("what do you think we should cover for this topic",
+                           thinking=THINK_OFF) == IDEA_TURN_NOTE
+    assert short_turn_note("ok", thinking=THINK_OFF) == SOCIAL_TURN_NOTE
+    assert short_turn_note("we are in the class rightnow",
+                           thinking=THINK_OFF) == SOCIAL_TURN_NOTE
+    # Spoken: the social note, but no idea note (SPOKEN REPLY sets its length).
+    assert short_turn_note("i had a rough day", voice=True) == SOCIAL_TURN_NOTE
+    assert short_turn_note("what do you think of hexia?", voice=True,
+                           thinking=THINK_ON) == ""
+    # The kids' page: none.
+    assert short_turn_note("hi blue", kid=True) == ""
+    assert short_turn_note("why is the sky blue?", kid=True, thinking=THINK_ON) == ""
+    # A class introduction keeps the short note; a correction none.
+    assert short_turn_note("can you introduce this topic to the class",
+                           thinking=THINK_ON) == SHORT_TURN_NOTE
+    assert short_turn_note("wrong room", thinking=THINK_ON) == ""
+
+
+def test_the_notes_say_what_they_were_measured_saying():
+    """The idea note gives a ceiling and reasons, and offers nothing; the
+    social note names no size, which padded "hi blue" to 27-40 words."""
+    assert "under about 150 words" in IDEA_TURN_NOTE and "why" in IDEA_TURN_NOTE
+    assert "offer" not in IDEA_TURN_NOTE.lower()
+    assert not any(ch.isdigit() for ch in SOCIAL_TURN_NOTE)
+    assert "react first" in SOCIAL_TURN_NOTE
 
 
 # --------------------------------------------------------------------------
@@ -654,11 +783,91 @@ def test_a_short_question_is_capped_and_noted(chat):
     assert SHORT_TURN_NOTE not in json.dumps(chat.saved)
 
 
-def test_a_greeting_is_capped_without_the_note(chat):
+def test_a_greeting_is_capped_with_the_social_note(chat):
+    """The greeting fast path pins it too."""
     chat.ask("hi blue")
     payload = chat.model.main[-1]
     assert payload["max_tokens"] == TYPED_REPLY_TOKENS
-    assert SHORT_TURN_NOTE not in _user_text(payload)
+    assert _user_text(payload) == f"hi blue\n\n[{SOCIAL_TURN_NOTE}]"
+
+
+@pytest.mark.parametrize("text", ["ok", "we are in the class rightnow"])
+def test_an_ack_or_news_gets_the_social_note(chat, text):
+    """"ok" after an idea got 28-64 words that carried the idea on (the
+    10-05 harness's short_acks[2], replayed); with the note, 10-25."""
+    chat.ask(text)
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] == TYPED_REPLY_TOKENS
+    assert _user_text(payload) == f"{text}\n\n[{SOCIAL_TURN_NOTE}]"
+    assert SOCIAL_TURN_NOTE not in payload["messages"][0]["content"]
+    assert SOCIAL_TURN_NOTE not in json.dumps(chat.saved)
+
+
+def test_a_spoken_social_turn_gets_the_social_note(chat):
+    chat.ask("i had a rough day", voice=True)
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] == SPOKEN_REPLY_TOKENS
+    assert _user_text(payload).endswith(f"[{SOCIAL_TURN_NOTE}]")
+
+
+def test_an_idea_turn_gets_its_room_and_note(chat):
+    """#10134: "what do you think we should cover for this topic" was capped
+    at 220 tokens under SHORT_TURN_NOTE (79-93 words of plan, replayed on
+    qwen3.8-27b). The reasoning allowance goes on top of its own cap."""
+    chat.ask("what do you think we should cover for this topic")
+    payload = chat.model.main[-1]
+    assert payload["reasoning_effort"] == "low"
+    assert payload["max_tokens"] == IDEA_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS
+    assert _user_text(payload).endswith(
+        f"what do you think we should cover for this topic\n\n[{IDEA_TURN_NOTE}]")
+    assert IDEA_TURN_NOTE not in payload["messages"][0]["content"]
+    assert IDEA_TURN_NOTE not in json.dumps(chat.saved)
+
+
+def test_an_idea_reply_is_held_to_the_idea_cap(chat):
+    chat.model.queue(LONG)
+    reply = reply_of(chat.ask("what do you think makes a good lecture?"))
+    assert visible_chars(TYPED_REPLY_TOKENS) < len(reply) <= visible_chars(
+        IDEA_REPLY_TOKENS)
+    assert reply.endswith("wrong.")
+
+
+def test_a_spoken_idea_turn_keeps_the_spoken_cap_and_no_note(chat):
+    chat.ask("what do you think makes a good lecture?", voice=True)
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == SPOKEN_REPLY_TOKENS
+    assert IDEA_TURN_NOTE not in _user_text(payload)
+
+
+def test_the_kids_page_keeps_the_short_cap_and_no_note(chat):
+    chat.client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "why do you think dogs bark?"}],
+        "robot": "blue"}, headers={"X-Blue-Device": "ipad"})
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == TYPED_REPLY_TOKENS
+    text = _user_text(payload)
+    assert IDEA_TURN_NOTE not in text and SOCIAL_TURN_NOTE not in text
+
+
+def test_an_idea_turn_the_reasoning_starved_is_asked_again_with_its_room(
+        fresh, monkeypatch):
+    """The retry without thinking keeps the turn's own cap, not 220."""
+    sent = []
+
+    def post(payload, timeout=120):
+        sent.append(dict(payload))
+        if len(sent) == 1:
+            return _reply("", finish_reason="length", reasoning=1986)
+        return _reply("Start with why local matters, then one clean run.")
+
+    monkeypatch.setattr(bt, "_post_to_model", post)
+    bt._lm_turn_reset()
+    bt.call_lm_studio([{"role": "user", "content": "what should we cover?"}],
+                      include_tools=False, thinking=THINK_ON,
+                      reply_cap=IDEA_REPLY_TOKENS)
+    assert [(p["reasoning_effort"], p["max_tokens"]) for p in sent] == [
+        ("low", IDEA_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS),
+        ("none", IDEA_REPLY_TOKENS)]
 
 
 def test_a_spoken_question_is_capped_without_the_note(chat):
@@ -847,6 +1056,18 @@ def test_a_retry_keeps_the_turns_system_message_cap_and_note(chat):
     assert "OpenAI" not in reply
     assert len(reply) <= visible_chars(TYPED_REPLY_TOKENS)
     assert reply.endswith("harness.")
+
+
+def test_a_retry_of_an_idea_turn_keeps_its_cap_and_note(chat):
+    chat.model.queue("As a large language model developed by OpenAI, I don't "
+                     "have a body, but a good lecture leaves a gap.", LONG_RETRY)
+    reply = reply_of(chat.ask("what do you think makes a good lecture?"))
+    retry = chat.model.payloads[1]
+    assert TYPED_REPLY_TOKENS < retry["max_tokens"] <= IDEA_REPLY_TOKENS
+    live = [m["content"] for m in retry["messages"] if m.get("role") == "user"][-2]
+    assert live.endswith(f"[{IDEA_TURN_NOTE}]")
+    assert "OpenAI" not in reply
+    assert len(reply) <= visible_chars(IDEA_REPLY_TOKENS)
 
 
 def test_a_spoken_retry_keeps_spoken_reply_and_its_cap(chat):

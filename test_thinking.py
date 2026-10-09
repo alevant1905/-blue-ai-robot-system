@@ -269,8 +269,14 @@ def test_the_reply_after_a_forced_call_keeps_the_turn_s_decision(chat):
 
 def test_the_chat_page_sends_the_decision(chat):
     # Short messages, so the visible reply has its short cap
-    # (blue/server/reply_budget.py) and the allowance goes on top of it.
+    # (blue/server/reply_budget.py) and the allowance goes on top of it. An
+    # opinion asked for is an idea turn, with an idea's cap.
     chat.ask("what do you make of memory?")
+    assert chat.model.main[-1]["reasoning_effort"] == "low"
+    assert chat.model.main[-1]["max_tokens"] == (
+        bt._reply_budget.IDEA_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS)
+
+    chat.ask("where does your memory live?")
     assert chat.model.main[-1]["reasoning_effort"] == "low"
     assert chat.model.main[-1]["max_tokens"] == (
         bt._reply_budget.TYPED_REPLY_TOKENS + THINKING_ALLOWANCE_TOKENS)
@@ -648,9 +654,10 @@ def test_the_turn_logs_model_thinking_and_tokens(chat, capsys):
     chat.ask("what do you make of memory?")
     out = capsys.readouterr().out
 
-    # A short message: its reply cap is named too (blue/server/reply_budget.py).
+    # A short message: its reply cap is named too (blue/server/reply_budget.py),
+    # here an idea turn's.
     assert ("[LM] model qwen/qwen3.8-27b, thinking on (sent low), "
-            "reply cap 220t, 1 call: "
+            "reply cap 450t, 1 call: "
             "prompt 10440t, reasoning 120t, completion 300t") in out
 
 
