@@ -278,17 +278,23 @@ def test_after_a_question_the_turn_asks_for_none(chat):
     treating you?", "pretty tired…" got an either/or menu or a check-in."""
     _thread(chat, ASKED, "the dh399 crowd mostly")
     text = _user_text(chat.model.main[-1])
-    # One bracket with the social note (spec S8).
-    assert text == (f"the dh399 crowd mostly\n\n"
-                    f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE}]")
+    assert text == f"the dh399 crowd mostly\n\n[{NO_QUESTION_NOTE}]"
     # The note is not his words: neither stored nor replayed.
     assert NO_QUESTION_NOTE not in json.dumps(chat.saved)
 
 
-def test_after_a_statement_no_question_note_is_added(chat):
+def test_after_a_statement_nothing_is_added(chat):
     _thread(chat, SAID, "the dh399 crowd mostly")
-    assert _user_text(chat.model.main[-1]) == (
-        f"the dh399 crowd mostly\n\n[{SOCIAL_TURN_NOTE}]")
+    assert _user_text(chat.model.main[-1]) == "the dh399 crowd mostly"
+
+
+@pytest.mark.parametrize("reply,note", [
+    (ASKED, f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE}]"),
+    (SAID, f"[{SOCIAL_TURN_NOTE}]")])
+def test_news_gets_the_social_note_and_both_in_one_bracket(chat, reply, note):
+    """One bracket with the social note (spec S8)."""
+    _thread(chat, reply, "we are in the class rightnow")
+    assert _user_text(chat.model.main[-1]) == f"we are in the class rightnow\n\n{note}"
 
 
 def test_a_short_question_after_a_question_gets_one_note(chat):
@@ -309,8 +315,14 @@ def test_a_spoken_turn_after_a_question_gets_the_note(chat):
     """The heard note, which leaves room for HEARD, NOT TYPED's check-back."""
     _thread(chat, ASKED, "i don't know, maybe the material is too dense", voice=True)
     text = _user_text(chat.model.main[-1])
-    assert text.endswith(f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE_HEARD}]")
+    assert text.endswith(f"[{NO_QUESTION_NOTE_HEARD}]")
     assert "HEARD, NOT TYPED" in chat.model.main[-1]["messages"][0]["content"]
+
+
+def test_spoken_news_after_a_question_gets_both_notes_in_one(chat):
+    _thread(chat, ASKED, "i had a rough day", voice=True)
+    assert _user_text(chat.model.main[-1]).endswith(
+        f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE_HEARD}]")
 
 
 CHECKED_BACK = "I didn't catch that — did you mean how old is Athena?"

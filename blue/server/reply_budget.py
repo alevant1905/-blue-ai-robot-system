@@ -34,7 +34,8 @@ Asked what he thinks ("what do you think we should cover for this topic",
 with his reasons, not five sentences. A greeting, an acknowledgement, a
 check-in or a bit of news gets SOCIAL_TURN_NOTE, a reply at about his
 length. Any other question keeps SHORT_TURN_NOTE, and a class introduction
-stays brief.
+stays brief. A turn that is none of these for sure (a remark, pushback, an
+answer to Blue's question) gets no note, as before.
 
 Blue's previous reply ending on a question adds NO_QUESTION_NOTE to the
 same pinned note (turn_note), unless the turn's own request may end on one.
@@ -96,26 +97,54 @@ IDEA_TURN_NOTE = ("Say what you think and why: a paragraph or two of plain "
 # no offer or "ready for whatever comes up" in 3 runs; without the note,
 # under c81485b's closing note, each of 3 had one. It does not stop a
 # question back: that turn and "hi" (#10107) still ended on one in 2 of 3.
+# Nor the check-back on a garbled heard turn ("I'm okay. Just working on my
+# forces against today.", morning_misheard_courses[1]): 3 of 3 named a guess
+# with it, 2 of 2 without. "exactly" after a long answer got 41 and 26 words,
+# each one step further on his point.
 SOCIAL_TURN_NOTE = "Reply to his last message at about his length; react first."
 
 # He asks what Blue thinks: the cues of an opinion asked for (spec S8, C8),
 # and their plain variants in the log ("Do you really think you're a
 # practical alternative to commercial AI systems?", 7435; "do you believe
 # in God?", 7465; "How do you feel about the research talk.", 971).
-# "where do you think we are right now?", "who do you think i am" and "which
-# one do you think it is?" (6373, 6505, 8027) ask for a guess at a fact.
-_OPINION_CUE_RE = re.compile(
-    r"\b(?<!where )(?<!who )(?<!which one )(?<!which )(?<!when )"
-    r"(?:do|did|would) (?:you|u|yo|ya) (?:really |honestly |actually )?"
+# These ask in so many words, with or without a "?": "I hope they like our
+# research talk what do you think." (1001), "thinking of using lm studio for
+# the lab what do you think" (10136, shortened).
+_THINK_CUE_RE = re.compile(
+    r"\b(?:do|did|would) (?:you|u|yo|ya) (?:really |honestly |actually )?"
     r"(?:think|believe)\b"
-    r"|\bworth\b|\bshould we\b|\bi wonder\b|\bwhat if\b"
+    r"|\bwhat do (?:you|u) make of\b|\bhow do (?:you|u) feel about\b")
+# "do you actually think…" is no correction (thinking._CORRECTION_RE reads a
+# bare "actually" as one).
+_CUE_ACTUALLY_RE = re.compile(
+    r"\b((?:do|did|would) (?:you|u|yo|ya)) actually (?=(?:think|believe)\b)")
+# A guess at a fact, not a view: "where do you think we are right now?",
+# "who do you think i am", "which one do you think it is?" (6373, 6505,
+# 8027), "what time do you think it is", "how many students do you think
+# will come?". The words just before the cue.
+_GUESS_BEFORE_RE = re.compile(
+    r"\b(?:where|who|whom|which(?: one)?|when) $"
+    r"|\b(?:what (?:time|day|date|year|month)"
+    r"|how (?:many|much|long|old|far|big|tall|soon|often|late|early|fast))\b"
+    r"(?: [\w']+){0,4} $")
+# The looser cues count in a question or a request only: "it was worth it"
+# reports. Not a price ("how much is the house worth?", "what's elon musk
+# worth"), nor wondering where someone went ("i wonder where nori went").
+_OPINION_CUE_RE = re.compile(
+    r"\bworth\b|\bshould we\b|\bwhat if\b"
+    r"|\bi wonder\b(?! (?:where|who|whom|when|what time"
+    r"|how (?:many|much|long|old|far))\b)"
     r"|\bany (?:ideas|thoughts|advice|suggestions)\b|\bhow would (?:you|u|we)\b"
-    r"|\byour (?:thoughts|take|opinion|view)\b|\bwhat do (?:you|u) make of\b"
-    r"|\bhow do (?:you|u) feel about\b")
+    r"|\byour (?:thoughts|take|opinion|view)\b")
+_PRICE_RE = re.compile(
+    r"\bhow much\b[^.?!]*\bworth\b"
+    r"|\bwhat(?:'s|s| is| are| was| were)\b[^.?!]{0,40}\bworth\b[\s?.!]*$")
 # "why" opening a question ("why is that distinction so decisive?", 8145;
-# "why", 9189), not "as to why we named him nori" (781). About what he did
-# it asks for no view: "why did you change lights to red" (7727), "why cant
-# you access the text" (6831).
+# "why", 9189; "ok, why?"), not "as to why we named him nori" (781), nor a
+# "why" tagged onto news, which asks the cause of what he reports ("nori is
+# barking, why"; "Your eyes just changed color, why?", 7131). About what he
+# did it asks for no view: "why did you change lights to red" (7727), "why
+# cant you access the text" (6831).
 _WHY_RE = re.compile(r"(?:^|[.?!,;]\s*)(?:(?:and|but|so|ok(?:ay)?|then)\s+)?why\b")
 _WHY_YOU_DID_RE = re.compile(
     r"\bwhy (?:did|didn'?t|do|don'?t|dont|can'?t|cant|couldn'?t|won'?t|wont"
@@ -131,6 +160,68 @@ _IMPERATIVE_RE = re.compile(
     r"^(?:focus|remember|forget|say|be|act|pretend|answer|respond|speak|talk"
     r"|wait|listen|ignore|skip|move|sing|dance|name|pick|choose|guess|stay"
     r"|hold|note|mention|share|consider|recall)\b")
+# Someone else, by name or as "the girls": not Blue ("You got the girls
+# ages wrong", 2413), nor a "that" or an "it".
+_SUBJECT = (r"(?:the |a |an |his |her |their )?(?!(?:you|u|your|ur|you're"
+            r"|youre|that|this|it|there)\b)[a-z][\w'-]*(?: [a-z][\w'-]*)?")
+# Small talk that asks for nothing opens on who it happened to, or when:
+# "we are in the class rightnow" (10148), "i had a rough day", "tomorrow we
+# have dh399" (9985), "nori is here sleeping on the floor" (9983), "maybe.
+# nori would like a long walk", "pretty tired, long week of teaching". The
+# social note asks for a reply his size, so anything else that asks for
+# nothing keeps the reply of before, with no note: a remark about Blue ("you
+# appear to have functional self-awareness and functional desires", 7363;
+# "you made all that up", 8631), a question or request the detectors miss
+# ("any epiphanies about your self-understanding", 8235; "Cancel the meeting
+# with bob"), pushback ("not sure that distinction can hold up to scrutiny",
+# 6885; "looks like canada is flirting with fascism", 7949).
+_NEWS_START_RE = re.compile(
+    r"^(?:i|i'm|im|i've|ive|i'll|i'd|we|we're|we've|we'll|my|our|me|us"
+    r"|today|tonight|tomorrow|yesterday"
+    r"|this (?:morning|afternoon|evening|week|weekend)"
+    r"|things|everything|everyone|everybody"
+    r"|it (?:was|went|is going|has been)"
+    r"|it'?s (?:been|going|my|our|here|there|home|done|over|finished|late|early"
+    r"|quiet|raining|snowing|cold|hot|nice|good|great|fine|ok(?:ay)?"
+    r"|a (?:nice|good|great|lovely|beautiful|long|busy|rough|quiet|slow))"
+    r"|(?:(?:pretty|so|very|really|super|kinda|a bit|bit|totally|just|been) )?"
+    r"(?:tired|exhausted|beat|wiped|busy|sleepy|sick|stressed|bored|hungry"
+    r"|happy|sad|rough|long|hectic|quiet)"
+    # where he is: "home now", "off to class", "at the office"
+    r"|(?:just |now )?(?:home|back (?:home|at|in|from)|off to|on (?:my|our|the) way"
+    r"|at (?:the|my|our|home|work|school)"
+    r"|in (?:the|my|our) (?:car|office|class|classroom|kitchen|lab|room)))\b"
+    # what he's doing, "I'm" left out: "working on dh399 today" (9105); not
+    # a remark ("intersting that you can be unsettled", 6040)
+    r"|^(?:(?:just|still|busy|been|currently) )?(?!(?:bring|sing|ring|string"
+    r"|thing|king|spring|during|nothing|something|anything|everything"
+    r"|thinking|wondering|considering|debating|interesting|intersting|amazing"
+    r"|fascinating|surprising|confusing|annoying|disappointing|frustrating"
+    r"|exciting|boring|depressing|worrying|concerning|troubling|striking"
+    r"|compelling|convincing|puzzling|shocking|embarrassing|disturbing"
+    r"|alarming)\b)[a-z]{2,}ing\b"
+    # someone else, where they are or what they did: "nori is here"
+    r"|^" + _SUBJECT + r"(?: is| are| was| were|'s) (?:here|there|home|back|out"
+    r"|away|asleep|sleeping|awake|up|at|in|on|with|coming|going|doing|having"
+    r"|getting|still|off|sick)\b"
+    r"|^" + _SUBJECT + r" (?:would like|wants|went|came|got|has|had|left"
+    r"|arrived|just|loves)\b")
+# ...and that still asks or argues in passing: "i don't think that's right",
+# "i'm okay, where were we", "i see you've updated it" (what Blue did: "it
+# doesn't appear that you've updated Athena's age correctly", 9229).
+_NOT_NEWS_RE = re.compile(
+    r"\b(?:what|who|whom|whose|when|where|why|how|which)\b"
+    r"|\bi (?:don'?t|do not|didn'?t|can'?t) (?:think|believe|agree|buy|see)\b"
+    r"|\bnot (?:so )?sure\b|\bnot convinced\b|\b(?:looks|sounds|feels) like\b"
+    r"|\bi (?:want|need|wanted|needed|wish|would like|'d like) (?:to|you)\b"
+    r"|\bi (?:don'?t|do not) (?:want|need) (?:you|u)\b"
+    r"|\byou(?:'ve| have| did| made| didn'?t| haven'?t| forgot| missed| said"
+    r"| keep| still| got)\b|\bi (?:told|asked) you\b|\bwrong\b"
+    # a fact put right: "Our dog's name is not Luna." (2091)
+    r"|\b(?:is|are) not\b|\b(?:isn'?t|aren'?t)\b"
+    # a question inside the sentence: "Today we start our course CS240J are
+    # you excited for it." (1885)
+    r"|\b(?:are|do|did|can|could|would|will|were) (?:you|u)\b")
 
 # Something whose length is the point, asked for by name.
 _ARTIFACT_RE = re.compile(
@@ -352,29 +443,64 @@ def accepts_offer(text: str, prev_reply: str = "") -> bool:
     return True
 
 
+def _asks_a_view(rest: str, asks: bool) -> bool:
+    """He asks what Blue thinks: "do you think", "what do you make of" in
+    any message; the looser cues and "why" in a question or a request."""
+    for m in _THINK_CUE_RE.finditer(rest):
+        if not _GUESS_BEFORE_RE.search(rest[:m.start()]):
+            return True
+    if not (asks or re.search(r"\b(?:i wonder|what if)\b", rest)):
+        return False
+    for m in _OPINION_CUE_RE.finditer(rest):
+        if not (m.group(0) == "worth" and _PRICE_RE.search(rest)):
+            return True
+    if _WHY_YOU_DID_RE.search(rest):
+        return False
+    for m in _WHY_RE.finditer(rest):
+        before = rest[:m.start()].strip(" ,;.!?")
+        after = rest[m.end():].strip(" ,;.!?")
+        if after or not before or _thinking._ACK_RE.match(before):
+            return True
+    return False
+
+
+def _is_news(rest: str) -> bool:
+    """News, a plan or a feeling that asks for nothing (_NEWS_START_RE): its
+    first sentence that is not an acknowledgement opens on who or when."""
+    if (_NOT_NEWS_RE.search(rest) or _THINK_CUE_RE.search(rest)
+            or _OPINION_CUE_RE.search(rest)):
+        return False
+    for piece in re.split(r"(?<=[.!?;,])\s+", rest):
+        bare = _thinking._FILLER_PREFIX_RE.sub("", piece.strip()).strip(" ,;.!?")
+        if not bare or _thinking._ACK_RE.match(bare):
+            continue
+        return bool(_NEWS_START_RE.match(bare))
+    return False
+
+
 def turn_kind(text: str) -> str:
     """"idea", "social" or "" for a short message, from his words alone.
 
-    idea: he asks what Blue thinks (_OPINION_CUE_RE, or a question opening
-    on "why"), or wonders aloud ("i wonder if it would be better than our
+    idea: he asks what Blue thinks (_THINK_CUE_RE in any message;
+    _OPINION_CUE_RE or a question opening on "why" in a question or a
+    request), or wonders aloud ("i wonder if it would be better than our
     current system", 9375).
     social: a greeting, an acknowledgement, a check-in, or news, a plan or a
     feeling that asks for nothing ("we are in the class rightnow", 10148).
     "": any other question or request, a correction ("wrong room", "its not
     lab 5"), a remark that argues ("i'm not so sure. a lot of it seems like
-    hype to me"), and a class introduction, which stays brief."""
+    hype to me") or is about Blue, and a class introduction, which stays
+    brief. Unsure is "": no note, the reply of before."""
     t = _thinking._normalise(text)
     rest = _thinking._bare(t)
     if not rest or _thinking._NAME_ONLY_RE.match(rest):
         return "social" if t else ""
     if (_thinking._CLASS_GREETING_RE.search(rest) or _INTRODUCTION_RE.search(rest)
-            or _thinking._CORRECTION_RE.search(rest)):
+            or _thinking._CORRECTION_RE.search(_CUE_ACTUALLY_RE.sub(r"\1 ", rest))):
         return ""
     asks = _thinking._asks_something(rest)
-    if asks or re.search(r"\b(?:i wonder|what if)\b", rest):
-        if _OPINION_CUE_RE.search(rest) or (
-                _WHY_RE.search(rest) and not _WHY_YOU_DID_RE.search(rest)):
-            return "idea"
+    if _asks_a_view(rest, asks):
+        return "idea"
     if _thinking._ACK_RE.match(rest) or _thinking._CHECKIN_RE.match(rest):
         return "social"
     # "I'm doing okay. What about you?" — a check-in handed back.
@@ -389,7 +515,7 @@ def turn_kind(text: str) -> str:
         if (_thinking._REQUEST_START_RE.match(bare)
                 or _thinking._WORK_START_RE.match(bare) or _IMPERATIVE_RE.match(bare)):
             return ""
-    return "social"
+    return "social" if _is_news(rest) else ""
 
 
 def reply_budget(text: str, *, voice: bool = False,

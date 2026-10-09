@@ -266,6 +266,12 @@ IDEA_TURNS = [
     "hi blue, what do you think of hexia?",
     "what if we skipped the install and used the browser?",
     "should we let them pick their own model?",
+    # asked in so many words, with no "?"
+    "thinking of using lm studio for the lab what do you think",  # 10136, short
+    "I hope they like our research talk what do you think.",  # 1001
+    # "actually" here is no correction
+    "do you actually think it's worth it?",
+    "ok, why?",
 ]
 
 SOCIAL_TURNS = [
@@ -275,11 +281,16 @@ SOCIAL_TURNS = [
     "we are in the class rightnow",                           # 10148
     "we will do that in class",                               # 10132
     "i might take you with me to dh201 tomorrow",             # 10111
-    "anyways lm studio is sufficient. not a computer science class",  # 10140
     "pretty tired, long week of teaching",
     "maybe. nori would like a long walk",
     "i had a rough day",
     "nori is here sleeping on the floor. everything is quiet",  # 9983
+    "tomorrow we have dh399",                                 # 9985
+    "working on dh399 today",                                 # 9105
+    "good. we are on our way to dh399",                       # 9765
+    "it was a good class. a few really knowledgeable students there",  # 9899
+    "Felix is coming over today at 11 a.m.",                  # 3980
+    "back home now after walk with nori",                     # 2946
 ]
 
 NEITHER = [
@@ -289,13 +300,33 @@ NEITHER = [
     "Okay, but where do you think we are right now?",         # 6373
     "who do you think i am",                                  # 6505
     "Which one do you think it is?",                          # 8027
+    "what time do you think it is",
+    "how many students do you think will come?",
+    "how much is the house worth?",
+    "i wonder where nori went",
+    # the cause of what he reports, not a view
+    "nori is barking, why",
+    "Your eyes just changed color, why?",                     # 7131
     # what he wants to know is why Blue did something
     "why did you change lights to red",                       # 7727
     "why cant you access the text",                           # 6831
+    "finally why did you make all those errors",              # 7767
     # a correction, or a remark that argues
     "wrong room",                                             # 10150
     "its not lab 5",                                          # 10021
     "i'm not so sure. a lot of it seems like hype to me",
+    "not sure that distinction can hold up to scrutiny",      # 6885
+    "looks like canada is flirting with fascism",             # 7949
+    "anyways lm studio is sufficient. not a computer science class",  # 10140
+    "it doesn't appear that you've updated Athena's age correctly.",  # 9229
+    # a remark about Blue
+    "you appear to have functional self-awareness and functional desires",  # 7363
+    "you made all that up",                                   # 8631
+    # a question or a request the detectors miss
+    "any epiphanies about your self-understanding",           # 8235
+    "if you're not neutral, what are you",                    # 6092
+    "Cancel the meeting with bob",
+    "i want to turn off thinking or reasoning but i cant",    # 9077
     # a class introduction stays brief
     "can you introduce this topic to the class",              # 10126
     "how would you introduce yourself to a audience of students",  # 2876
@@ -326,6 +357,20 @@ def test_a_question_a_correction_or_a_request_is_neither(text):
 def test_why_inside_a_sentence_asks_for_no_view():
     """781: a guessing game, small talk, not a view asked for."""
     assert turn_kind("you wanna take a guess as to why we named him nori.") != "idea"
+
+
+@pytest.mark.parametrize("text", [
+    "you made all that up",
+    "not sure that distinction can hold up to scrutiny",
+    "any epiphanies about your self-understanding",
+])
+def test_what_is_neither_gets_no_note(text):
+    """The social note asks for a reply his size; a remark, pushback or a
+    missed question keeps the reply of before, with no note at all."""
+    for thinking in (THINK_ON, THINK_OFF):
+        assert short_turn_note(text, thinking=thinking) == ""
+        assert short_turn_note(text, voice=True, thinking=thinking) == ""
+    assert reply_budget(text) == TYPED_REPLY_TOKENS
 
 
 @pytest.mark.parametrize("text", IDEA_TURNS)
@@ -801,6 +846,18 @@ def test_an_ack_or_news_gets_the_social_note(chat, text):
     assert _user_text(payload) == f"{text}\n\n[{SOCIAL_TURN_NOTE}]"
     assert SOCIAL_TURN_NOTE not in payload["messages"][0]["content"]
     assert SOCIAL_TURN_NOTE not in json.dumps(chat.saved)
+
+
+@pytest.mark.parametrize("text", [
+    "you appear to have functional self-awareness and functional desires",
+    "looks like canada is flirting with fascism",
+])
+def test_a_remark_is_capped_with_no_note(chat, text):
+    """7363, 7949: no social note asking for a reply his size."""
+    chat.ask(text)
+    payload = chat.model.main[-1]
+    assert payload["max_tokens"] - bt._thinking_allowance(payload) == TYPED_REPLY_TOKENS
+    assert _user_text(payload) == text
 
 
 def test_a_spoken_social_turn_gets_the_social_note(chat):
