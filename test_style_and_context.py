@@ -173,10 +173,15 @@ def test_a_heard_turn_ends_on_the_spoken_note():
 
 
 def test_panel_keeps_the_short_spoken_note():
-    """Panel passes voice=True without `heard`, for brevity only."""
+    """Panel passes voice=True without `heard`, for brevity only. Its robots
+    talk to each other and the room, so it keeps the clause it had: the
+    chat page's "one short one about what he just said" invited a panel
+    robot to put questions to "he" (S7 review)."""
     text = _system_text(voice=True, heard=False)
     assert "\nSTYLE:" not in text and "A feeling is not a request" not in text
-    assert text.rstrip().endswith(SPOKEN_END)
+    assert SPOKEN_END not in text
+    assert text.rstrip().endswith(
+        "End on your answer — no follow-up question unless you need one to go on.")
 
 
 # ---- Alex is "you" when he is the one talking (P2-5) ------------------------------
@@ -626,8 +631,9 @@ def _thread_system_text(texts, user="Alex", voice=False):
         msgs.append({"role": "user", "content": text})
         if i < len(texts) - 1:
             msgs.append({"role": "assistant", "content": "Nice to meet you."})
+    # A spoken turn on the chat page is a heard one (voice=heard=voice_turn).
     out = bt._chat_system_message(msgs, robot="blue", user_name=user, voice=voice,
-                                  language="", system_addendum="", heard=False)
+                                  language="", system_addendum="", heard=voice)
     return out[0]["content"]
 
 

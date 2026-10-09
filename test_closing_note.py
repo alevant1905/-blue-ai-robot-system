@@ -26,9 +26,10 @@ import re
 import pytest
 
 import bluetools as bt
-from blue.server.reply_budget import (NO_QUESTION_NOTE, SHORT_TURN_NOTE,
-                                      ends_on_question, no_question_note,
-                                      turn_note)
+from blue.server.reply_budget import (NO_QUESTION_NOTE, NO_QUESTION_NOTE_HEARD,
+                                      SHORT_TURN_NOTE, ends_on_question,
+                                      no_question_note,
+                                      questions_are_the_content, turn_note)
 from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
 
 ALEX_QUESTION_RULE = (
@@ -65,6 +66,19 @@ def test_a_reply_reacts_first_and_adds_something_of_his_own():
     assert note.index("Start from what he just said") < note.index("add one thing of your own")
 
 
+def test_his_own_thing_comes_from_what_alex_said():
+    """ "or a detail you noticed" was filled from the context blocks or made
+    up: Nori "dragging the rest of us through the park" (home_checkin[5]),
+    the week's timetable recited to "pretty tired, long week of teaching",
+    "I was at DH201 last Thursday" (10112) (S7 review)."""
+    note = _closing(_system_text())
+    assert "what you think and why, or something you noticed in what he said" in note
+    assert "a detail you noticed" not in note
+    heard = _system_text(voice=True, heard=True)
+    assert "something you noticed in what he said" in heard
+    assert "a detail you noticed" not in heard
+
+
 def test_alexs_question_rule_is_in_the_note_in_his_words():
     note = _closing(_system_text())
     assert ALEX_QUESTION_RULE in note
@@ -75,20 +89,52 @@ def test_alexs_question_rule_is_in_the_note_in_his_words():
     assert "A greeting gets a greeting back and something of your own, not a question" in note
 
 
+@pytest.mark.parametrize("heard", [False, True])
+def test_a_check_back_and_a_needed_detail_are_still_asked(heard):
+    """ "No other question" forbade the check-back HEARD, NOT TYPED asks for
+    on a garbled turn, and the clarification the earlier note allowed
+    ("could you tell me her name so I can check properly?", 7662)."""
+    text = _system_text(voice=heard, heard=heard)
+    note = text[text.rindex("\nSTYLE:"):]
+    assert "No other question" not in note
+    assert ("ask only to check a word you didn't catch or a detail you need "
+            "before you can do what he asked") in note
+    assert note.index(ALEX_QUESTION_RULE) < note.index("ask only to check a word")
+    if heard:
+        assert text.index("HEARD, NOT TYPED") < text.rindex("\nSTYLE:")
+
+
 def test_a_true_fact_is_held_and_his_own_life_is_his():
     """10139: the reasoning knew the app is proprietary and conceded. On a
     draft that said only "about his own plans, family and life, he is the
     authority", the reasoning read it as "the authority on his own plans and
-    what he's verified" for a fact about LM Studio."""
+    what he's verified" for a fact about LM Studio; with his courses in that
+    list, as "the authority on… his own tools and his course material"
+    (2 of 3 replays conceded, S7 review)."""
     note = _closing(_system_text())
     assert "When corrected, take the fix" not in note
     assert "When he corrects you and he's right, take it in a few words" in note
     assert "About what only he can know — his plans, his family, his own life — he is the authority" in note
-    # Phase 3's verify before conceding: his courses are checked first.
-    assert "check what he says against the syllabus and schedule in front of you" in note
     assert "what you know doesn't change because he disagrees" in note
     assert "say so once, plainly and kindly" in note
     assert "don't argue it again" in note
+
+
+def test_his_courses_are_his_to_set():
+    """Spec S7: his courses → he is the authority. Checking what he says
+    against the syllabus "before you give way" was the 09-24 stubbornness:
+    "Yes, I'm sure. The PDF syllabus… lists Lab 5" (10020), then "its not
+    lab 5". The syllabus is mentioned once, then he decides (S7 review)."""
+    note = _closing(_system_text())
+    assert "before you give way" not in note
+    assert "if they agree with you, say so once" not in note
+    assert ("His courses and schedule are his to set: if what he says differs "
+            "from the syllabus or schedule in front of you, say what it shows "
+            "once, then go with what he says.") in note
+    # Not in the "only he can know" list, where LM Studio read as his course.
+    only = note[note.index("About what only he can know"):]
+    only = only[:only.index("he is the authority")]
+    assert "course" not in only
 
 
 def test_the_note_quotes_no_phrase_to_say_back():
@@ -137,7 +183,8 @@ def test_the_kids_page_keeps_its_own_note():
 @pytest.mark.parametrize("reply", [
     "What model did you point it at?",
     "Did you get around to reading it?  ",
-    'He asked me, "why?"',
+    '"How was the drive in?"',
+    "**“Did the lab run long?”**",
     "Was it the **Reigeluth** reading or the agent loops?**",
     "(Or was that just the wifi?)",
     "Do you want to talk about what happened, or let the day go?\n",
@@ -151,10 +198,50 @@ def test_a_reply_that_ends_on_a_question(reply):
     "", None, "That makes sense.", "What? No, the lab is on Wednesday.",
     "Fair point on the gloss — it isn't open source, though.",
     "Is it hype? Partly. The procedural middle is real.",
+    # A quoted question is someone's words, not Blue asking (3971, 4495,
+    # 7910 in conversation_log).
+    'He asked me, "why?"',
+    'The guiding question for the class is: "what happens to representation?"',
+    "Her title says it all: “Who owns the model?”",
+    '"Open" is doing the work in "who gets to run it?"',
 ])
 def test_a_reply_that_does_not(reply):
     assert not ends_on_question(reply)
     assert no_question_note(reply) == ""
+
+
+@pytest.mark.parametrize("turn", [
+    "give me three discussion questions for tomorrow's dh201 reading",
+    "draft an email asking the dean whether the lab can move",
+    "ask the class what they think about agents",
+    "what were those questions again?",
+    "make a quick quiz on the reading",
+    "write felix a note about friday",
+])
+def test_a_request_that_may_end_on_a_question_gets_no_note(turn):
+    """The pin contradicted a request whose questions are the content."""
+    assert questions_are_the_content(turn)
+    assert no_question_note(ASKED, turn) == ""
+    assert no_question_note(ASKED, turn, heard=True) == ""
+
+
+@pytest.mark.parametrize("turn", [
+    "the dh399 crowd mostly", "pretty tired", "tell me more about that",
+    "what could go wrong?", "i don't know, maybe the material is too dense",
+])
+def test_a_conversational_turn_keeps_the_note(turn):
+    assert not questions_are_the_content(turn)
+    assert no_question_note(ASKED, turn) == NO_QUESTION_NOTE
+    assert no_question_note(ASKED, turn, heard=True) == NO_QUESTION_NOTE_HEARD
+
+
+def test_the_heard_note_leaves_room_to_check_a_word():
+    """HEARD, NOT TYPED asks for one short question naming the guess on a
+    garbled turn; the plain note forbade it on the turns that answer Blue's
+    question, a name or a code, what speech recognition swaps most."""
+    assert NO_QUESTION_NOTE_HEARD.startswith(NO_QUESTION_NOTE[:-1])
+    assert "check a word you didn't catch" in NO_QUESTION_NOTE_HEARD
+    assert "check a word" not in NO_QUESTION_NOTE
 
 
 def test_the_notes_beside_his_words_are_one():
@@ -215,8 +302,42 @@ def test_a_greeting_after_a_question_gets_the_note(chat):
 
 
 def test_a_spoken_turn_after_a_question_gets_the_note(chat):
+    """The heard note, which leaves room for HEARD, NOT TYPED's check-back."""
     _thread(chat, ASKED, "i don't know, maybe the material is too dense", voice=True)
-    assert _user_text(chat.model.main[-1]).endswith(f"[{NO_QUESTION_NOTE}]")
+    text = _user_text(chat.model.main[-1])
+    assert text.endswith(f"[{NO_QUESTION_NOTE_HEARD}]")
+    assert "HEARD, NOT TYPED" in chat.model.main[-1]["messages"][0]["content"]
+
+
+CHECKED_BACK = "I didn't catch that — did you mean how old is Athena?"
+
+
+@pytest.mark.parametrize("voice", [False, True])
+def test_after_a_check_back_the_turn_gets_no_note(chat, voice):
+    """A check-back is no question back. His answer may come through
+    garbled again, and HEARD, NOT TYPED asks for another (S7 review)."""
+    _thread(chat, CHECKED_BACK, "how old is athena now", voice=voice)
+    text = _user_text(chat.model.main[-1])
+    assert NO_QUESTION_NOTE not in text and NO_QUESTION_NOTE_HEARD not in text
+
+
+@pytest.mark.parametrize("turn", [
+    "give me three discussion questions for tomorrow's dh201 reading",
+    "ask the class what they think about agents",
+])
+def test_a_request_for_questions_after_a_question_gets_no_note(chat, turn):
+    _thread(chat, ASKED, turn)
+    text = _user_text(chat.model.main[-1])
+    assert NO_QUESTION_NOTE not in text
+
+
+def test_a_forced_tool_that_writes_gets_no_note(chat, monkeypatch):
+    """The email or the document is the request, whatever it ends on."""
+    monkeypatch.setattr(bt._reply_budget, "questions_are_the_content",
+                        lambda text: False)
+    _thread(chat, ASKED, "compose a reply to the email from felix")
+    assert chat.model.main[0].get("tool_choice") == "required"
+    assert NO_QUESTION_NOTE not in _user_text(chat.model.main[0])
 
 
 def test_the_kids_page_gets_no_note(chat):

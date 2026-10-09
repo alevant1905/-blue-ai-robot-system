@@ -29,7 +29,7 @@ it ("what could go wrong?" 116-166 words with the offer, 133-146 without).
 "go on" lifts the cap.
 
 Blue's previous reply ending on a question adds NO_QUESTION_NOTE to the
-same pinned note (turn_note).
+same pinned note (turn_note), unless the turn's own request may end on one.
 
 Pure text in, a number or a note out — no bluetools import.
 """
@@ -340,21 +340,74 @@ def short_turn_note(text: str, *, voice: bool = False, kid: bool = False,
 # decompress…?", "Have you tried breaking that Reigeluth chapter…?"); this
 # wording, 0 of 6.
 NO_QUESTION_NOTE = "End this reply on a statement, with no question."
-# What may follow the "?" at the end of a reply: closing quotes, brackets,
-# markdown emphasis.
-_TRAILING_RE = re.compile(r"[\s\"'”’)\]*_~]+$")
+# A heard turn may come through garbled, and HEARD, NOT TYPED asks for one
+# short question naming the guess then. The plain note forbade it on exactly
+# the turns that answer Blue's question, a name or a code, what speech
+# recognition swaps most: 9 of the 18 check-backs in conversation_log came
+# right after a reply that ended on a question. One replay each (10-08):
+# "i don't know, maybe the material is too dense" still ended on a
+# statement; "probably the age and lupus part" (the agent loops) was taken
+# literally, so this leaves room for the check-back and does not make one.
+NO_QUESTION_NOTE_HEARD = ("End this reply on a statement, with no question, "
+                          "unless you need to check a word you didn't catch.")
+# What may follow the "?" at the end of a reply: brackets, markdown emphasis.
+_TRAILING_RE = re.compile(r"[\s)\]*_~]+$")
+# Closing quotes after the "?" are someone else's words, unless the whole
+# reply is one quote.
+_CLOSE_QUOTES = "\"'”’»"
+_OPEN_QUOTES = "\"'“‘«"
+_DOUBLE_QUOTES_RE = re.compile(r"[\"“”«»]")
+# The turn's own request may end on a question: "give me three discussion
+# questions for tomorrow's dh201 reading", "draft an email asking the dean
+# whether…", "ask the class what they think about X". A pin there
+# contradicts what he asked for.
+_QUESTIONS_ASKED_FOR_RE = re.compile(
+    r"\bquestions?\b|\bquiz"
+    r"|\bask(?:s|ing)? (?:them|the|him|her|everyone|everybody|my|our|his|their"
+    r"|students|people|whether|if)\b")
 
 
 def ends_on_question(reply: str) -> bool:
     """Blue's reply ended on a question: "…what model did you point it at?",
-    also inside closing quotes or markdown. A question earlier in the reply
-    does not count."""
-    return _TRAILING_RE.sub("", reply or "").endswith("?")
+    also inside markdown or brackets. A question earlier in the reply does
+    not count, nor does a quoted one at its end ('The guiding question for
+    the class is: "…what happens to representation?"', conversation_log
+    3971, 4495, 7910): Blue asked nothing. A reply that is one quote from
+    start to end still counts."""
+    text = _TRAILING_RE.sub("", reply or "")
+    quoted = False
+    while text and text[-1] in _CLOSE_QUOTES:
+        quoted = True
+        text = _TRAILING_RE.sub("", text[:-1])
+    if not text.endswith("?"):
+        return False
+    if not quoted:
+        return True
+    whole = (reply or "").strip().strip("*_~").strip()
+    return (whole[:1] in _OPEN_QUOTES
+            and not _DOUBLE_QUOTES_RE.search(whole[1:-1]))
 
 
-def no_question_note(prev_reply: str) -> str:
-    """NO_QUESTION_NOTE when Blue's previous reply ended on a question."""
-    return NO_QUESTION_NOTE if ends_on_question(prev_reply) else ""
+def questions_are_the_content(text: str) -> bool:
+    """The turn asks for writing, a list, a recall or a reading, or names
+    questions or asking someone: its reply may end on a question that is
+    not Blue asking Alex."""
+    t = _thinking._normalise(text)
+    return bool(t) and any(rx.search(t) for rx in (
+        _QUESTIONS_ASKED_FOR_RE, _ARTIFACT_RE, _WRITE_RE, _COUNT_RE,
+        _RECALL_RE, _READ_RE))
+
+
+def no_question_note(prev_reply: str, turn: str = "", *,
+                     heard: bool = False) -> str:
+    """NO_QUESTION_NOTE when Blue's previous reply ended on a question
+    (NO_QUESTION_NOTE_HEARD on a heard turn), but none when the turn's own
+    request may end on one (questions_are_the_content)."""
+    if not ends_on_question(prev_reply):
+        return ""
+    if turn and questions_are_the_content(turn):
+        return ""
+    return NO_QUESTION_NOTE_HEARD if heard else NO_QUESTION_NOTE
 
 
 def turn_note(*notes: str) -> str:

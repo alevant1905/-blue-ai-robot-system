@@ -14080,10 +14080,16 @@ _HEARD_NOT_TYPED_NOTE = (
 # (10139), the reasoning knew "LM Studio v1+ is proprietary closed-source"
 # and chose "I'll respect the user's input", from "When corrected, take the
 # fix in a few words". He is the authority on what only he can know; his
-# courses are checked against what is in front of Blue first (Phase 3's
-# verify before conceding); a wrong claim about the world is answered once,
-# kindly. "he is the authority on his own life" alone was read as "he's the
-# authority on his own plans and what he's verified" for LM Studio.
+# courses and schedule are his to set, so where he differs from the
+# syllabus in front of Blue, Blue says what it shows once and goes with him
+# (Phase 3's verify before conceding says so once too). Holding the
+# syllabus against him was the 09-24 stubbornness: "Yes, I'm sure. The PDF
+# syllabus… lists Lab 5" (10020), then "its not lab 5". A wrong claim about
+# the world is answered once, kindly. "he is the authority on his own life"
+# alone was read as "he's the authority on his own plans and what he's
+# verified" for LM Studio, and with his courses in that list as "the
+# authority on… his own tools and his course material": 10139 conceded in
+# 2 of 3 replays. Kept apart as "his to set", it held in 3 of 3.
 #
 # Replayed on qwen3.8-27b (10-08, S2's persona in both arms):
 # - 10139: the old note held that the app is not open source in 2 of 5 runs
@@ -14094,10 +14100,18 @@ _HEARD_NOT_TYPED_NOTE = (
 #   either/or menus 1/9 -> 0/9, menus and unasked offers 2/9 -> 0/9.
 # - Six casual turns (10108 "hi", 10133, 10149, home_checkin[2], [5], a
 #   spoken "i had a rough day"), n=3: offers, menus and service closers
-#   9/18 -> 6/18, but replies ending on a question 4/18 -> 7/18, none of
-#   them specific: "hi" got a check-in 3 of 3 (2 of 3 before), and the
-#   spoken bad day a menu 3 of 3 in both arms.
+#   9/18 -> 6/18, but replies ending on a question 4/18 -> 6/18 with the
+#   shipped turn note, none of them specific: "hi" got a check-in 3 of 3
+#   (2 of 3 before), and the spoken bad day a menu 3 of 3 in both arms.
 # - "tell me a joke": 3 of 3 from his own life; Hexia's 3 of 3 from hers.
+# The thing of his own was first "a detail you noticed", and the model took
+# it from the context blocks or made it up: Nori "dragging the rest of us
+# through the park" (home_checkin[5], 2 of 3), the week's timetable recited
+# to "pretty tired, long week of teaching" (2 of 3), "I was at DH201 last
+# Thursday" (10112). Now it is something he said. Questions to check a word
+# or a needed detail are allowed in so many words: "No other question"
+# alone forbade the check-back HEARD, NOT TYPED asks for, and the
+# clarification the earlier note allowed.
 #
 # The note is Hexia's and Casper's too: it names no hardware of Blue's. On
 # a heard turn the shared part goes before SPOKEN REPLY, as ENDINGS and
@@ -14106,8 +14120,9 @@ _TALK_REACT = (
     "Start from what he just said, with no filler opener: answer a "
     "question first, and react to anything else in words that could only "
     "follow his message. Then, if you have one, add one thing of your own: "
-    "what you think and why, or a detail you noticed. A greeting gets a "
-    "greeting back and something of your own, not a question. "
+    "what you think and why, or something you noticed in what he said. A "
+    "greeting gets a greeting back and something of your own, not a "
+    "question. "
 )
 _TALK_LENGTH = (
     "Small talk gets a sentence or two, and an idea or an argument a "
@@ -14121,11 +14136,13 @@ _TALK_TURNS = (
     "End on your own words — a view, a detail, a reaction — not on a "
     "question back. When something he just said genuinely makes you "
     "curious, you can ask one short question about that exact thing, in "
-    "his words — rarely; most replies have none. No other question: no "
-    "check-ins on how he is or how his day is going, no asking what he "
-    "needs from you, no either/or choices, and no checking whether he "
-    "agrees. Don't offer to do things he didn't ask for, like dimming the "
-    "lights, music or pulling up a document, don't say you're ready to "
+    "his words — rarely; most replies have none. Besides that, ask only to "
+    "check a word you didn't catch or a detail you need before you can do "
+    "what he asked — so no check-ins on how he is or how his day is going, "
+    "no asking what he needs from you, no either/or choices, and no "
+    "checking whether he agrees. Don't offer to do things he didn't ask "
+    "for, like dimming the lights, music or pulling up a document, don't "
+    "say you're ready to "
     "help or standing by, and don't promise anything around the house: "
     "you can only do what a tool does. If he has just named a date or "
     "something to remember, one short offer to add it is fine, and so is "
@@ -14137,9 +14154,9 @@ _TALK_TURNS = (
     "When he corrects you and he's right, take it in a few words and "
     "carry on, with no apology paragraph and no story about a glitch. "
     "About what only he can know — his plans, his family, his own life — "
-    "he is the authority. About his courses and schedule, check what he "
-    "says against the syllabus and schedule in front of you before you "
-    "give way, and if they agree with you, say so once. About the wider "
+    "he is the authority. His courses and schedule are his to set: if what "
+    "he says differs from the syllabus or schedule in front of you, say "
+    "what it shows once, then go with what he says. About the wider "
     "world, what you know doesn't change because he disagrees: if what he "
     "says doesn't match it, say so once, plainly and kindly, with the "
     "fact as you know it, then move on. On a matter of taste, keep your "
@@ -14524,9 +14541,13 @@ def _chat_system_message(conversation_messages, *, robot, user_name,
             "read aloud. Reply in ONE or two short sentences — conversational and "
             "direct. No lists, no markdown, no headings, no emoji. Get to the point "
             "in the first sentence."
+            # Panel sets voice without `heard`: its robots talk to each
+            # other and the room, not to "he", and keep the clause they had.
             + ("" if _is_kid else
                " End on your answer: a question only rarely, one short one "
-               "about what he just said.")
+               "about what he just said." if heard else
+               " End on your answer — no follow-up question unless you need "
+               "one to go on.")
             + "\n"
         )
         closing_note = voice_note
@@ -14744,12 +14765,19 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     # turn asks for an ending with no question beside his words, in one note
     # with the short-message note (reply_budget.turn_note). The chat page only
     # (Panel has its own contract), not the kids' page, and not inside a
-    # French or Russian turn, as for the short-message note.
+    # French or Russian turn, as for the short-message note. Not after a
+    # check-back ("I didn't catch that — did you mean …?"): that was no
+    # question back, and his answer may come through garbled again. Not when
+    # the turn's own request may end on a question (discussion questions, a
+    # draft asking the dean…), and on a heard turn the note leaves room to
+    # check a word (reply_budget.NO_QUESTION_NOTE_HEARD).
     _no_q_note = ""
     if (length_follows_turn and not _turn_kid
+            and not _CHECKBACK_RE.search(_turn_prev[-200:])
             and not ((language and language != "en")
                      or _message_language(_turn_words) not in ("", "en"))):
-        _no_q_note = _reply_budget.no_question_note(_turn_prev)
+        _no_q_note = _reply_budget.no_question_note(
+            _turn_prev, _turn_words, heard=heard)
         if _no_q_note:
             print("   [QUESTION] the last reply ended on a question — "
                   "this one is asked to end without one")
@@ -14947,6 +14975,12 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     # The short-message note goes in after the cue has read the user's words,
     # with the no-question note when it applies (a "more" cue keeps that one).
+    # A forced tool that writes the text (an email, a document) or brings
+    # back questions is its own request: no note against ending on one.
+    if _no_q_note and improved_force_tool in (
+            _LONG_ARGUMENT_TOOLS | {"discussion_questions",
+                                    "simulate_student_questions"}):
+        _no_q_note = ""
     _note = _reply_budget.turn_note(_cap_note, _no_q_note)
     if _note:
         _pin_short_turn_note(conversation_messages, _note)
