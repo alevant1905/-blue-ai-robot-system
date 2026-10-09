@@ -86,3 +86,28 @@ def _no_live_memory_touches(monkeypatch):
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(bmi.EnhancedMemorySystem, name, guarded)
+
+
+# The chat route's J-space block (messages_with_jspace) first ingests the
+# robot's recent visual observations: each becomes an episode in the LIVE
+# data/<robot>space/continuity.db and queues a "perception" reflection that
+# the server then runs on the real model (whole-branch review, 10-08). The
+# chat fixture stubs note_exchange and begin_turn but not this. A hub on a
+# test's own directory still ingests. Only patched once the routes module is
+# loaded, so tests that never import bluetools don't pay for it.
+@pytest.fixture(autouse=True)
+def _no_live_jspace_ingest(monkeypatch):
+    import sys
+    routes = sys.modules.get("blue.server.routes.continuity")
+    if routes is None or not hasattr(routes, "RobotContinuity"):
+        return
+    live = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    original = routes.RobotContinuity.ingest_visual_observations
+
+    def guarded(self, *args, **kwargs):
+        db = os.path.realpath(str(getattr(self.store, "db_path", "")))
+        if db.startswith(live + os.sep):
+            return []
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(routes.RobotContinuity, "ingest_visual_observations", guarded)
