@@ -104,6 +104,30 @@ def test_a_check_in_is_offered_what_happened_not_the_work_queue(
     assert reply_of(response).startswith("Pretty good.")
 
 
+def test_a_check_in_after_a_question_is_never_told_to_ask_one(chat, monkeypatch):
+    """thread4 (10-08 review): "how are you" after "Hey. What are you working
+    on tonight?" was pinned "…about how you're doing, then return the
+    question." beside "End this reply on a statement, with no question.",
+    under a closing note that says no check-ins on how he is."""
+    import re
+
+    from blue.server import reply_budget
+
+    _queue_focus_hub(monkeypatch, "", {})
+    chat.model.queue("Pretty steady tonight. Still turning over the Castelle chapter.")
+    chat.ask("how are you", messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "Hey. What are you working on tonight?"},
+        {"role": "user", "content": "how are you"},
+    ])
+
+    turn = chat.model.payloads[0]["messages"][-1]["content"]
+    assert "Answer this social check-in" in turn
+    assert reply_budget.NO_QUESTION_NOTE in turn
+    assert not re.search(r"\b(?:return|ask|hand)\w*\s+(?:\w+\s+)?(?:the\s+|a\s+)?"
+                         r"question", turn, re.I)
+
+
 def _queue_focus_hub(monkeypatch, lately, asked):
     from datetime import datetime, timezone
 

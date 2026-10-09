@@ -372,6 +372,19 @@ def test_identity_grounding_note_separates_robot_from_runtime():
     assert "without introducing yourself again" in more_note
 
 
+def test_the_check_in_note_never_asks_for_a_question_back():
+    """Whether a question goes back is the page's own rule: "then return the
+    question" sat beside the turn against the chat page's closing note and
+    its no-question note (whole-branch review)."""
+    import re
+
+    note = identity_grounding_note("Blue", "Alex's robot companion", "self_state")
+    assert "Answer this social check-in" in note
+    assert "how you're doing" in note
+    assert not re.search(
+        r"\b(?:return|ask|hand)\w*\s+(?:\w+\s+)?(?:the\s+|a\s+)?question", note, re.I)
+
+
 @pytest.mark.parametrize("kind", ["identity", "identity_more", "introduction"])
 def test_invented_static_location_identity_is_rejected(kind):
     reply = (

@@ -124,9 +124,27 @@ def test_a_question_or_request_about_a_document_still_searches(library, message)
     "today we have the dh201 lab, introduce the topic to the class",
     "today's topic in dh201: connectionism. introduce it",
     "today's lab is in the dh201 syllabus check it",
+    # any imperative after the frame, not only the hand list (whole-branch
+    # review): a report or a presentation needs the chapter read
+    "tomorrow we have the castelle reading for dh399, draft my reading report",
+    "this week's reading for dh399 is castelle chapter 3, create a study guide",
+    "today's reading for dh399 is castelle chapter 3, present your reading "
+    "report to the class",
+    "today's topic for dh201 is connectionism, present it to the class",
+    "today's topic for dh201 is connectionism, walk the class through it",
+    "today's reading for dh399 is castelle chapter 3. so write me a summary",
 ])
 def test_a_request_after_the_frame_still_searches(library, message):
     assert _searches(library, message)
+
+
+@pytest.mark.parametrize("message", [
+    "today we have dh201, then office hours",
+    "today's lab for dh201 is in sb107, starting at 11:30",
+    "tomorrow we have dh399 - the castelle chapter",
+])
+def test_a_later_clause_that_asks_nothing_is_still_a_statement(library, message):
+    assert not _searches(library, message)
 
 
 @pytest.mark.parametrize("message", [
@@ -215,6 +233,12 @@ def test_what_is_heard_or_presented_has_no_brackets_at_all(message, thread, spok
     "i'm presenting the chapter at the conference, outline it for me",
     "the students present their reading reports today",
     "at present the reading is wooldridge chapter 2",
+    # the "you" asks Blue to write; someone else presents (whole-branch review)
+    "can you write me a reading report on castelle so i can present it in dh399",
+    "i want you to write a report with sources so i can present the findings "
+    "to the dean",
+    "could you draft the slides so we can present them on friday",
+    "can you help me present the castelle chapter",
 ])
 def test_a_present_that_is_not_presenting_is_written(message):
     note = tool_pipeline.source_credit_note(message, _thread(message))
@@ -226,6 +250,8 @@ def test_a_present_that_is_not_presenting_is_written(message):
     "on this text",                                                # 10081
     "ok, present it",
     "can you read that out loud",
+    "can you present it to the class",
+    "i want you to present your reading report so the class can discuss it",
 ])
 def test_blue_asked_to_present_is_heard(message):
     note = tool_pipeline.source_credit_note(message, _thread(message))

@@ -1169,3 +1169,48 @@ def test_a_retry_with_no_turn_behind_it_still_asks_for_a_short_reply(
                             + " " + tc._PERSONA_ONLY_LENGTH)
     for robot in ("hexia", "pico"):
         assert tc._PERSONA_LENGTH_RE.search(bt.ROBOTS[robot]["persona_line"])
+
+
+# --------------------------------------------------------------------------
+# A yes to an offer, by the same test as the cap
+# --------------------------------------------------------------------------
+
+def _system_after(prev_reply, answer):
+    thread = [{"role": "user", "content": "i finally finished the grant draft"},
+              {"role": "assistant", "content": prev_reply},
+              {"role": "user", "content": answer}]
+    return bt.build_dynamic_system_message(
+        thread, bt.build_system_preamble(robot_name="Blue"), robot="blue")["content"]
+
+
+@pytest.mark.parametrize("prev_reply,answer", [
+    # thread6 and thread3 of the whole-branch review: nothing was offered
+    ("Nice, that's a big one off the list. Which part fought you hardest?",
+     "yeah the budget"),
+    ("That sounds like a long one, after a full day of teaching. Was it the "
+     "lecture?", "yeah long day"),
+    ("That sounds like a long one, after a full day of teaching. Was it the "
+     "lecture?", "yes"),
+])
+def test_an_answer_to_his_question_is_no_yes_to_an_offer(prev_reply, answer):
+    """The system note said "says YES to your previous offer or question …
+    Do what you offered, fully" while the turn was capped and noted "at
+    about his length", and the anti-repetition list was dropped."""
+    assert reply_budget(answer, prev_reply=prev_reply) is not None
+    text = _system_after(prev_reply, answer)
+    assert "CONTINUE, DON'T RESTART" not in text
+    assert "You ALREADY said the following" in text
+
+
+@pytest.mark.parametrize("prev_reply,answer", [
+    ("I could sketch the budget justification next. Want me to draft it?", "yes"),
+    ("The syllabus has the rubric for it. Would you like me to pull it up?",
+     "sure, go ahead"),
+    ("If you'd like, I can outline the narrative section the same way.",
+     "yeah the narrative"),
+])
+def test_a_yes_to_an_offer_still_continues_it(prev_reply, answer):
+    assert reply_budget(answer, prev_reply=prev_reply) is None
+    text = _system_after(prev_reply, answer)
+    assert "says YES to your previous offer" in text
+    assert "You ALREADY said the following" not in text

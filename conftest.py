@@ -19,6 +19,9 @@ That only failed because the running server held the serial ports; with the
 server stopped, a test run would move Blue, Hexia and Casper.
 BLUE_HEADS_DISABLED=1 stops the real board loaders (a fake board still works).
 
+The read paths of the live memory DB write access counts to it; see
+_no_live_memory_touches below.
+
 Every chat payload is trimmed to the input budget, which _lm_input_budget
 reads from the loaded model with a GET to LM Studio's /api/v0/models when
 its cache is cold. The chat-page tests stub both transports but not that,
@@ -54,3 +57,32 @@ def _no_live_vector_store(monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(bmi, "_get_memory_collection", lambda: None)
+
+
+# Reading the live memory DB writes to it: every search_memories hit bumps
+# its access_count and last_accessed (_touch_memories), and every
+# <known_facts> block starts a thread that bumps use_count and last_used_at
+# on the facts it shows (_touch_facts_used). Both feed recall ranking. The
+# chat tests keep those read paths live on purpose, so a suite run at 21:15
+# on 10-08, three hours after Alex's last turn, stamped two of his session
+# memories and the 25 facts in <known_facts> (whole-branch review). Six of
+# the test files alone added 2,625 to the facts' use_count and an access to
+# each of the two memories. A test's own temporary database still gets them.
+@pytest.fixture(autouse=True)
+def _no_live_memory_touches(monkeypatch):
+    try:
+        import blue_memory_improved as bmi
+    except Exception:
+        return
+    live = os.path.realpath(str(bmi.MEMORY_DB_PATH))
+    for name in ("_touch_memories", "_touch_facts_used"):
+        original = getattr(bmi.EnhancedMemorySystem, name, None)
+        if original is None:
+            continue
+
+        def guarded(self, *args, _original=original, **kwargs):
+            if os.path.realpath(str(self.db_path)) == live:
+                return None
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(bmi.EnhancedMemorySystem, name, guarded)

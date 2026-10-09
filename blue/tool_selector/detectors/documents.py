@@ -10,6 +10,7 @@ from .base import BaseDetector
 from ..models import ToolIntent
 from ..constants import ToolPriority
 from ..utils import has_any_word
+from ...server import thinking as _thinking
 
 
 # Words too generic to identify a specific library document. Used to filter
@@ -262,7 +263,7 @@ _CLAUSE_ASKS_RE = re.compile(
     r"(?:what|whats|which|when|where|who|why|how(?!\s+to\b)|introduce"
     r"|summari[sz]e|explain|describe|outline|tell|remind|give|list|show"
     r"|go\s+over|look|read|check|find|search|pull\s+up|open|prep(?:are)?|help"
-    r"|let['’]?s)\b")
+    r"|let['’]?s|discuss|cover|run\s+through|walk\s+(?:\w+\s+){0,2}?through)\b")
 _WH_ASKS_RE = re.compile(
     r"\b(?:what|which|when|where|who|why|how)(?:['’]s|\s+(?:is|are|was|were|do"
     r"|does|did|should|shall|can|could|will|would|have|has|am|many|much))\b"
@@ -272,6 +273,21 @@ _ASKS_FOR_IT_RE = re.compile(
     r"|read|look\s+(?:at|up|for)|pull\s+up|remind\s+me"
     r"|(?:tell|give|show)\s+(?:me|us|them))"
     r"\s+(?:it|them|this|that|the|me|us|my|our|his|her|what|how|about)\b")
+
+
+def _clause_asks(clause: str) -> bool:
+    """A clause after the frame that asks: a question or request word
+    (_CLAUSE_ASKS_RE), or any imperative the thinking switch reads as a
+    request. The hand list missed write, draft, make, create and present:
+    "tomorrow we have the castelle reading for dh399, draft my reading
+    report" and "today's topic for dh201 is connectionism, present it to the
+    class" were a class he shares, so the chapter was never read (whole-
+    branch review)."""
+    if _CLAUSE_ASKS_RE.match(clause):
+        return True
+    bare = _thinking._FILLER_PREFIX_RE.sub("", clause.strip())
+    return bool(_thinking._REQUEST_START_RE.match(bare)
+                or _thinking._WORK_START_RE.match(bare))
 
 
 def _shares_a_class(msg_lower: str) -> bool:
@@ -284,7 +300,7 @@ def _shares_a_class(msg_lower: str) -> bool:
     rest = _TITLE_RE.sub(" ", text[m.end() - m.group().endswith(":"):])
     clauses = re.split(r"[,.!;\n]+|\s[-–—]\s", rest)[1:]
     return not (_WH_ASKS_RE.search(rest) or _ASKS_FOR_IT_RE.search(rest)
-                or any(_CLAUSE_ASKS_RE.match(c) for c in clauses))
+                or any(_clause_asks(c) for c in clauses))
 
 
 # The re-read verbs, as words: "open" was inside "open-source" and "open

@@ -2288,11 +2288,17 @@ def identity_grounding_note(
         # The workspace FOCUS is offered only through state_hint, which says
         # whether it is fresh. "Grounded in your current focus" used to be
         # unconditional, and FOCUS is often a day or more old at a check-in.
+        # Whether a question goes back is the page's own rule, not this
+        # note's: "then return the question" sat beside the turn against the
+        # chat page's closing note ("no check-ins on how he is") and the
+        # no-question note pinned after a reply that ended on one ("how are
+        # you" after "Hey. What are you working on tonight?", whole-branch
+        # review). The kids' page has its own STYLE.
         task = (
             "Answer this social check-in the way a companion would: one or two "
-            "short, natural sentences about how you're doing, then return the "
-            "question. Do not name J-space, drives, your focus or 'bounded "
-            "signals', and do not quote workspace text. Don't report standby or "
+            "short, natural sentences about how you're doing. Do not name "
+            "J-space, drives, your focus or 'bounded signals', and do not "
+            "quote workspace text. Don't report standby or "
             "house status, bugs or corrections, or anything you're waiting on "
             "from the user. No 'as an AI', 'fully operational', 'thank you for "
             "asking' or offers to help; no flat denial of feelings and no claim "

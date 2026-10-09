@@ -5077,9 +5077,10 @@ def _schedule_target_date(query: str):
             except ValueError:
                 return None
         return target
-    if re.search(r"\btomorrow\b", q):
+    # His spellings: "introduce todays topic to the class" (10143).
+    if re.search(r"\btomorrows?\b", q):
         return today + timedelta(days=1)
-    if re.search(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", q):
+    if re.search(r"\b(?:todays?|tonight|this (?:morning|afternoon|evening))\b", q):
         return today
     return None
 
@@ -5197,13 +5198,36 @@ _DAY_CONTENT_CLAIM_RE = re.compile(
     r"|\b(?:on|at|up to) (?:week|lab) \d")
 
 
+# Where a request after his statement starts, as he says it: "we're in front
+# of the class now, introduce the topic for today", "we are in class now
+# introduce today's topic" (heard, no comma). Not "and": "we did the reading
+# and read the notes" is news.
+_DAY_CLAUSE_SPLIT_RE = re.compile(r"[,;:]+|\b(?:so|then|now)\b")
+
+
+def _asks_in_a_later_clause(t: str) -> bool:
+    """A clause after his opening one that opens on a request, as
+    turn_kind's clause loop reads one. asks_something only reads a request
+    at the start of a sentence, and _DAY_ASKS_RE had none of introduce,
+    summarize or outline: "we have dh201 tomorrow, summarize the readings"
+    got no rows (whole-branch review)."""
+    for clause in _DAY_CLAUSE_SPLIT_RE.split(t)[1:]:
+        bare = _thinking._FILLER_PREFIX_RE.sub("", clause.strip())
+        if (_thinking._REQUEST_START_RE.match(bare)
+                or _thinking._WORK_START_RE.match(bare)):
+            return True
+    return False
+
+
 def _tells_not_asks(text: str) -> bool:
     """A plain statement of his: "we will do that in class", not "we have
     dh201 tomorrow right", "i need the readings for friday", "i meant the
-    other reading" or "we already did lab 5"."""
+    other reading", "we already did lab 5" or "we're in class now, introduce
+    the topic"."""
     t = _thinking._normalise(text)
     return bool(_DAY_TELLS_RE.match(t) and not _DAY_ASKS_RE.search(t)
                 and not _thinking.asks_something(t)
+                and not _asks_in_a_later_clause(t)
                 and not _thinking._CORRECTION_RE.search(t)
                 and not _DAY_CONTENT_CLAIM_RE.search(t))
 
@@ -5231,7 +5255,7 @@ def _day_of(text: str):
     if target:
         return target
     low = (text or "").lower()
-    if re.search(r"\btoday\b|\btonight\b", low):
+    if re.search(r"\btodays?\b|\btonight\b", low):
         return _date.today()
     for i, name in enumerate(_WEEKDAYS):
         if re.search(rf"\b{name}\b", low):
@@ -13391,6 +13415,14 @@ def build_dynamic_system_message(conversation_messages: List[Dict], facts_preamb
     # offer. Let the identity grounding handle it without a contradictory
     # continuation instruction telling the model to accept "no J-space".
     if identity_request_kind(_last_user_text) == "jspace":
+        _cue = None
+    # A yes takes up an offer only by the test the reply cap uses
+    # (reply_budget.accepts_offer). "yeah the budget" after "Nice. Which part
+    # fought you hardest?" answers a question: nothing was offered, and "Do
+    # what you offered, fully" sat against the turn's "at about his length",
+    # with the anti-repetition list dropped (whole-branch review).
+    if _cue == 'yes' and not _reply_budget.accepts_offer(
+            _last_user_text, _prev_assistant_text):
         _cue = None
     if _cue:
         print(f"   [CUE] continuation cue '{_cue}' — CONTINUE-DON'T-RESTART note in system message")

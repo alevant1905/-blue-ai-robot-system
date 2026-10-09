@@ -56,6 +56,10 @@ TOMORROW = date.today() + timedelta(days=1)
     ("what are we doing in dh201 today?", "isnt there another reading too?", "hi"),
     ("what do we have tomorrow", "cool"),
     ("what's on in dh399 friday", "we'll see"),
+    # a later clause that asks nothing
+    ("we have dh201 tomorrow, then office hours",),
+    ("we are in class now and the room is packed",),
+    ("i will bring you to class tomorrow, so you can meet the students",),
 ])
 def test_a_statement_gets_no_syllabus_day(thread):
     assert bt._syllabus_day_target(_users(*thread)) is None
@@ -114,6 +118,37 @@ def test_a_request_or_correction_inside_his_statement_gets_the_day(text):
     assert bt._syllabus_day_target(_users(text)) == TOMORROW
 
 
+@pytest.mark.parametrize("text,day", [
+    # a request in a later clause (whole-branch review); the first names no
+    # course, so nothing but these rows says what today's topic is (09-24)
+    ("we're in front of the class now, introduce the topic for today", date.today()),
+    ("we are in class now introduce today's topic", date.today()),  # heard
+    ("we are about to start dh201, introduce today's lab to the students",
+     date.today()),
+    ("we have dh201 tomorrow, summarize the readings", TOMORROW),
+    ("i'm presenting in dh399 tomorrow, outline the castelle chapter", TOMORROW),
+])
+def test_a_request_in_a_later_clause_gets_the_day(text, day):
+    assert bt._syllabus_day_target(_users(text)) == day
+
+
+def test_introduce_it_in_front_of_the_class_keeps_the_day_asked_before():
+    assert bt._syllabus_day_target(_users(
+        "what's the topic in dh201 today?",
+        "we're in front of the class now, introduce it")) == date.today()
+
+
+@pytest.mark.parametrize("thread", [
+    # his spelling (10143, 10-07 11:44, during the DH201 lecture)
+    ("okay. enough banter. introduce todays topic to the class",),
+    ("we are in the class rightnow", "introduce todays topic to the class"),
+    ("whats todays topic",),
+])
+def test_todays_without_the_apostrophe_is_today(thread):
+    assert bt._syllabus_day_target(_users(*thread)) == date.today()
+    assert bt._day_of("whats on tomorrows schedule") == TOMORROW
+
+
 @pytest.mark.parametrize("follow_up", [
     # the 09-24 correction in the first person: corrected, Blue must check
     # the rows, not guess again ("AI Lab 5")
@@ -153,6 +188,21 @@ def test_the_statement_reaches_the_model_without_the_rows(monkeypatch, tmp_path,
     chat.ask("i might take you with me to dh201 tomorrow")
     assert "<syllabus_day>" not in chat.model.system_prompt
     chat.ask("what are we doing in dh201 tomorrow")
+    assert "<syllabus_day>" in chat.model.system_prompt
+    assert "Lineages of AI" in chat.model.system_prompt
+
+
+def test_a_topic_introduction_in_class_reaches_the_model_with_the_topic(
+        monkeypatch, tmp_path, chat):
+    """10143: S4 leaves the old class reply's wording out, so today's row is
+    the only place the topic is (whole-branch review)."""
+    _one_course_library(monkeypatch, tmp_path, date.today())
+    chat.ask("okay. enough banter. introduce todays topic to the class",
+             messages=[
+                 {"role": "user", "content": "we are in the class rightnow"},
+                 {"role": "assistant", "content": "Hi everyone, I'm Blue."},
+                 {"role": "user", "content": "okay. enough banter. introduce "
+                                             "todays topic to the class"}])
     assert "<syllabus_day>" in chat.model.system_prompt
     assert "Lineages of AI" in chat.model.system_prompt
 
@@ -414,10 +464,18 @@ def test_a_place_he_set_wins_over_the_calendar(place, calendar):
 
 
 def test_a_broken_calendar_never_breaks_the_location(place, monkeypatch):
+    """With a class in the room, so the calendar is really read: with no
+    thread the class line was never looked up and the test could not fail
+    (whole-branch review)."""
+    called = []
+
     def boom(*a, **k):
+        called.append(1)
         raise RuntimeError("db locked")
     monkeypatch.setattr(bt, "_calendar_event_now", boom)
-    assert "Your base is" in bt._build_location_block()
+    block = bt._build_location_block(_users(*IN_CLASS_THREAD))
+    assert called
+    assert "Your base is" in block and "teaching" not in block
 
 
 def test_the_system_prompt_has_one_location_with_the_room(place, calendar):

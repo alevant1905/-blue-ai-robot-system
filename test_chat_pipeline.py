@@ -1236,3 +1236,38 @@ def test_the_draft_restarts_for_each_model_call_and_ends_checking(chat):
     after_last = "".join(e.get("delta", "") for e in events[resets[-1]:])
     assert after_last.strip() == "Memory is less a store than a practice, in your notes."
     assert events[-1] == {"phase": "checking"}
+
+
+# --------------------------------------------------------------------------
+# The suite never writes to the live memory DB, reads included
+# --------------------------------------------------------------------------
+
+def test_reading_the_live_memory_db_writes_nothing_to_it(monkeypatch):
+    """search_memories and <known_facts> bump access counts on what they
+    read. A run of these tests stamped two of Alex's session memories and
+    all 25 facts three hours after his last turn (whole-branch review):
+    conftest's _no_live_memory_touches keeps them off the live DB."""
+    if not getattr(bt, "memory_system", None):
+        pytest.skip("no memory system")
+    opened = []
+
+    def no_connection():
+        opened.append(1)
+        raise AssertionError("the live memory DB was opened for a write")
+
+    monkeypatch.setattr(bt.memory_system, "_conn", no_connection)
+    bt.memory_system._touch_memories(["ece762e9fe4b"])
+    bt.memory_system._touch_facts_used(["user_name"])
+    assert opened == []
+
+
+def test_a_temporary_memory_db_still_counts_what_was_read(tmp_path):
+    import blue_memory_improved as bmi
+
+    memory = bmi.EnhancedMemorySystem(db_path=str(tmp_path / "m.db"))
+    opened = []
+    real = memory._conn
+    memory._conn = lambda: opened.append(1) or real()
+    memory._touch_facts_used(["user_name"])
+    memory._touch_memories(["x"])
+    assert opened == [1, 1]

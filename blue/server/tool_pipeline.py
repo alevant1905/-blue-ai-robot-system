@@ -167,6 +167,12 @@ _PRESENTS_RE = re.compile(
 # will present the paper at the conference, write me a report on it with
 # sources" is a written report for Alex.
 _ASKED_OF_YOU_RE = re.compile(r"\b(?:you|u)\b", re.I)
+# ...with nobody else between that "you" and the verb: "can you write me a
+# reading report on castelle so i can present it in dh399" and "i want you to
+# write a report with sources so i can present the findings to the dean" ask
+# for a written report that Alex presents (whole-branch review).
+_SOMEONE_ELSE_PRESENTS_RE = re.compile(
+    r"\b(?:i|we|they|he|she|students)\b|\bhelp\s+(?:me|us)\b", re.I)
 _OPENS_ITS_CLAUSE_RE = re.compile(
     r"(?:^|[,;:])\s*(?:(?:please|pls|now|then|so|ok(?:ay)?|and|also|just"
     r"|go\s+ahead\s+and)\s+)*$", re.I)
@@ -176,8 +182,11 @@ def _blue_presents(text: str) -> bool:
     """The user's words ask Blue to present, or to read something aloud."""
     for m in _PRESENTS_RE.finditer(text):
         sentence = re.split(r"[.!?\n]", text[:m.start()])[-1]
-        if (_ASKED_OF_YOU_RE.search(sentence)
-                or _OPENS_ITS_CLAUSE_RE.search(sentence)):
+        yous = list(_ASKED_OF_YOU_RE.finditer(sentence))
+        if yous and not _SOMEONE_ELSE_PRESENTS_RE.search(
+                sentence[yous[-1].end():]):
+            return True
+        if _OPENS_ITS_CLAUSE_RE.search(sentence):
             return True
     return False
 
