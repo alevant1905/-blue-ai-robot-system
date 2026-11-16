@@ -31,12 +31,29 @@ def test_the_table_is_not_empty_and_has_no_duplicates():
     assert all(callable(fn) for fn in tool_handlers.HANDLERS.values())
 
 
-def test_handlers_for_unavailable_subsystems_decline_rather_than_crash():
-    """Those tools are filtered out of TOOLS when their subsystem is missing.
-    Their handlers still exist, and must return None so the caller answers
-    "Unknown tool" — exactly what the unmatched branch did before."""
-    unadvertised = set(tool_handlers.HANDLERS) - advertised_tool_names()
-    assert unadvertised, "expected some handlers to be gated by availability"
+def test_every_handler_has_a_schema():
+    """The other direction. Five handlers had schemas that were filtered out
+    at every start, because the modules behind them (an academic assistant,
+    proactive suggestions) never existed in this repository: code that read
+    as five features and could not run. Removed 2026-11-16; a handler with
+    no schema is now a failure."""
+    from blue.server.tool_schemas import RAW_TOOLS
+
+    declared = {t["function"]["name"] for t in RAW_TOOLS}
+    orphans = set(tool_handlers.HANDLERS) - declared
+    assert not orphans, f"handlers the model can never be offered: {sorted(orphans)}"
+
+
+def test_browse_website_is_declared_with_the_rest_and_comes_last():
+    """bluetools used to append this schema to its list after the fact. It
+    is declared with the others now, and stays last so the tools the model
+    is sent are in the order they always were."""
+    from blue.server.tool_schemas import RAW_TOOLS
+
+    names = [t["function"]["name"] for t in RAW_TOOLS]
+    assert names.count("browse_website") == 1
+    assert names[-1] == "browse_website"
+    assert [t["function"]["name"] for t in bt.TOOLS][-1] == "browse_website"
 
 
 def test_an_unknown_tool_name_is_reported_not_raised():

@@ -801,86 +801,6 @@ def _tool_who_do_i_know(tool_name, tool_args):
             })
 
 
-def _tool_analyze_with_chat_theory(tool_name, tool_args):
-    if bt.ACADEMIC_ASSISTANT_AVAILABLE:
-        topic = tool_args.get("topic", "")
-        context = tool_args.get("context", "")
-
-        result = bt.analyze_with_chat(topic, context)
-        print(f"   [OK] Generated CHAT analysis for: {topic}")
-        return result
-
-
-def _tool_prepare_lecture(tool_name, tool_args):
-    if bt.ACADEMIC_ASSISTANT_AVAILABLE:
-        topic = tool_args.get("topic", "")
-        duration = tool_args.get("duration", 50)
-        course = tool_args.get("course", "")
-        level = tool_args.get("level", "undergraduate")
-
-        result = bt.prepare_lecture(topic, duration, course, level)
-        print(f"   [OK] Generated lecture outline for: {topic}")
-        return result
-
-
-def _tool_discussion_questions(tool_name, tool_args):
-    if bt.ACADEMIC_ASSISTANT_AVAILABLE:
-        reading = tool_args.get("reading", "")
-        topic = tool_args.get("topic", "")
-
-        result = bt.generate_discussion_questions(reading, topic)
-        print(f"   [OK] Generated discussion questions for: {topic}")
-        return result
-
-
-def _tool_simulate_student_questions(tool_name, tool_args):
-    if bt.ACADEMIC_ASSISTANT_AVAILABLE:
-        topic = tool_args.get("topic", "")
-        context = tool_args.get("context", "")
-
-        result = bt.simulate_student_q_and_a(topic, context)
-        print(f"   [OK] Simulated student questions for: {topic}")
-        return result
-
-
-def _tool_check_proactive_suggestions(tool_name, tool_args):
-    if bt.PROACTIVE_ASSISTANCE_AVAILABLE:
-        try:
-            pa = bt.get_proactive_assistance()
-            # Get current person from context (default to Alex)
-            person = "Alex"  # Could be enhanced to detect from visual memory
-
-            suggestions = pa.check_for_suggestions(person)
-
-            if suggestions:
-                result = {
-                    "has_suggestions": True,
-                    "suggestions": [
-                        {
-                            "type": suggestion.suggestion_type,
-                            "priority": suggestion.priority,
-                            "message": suggestion.message,
-                            "action_available": suggestion.action_available
-                        }
-                        for suggestion in suggestions
-                    ]
-                }
-                print(f"   [OK] Found {len(suggestions)} proactive suggestions")
-            else:
-                result = {
-                    "has_suggestions": False,
-                    "message": "No suggestions at this time"
-                }
-                print(f"   [OK] No proactive suggestions at this time")
-
-            return json.dumps(result, indent=2)
-        except Exception as e:
-            return json.dumps({
-                "success": False,
-                "error": f"Failed to check suggestions: {str(e)}"
-            })
-
-
 HANDLERS: Dict[str, Callable[..., Optional[str]]] = {
     "move_head": _tool_move_head,
     "head_eye_color": _tool_head_eye_color,
@@ -936,9 +856,4 @@ HANDLERS: Dict[str, Callable[..., Optional[str]]] = {
     "remember_person": _tool_remember_person,
     "remember_place": _tool_remember_place,
     "who_do_i_know": _tool_who_do_i_know,
-    "analyze_with_chat_theory": _tool_analyze_with_chat_theory,
-    "prepare_lecture": _tool_prepare_lecture,
-    "discussion_questions": _tool_discussion_questions,
-    "simulate_student_questions": _tool_simulate_student_questions,
-    "check_proactive_suggestions": _tool_check_proactive_suggestions,
 }

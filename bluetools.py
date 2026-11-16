@@ -180,15 +180,6 @@ except ImportError:
     VISUAL_UNDERSTANDING_AVAILABLE = False
     print("[WARN] Enhanced visual understanding not available")
 
-# Proactive Assistance (if available)
-try:
-    from blue_proactive_assistance import get_proactive_assistance, ProactiveSuggestion
-    PROACTIVE_ASSISTANCE_AVAILABLE = True
-    print("[OK] Proactive assistance loaded - Blue can offer helpful suggestions!")
-except ImportError as e:
-    PROACTIVE_ASSISTANCE_AVAILABLE = False
-    print(f"[INFO] Optional proactive assistance not installed: {e}")
-
 # Proactive heartbeat queue (reminders → next inbound response)
 try:
     import blue_proactive
@@ -197,19 +188,6 @@ try:
 except ImportError as e:
     PROACTIVE_QUEUE_AVAILABLE = False
     print(f"[WARN] Proactive queue not available: {e}")
-
-# Academic Research Assistant (if available)
-try:
-    from blue_academic_assistant import (
-        get_academic_assistant, analyze_with_chat, prepare_lecture,
-        generate_discussion_questions, simulate_student_q_and_a,
-        synthesize_research, circumference_content
-    )
-    ACADEMIC_ASSISTANT_AVAILABLE = True
-    print("[OK] Academic assistant loaded - Teaching and research tools ready!")
-except ImportError as e:
-    ACADEMIC_ASSISTANT_AVAILABLE = False
-    print(f"[INFO] Optional academic assistant not installed: {e}")
 
 # Scholarly research — academic journal search wired to the Laurier library
 # (Omni discovery + OpenAlex/Crossref/Unpaywall; full text via libproxy)
@@ -225,17 +203,10 @@ except ImportError as e:
     SCHOLAR_AVAILABLE = False
     print(f"[WARN] Scholar tools not available: {e}")
 
-# Multi-Person Context Awareness (if available)
-try:
-    from blue_context_awareness import (
-        get_context_awareness, adapt_for_audience, get_audience_context,
-        generate_contextual_greeting
-    )
-    CONTEXT_AWARENESS_AVAILABLE = True
-    print("[OK] Context awareness loaded - Blue adapts to his audience!")
-except ImportError as e:
-    CONTEXT_AWARENESS_AVAILABLE = False
-    print(f"[INFO] Optional context awareness not installed: {e}")
+# Three optional modules were probed for here (blue_proactive_assistance,
+# blue_academic_assistant, blue_context_awareness). None ever existed in this
+# repository, so their five tool schemas were filtered out at every start and
+# their handlers could not run; removed 2026-11-16.
 
 # ================================================================================
 # LOGGING (single source)
@@ -3942,19 +3913,6 @@ if not ENHANCED_TOOLS_AVAILABLE:
         "launch_application", "set_volume", "story_prompt", "educational_activity",
         "get_local_time", "get_sunrise_sunset"
     }, "unavailable enhanced")
-
-if not ACADEMIC_ASSISTANT_AVAILABLE:
-    _filter_unavailable_tools({
-        "analyze_with_chat_theory",
-        "prepare_lecture",
-        "discussion_questions",
-        "simulate_student_questions",
-    }, "unavailable academic assistant")
-
-if not PROACTIVE_ASSISTANCE_AVAILABLE:
-    _filter_unavailable_tools({
-        "check_proactive_suggestions",
-    }, "unavailable proactive assistance")
 
 
 # ===== DOCUMENT MANAGEMENT FUNCTIONS =====
@@ -11200,15 +11158,6 @@ def _chat_inject_vision(messages: List[Dict[str, Any]]) -> None:
                 except Exception as e:
                     print(f"[VISUAL-MEMORY] Error loading visual history context: {e}")
 
-            # Add context awareness if available
-            if CONTEXT_AWARENESS_AVAILABLE and known_people:
-                try:
-                    # Infer who might be present (this is simplified - real detection would be more sophisticated)
-                    audience_prompt = adapt_for_audience("", known_people[:1])  # Default to Alex
-                    vision_prompt_parts.append(audience_prompt)
-                except Exception as e:
-                    print(f"[CONTEXT-AWARE] Error: {e}")
-
             # Removed conflicting instruction - we want accurate description of the actual image
 
             image_parts.append({
@@ -15012,11 +14961,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
 
     # The short-message note goes in after the cue has read the user's words,
     # with the no-question note when it applies (a "more" cue keeps that one).
-    # A forced tool that writes the text (an email, a document) or brings
-    # back questions is its own request: no note against ending on one.
-    if _no_q_note and improved_force_tool in (
-            _LONG_ARGUMENT_TOOLS | {"discussion_questions",
-                                    "simulate_student_questions"}):
+    # A forced tool that writes the text (an email, a document) is its own
+    # request: no note against ending on a question.
+    if _no_q_note and improved_force_tool in _LONG_ARGUMENT_TOOLS:
         _no_q_note = ""
     _note = _reply_budget.turn_note(_cap_note, _no_q_note)
     if _note:
@@ -18022,210 +17969,7 @@ def facebook_callback():
         """
 
 
-# Don't auto-run when imported - let run.py handle startup
-# app.run(host='127.0.0.1', port=PROXY_PORT, debug=False)
-
-# ===== Tool Executor with timeouts, retries, and small cache =====
-class ToolExecutor:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-
-    @lru_cache(maxsize=128)
-    def _cached_call(self, tool_name: str, args_key: str) -> str:
-        args = json.loads(args_key)
-        return self._raw_call(tool_name, args)
-
-    def _raw_call(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        try:
-            return execute_tool(tool_name, tool_args)
-        except Exception as e:
-            log.exception("Tool '%s' crashed: %s", tool_name, e)
-            return json.dumps({"error": str(e), "tool": tool_name})
-
-    def execute(self, tool_name: str, tool_args: Dict[str, Any], use_cache: bool = False) -> str:
-        tries = max(1, int(self.settings.TOOL_RETRIES) + 1)
-        last_err = None
-        for attempt in range(1, tries + 1):
-            try:
-                if use_cache:
-                    args_key = json.dumps(tool_args, sort_keys=True)[:2048]
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        fut = pool.submit(self._cached_call, tool_name, args_key)
-                        return fut.result(timeout=self.settings.TOOL_TIMEOUT_SECS)
-                else:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        fut = pool.submit(self._raw_call, tool_name, tool_args)
-                        return fut.result(timeout=self.settings.TOOL_TIMEOUT_SECS)
-            except concurrent.futures.TimeoutError:
-                last_err = f"timeout after {self.settings.TOOL_TIMEOUT_SECS}s"
-                log.warning("Tool '%s' timed out (attempt %d/%d)", tool_name, attempt, tries)
-            except Exception as e:
-                last_err = str(e)
-                log.warning("Tool '%s' failed (attempt %d/%d): %s", tool_name, attempt, tries, e)
-            time.sleep(0.2 * attempt)
-        return json.dumps({"error": last_err or "unknown", "tool": tool_name, "attempts": tries})
-
-# ===== Ephemeral Session State =====
-SESSION_STATE: Dict[str, Any] = {}
-
-
-def session_get(key: str, default=None):
-    return SESSION_STATE.get(key, default)
-
-
-def session_set(key: str, value: Any) -> None:
-    SESSION_STATE[key] = value
-
-def clear_gmail_context():
-    """
-    Clear email-related session state to prevent confusion between operations.
-    Call this after completing email operations to ensure old results don't interfere.
-    ADDED: October 2024 - Fix for Blue confusing READ with REPLY operations
-    """
-    SESSION_STATE.pop('last_gmail_operation', None)
-    SESSION_STATE.pop('last_gmail_result', None)
-    SESSION_STATE.pop('last_gmail_query', None)
-    log.info("Cleared Gmail session context to prevent operation confusion")
-
-
-# ================== BEGIN: Browse Website Tool + PRIORITY-EXPLICIT (with browse) ==================
-"""
-Adds a safe 'browse_website' tool and updates the system to understand and prioritize it.
-- Explicit commands ALWAYS win.
-- Smart auto-use (optional) may trigger for obvious "open/read this URL" cases.
-- Web search cannot override an explicit browse request.
-- Safe fetch: http/https only; timeouts; size limits; basic HTML->text extraction; link harvesting.
-
-USAGE examples:
-  use browse_website: {"url":"https://example.com"}
-  /browse_website https://example.com
-  use browse: https://example.com
-"""
-
-from typing import List, Dict, Optional, Tuple, Any
-import re as _re, json as _json, html as _html, urllib.parse as _urlparse
-import requests
-
-# ---- Ensure TOOLS contains browse_website schema ----
-try:
-    TOOLS
-except NameError:
-    TOOLS = []
-
-def _has_tool_named(name: str) -> bool:
-    try:
-        for t in TOOLS:
-            fn = t.get("function",{})
-            if fn.get("name") == name:
-                return True
-    except Exception:
-        pass
-    return False
-
-_BROWSE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "browse_website",
-        "description": "Fetch a web page over HTTPS and return cleaned text, title, and links. For direct browsing of a specific URL.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type":"string", "description":"The absolute URL to fetch (http or https)."},
-                "extract": {"type":"string", "enum":["text","html"], "description":"Return cleaned text or raw HTML (default text)."},
-                "max_chars": {"type":"integer", "description":"Max length of text to return (default 8000)."},
-                "include_links": {"type":"boolean", "description":"Include a compact list of outgoing links (default true)."},
-                "headers": {"type":"object", "description":"Optional request headers to include."}
-            },
-            "required": ["url"]
-        }
-    }
-}
-
-if not _has_tool_named("browse_website"):
-    try:
-        TOOLS.append(_BROWSE_SCHEMA)
-        print("[TOD] Registered tool: browse_website", flush=True)
-    except Exception as e:
-        print(f"[TOD] Could not register browse_website: {e}", flush=True)
-
-# ---- DUPLICATE CODE REMOVED ----
-# The browse_website implementation has been moved to before execute_tool (around line 1600)
-# to fix the NameError: name '_execute_browse_website' is not defined
-# Keeping only the TOOLS registration above and the alias/scoring below.
-
-# ---- Hook into execute_tool without breaking existing tools ----
-# REMOVED: Duplicate execute_tool override - browse_website is now handled in main execute_tool
-
-# ---- Extend existing alias+scoring with browse ----
-try:
-    KNOWN_TOOL_ALIASES
-except NameError:
-    KNOWN_TOOL_ALIASES = {}
-KNOWN_TOOL_ALIASES.setdefault("browse_website", [])
-for alias in ["browse","open_url","open website","visit","go to","navigate","read url"]:
-    if alias not in KNOWN_TOOL_ALIASES["browse_website"]:
-        KNOWN_TOOL_ALIASES["browse_website"].append(alias)
-
-_URL_IN_TEXT = _re.compile(r'https?://\S+', _re.I)
-
-
-def _score_browse(text: str) -> float:
-    t = (text or "").strip().lower()
-    if _URL_IN_TEXT.search(t): return 0.98
-    cues = ["open ", "go to ", "navigate to ", "read this page", "summarize this page", "visit "]
-    if any(c in t for c in cues): return 0.85
-    return 0.0
-
-try:
-    _SCORERS
-    _SCORERS["browse_website"] = _score_browse
-except NameError:
-    _SCORERS = {"browse_website": _score_browse}
-
-# ---- Add scholarly search aliases ----
-KNOWN_TOOL_ALIASES.setdefault("search_scholar", [])
-for alias in ["scholar_search", "academic_search", "search_journals",
-              "search_library", "journal_search", "find_papers",
-              "search_academic", "library_search"]:
-    if alias not in KNOWN_TOOL_ALIASES["search_scholar"]:
-        KNOWN_TOOL_ALIASES["search_scholar"].append(alias)
-
-KNOWN_TOOL_ALIASES.setdefault("read_paper", [])
-for alias in ["read_article", "fetch_paper", "get_full_text", "fetch_article",
-              "download_paper", "read_fulltext"]:
-    if alias not in KNOWN_TOOL_ALIASES["read_paper"]:
-        KNOWN_TOOL_ALIASES["read_paper"].append(alias)
-
-# ---- Add Gmail tool aliases ----
-KNOWN_TOOL_ALIASES.setdefault("read_gmail", [])
-for alias in ["check email", "read email", "show email", "get email", "inbox", "my emails", "check messages", "read messages"]:
-    if alias not in KNOWN_TOOL_ALIASES["read_gmail"]:
-        KNOWN_TOOL_ALIASES["read_gmail"].append(alias)
-
-KNOWN_TOOL_ALIASES.setdefault("send_gmail", [])
-for alias in ["send email", "email to", "compose email", "write email", "send message", "email"]:
-    if alias not in KNOWN_TOOL_ALIASES["send_gmail"]:
-        KNOWN_TOOL_ALIASES["send_gmail"].append(alias)
-
-def _score_read_gmail(text: str) -> float:
-    t = (text or "").strip().lower()
-    gmail_read_terms = ["check email", "read email", "show email", "my inbox", "unread", "new messages", "email from"]
-    if any(term in t for term in gmail_read_terms): return 0.95
-    if "email" in t and any(word in t for word in ["check", "read", "show", "get", "see"]): return 0.85
-    return 0.0
-
-def _score_send_gmail(text: str) -> float:
-    t = (text or "").strip().lower()
-    if "send email" in t or "email to" in t: return 0.95
-    if "send" in t and "email" in t: return 0.85
-    if "compose" in t and "email" in t: return 0.85
-    return 0.0
-
-_SCORERS["read_gmail"] = _score_read_gmail
-_SCORERS["send_gmail"] = _score_send_gmail
-
-print("[TOD] Browse tool ready", flush=True)
-print("[TOD] Gmail tools ready", flush=True)
+# The server is started by run.py, which imports this module.
 
 # Start the email auto-reply loop at MODULE-LOAD time. The same call
 # also exists inside `if __name__ == "__main__":` further up, but the
@@ -18238,217 +17982,7 @@ try:
         _start_email_autoreply_loop()
 except Exception as _autoreply_err:
     print(f"[AUTO-REPLY] could not start loop: {_autoreply_err}", flush=True)
-# ================== END: Browse Website Tool + PRIORITY-EXPLICIT (with browse) ==================
 
-
-# ================================================================================
-#                           BLUETOOLS GMAIL UPGRADES                          #
-#                    (Appended October 2025 — safe block)                    #
-# ================================================================================
-
-# Per-tool context limits to prevent cross-tool bleed in email operations
-try:
-    PER_TOOL_CONTEXT_LIMITS  # type: ignore
-except NameError:
-    PER_TOOL_CONTEXT_LIMITS = {
-        "read_gmail": 6,
-        "send_gmail": 6,
-        "reply_gmail": 6,
-    }
-
-def get_context_limit_for(tool_name: str, default_limit: int = 20) -> int:
-    try:
-        return int(PER_TOOL_CONTEXT_LIMITS.get(tool_name, default_limit))
-    except Exception:
-        return default_limit
-
-# NOTE: detect_gmail_operation_intent, extract_email_address, extract_email_subject_and_body
-# are defined earlier in the file (around line 7116) to ensure they're available when needed.
-
-# Operation receipt
-
-
-def _record_gmail_operation(op_type: str, query: str = "", extra: dict | None = None):
-    import time as _t, json as _json
-    meta = {"tool": op_type, "query": query or "", "ts": _t.time()}
-    if extra and isinstance(extra, dict):
-        meta.update(extra)
-    try:
-        print("[GMAIL-META] " + _json.dumps(meta))
-    except Exception:
-        pass
-    return meta
-
-# NOTE: To wire these into your existing flow:
-#  - Before invoking the model/tool for Gmail, call detect_gmail_operation_intent(last_user_text)
-#    and route strictly to 'read_gmail' / 'send_gmail' / 'reply_gmail' if returned.
-#  - When building the context for that tool call, cap messages using get_context_limit_for(tool, default_limit).
-#  - In your Gmail tool implementations, call _record_gmail_operation(...) after success.
-#  - Use extract_email_subject_and_body() in your send path to infer subject/body from natural phrasing.
-# ================================================================================
-
-
-# ================================================================================
-#                    VOICE EMAIL INTERFACE (CONSOLIDATED)                     #
-#             AddressBook + NLU + Controller + Lazy Wiring Helpers            #
-#                    Appended: 1761490066                                        #
-# ================================================================================
-import re, os, json, difflib, time, typing, dataclasses
-import difflib as _difflib, time as _time, dataclasses as _dataclasses
-from dataclasses import dataclass
-
-@dataclass
-class _Contact:
-    name: str
-    email: str
-    aliases: list[str] | None = None
-    def all_names(self) -> list[str]:
-        names = [self.name]
-        if self.aliases: names.extend(self.aliases)
-        return [_normalize_text(n) for n in names if n]
-
-def _normalize_text(s: str) -> str:
-    s = s or ""
-    s = s.strip().lower()
-    s = _re.sub(r"[^a-z0-9@.\s+-]", "", s)
-    s = _re.sub(r"\s+", " ", s)
-    return s
-
-class AddressBook:
-    def __init__(self, path: str):
-        self.path = path
-        self.contacts: list[_Contact] = []
-        if os.path.exists(path): self._load()
-        else: self._save()
-    def add_or_update(self, name: str, email: str, aliases: list[str] | None = None) -> _Contact:
-        name_n = _normalize_text(name)
-        for c in self.contacts:
-            if _normalize_text(c.name) == name_n or _normalize_text(c.email) == _normalize_text(email):
-                c.name = name; c.email = email; c.aliases = aliases or c.aliases; self._save(); return c
-        c = _Contact(name=name, email=email, aliases=aliases or [])
-        self.contacts.append(c); self._save(); return c
-    def remove(self, name_or_email: str) -> bool:
-        key = _normalize_text(name_or_email); before = len(self.contacts)
-        self.contacts = [c for c in self.contacts if _normalize_text(c.name)!=key and _normalize_text(c.email)!=key]
-        if len(self.contacts)!=before: self._save(); return True
-        return False
-    def find_best(self, query: str) -> tuple[_Contact | None, float, list[_Contact]]:
-        q = _normalize_text(query)
-        if not q: return None, 0.0, []
-        for c in self.contacts:
-            if _normalize_text(c.email) == q: return c, 1.0, [c]
-        candidates: list[tuple[_Contact,float]] = []
-        for c in self.contacts:
-            for nm in c.all_names():
-                score = _difflib.SequenceMatcher(a=q, b=nm).ratio()
-                candidates.append((c, score))
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        if not candidates: return None, 0.0, []
-        best, score = candidates[0]
-        top = [c for c,_ in candidates[:3]]
-        return best, score, top
-    def as_dict(self) -> dict:
-        return {"contacts":[_dataclasses.asdict(c) for c in self.contacts], "last_updated": int(_time.time())}
-    def _load(self):
-        with open(self.path, "r", encoding="utf-8") as f: data = _json.load(f)
-        self.contacts = [_Contact(**c) for c in data.get("contacts", [])]
-    def _save(self):
-        with open(self.path, "w", encoding="utf-8") as f: _json.dump(self.as_dict(), f, indent=2)
-
-@dataclass
-class ParseResult:
-    intent: str | None
-    contact_query: str | None = None
-    subject: str | None = None
-    body: str | None = None
-    constraints: dict | None = None
-
-class VoiceEmailNLU:
-    def __init__(self, address_book: AddressBook | None = None):
-        self.address_book = address_book
-        self._pat_reply_from = _re.compile(r"(answer|reply)\s+(?:to\s+)?(?:emails?\s+)?(?:from\s+)?(?P<name>.+)$", _re.I)
-        self._pat_reply_to   = _re.compile(r"(reply|respond)\s+(?:to\s+)(?P<name>.+)$", _re.I)
-        self._pat_read_from  = _re.compile(r"(show|read|list|check)\s+(?:my\s+)?emails?\s+(?:from\s+)(?P<name>.+)$", _re.I)
-        self._pat_send_to    = _re.compile(r"(send|email|compose)\s+(?:an?\s+email\s+)?(?:to\s+)?(?P<name>[^,]+?)(?:\s+about\s+(?P<subject>[^,]+?))?(?:\s+(?:that\s+says|saying)\s+(?P<body>.+))?$", _re.I)
-    def parse(self, text: str) -> ParseResult:
-        t = (text or "").strip()
-        m = self._pat_reply_from.search(t) or self._pat_reply_to.search(t)
-        if m: return ParseResult(intent="reply_contact", contact_query=m.group("name").strip())
-        m = self._pat_read_from.search(t)
-        if m: return ParseResult(intent="read_contact", contact_query=m.group("name").strip())
-        m = self._pat_send_to.search(t)
-        if m: return ParseResult(intent="send_contact", contact_query=(m.group("name") or "").strip(), subject=(m.group("subject") or "").strip() or None, body=(m.group("body") or "").strip() or None)
-        if "email" in t.lower() or "inbox" in t.lower(): return ParseResult(intent="read_generic")
-        return ParseResult(intent=None)
-
-class VoiceEmailController:
-    def __init__(self, execute_tool_fn, address_book: AddressBook, nlu: VoiceEmailNLU, confidence_threshold: float = 0.72):
-        self.execute_tool = execute_tool_fn
-        self.address_book = address_book
-        self.nlu = nlu
-        self.confidence_threshold = confidence_threshold
-    def handle_voice_command(self, utterance: str, dry_run: bool = True) -> dict:
-        parse = self.nlu.parse(utterance)
-        if parse.intent in ("reply_contact","read_contact","send_contact"):
-            contact, conf, top = self.address_book.find_best(parse.contact_query or "")
-            if not contact or conf < self.confidence_threshold:
-                suggestion = ", ".join([c.name for c in top]) or "no matches"
-                return {"success": False, "needs_disambiguation": True, "spoken_confirmation": f"I found multiple or low-confidence matches for '{parse.contact_query}'. Did you mean {suggestion}?", "candidates": [_dataclasses.asdict(c) for c in top], "confidence": conf}
-        if parse.intent == "reply_contact": return self._reply_latest_from(contact, dry_run=dry_run)
-        if parse.intent == "read_contact":  return self._read_from(contact, dry_run=dry_run)
-        if parse.intent == "send_contact":  return self._send_to(contact, subject=parse.subject, body=parse.body, dry_run=dry_run)
-        if parse.intent == "read_generic":  return self._read_generic(dry_run=dry_run)
-        return {"success": False, "spoken_confirmation": "I didn't catch that. Try 'reply to Sam', 'show emails from Jordan', or 'email Pat about timelines saying move ahead'."}
-    def _read_generic(self, dry_run: bool) -> dict:
-        args = {"query": "in:inbox newer_than:7d"}
-        if dry_run: return {"success": True, "plan": {"tool": "read_gmail", "args": args}, "spoken_confirmation": "I'll read your recent inbox."}
-        out = self.execute_tool("read_gmail", args); return self._norm(out, "I'll read your recent inbox.")
-    def _read_from(self, contact: _Contact, dry_run: bool) -> dict:
-        args = {"query": f'in:inbox from:{contact.email}'}
-        if dry_run: return {"success": True, "plan": {"tool": "read_gmail", "args": args}, "spoken_confirmation": f"I'll read your recent emails from {contact.name}."}
-        out = self.execute_tool("read_gmail", args); return self._norm(out, f"I'll read your emails from {contact.name}.")
-    def _reply_latest_from(self, contact: _Contact, dry_run: bool) -> dict:
-        args = {"query": f'in:inbox from:{contact.email}', "mode": "latest_only"}
-        if dry_run: return {"success": True, "plan": {"tool": "reply_gmail", "args": args}, "spoken_confirmation": f"I'll reply to the latest email from {contact.name}."}
-        out = self.execute_tool("reply_gmail", args); return self._norm(out, f"I replied to the latest email from {contact.name}.")
-    def _send_to(self, contact: _Contact, subject: str | None, body: str | None, dry_run: bool) -> dict:
-        text = f"send email to {contact.email}"
-        if subject: text += f" about {subject}"
-        if body: text += f" saying {body}"
-        args = {"to": contact.email, "subject": subject, "body": body, "text": text}
-        if dry_run: return {"success": True, "plan": {"tool": "send_gmail", "args": args}, "spoken_confirmation": f"I'll send {contact.name} an email" + (f" about {subject}" if subject else "") + (" with your message." if body else ".")}
-        out = self.execute_tool("send_gmail", args); return self._norm(out, f"I sent an email to {contact.name}.")
-    def _norm(self, out, confirmation: str) -> dict:
-        if isinstance(out, str):
-            try: obj = _json.loads(out)
-            except Exception: obj = {"raw": out}
-        else: obj = out or {}
-        obj.setdefault("success", True); obj.setdefault("spoken_confirmation", confirmation); return obj
-
-_VOICE_ADDRBOOK_PATH = os.environ.get("BLUE_ADDRESS_BOOK", "/mnt/data/blue_address_book.json")
-__voice_singletons = {"ab": None, "nlu": None, "controller": None}
-
-def get_voice_email_controller(execute_tool_fn):
-    ab = __voice_singletons.get("ab")
-    if ab is None:
-        if not os.path.exists(_VOICE_ADDRBOOK_PATH):
-            seed = {"contacts":[
-                {"name":"Sam Carter","email":"sam.carter@example.com","aliases":["Sam","Samuel Carter"]},
-                {"name":"Jordan Lee","email":"jordan.lee@example.com","aliases":["Jordy","J Lee"]},
-                {"name":"Pat Morgan","email":"pat.morgan@example.com","aliases":["Patrick Morgan","Patricia Morgan","Pat"]}
-            ], "last_updated": int(_time.time())}
-            with open(_VOICE_ADDRBOOK_PATH, "w", encoding="utf-8") as f: _json.dump(seed, f, indent=2)
-        ab = AddressBook(_VOICE_ADDRBOOK_PATH); __voice_singletons["ab"] = ab
-    nlu = __voice_singletons.get("nlu") or VoiceEmailNLU(address_book=ab); __voice_singletons["nlu"] = nlu
-    ctl = __voice_singletons.get("controller") or VoiceEmailController(execute_tool_fn=execute_tool_fn, address_book=ab, nlu=nlu); __voice_singletons["controller"] = ctl
-    return ctl
-
-def voice_email_handle_command(utterance: str, *, execute_tool_fn, dry_run: bool = True) -> dict:
-    ctl = get_voice_email_controller(execute_tool_fn)
-    return ctl.handle_voice_command(utterance, dry_run=dry_run)
-
-# End Voice Email Interface
-###############################################################################
 
 # === Enhanced conversational de-duplication ===
 def polish_response_for_conversation(response: str, conversation_messages: List[Dict]) -> str:

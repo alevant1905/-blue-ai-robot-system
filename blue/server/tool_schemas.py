@@ -1046,107 +1046,23 @@ RAW_TOOLS = [
             }
         }
     },
+    # Last on purpose: until 2026-11-16 bluetools appended this schema after
+    # building its list, so the model has always seen it at the end.
     {
         "type": "function",
         "function": {
-            "name": "analyze_with_chat_theory",
-            "description": "Analyze a topic through Cultural-Historical Activity Theory (CHAT) lens. Use this when Alex asks to apply CHAT framework to something, or for academic analysis of technology/education topics.",
+            "name": "browse_website",
+            "description": "Fetch a web page over HTTPS and return cleaned text, title, and links. For direct browsing of a specific URL.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "The topic to analyze"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Additional context about the situation"
-                    }
+                    "url": {"type": "string", "description": "The absolute URL to fetch (http or https)."},
+                    "extract": {"type": "string", "enum": ["text", "html"], "description": "Return cleaned text or raw HTML (default text)."},
+                    "max_chars": {"type": "integer", "description": "Max length of text to return (default 8000)."},
+                    "include_links": {"type": "boolean", "description": "Include a compact list of outgoing links (default true)."},
+                    "headers": {"type": "object", "description": "Optional request headers to include."}
                 },
-                "required": ["topic"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "prepare_lecture",
-            "description": "Generate a lecture outline for teaching. Use when Alex needs to prepare for class or wants help structuring a lecture.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "The lecture topic"
-                    },
-                    "duration": {
-                        "type": "integer",
-                        "description": "Lecture duration in minutes (default 50)"
-                    },
-                    "course": {
-                        "type": "string",
-                        "description": "Course name or context"
-                    },
-                    "level": {
-                        "type": "string",
-                        "description": "Student level: undergraduate, graduate, etc."
-                    }
-                },
-                "required": ["topic"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "discussion_questions",
-            "description": "Generate discussion questions for a reading or topic. Use when Alex is preparing for class discussion.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reading": {
-                        "type": "string",
-                        "description": "The reading or text to generate questions about"
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "The topic or theme"
-                    }
-                },
-                "required": ["reading", "topic"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "simulate_student_questions",
-            "description": "Simulate likely student questions and provide teaching strategies. Use when Alex is preparing to teach a topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "The topic being taught"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Additional context about the lesson"
-                    }
-                },
-                "required": ["topic"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_proactive_suggestions",
-            "description": "Check if there are any helpful proactive suggestions based on patterns and context. Use when checking in or when appropriate time has passed.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
+                "required": ["url"]
             }
         }
     }
