@@ -3859,16 +3859,18 @@ class EnhancedMemorySystem:
         from the morning of a long day. The recap is the one record of the
         whole day. session_summaries has one row a date for every robot
         together, which is why it was dropped from this block (Hexia took
-        Blue's day for hers); a day only this robot talked on is safely
-        its own. A keyword stand-in is no recap."""
+        Blue's day for hers). So it is shown in two cases only: the day was
+        this robot's alone; or other robots talked that day too and the
+        recap says who did what by name, this robot among them (the recaps
+        written since 2026-11-16 do; 10-30, the day Alex tried Casper beside
+        Blue, is one). A keyword stand-in is no recap."""
         key = (robot or "blue").lower()
+        robot_name = self._ROBOT_NAMES.get(key, "the robot")
         try:
-            others = conn.execute(
+            shared = conn.execute(
                 "SELECT 1 FROM conversation_log WHERE substr(timestamp, 1, 10) = ? "
                 "AND lower(coalesce(robot, 'blue')) != ? LIMIT 1",
                 (day, key)).fetchone()
-            if others:
-                return ""
             row = conn.execute(
                 "SELECT summary FROM session_summaries WHERE session_id = ?",
                 (day,)).fetchone()
@@ -3881,7 +3883,14 @@ class EnhancedMemorySystem:
                 (day,)).fetchall() if r[0]]
         except Exception:
             return ""
-        robot_name = self._ROBOT_NAMES.get(key, "the robot")
+        if shared:
+            by_name = (re.search(rf"\b{re.escape(robot_name)}\b", recap)
+                       and not self._RECAP_ROBOT_RE.search(recap)
+                       and not self._RECAP_USER_RE.search(recap))
+            if not by_name:
+                return ""
+            return ("(the other robots' conversations that day are in it "
+                    "too, each under its own name) " + recap)[:800]
         recap = self._RECAP_ROBOT_RE.sub(robot_name, recap)
         if len(people) == 1:
             recap = self._RECAP_USER_RE.sub(people[0], recap)

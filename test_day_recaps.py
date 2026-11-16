@@ -293,13 +293,38 @@ def test_earlier_sessions_carry_the_recap_of_his_own_day(memory, model):
     assert "The day in short: Alex and Blue planned the DH399 lab." in block
 
 
-def test_a_day_shared_with_another_robot_gets_no_recap(memory, model):
-    """One row a date for every robot: Hexia took Blue's day for hers."""
-    _seed(memory, LAB_DAY + [
-        (_at(3, 16, 0), "user", "tell me a story about a dragon", "hexia", "Vilda"),
-        (_at(3, 16, 1), "assistant", "Once there was a dragon.", "hexia", "Vilda"),
-    ])
+SHARED_DAY = LAB_DAY + [
+    (_at(3, 16, 0), "user", "tell me a story about a dragon", "hexia", "Vilda"),
+    (_at(3, 16, 1), "assistant", "Once there was a dragon.", "hexia", "Vilda"),
+]
+
+
+def test_a_shared_day_is_shown_only_to_a_robot_its_recap_names(memory, model):
+    """One row a date for every robot. A recap that says who did what can
+    be shown to a robot it names; Hexia is not in this one."""
+    _seed(memory, SHARED_DAY)
     memory.summarize_session(_day(3))
+
+    blue = memory._build_session_history_block(robot="blue")
+    hexia = memory._build_session_history_block(robot="hexia")
+
+    assert ("The day in short: (the other robots' conversations that day are "
+            "in it too, each under its own name) Alex and Blue planned the "
+            "DH399 lab.") in blue
+    assert hexia and "The day in short:" not in hexia
+
+
+def test_a_shared_day_in_the_old_wording_is_nobodys(memory):
+    """"The assistant" on a day two robots talked: Hexia took Blue's day
+    for hers, which is why the recaps left this block."""
+    _seed(memory, SHARED_DAY)
+    conn = memory._conn()
+    conn.execute("INSERT INTO session_summaries (session_id, summary, topics, created_at) "
+                 "VALUES (?, ?, ?, ?)", (
+                     _day(3), "The user planned a lab with the assistant, and "
+                     "Blue told a story about a dragon.", "", "x"))
+    conn.commit()
+    conn.close()
 
     for robot in ("blue", "hexia"):
         block = memory._build_session_history_block(robot=robot)
