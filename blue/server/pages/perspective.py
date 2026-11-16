@@ -89,17 +89,22 @@ PERSPECTIVE_HTML = """
 
             <a href="/documents" class="back-link">← Back to documents</a>
             <a href="/perspective/blue" class="back-link" style="margin-left: 24px;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>Blue's Perspective</a>
+            <a href="/perspective/hexia" class="back-link" style="margin-left: 24px;">Hexia's</a>
+            <a href="/perspective/casper" class="back-link" style="margin-left: 24px;">Casper's</a>
         </div>
     </div>
 </body>
 </html>
 """
 
-BLUE_PROFILE_HTML = """
+# One page for every robot's self-profile. Until 2026-11-16 it was Blue's alone
+# (the text said "Blue" and "his" throughout), though Hexia and Casper have
+# had profiles of their own, read on every turn, since they arrived.
+ROBOT_PROFILE_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Blue's Perspective</title>
+    <title>{{ name }}'s Perspective</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/assets/blue.css">
     <script src="/assets/blue.js" defer></script>
@@ -151,8 +156,8 @@ BLUE_PROFILE_HTML = """
 <body>
     <div class="container">
         <div class="header">
-            <h1><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>Blue's Perspective</h1>
-            <p>Who Blue is — his own evolving character. This shapes how he speaks when he's being himself (not writing as you). Edit it freely; evolving builds on whatever's here.</p>
+            <h1><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>{{ name }}'s Perspective</h1>
+            <p>Who {{ name }} is — {{ poss }} own evolving character. This shapes how {{ subj }} speaks when {{ subj }}'s being {{ refl }}{% if robot == 'blue' %} (not writing as you){% endif %}. Edit it freely; evolving builds on whatever's here.</p>
         </div>
         <div class="content">
             {% if message %}<div class="message {{ message_type }}">{{ message }}</div>{% endif %}
@@ -163,20 +168,22 @@ BLUE_PROFILE_HTML = """
                 {% if user_edited %} &nbsp;•&nbsp; <span style="color:#7a5b00;">your edits carry forward into the next evolution</span>{% endif %}
             </div>
 
-            <form method="POST" action="/perspective/blue">
-                <textarea name="profile" placeholder="Blue's sense of himself...">{{ profile }}</textarea>
+            <form method="POST" action="{{ action }}">
+                <textarea name="profile" placeholder="{{ name }}'s sense of {{ refl }}...">{{ profile }}</textarea>
                 <div class="actions">
                     <button type="submit" name="action" value="save" class="btn btn-save"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>Save edits</button>
                     <button type="submit" name="action" value="evolve" class="btn btn-evolve"
-                            onclick="return confirm('Evolve Blue\\'s perspective now from his recent experiences? This builds on the current text and can take a minute.');">
+                            onclick="return confirm('Evolve {{ name }}\\'s perspective now from {{ poss }} recent experiences? This builds on the current text and can take a minute.');">
                         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22V11M12 11C12 7 9 4 4 4c0 5 3 7 8 7zM12 11c0-3 2-5 6-5 0 4-2 6-6 6z"/></svg>Evolve now
                     </button>
-                    <span class="hint">Evolving reads his memories, recent days, and library — may take a minute.</span>
+                    <span class="hint">Evolving reads {{ poss }} memories, recent days, and library — may take a minute.</span>
                 </div>
             </form>
 
             <div class="nav">
                 <a href="/perspective"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>My (Alex's) Perspective</a>
+                {% for other in others %}<a href="{{ other.path }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>{{ other.name }}'s Perspective</a>
+                {% endfor %}
                 <a href="/documents"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg>Documents</a>
             </div>
         </div>

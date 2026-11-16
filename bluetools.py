@@ -9050,10 +9050,6 @@ def _identity_seed(robot="blue") -> str:
     return cfg["seed"]
 
 
-def _blue_identity_seed() -> str:  # back-compat
-    return _identity_seed("blue")
-
-
 def _load_profile(robot="blue") -> dict:
     try:
         with open(_robot_cfg(robot)["profile_path"], 'r', encoding='utf-8') as f:
@@ -9072,14 +9068,6 @@ def _save_profile(robot, obj: dict):
         print(f"   [SELF] could not save {robot} profile: {e}")
 
 
-def _load_blue_profile() -> dict:  # back-compat
-    return _load_profile("blue")
-
-
-def _save_blue_profile(obj: dict):  # back-compat
-    return _save_profile("blue", obj)
-
-
 def get_self_profile(robot="blue") -> str:
     """A robot's current self-profile. Seeds lazily from its identity note (cheap,
     no LLM) the first time, so its default voice always has something to draw on;
@@ -9095,10 +9083,6 @@ def get_self_profile(robot="blue") -> str:
         'generated_at': __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M'),
     })
     return seed
-
-
-def get_blue_profile() -> str:  # back-compat
-    return get_self_profile("blue")
 
 
 def _gather_experiences(robot="blue") -> str:
@@ -9157,10 +9141,6 @@ def _gather_experiences(robot="blue") -> str:
     return "\n\n".join(parts)
 
 
-def _gather_blue_experiences() -> str:  # back-compat
-    return _gather_experiences("blue")
-
-
 def evolve_self_profile(robot="blue") -> dict:
     """Evolve a robot's self-profile from its experiences, BUILDING ON the
     current text (so it grows rather than resetting, and any manual edits carry
@@ -9210,10 +9190,6 @@ def evolve_self_profile(robot="blue") -> dict:
         return obj
 
 
-def evolve_blue_profile() -> dict:  # back-compat
-    return evolve_self_profile("blue")
-
-
 def save_self_profile_text(robot, text: str) -> dict:
     """Persist a hand-edited self-profile for a robot. Evolution later builds on
     this text, so edits are carried forward rather than frozen."""
@@ -9224,10 +9200,6 @@ def save_self_profile_text(robot, text: str) -> dict:
         obj['edited_at'] = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')
         _save_profile(robot, obj)
         return obj
-
-
-def save_blue_profile_text(text: str) -> dict:  # back-compat
-    return save_self_profile_text("blue", text)
 
 
 _PROFILE_NOTE_MAX = 1500
@@ -15136,12 +15108,27 @@ def perspective_profile_page():
     )
 
 
-from blue.server.pages.perspective import BLUE_PROFILE_HTML
+from blue.server.pages.perspective import ROBOT_PROFILE_HTML
 
 
-@app.route('/perspective/blue', methods=['GET', 'POST'])
-def blue_perspective_page():
-    """Read / edit / evolve Blue's own perspective profile."""
+def _perspective_path(robot_key: str) -> str:
+    """A robot's self-profile page, by the name it goes by in a URL."""
+    return "/perspective/" + ROBOTS[robot_key].get("public_id", robot_key)
+
+
+@app.route('/perspective/blue', methods=['GET', 'POST'], defaults={'robot': 'blue'})
+@app.route('/perspective/<robot>', methods=['GET', 'POST'])
+def blue_perspective_page(robot='blue'):
+    """Read / edit / evolve a robot's own perspective profile.
+
+    Blue's alone until 2026-11-16 (the endpoint keeps his name). Hexia and
+    Casper each have a profile that their turns read; nothing let Alex see
+    or edit one."""
+    key = _robot_id(robot)
+    if key not in ROBOTS:
+        return "No such robot.", 404
+    cfg = ROBOTS[key]
+    name = cfg["name"]
     message = None
     message_type = None
 
@@ -15149,26 +15136,31 @@ def blue_perspective_page():
         action = request.form.get('action', 'save')
         if action == 'evolve':
             try:
-                obj = evolve_blue_profile()
+                obj = evolve_self_profile(key)
                 if obj.get('profile'):
-                    message = f"Blue's perspective evolved (evolution #{obj.get('evolution_count', '?')})."
+                    message = f"{name}'s perspective evolved (evolution #{obj.get('evolution_count', '?')})."
                     message_type = "success"
                 else:
                     message = ("Couldn't evolve right now — is the local model running? "
-                               "Blue's current perspective is unchanged.")
+                               f"{name}'s current perspective is unchanged.")
                     message_type = "error"
             except Exception as e:
                 message, message_type = f"Error evolving: {e}", "error"
         else:  # save
-            save_blue_profile_text(request.form.get('profile', ''))
-            message, message_type = "Saved. Blue will speak from this from now on.", "success"
+            save_self_profile_text(key, request.form.get('profile', ''))
+            message, message_type = f"Saved. {name} will speak from this from now on.", "success"
 
     # Ensure there's at least a seeded profile to show (cheap, no LLM).
-    get_blue_profile()
-    obj = _load_blue_profile()
+    get_self_profile(key)
+    obj = _load_profile(key)
     user_edited = bool(obj.get('user_edited'))
     return render_template_string(
-        BLUE_PROFILE_HTML,
+        ROBOT_PROFILE_HTML,
+        robot=key, name=name,
+        subj=cfg["pronoun_subj"], poss=cfg["pronoun_poss"], refl=cfg["pronoun_refl"],
+        action=_perspective_path(key),
+        others=[{"name": other["name"], "path": _perspective_path(other_key)}
+                for other_key, other in ROBOTS.items() if other_key != key],
         profile=obj.get('profile', ''),
         user_edited=user_edited,
         evolution_count=obj.get('evolution_count', 0),
