@@ -414,10 +414,11 @@ def test_a_teaching_opener_does_not_make_a_reply_runaway(reply):
 def test_the_runaway_check_does_not_import_the_blue_package():
     """An offline script must not start the live memory system.
 
-    `import blue.server.runaway` runs blue/__init__ -> blue.memory, which
-    opens the real ChromaDB through the data junction. The child process
-    refuses any blue.* import, so a regression fails here instead of doing
-    that.
+    `import blue.server.runaway` used to run blue/__init__ -> blue.memory,
+    which opened the real ChromaDB through the data junction (the package
+    imports nothing since 2026-11-16, and blue.server.runaway still imports
+    bluetools). The child process refuses any blue.* import, so a regression
+    fails here instead of doing that.
     """
     script = (
         "import sys\n"

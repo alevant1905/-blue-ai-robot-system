@@ -1,52 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Blue AI Robot System - Modular Entry Point
-============================================
+Blue AI Robot System - Entry Point
+===================================
 
-This is the new entry point that uses the refactored modular components.
 Run with: python run.py
 
-The original bluetools.py is kept as a backup.
+Loads the server (bluetools.py), reports the services it found, starts the
+proactive heartbeat and serves the app.
 
-Module Structure:
+Where the code lives:
+    bluetools.py             # the server: app, auth, tools, the model loop, chat
     blue/
-    ├── __init__.py          # Core exports
-    ├── utils.py             # Utility functions
-    ├── memory.py            # Memory/facts system
-    ├── llm.py               # LLM client
-    ├── tool_selector/       # Intent detection & tool selection (package)
-    │   ├── selector.py      # ImprovedToolSelector
-    │   └── detectors/       # Per-domain intent detectors
-    └── tools/
-        ├── music.py         # YouTube Music
-        ├── vision.py        # Camera & visualizer
-        ├── documents.py     # Document management
-        ├── lights.py        # Philips Hue
-        ├── web.py           # Web search & browsing
-        └── gmail.py         # Email operations
+    ├── server/              # pages, routes and the pieces split out of bluetools
+    ├── tool_selector/       # intent detection & tool selection
+    ├── tools/               # library index, scholar search, page fetching, faces
+    ├── head.py              # the robot heads (Blue, Hexia, Casper)
+    ├── continuity.py        # each robot's J-space store
+    └── llm.py, utils.py     # shared transport and helpers
+    blue_memory_improved.py  # facts, memories, the conversation log
+    blue_identity.py         # who is who, and the reply checks about it
+
+The service report below reads the server's own state. It used to import a
+second copy of the music, lights, Gmail and camera code from blue/tools/,
+which the server never ran, so a tick here said nothing about Blue.
 """
 
 import sys
 import os
 import io
-
-# Fix Windows console encoding for emojis
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(
-        sys.stdout.buffer,
-        encoding='utf-8',
-        errors='replace',
-        line_buffering=True,
-        write_through=True,
-    )
-    sys.stderr = io.TextIOWrapper(
-        sys.stderr.buffer,
-        encoding='utf-8',
-        errors='replace',
-        line_buffering=True,
-        write_through=True,
-    )
 
 # Ensure we're in the right directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +37,25 @@ os.chdir(script_dir)
 # Add to path if needed
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
+
+
+def fix_console_encoding() -> None:
+    """Windows consoles choke on the emoji below. Called from main(), not at
+    import, so importing this module (the tests do) leaves stdout alone."""
+    if sys.platform != 'win32':
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+        setattr(sys, name, io.TextIOWrapper(
+            buffer,
+            encoding='utf-8',
+            errors='replace',
+            line_buffering=True,
+            write_through=True,
+        ))
 
 
 def serve_app(app, host: str, port: int) -> None:
@@ -73,113 +74,102 @@ def serve_app(app, host: str, port: int) -> None:
 def print_banner():
     """Print startup banner."""
     print("=" * 60)
-    print("🤖 Blue AI Robot System - MODULAR VERSION")
+    print("🤖 Blue AI Robot System")
     print("=" * 60)
 
+
 def check_modular_imports():
-    """Verify modular components are available."""
-    print("\n📦 Checking modular components...")
-
-    try:
-        from blue import (
-            ImprovedToolSelector, ToolIntent, ToolSelectionResult,
-            load_blue_facts, build_system_preamble,
-            LMStudioClient, settings
-        )
-        print("   ✅ blue package (core)")
-    except ImportError as e:
-        print(f"   ❌ blue package: {e}")
-        return False
-
-    try:
-        from blue.tools import (
-            # Music
-            init_youtube_music, play_music, control_music,
-            # Lights
-            get_hue_lights, apply_mood_to_lights, MOOD_PRESETS,
-            # Documents
-            load_document_index, search_documents_rag,
-            # Web
-            execute_web_search, get_weather_data,
-            # Gmail
-            GMAIL_AVAILABLE, execute_read_gmail,
-            # Vision
-            capture_camera_image, get_vision_queue,
-        )
-        print("   ✅ blue.tools package")
-    except ImportError as e:
-        print(f"   ❌ blue.tools package: {e}")
-        return False
-
+    """Verify the tool selector loads and can read a request."""
+    print("\n📦 Checking the tool selector...")
     try:
         from blue.tool_selector import ImprovedToolSelector
         selector = ImprovedToolSelector()
-        # Quick test
+        # Detection only: nothing is played.
         result = selector.select_tool("play some jazz music", [])
         if result.primary_tool:
             print(f"   ✅ Tool selector working (test: {result.primary_tool.tool_name})")
         else:
             print("   ✅ Tool selector loaded")
     except Exception as e:
-        print(f"   ⚠️  Tool selector: {e}")
-
+        print(f"   ❌ Tool selector: {e}")
+        return False
     return True
 
-def check_services():
-    """Check external service availability."""
+
+def check_services(server):
+    """Report the services as the loaded server sees them."""
     print("\n🔌 Checking services...")
 
-    # Check Hue
+    # Philips Hue
     try:
-        from blue.tools.lights import BRIDGE_IP, HUE_USERNAME, get_hue_lights
-        if BRIDGE_IP and HUE_USERNAME:
-            lights = get_hue_lights()
+        bridge = getattr(server, "BRIDGE_IP", "")
+        if bridge and getattr(server, "HUE_USERNAME", ""):
+            lights = server.get_hue_lights()
             if lights:
-                print(f"   ✅ Philips Hue: {len(lights)} light(s) at {BRIDGE_IP}")
+                print(f"   ✅ Philips Hue: {len(lights)} light(s) at {bridge}")
             else:
-                print(f"   ⚠️  Philips Hue: Configured but no lights found")
+                print(f"   ⚠️  Philips Hue: no answer from the bridge at {bridge} "
+                      "(off the home network?)")
         else:
             print("   ⚠️  Philips Hue: Not configured")
     except Exception as e:
         print(f"   ❌ Philips Hue: {e}")
 
-    # Check YouTube Music
+    # YouTube Music
     try:
-        from blue.tools.music import init_youtube_music
-        if init_youtube_music():
+        if server.init_youtube_music():
             print("   ✅ YouTube Music: Ready")
         else:
             print("   ⚠️  YouTube Music: Not available (pip install ytmusicapi)")
     except Exception as e:
         print(f"   ❌ YouTube Music: {e}")
 
-    # Check Gmail
+    # Gmail
     try:
-        from blue.tools.gmail import GMAIL_AVAILABLE
-        if GMAIL_AVAILABLE:
+        if getattr(server, "GMAIL_AVAILABLE", False):
             print("   ✅ Gmail: Available")
         else:
             print("   ⚠️  Gmail: Not configured")
     except Exception as e:
         print(f"   ❌ Gmail: {e}")
 
-    # Check Documents
+    # Documents
     try:
-        from blue.tools.documents import load_document_index
-        index = load_document_index()
+        index = server.load_document_index()
         doc_count = len(index.get('documents', []))
         print(f"   ✅ Documents: {doc_count} indexed")
     except Exception as e:
         print(f"   ❌ Documents: {e}")
 
+    # The robots
+    try:
+        names = ", ".join(cfg["name"] for cfg in server.ROBOTS.values())
+        print(f"   ✅ Robots: {names}")
+    except Exception as e:
+        print(f"   ❌ Robots: {e}")
+
+
+def print_usage():
+    print("\n" + "=" * 60)
+    print("📖 Usage Examples:")
+    print("   🎵 'Play Bohemian Rhapsody by Queen'")
+    print("   💡 'Set the lights to sunset mood'")
+    print("   📧 'Check my email'")
+    print("   🔍 'Search for AI news'")
+    print("   📄 'What does my contract say about...'")
+    print("=" * 60)
+
+
 def run_server():
-    """Start the Flask server."""
+    """Load the server, report its services, and serve it."""
     print("\n🚀 Starting server...")
-    print("   Loading bluetools.py (this will start the Flask server)")
+    print("   Loading bluetools.py")
     print("")
 
-    # Import bluetools and run its main function
     import bluetools
+
+    check_services(bluetools)
+    print_usage()
 
     # Start the proactive heartbeat (reminder emails + alert queue).
     # bluetools.py only starts this from inside its `if __name__ == "__main__":`
@@ -191,47 +181,32 @@ def run_server():
     except Exception as e:
         print(f"   ⚠️  Proactive heartbeat failed to start: {e}")
 
-    # Run the server if bluetools has a main guard
-    if hasattr(bluetools, '__name__'):
-        # Bind to all interfaces by default so phones/laptops can reach Blue.
-        # Remote requests are gated by the password (see _require_remote_auth
-        # in bluetools.py); localhost stays ungated for the Ohbot client.
-        # Override with BLUE_HOST=127.0.0.1 to restrict to this machine only.
-        bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
-        port = int(os.environ.get("BLUE_PORT", "5000"))
-        print(f"   Server starting on http://{bind_host}:{port}")
-        print("   Remote devices must sign in with the access password.")
-        print("   Press CTRL+C to quit")
-        print("")
-        # bluetools.py is imported here, so start the server explicitly.
-        if hasattr(bluetools, 'app'):
-            serve_app(bluetools.app, bind_host, port)
+    # Bind to all interfaces by default so phones/laptops can reach Blue.
+    # Remote requests are gated by the password (see _require_remote_auth
+    # in bluetools.py); localhost stays ungated for the Ohbot client.
+    # Override with BLUE_HOST=127.0.0.1 to restrict to this machine only.
+    bind_host = os.environ.get("BLUE_HOST", "0.0.0.0")
+    port = int(os.environ.get("BLUE_PORT", "5000"))
+    print(f"\n   Server starting on http://{bind_host}:{port}")
+    print("   Remote devices must sign in with the access password.")
+    print("   Press CTRL+C to quit")
+    print("")
+    if hasattr(bluetools, 'app'):
+        serve_app(bluetools.app, bind_host, port)
+
 
 def main():
     """Main entry point."""
+    fix_console_encoding()
     print_banner()
 
-    # Check modular components first
     if not check_modular_imports():
-        print("\n❌ Modular components failed to load!")
-        print("   Please check your blue package installation.")
+        print("\n❌ The tool selector failed to load!")
+        print("   Please check the blue package.")
         return
 
-    # Check services
-    check_services()
-
-    # Print usage info
-    print("\n" + "=" * 60)
-    print("📖 Usage Examples:")
-    print("   🎵 'Play Bohemian Rhapsody by Queen'")
-    print("   💡 'Set the lights to sunset mood'")
-    print("   📧 'Check my email'")
-    print("   🔍 'Search for AI news'")
-    print("   📄 'What does my contract say about...'")
-    print("=" * 60)
-
-    # Start the server
     run_server()
+
 
 if __name__ == "__main__":
     main()

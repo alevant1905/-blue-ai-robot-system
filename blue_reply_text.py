@@ -26,9 +26,10 @@ finds a tool call the model wrote out as text instead of making it
 forced tool call that wrote the model arguing with itself instead of the call.
 
 Stdlib only and at the repo top level on purpose: blue_memory_improved imports
-this, and importing anything under blue/ runs blue/__init__ → blue.memory →
-blue_memory_improved, which is a cycle (and, outside the server, starts the
-live memory system).
+this. When it was written, importing anything under blue/ ran blue/__init__ →
+blue.memory → blue_memory_improved, a cycle that also started the live memory
+system outside the server. blue/__init__ imports nothing now (2026-11-16);
+this module stays where its importers expect it.
 """
 
 from __future__ import annotations
