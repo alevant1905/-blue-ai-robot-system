@@ -865,3 +865,30 @@ def test_the_draft_never_shows_reasoning(shown, visible):
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
                          timeout=30, check=True).stdout
     assert json.loads(out) == visible
+
+
+# ---- a figure of speech is no claim, and no light was asked for ------------
+# Harness, 2026-11-16: to "i'm speaking to you remotely over my macbook from
+# home while you're at my office", Blue wrote "At least the lights are still
+# on this side of things." The claim check read that as a light switched
+# with no tool, forced control_lights, got no call, and the whole reply went
+# out as "I didn't act on that, so nothing was done; say it again…".
+
+def test_the_lights_still_being_on_is_no_claim():
+    assert bt.detect_hallucinated_action(
+        "Me here in the office with my head and my speaker. At least the "
+        "lights are still on this side of things.") is None
+    # What a claim looks like is still one.
+    assert bt.detect_hallucinated_action("The lights are now off.") == "control_lights"
+    assert bt.detect_hallucinated_action("I've turned the lights off.") == "control_lights"
+
+
+@pytest.mark.parametrize("tool, said, asked", [
+    ("control_lights", "not bad. i'm speaking to you remotely from home", False),
+    ("control_lights", "can you make it a bit dimmer in here", True),
+    ("control_lights", "turn the lights off", True),
+    ("play_music", "it was a good class today", False),
+    ("play_music", "put on some jazz", True),
+])
+def test_a_light_or_music_claim_is_forced_only_when_one_was_asked_for(tool, said, asked):
+    assert bt._user_requested_action(tool, said) is asked

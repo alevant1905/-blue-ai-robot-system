@@ -10536,7 +10536,10 @@ _ACTION_CLAIM_PATTERNS = {
         r"i(?:'ve| have)?\s+(?:just\s+)?(?:turned|set|changed|adjusted|switched|put)\s+(?:the\s+)?lights?|"
         # "lights are (now) set/on/off..." — allow an adverb (now/all) to sit
         # between the verb-to-be and the action verb.
-        r"lights?\s+(?:are|were|have been|'re)\s+(?:\w+\s+){0,2}(?:turned|set|changed|adjusted|switched|on|off)|"
+        # Not "still": "at least the lights are still on this side of things"
+        # is a figure of speech, and was forced into a control_lights call
+        # that replaced the whole reply (harness, 2026-11-16).
+        r"lights?\s+(?:are|were|have been|'re)\s+(?:(?!still\b)\w+\s+){0,2}(?:turned|set|changed|adjusted|switched|on|off)|"
         # Present continuous
         r"(?:i'?m\s+)?(?:switching|turning|setting|changing|adjusting)\s+(?:the\s+)?lights?|"
         # Mood/scene-centric: "the galaxy mood is now active/on/set"
@@ -10618,6 +10621,15 @@ _ACTION_REQUEST_WORDS = {
     "create_reminder": ("remind", "reminder", "timer", "alarm", "schedule",
                         "calendar", "appointment", "event", "book"),
     "create_note": ("note", "write down", "jot", "save", "remember this"),
+    # Lights and music had no entry, so any sentence that read as a claim was
+    # forced through as if asked for. Nobody mentioned a light when "the
+    # lights are still on" became a forced control_lights call.
+    "control_lights": ("light", "lamp", "bright", "dim", "dark", "mood",
+                       "scene", "colour", "color", "glow", "hue", "cozy",
+                       "cosy", "ambian", "ambien", "atmosphere", "sunset",
+                       "romantic", "party", "movie"),
+    "play_music": ("play", "music", "song", "track", "playlist", "album",
+                   "listen", "put on", "radio", "tune"),
 }
 
 
