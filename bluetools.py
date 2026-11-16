@@ -14812,7 +14812,9 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
             if note and ((language and language != "en")
                          or _message_language(_turn_words) not in ("", "en")):
                 note = ""
-            _kinds = {_reply_budget.SOCIAL_TURN_NOTE: "the social note",
+            _kinds = {_reply_budget.SOCIAL_TURN_NOTE: "the news note",
+                      _reply_budget.GREETING_TURN_NOTE: "the greeting note",
+                      _reply_budget.ACK_TURN_NOTE: "the acknowledgement note",
                       _reply_budget.IDEA_TURN_NOTE: "the idea note",
                       _reply_budget.SHORT_TURN_NOTE: "the short-message note"}
             print(f"   [LENGTH] short message — reply capped at {cap} tokens"
@@ -17886,6 +17888,11 @@ _documents_routes.register_uploads(app)
 @app.route("/facebook/callback")
 def facebook_callback():
     """Handle Facebook OAuth callback"""
+    # Everything shown on these pages comes from the query string or from
+    # Facebook, and the pages are served from Blue's own origin, where the
+    # browser is already trusted: /facebook/callback?error=<script>… ran
+    # whatever a link put there (found 2026-11-16). All of it is escaped.
+    from markupsafe import escape as _esc
     code = request.args.get('code')
     error = request.args.get('error')
 
@@ -17895,8 +17902,8 @@ def facebook_callback():
         <head><title>Facebook Authentication Failed</title></head>
         <body style="font-family: Arial, sans-serif; padding: 40px;">
             <h1 style="color: #e74c3c;">Authentication Failed</h1>
-            <p>Error: {error}</p>
-            <p>Description: {request.args.get('error_description', 'Unknown error')}</p>
+            <p>Error: {_esc(error)}</p>
+            <p>Description: {_esc(request.args.get('error_description', 'Unknown error'))}</p>
             <p><a href="/">Return to Home</a></p>
         </body>
         </html>
@@ -17927,7 +17934,7 @@ def facebook_callback():
             if pages:
                 pages_html = "<h3>Connected Pages:</h3><ul>"
                 for page in pages:
-                    pages_html += f"<li>{page.get('name')} (ID: {page.get('id')})</li>"
+                    pages_html += f"<li>{_esc(page.get('name'))} (ID: {_esc(page.get('id'))})</li>"
                 pages_html += "</ul>"
 
             return f"""
@@ -17935,8 +17942,8 @@ def facebook_callback():
             <head><title>Facebook Connected</title></head>
             <body style="font-family: Arial, sans-serif; padding: 40px;">
                 <h1 style="color: #27ae60;">✓ Successfully Connected to Facebook</h1>
-                <p>Authenticated as: <strong>{user_info.get('name')}</strong></p>
-                <p>Email: {user_info.get('email')}</p>
+                <p>Authenticated as: <strong>{_esc(user_info.get('name'))}</strong></p>
+                <p>Email: {_esc(user_info.get('email'))}</p>
                 {pages_html}
                 <p style="margin-top: 20px;">You can now use Blue to post to Facebook!</p>
                 <p><a href="/">Return to Home</a></p>
@@ -17950,7 +17957,7 @@ def facebook_callback():
             <head><title>Authentication Error</title></head>
             <body style="font-family: Arial, sans-serif; padding: 40px;">
                 <h1 style="color: #e74c3c;">Authentication Error</h1>
-                <p>Error: {error_msg}</p>
+                <p>Error: {_esc(error_msg)}</p>
                 <p><a href="/">Return to Home</a></p>
             </body>
             </html>
@@ -17962,7 +17969,7 @@ def facebook_callback():
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; padding: 40px;">
             <h1 style="color: #e74c3c;">Unexpected Error</h1>
-            <p>Error: {str(e)}</p>
+            <p>Error: {_esc(str(e))}</p>
             <p><a href="/">Return to Home</a></p>
         </body>
         </html>

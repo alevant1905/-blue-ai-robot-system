@@ -26,7 +26,8 @@ import re
 import pytest
 
 import bluetools as bt
-from blue.server.reply_budget import (NO_QUESTION_NOTE, NO_QUESTION_NOTE_HEARD,
+from blue.server.reply_budget import (GREETING_TURN_NOTE,
+                                      NO_QUESTION_NOTE, NO_QUESTION_NOTE_HEARD,
                                       SHORT_TURN_NOTE, SOCIAL_TURN_NOTE,
                                       ends_on_question, no_question_note,
                                       questions_are_the_content, turn_note)
@@ -308,7 +309,7 @@ def test_a_greeting_after_a_question_gets_the_note(chat):
     """The greeting fast path pins it too."""
     _thread(chat, ASKED, "hi blue")
     assert _user_text(chat.model.main[-1]).endswith(
-        f"[{SOCIAL_TURN_NOTE} {NO_QUESTION_NOTE}]")
+        f"[{GREETING_TURN_NOTE} {NO_QUESTION_NOTE}]")
 
 
 def test_a_spoken_turn_after_a_question_gets_the_note(chat):

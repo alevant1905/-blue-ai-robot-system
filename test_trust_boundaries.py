@@ -59,6 +59,24 @@ def whoami(**kwargs):
 
 
 # --------------------------------------------------------------------------
+# A page that shows what a link told it to
+# --------------------------------------------------------------------------
+
+def test_the_facebook_callback_page_escapes_what_the_link_says(client):
+    """/facebook/callback printed its `error` and `error_description`
+    parameters into the page as they came. The page is served from Blue's
+    own origin, where this browser needs no password, so a link in an email
+    could run script with Alex's access to everything Blue does."""
+    page = get(client, "/facebook/callback?error=%3Cscript%3Ealert(1)%3C/script%3E"
+                       "&error_description=%3Cimg%20src=x%20onerror=alert(2)%3E")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "<script>alert(1)</script>" not in body
+    assert "<img src=x" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+
+
+# --------------------------------------------------------------------------
 # Who skips the password
 # --------------------------------------------------------------------------
 

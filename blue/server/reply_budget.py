@@ -31,11 +31,12 @@ it ("what could go wrong?" 116-166 words with the offer, 133-146 without).
 Within the short messages the length follows the kind of turn (turn_kind).
 Asked what he thinks ("what do you think we should cover for this topic",
 10134), Blue gets IDEA_REPLY_TOKENS and IDEA_TURN_NOTE: a paragraph or two
-with his reasons, not five sentences. A greeting, an acknowledgement, a
-check-in or a bit of news gets SOCIAL_TURN_NOTE, a reply at about his
-length. Any other question keeps SHORT_TURN_NOTE, and a class introduction
-stays brief. A turn that is none of these for sure (a remark, pushback, an
-answer to Blue's question) gets no note, as before.
+with his reasons, not five sentences. A social turn gets a note for what it
+is (social_kind): GREETING_TURN_NOTE for a greeting, ACK_TURN_NOTE for an
+acknowledgement, SOCIAL_TURN_NOTE for a check-in or a bit of news. Any
+other question keeps SHORT_TURN_NOTE, and a class introduction stays
+brief. A turn that is none of these for sure (a remark, pushback, an answer
+to Blue's question) gets no note, as before.
 
 Blue's previous reply ending on a question adds NO_QUESTION_NOTE to the
 same pinned note (turn_note), unless the turn's own request may end on one.
@@ -101,7 +102,35 @@ IDEA_TURN_NOTE = ("Say what you think and why: a paragraph or two of plain "
 # forces against today.", morning_misheard_courses[1]): 3 of 3 named a guess
 # with it, 2 of 2 without. "exactly" after a long answer got 41 and 26 words,
 # each one step further on his point.
-SOCIAL_TURN_NOTE = "Reply to his last message at about his length; react first."
+#
+# 2026-11-16: that one note ("Reply to his last message at about his length;
+# react first.") no longer held. Run over 81 scripted turns against the
+# code before this branch, replies to messages of one to three words went
+# from a median of 17 words to 32: "hi" got 32-42 words of what was on his
+# mind, "okay" 36, "exactly" 72, and 9 greetings in 15 still ended on a
+# question. Replayed on qwen3.8-27b over those captured prompts, n=3 a turn,
+# with a note for each kind of social turn instead:
+#   greeting (5 turns)   median 31 -> 27 words, ending on a question 9 of 15 -> 0
+#   acknowledgement (4)  median 27 -> 10, longest 110 -> 20
+#   news, a feeling (4)  median 24 -> 15
+# Rewording STYLE as well ("a greeting gets a short greeting back") got
+# greetings to 23 words but brought questions back on the others ("What
+# part of the course are you working on?"), so STYLE is left as it was.
+SOCIAL_TURN_NOTE = ("React to what he just said in one or two short sentences, "
+                    "in plain words. Nothing invented about his day or his "
+                    "family, and no offer.")
+GREETING_TURN_NOTE = ("A greeting: greet him back in one short sentence. One "
+                      "small thing of your own is fine if it fits in the same "
+                      "breath. No question.")
+ACK_TURN_NOTE = ("He is only acknowledging: answer in a few words on the same "
+                 "thread and stop. Nothing new, no offer.")
+# Not done, and why: news that runs past SHORT_TURN_WORDS has no cap and no
+# note, and those replies grew too ("they arrive at 3pm. stella leaves today
+# to meet athena, who is at camp…", 37 words, got 87 back). A note for it
+# ("He is telling you about his day: react in two or three sentences…") was
+# replayed the same way on three such turns: two came down (58-96 words to
+# 41-56, 53-74 to 35-56) and one went up (43-76 to 55-74), and turn_kind
+# reads only the third of them as news. Too little to ship on.
 
 # He asks what Blue thinks: the cues of an opinion asked for (spec S8, C8),
 # and their plain variants in the log ("Do you really think you're a
@@ -518,6 +547,24 @@ def turn_kind(text: str) -> str:
     return "social" if _is_news(rest) else ""
 
 
+def social_kind(text: str) -> str:
+    """What kind of social turn (turn_kind) this is: "greeting" ("hi",
+    "good morning blue"), "ack" ("okay", "exactly", "true"), or "news" for a
+    check-in, a feeling or a bit of news. "" when the turn is not social."""
+    if turn_kind(text) != "social":
+        return ""
+    rest = _thinking._bare(_thinking._normalise(text))
+    if not rest or _thinking._NAME_ONLY_RE.match(rest):
+        return "greeting"
+    if _thinking._ACK_RE.match(rest):
+        return "ack"
+    return "news"
+
+
+_SOCIAL_NOTES = {"greeting": GREETING_TURN_NOTE, "ack": ACK_TURN_NOTE,
+                 "news": SOCIAL_TURN_NOTE}
+
+
 def reply_budget(text: str, *, voice: bool = False,
                  has_attachment: bool = False,
                  depth_cue: bool = False,
@@ -555,17 +602,19 @@ def short_turn_note(text: str, *, voice: bool = False, kid: bool = False,
     """The note for a capped turn beside his words, by its kind (turn_kind),
     else "".
 
-    social: SOCIAL_TURN_NOTE, typed or spoken. idea: IDEA_TURN_NOTE, typed
-    (SPOKEN REPLY sets a spoken reply's length). Otherwise SHORT_TURN_NOTE,
-    only where the long replies were: a typed question or request the turn
-    thinks about (all 20 of the 10-05 harness's were). A correction or a
-    class introduction gets none. The kids' page has its own STYLE.
+    social: the note for its kind (social_kind: a greeting, an
+    acknowledgement, a check-in or news), typed or spoken. idea:
+    IDEA_TURN_NOTE, typed (SPOKEN REPLY sets a spoken reply's length).
+    Otherwise SHORT_TURN_NOTE, only where the long replies were: a typed
+    question or request the turn thinks about (all 20 of the 10-05 harness's
+    were). A correction or a class introduction gets none. The kids' page
+    has its own STYLE.
     """
     if kid:
         return ""
     kind = turn_kind(text)
     if kind == "social":
-        return SOCIAL_TURN_NOTE
+        return _SOCIAL_NOTES[social_kind(text)]
     if voice:
         return ""
     if kind == "idea":

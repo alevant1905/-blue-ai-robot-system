@@ -25,10 +25,12 @@ import pytest
 
 import bluetools as bt
 from blue.server import runaway
-from blue.server.reply_budget import (IDEA_REPLY_TOKENS, IDEA_TURN_NOTE,
+from blue.server.reply_budget import (ACK_TURN_NOTE, GREETING_TURN_NOTE,
+                                      IDEA_REPLY_TOKENS, IDEA_TURN_NOTE,
                                       SHORT_TURN_NOTE, SOCIAL_TURN_NOTE,
                                       SPOKEN_REPLY_TOKENS, TYPED_REPLY_TOKENS,
-                                      reply_budget, short_turn_note, turn_kind,
+                                      reply_budget,
+                                      short_turn_note, social_kind, turn_kind,
                                       visible_chars)
 from blue.server.thinking import THINK_OFF, THINK_ON, THINKING_ALLOWANCE_TOKENS
 from test_chat_pipeline import chat, reply_of  # noqa: F401  (fixture)
@@ -228,12 +230,12 @@ def test_the_more_cue_asked_politely_lifts_the_cap(text):
 
 def test_the_note_goes_with_a_typed_question_that_thinks():
     """Where the long replies were. A correction is short already, and a
-    size in the note could pad it. A greeting gets the social note, which
+    size in the note could pad it. A greeting gets the greeting note, which
     names no size."""
     assert short_turn_note("what could go wrong?", thinking=THINK_ON) == SHORT_TURN_NOTE
     assert short_turn_note("ok, push back on something I've said today",
                            thinking=THINK_ON) == SHORT_TURN_NOTE
-    assert short_turn_note("hi blue", thinking=THINK_OFF) == SOCIAL_TURN_NOTE
+    assert short_turn_note("hi blue", thinking=THINK_OFF) == GREETING_TURN_NOTE
     assert short_turn_note("its not lab 5", thinking=THINK_ON) == ""
     assert short_turn_note("how are you different from chat gpt?", voice=True,
                            thinking=THINK_ON) == ""
@@ -397,7 +399,7 @@ def test_each_kind_gets_its_note():
     # what gives the reply its shape.
     assert short_turn_note("what do you think we should cover for this topic",
                            thinking=THINK_OFF) == IDEA_TURN_NOTE
-    assert short_turn_note("ok", thinking=THINK_OFF) == SOCIAL_TURN_NOTE
+    assert short_turn_note("ok", thinking=THINK_OFF) == ACK_TURN_NOTE
     assert short_turn_note("we are in the class rightnow",
                            thinking=THINK_OFF) == SOCIAL_TURN_NOTE
     # Spoken: the social note, but no idea note (SPOKEN REPLY sets its length).
@@ -415,11 +417,44 @@ def test_each_kind_gets_its_note():
 
 def test_the_notes_say_what_they_were_measured_saying():
     """The idea note gives a ceiling and reasons, and offers nothing; the
-    social note names no size, which padded "hi blue" to 27-40 words."""
+    social notes name no word count, which padded "hi blue" to 27-40
+    words."""
     assert "under about 150 words" in IDEA_TURN_NOTE and "why" in IDEA_TURN_NOTE
     assert "offer" not in IDEA_TURN_NOTE.lower()
-    assert not any(ch.isdigit() for ch in SOCIAL_TURN_NOTE)
-    assert "react first" in SOCIAL_TURN_NOTE
+    for note in (SOCIAL_TURN_NOTE, GREETING_TURN_NOTE, ACK_TURN_NOTE):
+        assert not any(ch.isdigit() for ch in note)
+    assert "No question" in GREETING_TURN_NOTE
+    assert "few words" in ACK_TURN_NOTE and "no offer" in ACK_TURN_NOTE
+    assert "Nothing invented" in SOCIAL_TURN_NOTE
+
+
+# One note for every social turn ("Reply to his last message at about his
+# length; react first.") stopped holding: on 2026-11-16, over 81 scripted
+# turns on qwen3.8-27b, "hi" got 32-42 words, "okay" 36 and "exactly" 72.
+# Each kind now has its own.
+@pytest.mark.parametrize("text, kind", [
+    ("hi", "greeting"), ("Hi", "greeting"), ("hello", "greeting"),
+    ("good morning", "greeting"), ("hi blue", "greeting"),
+    ("okay", "ack"), ("ok", "ack"), ("true", "ack"), ("exactly", "ack"),
+    ("Just putting the girls to bed", "news"),
+    ("we are in the class rightnow", "news"),
+    ("how is your day going", "news"),
+    # Not social at all.
+    ("what could go wrong?", ""), ("wrong room", ""),
+    ("what do you think we should cover for this topic", ""),
+])
+def test_a_social_turn_is_a_greeting_an_acknowledgement_or_news(text, kind):
+    assert social_kind(text) == kind
+
+
+def test_news_past_the_short_length_keeps_the_reply_of_before():
+    """Tried and not shipped (see reply_budget.ACK_TURN_NOTE's comment): a
+    note for long news helped two replayed turns and lengthened a third."""
+    long_news = (
+        "they arrive at 3pm. stella leaves today to meet athena, who is at "
+        "camp. its athena's first time at an overnight camp. me and emmy and "
+        "vilda will come and meet up with stella and athena tomorrow")
+    assert reply_budget(long_news) is None
 
 
 # --------------------------------------------------------------------------
@@ -828,24 +863,25 @@ def test_a_short_question_is_capped_and_noted(chat):
     assert SHORT_TURN_NOTE not in json.dumps(chat.saved)
 
 
-def test_a_greeting_is_capped_with_the_social_note(chat):
+def test_a_greeting_is_capped_with_the_greeting_note(chat):
     """The greeting fast path pins it too."""
     chat.ask("hi blue")
     payload = chat.model.main[-1]
     assert payload["max_tokens"] == TYPED_REPLY_TOKENS
-    assert _user_text(payload) == f"hi blue\n\n[{SOCIAL_TURN_NOTE}]"
+    assert _user_text(payload) == f"hi blue\n\n[{GREETING_TURN_NOTE}]"
 
 
-@pytest.mark.parametrize("text", ["ok", "we are in the class rightnow"])
-def test_an_ack_or_news_gets_the_social_note(chat, text):
+@pytest.mark.parametrize("text, note", [
+    ("ok", ACK_TURN_NOTE), ("we are in the class rightnow", SOCIAL_TURN_NOTE)])
+def test_an_ack_or_news_gets_its_note(chat, text, note):
     """"ok" after an idea got 28-64 words that carried the idea on (the
-    10-05 harness's short_acks[2], replayed); with the note, 10-25."""
+    10-05 harness's short_acks[2], replayed); with a note, 10-25."""
     chat.ask(text)
     payload = chat.model.main[-1]
     assert payload["max_tokens"] == TYPED_REPLY_TOKENS
-    assert _user_text(payload) == f"{text}\n\n[{SOCIAL_TURN_NOTE}]"
-    assert SOCIAL_TURN_NOTE not in payload["messages"][0]["content"]
-    assert SOCIAL_TURN_NOTE not in json.dumps(chat.saved)
+    assert _user_text(payload) == f"{text}\n\n[{note}]"
+    assert note not in payload["messages"][0]["content"]
+    assert note not in json.dumps(chat.saved)
 
 
 @pytest.mark.parametrize("text", [
