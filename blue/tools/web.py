@@ -274,15 +274,9 @@ def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15,
     }
     if isinstance(headers, dict):
         req_headers.update({str(k): str(v) for k, v in headers.items()})
-    resp = requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=True)
-    resp.raise_for_status()
-    content = b""
-    for chunk in resp.iter_content(chunk_size=16384):
-        if chunk:
-            content += chunk
-            if len(content) > max_bytes:
-                break
-    return resp.headers.get("content-type", ""), content
+    # Local and private addresses are refused at every redirect hop.
+    from blue.server.security import fetch_public_url
+    return fetch_public_url(u, headers=req_headers, timeout=timeout, max_bytes=max_bytes)
 
 
 def execute_browse_website(args: dict) -> str:

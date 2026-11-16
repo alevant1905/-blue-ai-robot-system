@@ -7425,9 +7425,10 @@ def _extract_links(html_str: str, base_url: str, max_links: int = 40) -> list:
     return out
 
 def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15, max_bytes: int = 1_500_000):
-    """Safely fetch a URL with size limits."""
-    import requests as _requests
+    """Fetch a public page, size-limited. Local and private addresses are
+    refused at every redirect hop (blue.server.security.fetch_public_url)."""
     import urllib.parse as _urlparse3
+    from blue.server.security import fetch_public_url
     if not isinstance(url, str):
         raise ValueError("url must be a string")
     u = url.strip()
@@ -7442,15 +7443,7 @@ def _safe_fetch_url(url: str, headers: Optional[dict] = None, timeout: int = 15,
     }
     if isinstance(headers, dict):
         req_headers.update({str(k): str(v) for k,v in headers.items()})
-    resp = _requests.get(u, headers=req_headers, timeout=timeout, stream=True, allow_redirects=True)
-    resp.raise_for_status()
-    content = b""
-    for chunk in resp.iter_content(chunk_size=16384):
-        if chunk:
-            content += chunk
-            if len(content) > max_bytes:
-                break
-    return resp.headers.get("content-type",""), content
+    return fetch_public_url(u, headers=req_headers, timeout=timeout, max_bytes=max_bytes)
 
 def _execute_browse_website(args: dict) -> str:
     """Execute the browse_website tool."""
