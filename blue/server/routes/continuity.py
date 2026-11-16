@@ -726,7 +726,17 @@ def _enforce_workspace_invariants(workspace: str, robot_name: str) -> str:
     # Pico was Casper's provisional label. Migrate active self-models and
     # counterpart beliefs without touching the Picoh hardware model name.
     workspace = re.sub(r"\bPico\b", "Casper", workspace or "")
+    # Callers pass either the storage key ("pico") or the display name
+    # ("Casper"). The reflection worker passes the name, and "casper" is not
+    # a key: every one of Casper's passes skipped the invariants below, and
+    # the next server start caught up and logged a salience-0.95 "corrected
+    # identity" episode, 29 of them by 2026-11-16.
     robot = (robot_name or "").strip().lower()
+    if robot not in _SEEDS:
+        try:
+            robot = bt._robot_id(robot)
+        except Exception:
+            pass
     if robot not in _SEEDS:
         return workspace
     lines = _workspace_lines(workspace)

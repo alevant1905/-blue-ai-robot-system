@@ -37,9 +37,26 @@ effort is read when bluetools loads, so both go before it does; the tests
 that need either set it themselves.
 """
 
+import atexit
+import json
 import os
+import shutil
+import tempfile
 
 import pytest
+
+# Each robot's J-space store opens when bluetools loads, and opening one can
+# write to it: the workspace invariants are re-applied and, when they change
+# anything, a "corrected identity" episode is appended. A suite run on
+# 2026-11-16, with the server stopped, added one to Casper's live journal.
+# The suite gets stores of its own; a test that wants a particular store
+# still sets these itself (test_bluejspace.py).
+_JSPACE_TMP = tempfile.mkdtemp(prefix="blue-test-jspace-")
+atexit.register(shutil.rmtree, _JSPACE_TMP, ignore_errors=True)
+for _var, _name in (("BLUEJ_CONTINUITY_DIR", "blue"),
+                    ("HEXIA_CONTINUITY_DIR", "hexia"),
+                    ("PICO_CONTINUITY_DIR", "pico")):
+    os.environ.setdefault(_var, os.path.join(_JSPACE_TMP, _name))
 
 os.environ.setdefault("BLUE_CONTINUITY_THREADS", "0")
 os.environ.setdefault("BLUE_EMAIL_AUTOREPLY_DISABLED", "1")
@@ -48,6 +65,55 @@ os.environ.setdefault("BLUE_HEADS_DISABLED", "1")
 os.environ.setdefault("BLUE_LM_INPUT_BUDGET_TOKENS", "100000")
 os.environ.pop("BLUE_THINKING_MODELS", None)
 os.environ.pop("BLUE_THINKING_EFFORT", None)
+
+
+# The documents detector matches a message against Alex's real library, read
+# from the untracked document_index.json at request time. Any test that goes
+# through the selector therefore passed or failed by what was on his disk: a
+# DH201 folder uploaded on 08-12 broke a chat test within two hours, and the
+# Toscano file leaving the library failed two detector tests for weeks with
+# no code change. The suite reads this fixed library instead, through the
+# real index loader, so the tokenizer and the rare-token rules are still what
+# is under test. A test that needs another library sets its own after this.
+_PINNED_LIBRARY = [
+    {"filename": "Toscano_Fanaticism_On_The_Uses_Of_An_Idea.pdf",
+     "folder": "Toscano"},
+    {"filename": "Ilyenkov_Dialectics_Of_The_Ideal.pdf", "folder": "Marx"},
+    {"filename": "When_Models_Disagree_First_Transcription.txt",
+     "folder": "Mark Humphries Substack"},
+    {"filename": "Levant_AI_Fetish_Three_Theses.docx", "folder": "Alex Levant"},
+    {"filename": "Levant_Smart_Matter.pdf", "folder": "Alex Levant"},
+    # Three files in one folder, as in the real one: a folder word found in
+    # more than two documents is no single-word trigger ("surveillance").
+    {"filename": "Safe_Haven_Data_Policy.pdf",
+     "folder": "Surveillance Studies"},
+    {"filename": "Zuboff_Instrumentarianism.pdf",
+     "folder": "Surveillance Studies"},
+    {"filename": "Lyon_Panopticism.pdf", "folder": "Surveillance Studies"},
+    {"filename": "DH201_AL_2026F_workshop.pdf", "folder": "DH201"},
+    {"filename": "DH399_AL_2026F_syllabus.pdf", "folder": "DH399"},
+    {"filename": "CS101_AL_2026F_syllabus.pdf", "folder": "CS101"},
+]
+
+
+@pytest.fixture(autouse=True)
+def _pinned_library(tmp_path_factory, monkeypatch):
+    try:
+        from blue.tool_selector.detectors.documents import (
+            DocumentsDetector as D)
+    except Exception:
+        return
+    index = tmp_path_factory.getbasetemp() / "pinned_document_index.json"
+    if not index.exists():
+        index.write_text(json.dumps({"documents": _PINNED_LIBRARY}),
+                         encoding="utf-8")
+    # Everything _refresh_library writes is restored after each test, so a
+    # test that pins its own library never leaks it into the next one.
+    monkeypatch.setattr(D, "_index_path", classmethod(lambda cls: str(index)))
+    monkeypatch.setattr(D, "_lib_tokens_by_doc", None)
+    monkeypatch.setattr(D, "_lib_rare_tokens", None)
+    monkeypatch.setattr(D, "_lib_phrases", None)
+    monkeypatch.setattr(D, "_lib_mtime", -1.0)
 
 
 @pytest.fixture(autouse=True)

@@ -586,6 +586,71 @@ def test_workspace_invariants_drop_document_tool_failure_as_selfhood(
     assert "listing and reading" not in workspace
 
 
+# Casper's storage key is "pico" and his name is "Casper". The reflection
+# worker passes the name; the invariants looked it up as a key, found no
+# seed for "casper" and returned his workspace untouched. The next server
+# start then applied them and logged a "corrected identity" episode at
+# salience 0.95: 29 of them in his live journal by 2026-11-16.
+_CASPER_DRIFTED = (
+    '{"workspace": "IDENTITY: I am Casper, the newest robot in the house\\n'
+    'FOCUS: Getting to know the house\\n'
+    'WORKING BELIEFS: J-SPACE is a JavaScript execution environment (0.9); '
+    'a useful belief (0.7)\\n'
+    'OPEN QUESTIONS: none\\nCOMMITMENTS: stay accurate\\n'
+    'SELF-OBSERVATIONS: I am new here\\n'
+    'NEXT EXPECTATION: Alex will say hello", "changed": "c", '
+    '"episode_summary": "s", "salience": 0.5, "valence": 0.0, '
+    '"drive_deltas": {}}'
+)
+
+
+def test_caspers_reflection_gets_the_invariants_under_his_display_name(
+        continuity_module):
+    workspace = continuity_module._parse_reflection(
+        _CASPER_DRIFTED, "Casper")["workspace"]
+
+    assert "JavaScript execution environment" not in workspace
+    assert "not JavaScript or a code-running tool" in workspace
+    assert "Blue is my fellow Ohbot robot companion" in workspace
+    assert "Hexia is my fellow Ohbot robot companion (a Xyloh)" in workspace
+    assert "a useful belief" in workspace
+    # The same answer by key, and nothing left for a second pass to change.
+    assert workspace == continuity_module._enforce_workspace_invariants(
+        workspace, "pico")
+
+
+@pytest.mark.parametrize("key, name", [
+    ("blue", "Blue"), ("hexia", "Hexia"), ("pico", "Casper")])
+def test_workspace_invariants_settle_in_one_pass(continuity_module, key, name):
+    route = continuity_module
+    once = route._enforce_workspace_invariants(route._SEEDS[key], name)
+    assert once == route._enforce_workspace_invariants(once, key)
+    assert once == route._enforce_workspace_invariants(once, name)
+
+
+def test_a_restart_after_caspers_reflection_writes_nothing(continuity_module):
+    route = continuity_module
+    hub = route.HUB["pico"]
+    current = hub.store.get_workspace()
+    reflected = route._parse_reflection(
+        _CASPER_DRIFTED, hub.name, current["workspace"])
+    updated, _ = hub.store.update_workspace(
+        reflected["workspace"], current["version"])
+    assert updated
+    before = hub.store.get_workspace()
+
+    restarted = route.RobotContinuity(
+        "pico", route._ROBOT_DIRS["pico"], route._SEEDS["pico"])
+
+    after = restarted.store.get_workspace()
+    assert after["version"] == before["version"]
+    assert after["workspace"] == before["workspace"]
+    assert not [
+        episode for episode in
+        restarted.store.list_episodes(include_superseded=True)
+        if episode["source"] == "architecture_invariant"]
+
+
 def test_bad_identity_reply_is_a_bug_episode_not_prompt_evidence(continuity_module):
     route = continuity_module
     route.note_exchange(
