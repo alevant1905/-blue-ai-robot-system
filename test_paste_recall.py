@@ -316,8 +316,14 @@ def test_the_day_recap_names_a_paste(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "_summarize_transcript",
                         lambda transcript, day: seen.append(transcript) or ("", ""))
     memory.summarize_session(_at(2, 0).date().isoformat())
-    assert seen and "USER: Alex shared a long document: 'hers the transcript:'" in seen[0]
-    assert "USER: " + bulk_paste_stub(ATTACHED, "Alex") in seen[0]
+    # Each line of the day opens with its speaker's name; the stub already
+    # names who shared the document.
+    lines = seen[0].split("\n")
+    assert seen and any(
+        line.startswith("Alex shared a long document: 'hers the transcript:'")
+        for line in lines)
+    assert bulk_paste_stub(ATTACHED, "Alex") in lines
+    assert "Alex: too big?" in lines
     assert not any(word in seen[0] for word in PASTE_WORDS[:3] + CHAPTER_WORDS)
 
 

@@ -3367,37 +3367,74 @@ class EnhancedMemorySystem:
         like get got go going know think want need also here there about
         blue alex""".split())
 
+    # What a keyword recap starts with. A stored recap that starts this way
+    # is a stand-in written while the model was busy or unloaded, and is
+    # written again when it is free (_unsummarized_session_date).
+    FALLBACK_SUMMARY_PREFIX = "Conversation touching on "
+    # The whole day's transcript, as sent to the model for its recap. The
+    # recap was written from the day's last 4,000 characters at 300 a
+    # message: on 2026-09-24 (63 exchanges) that was the final dozen, so the
+    # day Alex planned DH399's second lab was remembered as a syllabus
+    # correction. Every exchange is in it now; a long day gets each message
+    # cut shorter instead of losing its morning.
+    DAY_TRANSCRIPT_CHARS = 12000
+    DAY_MESSAGE_CHARS = (60, 400)         # each message is cut to between these
+    # A day on which fewer words than this were said to a robot was a
+    # greeting and no more: "The assistant greeted the user, Alex." was
+    # stored for 10-18 and 10-25 and came back as a memory of a conversation.
+    DAY_MIN_USER_WORDS = 8
+    _ROBOT_NAMES = {"blue": "Blue", "hexia": "Hexia", "pico": "Casper",
+                    "bluej": "Blue"}
+
     def _fallback_summary(self, transcript: str) -> Tuple[str, str]:
         """Deterministic recap used when the LLM summary call is unavailable —
-        just the most frequent meaningful words. Weak but never fabricates."""
+        just the most frequent meaningful words. Weak but never fabricates.
+
+        Counted over what was said, not over who said it: every line of the
+        transcript opens with its speaker, and the old recaps came out as
+        "Conversation touching on assistant, user, today, open, class,
+        source." (2026-10-07; 11 stored days by 11-16)."""
         freq: Dict[str, int] = {}
-        for w in re.findall(r"[a-zA-Z]{4,}", transcript.lower()):
-            if w in self._SUMMARY_STOPWORDS:
-                continue
-            freq[w] = freq.get(w, 0) + 1
+        for line in (transcript or "").splitlines():
+            said = line.split(":", 1)[1] if ":" in line[:24] else line
+            for w in re.findall(r"[a-zA-Z]{4,}", said.lower()):
+                if w in self._SUMMARY_STOPWORDS:
+                    continue
+                freq[w] = freq.get(w, 0) + 1
         top = sorted(freq, key=lambda w: freq[w], reverse=True)[:6]
         if not top:
             return "", ""
         topics = ", ".join(top)
-        return f"Conversation touching on {topics}.", topics
+        return f"{self.FALLBACK_SUMMARY_PREFIX}{topics}.", topics
 
     def _summarize_transcript(self, transcript: str,
                               session_date: str) -> Tuple[str, str]:
         """Return (summary, topics) for a day's transcript. Tries the local
         LLM (grounded — it summarises real transcript text), falls back to a
-        keyword recap if the LLM is unavailable or returns junk."""
+        keyword recap if the LLM is unavailable or returns junk.
+
+        The recap is written with the speakers' names. It used to say "the
+        user" and "the assistant" ("The user asked the assistant about its
+        location…"), and that sentence then came back to Blue as a memory of
+        his own day."""
         if LLM_EXTRACTION_ENABLED and transcript.strip():
             # Serialise against fact extraction — LM Studio is single-request.
             if _LLM_EXTRACTION_LOCK.acquire(blocking=False):
                 try:
                     prompt = (
-                        "Summarize this conversation between a user and their "
-                        "home assistant. Output JSON: "
-                        "{\"summary\": \"1-2 plain sentences on what the user "
-                        "did, asked about, or shared\", "
+                        "Below is one day's conversation in Alex's household. "
+                        "Each line starts with the name of who is speaking: a "
+                        "person, or one of the household's robots (Blue, "
+                        "Hexia, Casper). Write the recap the robot will keep "
+                        "as its memory of the day. Output JSON: "
+                        "{\"summary\": \"one to four plain sentences in the "
+                        "past tense, in order, on what was talked about, asked "
+                        "for and decided, calling everyone by name\", "
                         "\"topics\": [\"up to 5 short keywords\"]}\n"
-                        "Summarize ONLY what appears below — do not invent "
-                        "anything that is not in the text.\n\n"
+                        "Never write 'the user' or 'the assistant'. A longer "
+                        "conversation gets more sentences, a short one a "
+                        "single sentence. Summarize ONLY what appears below — "
+                        "do not invent anything that is not in the text.\n\n"
                         f"CONVERSATION ({session_date}):\n{transcript}\n\nJSON:"
                     )
                     raw = _llm_extract(prompt, timeout=LLM_EXTRACTION_TIMEOUT)
@@ -3410,7 +3447,7 @@ class EnhancedMemorySystem:
                         raw = re.sub(r"\s*```$", "", raw)
                     try:
                         data = json.loads(raw)
-                        summary = (data.get("summary") or "").strip()[:400]
+                        summary = (data.get("summary") or "").strip()[:700]
                         topics = data.get("topics") or []
                         if isinstance(topics, list):
                             topics_str = ", ".join(
@@ -3424,32 +3461,32 @@ class EnhancedMemorySystem:
                         pass
         return self._fallback_summary(transcript)
 
-    def summarize_session(self, session_date: str) -> bool:
-        """Build and store a recap of one calendar day's conversation.
-
-        Always writes a row (even an empty-summary one for a day with no
-        usable content) so the day is never reprocessed in a loop."""
+    def _day_transcript(self, session_date: str) -> Tuple[str, int]:
+        """(transcript, words the people said) for one calendar day: every
+        exchange, each line opening with its speaker's name. Raises when the
+        log can't be read."""
+        conn = self._conn()
         try:
-            conn = self._conn()
             rows = conn.execute(
-                "SELECT role, content, user_name FROM conversation_log "
+                "SELECT role, content, user_name, robot FROM conversation_log "
                 "WHERE substr(timestamp, 1, 10) = ? ORDER BY id ASC",
                 (session_date,),
             ).fetchall()
+        finally:
             conn.close()
-        except Exception:
-            return False
 
-        lines: List[str] = []
+        said: List[Tuple[str, str]] = []
+        user_words = 0
         for r in rows:
             content = (r["content"] or "").strip()
             if not content or len(content) < 4:
                 continue
+            person = (r["user_name"] or "").strip() or "Someone"
             # The recap is a summary of what was said; a pasted document is
             # named, not summarised as if it had been said.
             if r["role"] == "user" and is_bulk_paste(content):
-                lines.append("USER: " + bulk_paste_stub(
-                    content, r["user_name"] or "The user"))
+                said.append(("", bulk_paste_stub(content, person)))
+                user_words += self.DAY_MIN_USER_WORDS
                 continue
             if content.startswith(("{", "[", "```")):
                 continue
@@ -3457,20 +3494,54 @@ class EnhancedMemorySystem:
             # connecting." rows and fed <earlier_sessions> afterwards.
             if r["role"] == "assistant" and is_failure_placeholder(content):
                 continue
-            lines.append(f"{(r['role'] or '').upper()}: {content[:300]}")
-        transcript = "\n".join(lines)
-        # Cap to the most recent slice so a very chatty day still fits the
-        # LLM's context budget.
-        if len(transcript) > 4000:
-            transcript = transcript[-4000:]
+            if r["role"] == "user":
+                user_words += len(content.split())
+                said.append((person, content))
+            else:
+                said.append((self._ROBOT_NAMES.get(
+                    (r["robot"] or "blue").lower(), "Blue"), content))
 
-        if transcript.strip():
+        low, high = self.DAY_MESSAGE_CHARS
+        each = max(low, min(high, self.DAY_TRANSCRIPT_CHARS // max(1, len(said))))
+        lines = [f"{who}: {text[:each]}" if who else text[:each]
+                 for who, text in said]
+        transcript = "\n".join(lines)
+        if len(transcript) > self.DAY_TRANSCRIPT_CHARS:
+            # More exchanges than fit even at the shortest cut: the start and
+            # the end of the day, with the gap marked.
+            head = self.DAY_TRANSCRIPT_CHARS // 3
+            transcript = (transcript[:head].rsplit("\n", 1)[0]
+                          + "\n[… the middle of the day is left out …]\n"
+                          + transcript[-(self.DAY_TRANSCRIPT_CHARS - head):]
+                          .split("\n", 1)[-1])
+        return transcript, user_words
+
+    def summarize_session(self, session_date: str) -> bool:
+        """Build and store a recap of one calendar day's conversation.
+
+        Always writes a row (even an empty-summary one for a day with no
+        usable content) so the day is never reprocessed in a loop. A keyword
+        stand-in never replaces a recap the model wrote."""
+        try:
+            transcript, user_words = self._day_transcript(session_date)
+        except Exception:
+            return False
+
+        if transcript.strip() and user_words >= self.DAY_MIN_USER_WORDS:
             summary, topics = self._summarize_transcript(transcript, session_date)
         else:
             summary, topics = "", ""
+        stand_in = summary.startswith(self.FALLBACK_SUMMARY_PREFIX)
 
         try:
             conn = self._conn()
+            previous = conn.execute(
+                "SELECT summary FROM session_summaries WHERE session_id = ?",
+                (session_date,)).fetchone()
+            kept = (previous["summary"] or "") if previous else ""
+            if stand_in and kept and not kept.startswith(self.FALLBACK_SUMMARY_PREFIX):
+                conn.close()
+                return True
             conn.execute(
                 "INSERT INTO session_summaries "
                 "(session_id, summary, topics, created_at) VALUES (?, ?, ?, ?) "
@@ -3485,25 +3556,35 @@ class EnhancedMemorySystem:
             return False
         # Index the recap as a semantically-searchable memory so this day can
         # resurface by relevance long after it scrolls out of the by-date window.
-        if summary:
-            self._index_session_memory(session_date, summary, topics)
+        if summary and summary != kept:
+            self._index_session_memory(session_date, summary, topics,
+                                       replace=True)
             print(f"   [MEM-SESSION] Summarized {session_date}: {summary[:60]}")
         return True
 
     def _index_session_memory(self, session_date: str, summary: str,
-                              topics: str) -> None:
+                              topics: str, replace: bool = False) -> None:
         """Store one day's recap as a 'session'-type memory so semantic
         search can surface it long after it scrolls past the by-date window.
-        Idempotent — _store_memory upserts by content hash."""
+        Idempotent — _store_memory upserts by content hash.
+
+        A keyword stand-in is no memory of the day and is not stored.
+        `replace` (a recap just written): the day's earlier recap memories
+        go, so a rewritten day is remembered one way."""
         if not summary or not summary.strip():
+            return
+        if summary.startswith(self.FALLBACK_SUMMARY_PREFIX):
             return
         content = summary.strip()
         if topics and topics.strip():
             content = f"{content} (topics: {topics.strip()})"
+        subject = f"conversation on {session_date}"
         try:
+            if replace:
+                self._drop_session_memories(subject, keep=content)
             self._store_memory(
                 mem_type="session",
-                subject=f"conversation on {session_date}",
+                subject=subject,
                 content=content,
                 source="session_summary",
                 importance=0.6,
@@ -3511,6 +3592,29 @@ class EnhancedMemorySystem:
             )
         except Exception as e:
             print(f"   [MEM-SESSION] index failed for {session_date}: {e}")
+
+    def _drop_session_memories(self, subject: str, keep: str) -> None:
+        """Remove a day's recap memories other than `keep`, from the table
+        and from the vector index."""
+        conn = self._conn()
+        try:
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM memories WHERE type = 'session' "
+                "AND subject = ? AND content != ?", (subject, keep)).fetchall()]
+            if ids:
+                conn.execute(
+                    f"DELETE FROM memories WHERE id IN ({','.join('?' * len(ids))})",
+                    ids)
+                conn.commit()
+        finally:
+            conn.close()
+        if ids:
+            collection = _get_memory_collection()
+            if collection:
+                try:
+                    collection.delete(ids=ids)
+                except Exception:
+                    pass
 
     def backfill_session_memories(self) -> int:
         """One-shot: index every existing day-recap as a 'session' memory.
@@ -3540,8 +3644,15 @@ class EnhancedMemorySystem:
         return len(rows)
 
     def _unsummarized_session_date(self) -> Optional[str]:
-        """Most recent past day (within SESSION_HISTORY_DAYS) that has
-        conversation rows but no summary yet. None once caught up."""
+        """The next past day that needs a recap, or None once caught up.
+
+        First the most recent day (within SESSION_HISTORY_DAYS) that has
+        conversation rows and no summary. Then any day, however old, whose
+        stored recap is a keyword stand-in: the model was busy or unloaded
+        when it was written, and "Conversation touching on assistant, user,
+        today…" stayed as that day's memory for good. Each stand-in is tried
+        once per run of the server, so a model that is still unloaded costs
+        one failed call a day and no loop."""
         try:
             conn = self._conn()
             today = datetime.now().date()
@@ -3555,8 +3666,21 @@ class EnhancedMemorySystem:
                 "GROUP BY d ORDER BY d DESC LIMIT 1",
                 (today.isoformat(), floor),
             ).fetchone()
+            if row:
+                conn.close()
+                return row["d"]
+            stand_ins = conn.execute(
+                "SELECT session_id FROM session_summaries "
+                "WHERE summary LIKE ? AND session_id < ? "
+                "ORDER BY session_id DESC",
+                (self.FALLBACK_SUMMARY_PREFIX + "%", today.isoformat()),
+            ).fetchall()
             conn.close()
-            return row["d"] if row else None
+            tried = self.__dict__.setdefault("_stand_ins_tried", set())
+            for r in stand_ins:
+                if r["session_id"] not in tried:
+                    return r["session_id"]
+            return None
         except Exception:
             return None
 
@@ -3565,10 +3689,13 @@ class EnhancedMemorySystem:
         Cheap no-op (a single SQL check) once caught up — safe to call every
         turn from a background thread; it backfills one day per turn."""
         done = 0
+        tried = self.__dict__.setdefault("_stand_ins_tried", set())
         for _ in range(max(1, max_per_call)):
             day = self._unsummarized_session_date()
             if not day:
                 break
+            # Whatever comes of it, this day is not offered again this run.
+            tried.add(day)
             if self.summarize_session(day):
                 done += 1
             else:
@@ -3717,6 +3844,49 @@ class EnhancedMemorySystem:
         except Exception:
             return True
 
+    # A recap written before 2026-11-16 calls its speakers "the user" and
+    # "the assistant". Where a day had one person and one robot, the names
+    # can be put back when it is shown.
+    _RECAP_USER_RE = re.compile(r"\b[Tt]he user\b")
+    _RECAP_ROBOT_RE = re.compile(r"\b[Tt]he (?:home |ai |AI )?assistant\b")
+
+    def _own_day_recap(self, conn, day: str, robot: str = "blue") -> str:
+        """The stored recap of `day`, if that day's conversation was this
+        robot's alone, else "".
+
+        The day's last few things Alex said (120 characters each) are all
+        <earlier_sessions> held: nothing of what was worked out, and nothing
+        from the morning of a long day. The recap is the one record of the
+        whole day. session_summaries has one row a date for every robot
+        together, which is why it was dropped from this block (Hexia took
+        Blue's day for hers); a day only this robot talked on is safely
+        its own. A keyword stand-in is no recap."""
+        key = (robot or "blue").lower()
+        try:
+            others = conn.execute(
+                "SELECT 1 FROM conversation_log WHERE substr(timestamp, 1, 10) = ? "
+                "AND lower(coalesce(robot, 'blue')) != ? LIMIT 1",
+                (day, key)).fetchone()
+            if others:
+                return ""
+            row = conn.execute(
+                "SELECT summary FROM session_summaries WHERE session_id = ?",
+                (day,)).fetchone()
+            recap = re.sub(r"\s+", " ", (row["summary"] or "") if row else "").strip()
+            if not recap or recap.startswith(self.FALLBACK_SUMMARY_PREFIX):
+                return ""
+            people = [r[0] for r in conn.execute(
+                "SELECT DISTINCT user_name FROM conversation_log "
+                "WHERE substr(timestamp, 1, 10) = ? AND role = 'user'",
+                (day,)).fetchall() if r[0]]
+        except Exception:
+            return ""
+        robot_name = self._ROBOT_NAMES.get(key, "the robot")
+        recap = self._RECAP_ROBOT_RE.sub(robot_name, recap)
+        if len(people) == 1:
+            recap = self._RECAP_USER_RE.sub(people[0], recap)
+        return recap[:700]
+
     def _build_session_history_block(self, robot: str = "blue") -> str:
         """Recent human-chat continuity, namespaced to one robot.
 
@@ -3752,10 +3922,12 @@ class EnhancedMemorySystem:
                         continue
                     snippets.append(f"{speaker}: {content[:120]}")
                 if snippets:
-                    lines.append(
-                        f"- {self._friendly_day_label(day)}: "
-                        + " | ".join(snippets[-4:])
-                    )
+                    line = (f"- {self._friendly_day_label(day)}: "
+                            + " | ".join(snippets[-4:]))
+                    recap = self._own_day_recap(conn, day, robot)
+                    if recap:
+                        line += f"\n  The day in short: {recap}"
+                    lines.append(line)
             conn.close()
         except Exception:
             return ""
@@ -3774,7 +3946,9 @@ class EnhancedMemorySystem:
             "have no record. They are compact excerpts, so they are reliable about "
             "TOPICS, dates, and the visible wording but thin on full detail: give what "
             "you have and offer to dig further, rather than either hedging it "
-            "all away or inventing specifics. Don't recite them verbatim or "
+            "all away or inventing specifics. Where a day has \"The day in "
+            "short\", that is a recap of the whole of that day's conversation, "
+            "yours included. Don't recite them verbatim or "
             "list them back unprompted.\n"
             "The date on each line is when you TALKED about it, which is not "
             "necessarily when the thing itself happened. A recap saying an "
