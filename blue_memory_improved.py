@@ -3962,15 +3962,20 @@ class EnhancedMemorySystem:
             said.append(f"{speaker}: {content[:self.ASKED_DAY_LINE_CHARS]}")
         if not said:
             return ""
-        if len(said) > self.ASKED_DAY_LINES:
+        total = len(said)
+        if total > self.ASKED_DAY_LINES:
             # The whole day in order: every nth line, first and last kept.
-            step = (len(said) - 1) / (self.ASKED_DAY_LINES - 1)
+            step = (total - 1) / (self.ASKED_DAY_LINES - 1)
             said = [said[round(i * step)] for i in range(self.ASKED_DAY_LINES)]
         delta = (current - day).days
         when = f"{day.strftime('%A %B')} {day.day}, {day.year} ({delta} days ago)"
         robot_name = self._ROBOT_NAMES.get(key, "this robot")
         lines = [f"  The day in short: {recap}"] if recap else []
-        lines.append("  Said to you that day, in order: " + " | ".join(said))
+        # How much of the day this is: shown 10 lines of 09-24's 63, he
+        # called it "a light day" (live, 2026-11-16).
+        shown = (f" ({len(said)} of the {total} things said, spread over the "
+                 "whole day)" if total > len(said) else "")
+        lines.append(f"  Said to you that day, in order{shown}: " + " | ".join(said))
         return (
             f"<asked_day date=\"{iso}\">\n"
             f"The day the user is asking about is {when}. This is YOUR "

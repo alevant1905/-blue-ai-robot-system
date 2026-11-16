@@ -464,6 +464,8 @@ def test_a_long_day_is_shown_from_first_to_last(memory):
 
     assert block.count("Alex: this is point number") == memory.ASKED_DAY_LINES
     assert "point number 0 of" in block and "point number 59 of" in block
+    # He is told how much of the day he is looking at.
+    assert "(10 of the 60 things said, spread over the whole day)" in block
 
 
 @pytest.mark.parametrize("build_question", [
