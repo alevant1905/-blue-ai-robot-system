@@ -43,6 +43,7 @@ from blue_identity import (
     derive_ages,
     contextual_identity_request_kind,
     is_bulk_paste,
+    recall_day_asked,
     is_correction_ack_reply,
     is_failure_placeholder,
     is_family_overview_request,
@@ -2132,6 +2133,17 @@ class EnhancedMemorySystem:
                 "content": session_block,
             })
 
+        # 2b-i) The one past day the question names ("…on october 7th",
+        #     "…last friday"), when it is older than the days just listed.
+        if user_msg:
+            asked_day_block = self._build_asked_day_block(
+                _user_intents(messages, user_msg, chat_turn)[-1], robot=robot)
+            if asked_day_block:
+                context_parts.append({
+                    "role": "system",
+                    "content": asked_day_block,
+                })
+
         # 2b-iii first: Blue's OWN earlier answers on this topic. The recap
         #     blocks record that a subject came up; this carries what he
         #     actually wrote about it, which is what "what were your ideas?"
@@ -3895,6 +3907,81 @@ class EnhancedMemorySystem:
         if len(people) == 1:
             recap = self._RECAP_USER_RE.sub(people[0], recap)
         return recap[:700]
+
+    # What the people said on the day asked about, as shown in <asked_day>.
+    ASKED_DAY_LINES = 10
+    ASKED_DAY_LINE_CHARS = 160
+
+    def _build_asked_day_block(self, question: str, robot: str = "blue",
+                               today=None) -> str:
+        """<asked_day>: this robot's record of the one past day a recall
+        question names, or "".
+
+        Asked "what happened when we did the dh201 class on october 7th?"
+        (2026-11-16), Blue answered "I don't have a record of that specific
+        class" with 35 rows of that class in his log. <earlier_sessions>
+        holds the last three days he talked; <remembered_days> finds days by
+        shared words and picked two September classes on "dh201" and
+        "class"; the J-space's dated recall knows only today and yesterday.
+        Nothing looked the date up. This does: the day's recap, where it is
+        his to be shown (_own_day_recap), and what was said to him that day
+        from first to last. Nothing for a day already in <earlier_sessions>,
+        for today, or for a day he has no rows on (the recall guard then
+        lets "we didn't talk that day" stand)."""
+        try:
+            day = recall_day_asked(question, today=today)
+        except Exception:
+            return ""
+        current = today or datetime.now().date()
+        if day is None or day >= current:
+            return ""
+        iso = day.isoformat()
+        if iso in self._recent_robot_session_days(robot):
+            return ""
+        key = (robot or "blue").lower()
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT user_name, content FROM conversation_log "
+                "WHERE robot = ? AND role = 'user' "
+                "AND substr(timestamp, 1, 10) = ? ORDER BY id ASC",
+                (key, iso)).fetchall()
+            recap = self._own_day_recap(conn, iso, robot) if rows else ""
+            conn.close()
+        except Exception:
+            return ""
+        said: List[str] = []
+        for row in rows:
+            speaker = (row["user_name"] or "the user").strip()
+            if is_bulk_paste(row["content"]):
+                said.append(bulk_paste_stub(row["content"], speaker))
+                continue
+            content = re.sub(r"\s+", " ", row["content"] or "").strip()
+            if len(content) < 4 or content.startswith(("{", "[", "```")):
+                continue
+            said.append(f"{speaker}: {content[:self.ASKED_DAY_LINE_CHARS]}")
+        if not said:
+            return ""
+        if len(said) > self.ASKED_DAY_LINES:
+            # The whole day in order: every nth line, first and last kept.
+            step = (len(said) - 1) / (self.ASKED_DAY_LINES - 1)
+            said = [said[round(i * step)] for i in range(self.ASKED_DAY_LINES)]
+        delta = (current - day).days
+        when = f"{day.strftime('%A %B')} {day.day}, {day.year} ({delta} days ago)"
+        robot_name = self._ROBOT_NAMES.get(key, "this robot")
+        lines = [f"  The day in short: {recap}"] if recap else []
+        lines.append("  Said to you that day, in order: " + " | ".join(said))
+        return (
+            f"<asked_day date=\"{iso}\">\n"
+            f"The day the user is asking about is {when}. This is YOUR "
+            f"({robot_name}'s) own record of the conversation that day, from "
+            "your conversation log. Answer from it, in your own words; where "
+            "it does not hold what they ask, say that part is not in your "
+            "record of that day rather than guessing, and never say the day "
+            "itself is unrecorded:\n"
+            + "\n".join(lines) +
+            "\n</asked_day>"
+        )
 
     def _build_session_history_block(self, robot: str = "blue") -> str:
         """Recent human-chat continuity, namespaced to one robot.

@@ -2890,15 +2890,69 @@ _WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday",
 # A day named in a message. A possessive names a thing on that day ("Friday's
 # seminar", "yesterday's class"), not the day of a conversation, unless the
 # thing is the conversation ("yesterday's chat").
+_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july",
+                "august", "september", "october", "november", "december")
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+          r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?"
+          r"|dec(?:ember)?)")
+_MDAY = r"(?:[12]\d|3[01]|0?[1-9])(?:st|nd|rd|th)?"
 _RECALL_DAY_RE = re.compile(
     r"\b(?:(?P<before>the day before yesterday)"
     r"|(?P<yesterday>yesterday|last night)"
     r"|(?P<today>(?:earlier )?today|tonight|this (?:morning|afternoon|evening))"
+    # A calendar date: "october 7th", "oct. 7", "the 7th of october".
+    r"|(?:on )?(?P<date>(?P<month>" + _MONTH + r")\.? (?:the )?(?P<mday>" + _MDAY + r")"
+    r"|(?:the )?(?P<mday2>" + _MDAY + r") (?:of )?(?P<month2>" + _MONTH + r"))"
     r"|(?:(?:on|last) )?(?P<weekday>" + "|".join(_WEEKDAY_NAMES) + r"))\b"
     r"(?P<possessive>['’]s\b"
     r"(?P<talk>\s+(?:conversation|convo|chat|talk|discussion)\b)?)?",
     re.IGNORECASE,
 )
+# What follows a date that looks ahead to it: "what did we say we'd do on
+# october 7th" is caught by the gap rule; these catch the date said first.
+_DATE_AHEAD_RE = re.compile(
+    r"\b(?:will|shall|going to|gonna|plan(?:ned|ning)? (?:to|for)|due|deadline"
+    r"|upcoming|next|until|till|by)\b", re.IGNORECASE)
+
+
+def _calendar_date_asked(text: str, match, current):
+    """The past date a calendar date in a recall question names, or None.
+
+    "what happened when we did the dh201 class on october 7th?" (2026-11-16,
+    answered "I don't have a record of that specific class" with 35 rows
+    from that day in the log): a date said outright is clearer than a
+    weekday, so the recall verb may sit anywhere before it in the sentence,
+    where a weekday needs it within six words. Nothing that looks ahead may
+    stand between them ("remember we have the talk on october 7th"). The
+    most recent such date not after today; Python does the arithmetic."""
+    from datetime import date
+
+    month_word = (match.group("month") or match.group("month2") or "").lower()
+    day_text = match.group("mday") or match.group("mday2") or ""
+    month = next((i + 1 for i, name in enumerate(_MONTH_NAMES)
+                  if name.startswith(month_word[:3])), None)
+    try:
+        number = int(re.sub(r"\D", "", day_text))
+    except ValueError:
+        return None
+    if not month or match.group("possessive"):
+        return None
+    sentence_start = max(text.rfind(ch, 0, match.start()) for ch in ".;:!?\n") + 1
+    before = text[sentence_start:match.start()]
+    verbs = list(_RECALL_VERB_RE.finditer(before))
+    if not verbs:
+        return None
+    gap = before[verbs[-1].end():]
+    if _DATE_AHEAD_RE.search(gap) or re.search(r"['’](?:ll|re)\b", gap):
+        return None
+    for year in (current.year, current.year - 1):
+        try:
+            day = date(year, month, number)
+        except ValueError:
+            return None
+        if day <= current:
+            return day
+    return None
 # What a day can date in a recall question: a conversation ("what did we
 # talk about", "you told me", "our conversation") or something done or met
 # on that day ("what did you do", "where was I", "how was your day") — the
@@ -2976,7 +3030,8 @@ def recall_day_asked(text: str, today=None):
     """The one day a recall question asks about, as a date, or None.
 
     "what did we talk about yesterday?" is yesterday; "…on Friday" is the
-    most recent Friday before today. Only a day that dates what the question
+    most recent Friday before today; "…on october 7th" is the most recent
+    October 7 (_calendar_date_asked). Only a day that dates what the question
     recalls counts — the remembered-days excerpt is dated by when we TALKED —
     so not "I want to try it today" after the question, "my Friday class" or
     "next Monday's lecture". None for no such day, or for two ("yesterday or
@@ -2988,6 +3043,11 @@ def recall_day_asked(text: str, today=None):
     text = text or ""
     days = set()
     for match in _RECALL_DAY_RE.finditer(text):
+        if match.group("date"):
+            named = _calendar_date_asked(text, match, current)
+            if named is not None:
+                days.add(named)
+            continue
         if not _day_dates_the_talk(text, match):
             continue
         if match.group("before"):

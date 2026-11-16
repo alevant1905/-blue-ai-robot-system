@@ -361,3 +361,133 @@ def test_a_stand_in_is_not_shown_as_the_day(memory, model):
     assert "Alex: lets plan the second lab for dh399" in block
     assert "The day in short:" not in block
     assert STAND_IN not in block
+
+
+# ---- a day asked for by its date --------------------------------------------
+# 2026-11-16, live: "what happened when we did the dh201 class on october
+# 7th?" got "I don't have a record of that specific class", with 35 rows of
+# that class in the log. Nothing in the memory layer read a calendar date.
+
+from blue_identity import recall_day_asked  # noqa: E402
+
+TODAY = datetime.date(2026, 11, 16)
+
+
+@pytest.mark.parametrize("text, day", [
+    ("what happened when we did the dh201 class on october 7th?", (2026, 10, 7)),
+    ("what did we talk about on october 7", (2026, 10, 7)),
+    ("do you remember our conversation on the 7th of october?", (2026, 10, 7)),
+    ("what did i tell you on Oct. 24th", (2026, 10, 24)),
+    ("remember what we discussed september 24?", (2026, 9, 24)),
+    # A date still ahead this year is last year's.
+    ("what did we talk about on december 3rd", (2025, 12, 3)),
+    # The older forms are untouched.
+    ("what did we talk about yesterday?", (2026, 11, 15)),
+    ("what did we talk about on friday", (2026, 11, 13)),
+])
+def test_a_calendar_date_in_a_recall_question_is_that_day(text, day):
+    assert recall_day_asked(text, today=TODAY) == datetime.date(*day)
+
+
+@pytest.mark.parametrize("text", [
+    # No recall in it: a plan, a fact, a request.
+    "i have a talk on october 7th",
+    "the assignment is due october 7th",
+    "remember to book the room for december 3rd",
+    "put the dentist on october 7th at 3",
+    # Recall, but the date is where something is going to happen.
+    "do you remember we will have the guest lecture on december 3rd",
+    "what did we say is due by october 7th",
+    # A thing on that date, not a conversation.
+    "what is october 7th's reading",
+    # Two days named.
+    "what did we talk about on october 7th or october 8th",
+    # Not a date.
+    "what did we say about may",
+    "remember the 7 of us went",
+    "what happened on february 30th",
+])
+def test_a_date_that_does_not_date_a_conversation_is_no_day(text):
+    assert recall_day_asked(text, today=TODAY) is None
+
+
+def _class_day(memory, days_ago=40):
+    rows = [
+        (_at(days_ago, 9, 30), "user", "what is the dh201 schedule for week 4 and what are the readings"),
+        (_at(days_ago, 9, 31), "assistant", "Week 4 is Lineages of AI: Wooldridge, Chomsky and Pasquinelli."),
+        (_at(days_ago, 10, 5), "user", "we are in front of the class, introduce connectionism and symbolic ai"),
+        (_at(days_ago, 10, 6), "assistant", "Good morning everyone. Two families of AI share one history."),
+        (_at(days_ago, 11, 0), "user", "i was thinking of using lm studio to run the lab"),
+        (_at(days_ago, 11, 1), "assistant", "LM Studio is enough for this level."),
+    ]
+    # Three later days, so the class is older than <earlier_sessions> shows.
+    for later in (20, 12, 5):
+        rows.append((_at(later, 9, 0), "user", "just checking in on the course outline today"))
+        rows.append((_at(later, 9, 1), "assistant", "The outline is where we left it."))
+    _seed(memory, rows)
+    return _at(days_ago, 12).date()
+
+
+def test_the_day_asked_about_is_looked_up(memory, model):
+    day = _class_day(memory)
+    model.reply = json.dumps({"summary": "Alex asked Blue for the DH201 week 4 "
+                              "readings and had Blue introduce the topic to the class.",
+                              "topics": ["DH201"]})
+    memory.summarize_session(day.isoformat())
+    question = f"what happened when we did the dh201 class on {day.strftime('%B')} {day.day}?"
+
+    block = memory._build_asked_day_block(question, robot="blue")
+
+    assert block.startswith(f'<asked_day date="{day.isoformat()}">')
+    assert "(40 days ago)" in block
+    assert ("The day in short: Alex asked Blue for the DH201 week 4 readings "
+            "and had Blue introduce the topic to the class.") in block
+    assert "Alex: what is the dh201 schedule for week 4" in block
+    assert "Alex: i was thinking of using lm studio to run the lab" in block
+    assert "never say the day itself is unrecorded" in block
+    # And it reaches the prompt.
+    parts = memory.build_context([{"role": "user", "content": question}],
+                                 user_name="Alex", robot="blue")
+    assert any("<asked_day" in p["content"] for p in parts)
+
+
+def test_a_long_day_is_shown_from_first_to_last(memory):
+    rows = [(_at(40, 8, 0) + timedelta(minutes=i), "user", f"this is point number {i} of the morning")
+            for i in range(60)]
+    for later in (20, 12, 5):
+        rows.append((_at(later, 9, 0), "user", "just checking in on the course outline today"))
+    _seed(memory, rows)
+    day = _at(40, 12).date()
+
+    block = memory._build_asked_day_block(
+        f"what did we talk about on {day.strftime('%B')} {day.day}", robot="blue")
+
+    assert block.count("Alex: this is point number") == memory.ASKED_DAY_LINES
+    assert "point number 0 of" in block and "point number 59 of" in block
+
+
+@pytest.mark.parametrize("build_question", [
+    # A day he has no rows on: the guard lets "we didn't talk" stand.
+    lambda day: "what did we talk about on january 2nd",
+    # No day named.
+    lambda day: "what did we talk about",
+    # A plan for that date, not a memory of it.
+    lambda day: f"i have a talk on {day.strftime('%B')} {day.day}",
+])
+def test_no_asked_day_block_without_a_day_on_record(memory, build_question):
+    day = _class_day(memory)
+    assert memory._build_asked_day_block(build_question(day), robot="blue") == ""
+
+
+def test_a_day_already_in_earlier_sessions_is_not_shown_twice(memory):
+    _class_day(memory)
+    recent = _at(5, 12).date()
+    question = f"what did we talk about on {recent.strftime('%B')} {recent.day}"
+    assert recent.isoformat() in memory._recent_robot_session_days("blue")
+    assert memory._build_asked_day_block(question, robot="blue") == ""
+
+
+def test_another_robots_day_is_not_this_ones(memory):
+    day = _class_day(memory)
+    question = f"what did we talk about on {day.strftime('%B')} {day.day}"
+    assert memory._build_asked_day_block(question, robot="hexia") == ""
