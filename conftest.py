@@ -58,6 +58,14 @@ for _var, _name in (("BLUEJ_CONTINUITY_DIR", "blue"),
                     ("PICO_CONTINUITY_DIR", "pico")):
     os.environ.setdefault(_var, os.path.join(_JSPACE_TMP, _name))
 
+# Every model response a test fakes names a model, and Blue remembers the last
+# one in data/lm_model.json to ask for it by name when none is loaded
+# (blue/lm_model.py). The suite remembers into a file of its own, emptied
+# before each test so no test asks for a model another one answered with.
+_LM_MODEL_FILE = os.path.join(_JSPACE_TMP, "lm_model.json")
+os.environ["BLUE_LM_MODEL_FILE"] = _LM_MODEL_FILE
+os.environ.pop("BLUE_LM_MODEL", None)
+
 os.environ.setdefault("BLUE_CONTINUITY_THREADS", "0")
 os.environ.setdefault("BLUE_EMAIL_AUTOREPLY_DISABLED", "1")
 os.environ.setdefault("BLUE_MEMORY_VECTORS", "0")
@@ -94,6 +102,17 @@ _PINNED_LIBRARY = [
     {"filename": "DH399_AL_2026F_syllabus.pdf", "folder": "DH399"},
     {"filename": "CS101_AL_2026F_syllabus.pdf", "folder": "CS101"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_model():
+    try:
+        os.remove(_LM_MODEL_FILE)
+    except FileNotFoundError:
+        pass
+    from blue import lm_model
+    lm_model._cache.update(path=None, record=None)
+    yield
 
 
 @pytest.fixture(autouse=True)

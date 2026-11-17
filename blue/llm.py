@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
+from . import lm_model
 from .utils import log
 
 # ================================================================================
@@ -80,7 +81,9 @@ def stream_abandonable(
     reasoning: List[str] = []
     finish_reason = None
     try:
-        with requests.post(url, json=payload,
+        # A refusal for want of a loaded model is asked again naming one
+        # (Bionic loads models only on request: see lm_model.py).
+        with lm_model.post(url, payload,
                            timeout=timeout, stream=True) as response:
             response.raise_for_status()
             for raw in response.iter_lines():
@@ -212,7 +215,7 @@ class LMStudioClient:
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                resp = requests.post(self.base_url, json=payload, timeout=self.timeout)
+                resp = lm_model.post(self.base_url, payload, timeout=self.timeout)
                 resp.raise_for_status()
                 result = resp.json()
 

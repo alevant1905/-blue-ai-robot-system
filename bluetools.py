@@ -1592,6 +1592,7 @@ from blue_reply_text import (strip_reasoning_tags, strip_tool_markup,
 # board isn't connected, all head calls are no-ops and chat keeps running.
 from blue import head as blue_head
 from blue import llm as _blue_llm   # shared abandonable transport
+from blue import lm_model as _lm_model   # names a model when none is loaded (Bionic)
 from blue.mood_eyes import mood_eye_color
 from blue.agreement import agreement_gesture
 # Every call to the single local model goes through this gate, so a background
@@ -2212,7 +2213,7 @@ class LMStudioClient:
                 # Serialized like the other HTTP path (see _post_to_model).
                 # Held for the call only, never across the backoff sleeps below.
                 with llm_slot(foreground=True):
-                    resp = requests.post(self.base_url, json=payload, timeout=self.timeout)
+                    resp = _lm_model.post(self.base_url, payload, timeout=self.timeout)
                 resp.raise_for_status()
                 result = resp.json()
                 
@@ -10221,8 +10222,15 @@ def _detect_lm_context_size() -> Optional[int]:
     loaded, the one that answered last is kept if it is still there;
     otherwise which one answers is not known until a response says so.
 
-    Returns None when the endpoint is missing or nothing is loaded — older
-    LM Studio builds have no /api/v0, so this must never be required.
+    With nothing loaded, the model the next call will name is the one that
+    answers (blue/lm_model.py: Bionic loads a model only when a request names
+    it, and unloads it after an hour idle), sized by the context it was last
+    loaded with. Without that, the first turn after an idle hour was trimmed
+    to the 6,500-token fallback and lost most of the conversation.
+
+    Returns None when the endpoint is missing, or nothing is loaded and no
+    model is remembered — older LM Studio builds have no /api/v0, so this
+    must never be required.
     """
     try:
         base = LM_STUDIO_URL.split('/v1/')[0]
@@ -10233,10 +10241,17 @@ def _detect_lm_context_size() -> Optional[int]:
     except Exception:
         return None
     if not loaded:
-        return None
+        model = _lm_model.fallback_model()
+        if not model:
+            return None
+        _lm_loaded_model["id"] = model
+        return _lm_model.fallback_context_length()
     answering = next((m for m in loaded if m.get("id") == _lm_loaded_model["id"]),
                      loaded[0] if len(loaded) == 1 else None)
     _lm_loaded_model["id"] = (answering or {}).get("id")
+    if answering:
+        _lm_model.remember(answering.get("id"),
+                           answering.get("loaded_context_length"))
     for m in ([answering] if answering else loaded):
         ctx = m.get("loaded_context_length") or m.get("max_context_length")
         if isinstance(ctx, int) and ctx > 0:
@@ -10769,7 +10784,7 @@ def _post_to_model(payload: Dict, timeout: int = 120) -> Dict:
     wrap whole turns keep their declared priority.
     """
     with llm_slot(foreground=True):
-        response = requests.post(LM_STUDIO_URL, json=payload, timeout=timeout)
+        response = _lm_model.post(LM_STUDIO_URL, payload, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
@@ -10815,8 +10830,8 @@ def _stream_from_model(payload: Dict, on_token, timeout: int = 120,
     model_id = None
     usage = None
     with llm_slot(foreground=True):
-        with requests.post(LM_STUDIO_URL, json=payload,
-                           timeout=timeout, stream=True) as response:
+        with _lm_model.post(LM_STUDIO_URL, payload,
+                            timeout=timeout, stream=True) as response:
             # Read the error body before the with-block closes the response.
             # Otherwise _lm_studio_recover sees '' — every streamed failure
             # was anonymous ("No models loaded" on 2026-08-19 left an empty
@@ -11558,6 +11573,9 @@ def _lm_turn_note(result, payload) -> None:
     if answered and answered != _lm_loaded_model["id"]:
         _lm_loaded_model["id"] = answered
         _lm_budget_cache["at"] = 0.0    # its context may differ: read it again
+    if answered:
+        # The model to ask for by name once nothing is loaded (Bionic).
+        _lm_model.remember(answered)
     model = answered or _lm_loaded_model["id"]
     print(f"   [MODEL] {model or 'unknown'} "
           f"(sent {payload.get('reasoning_effort') or 'no reasoning_effort'})")
@@ -12021,10 +12039,13 @@ def model_unavailable_reply(robot: str = "blue", user_name: str = "Alex",
     if user_name in _CHAT_ONLY_USERS:
         text = f"[System: {name} can't talk right now. Ask a grown-up to check the computer.]"
     elif kind == "no_model":
-        text = (f"[System: {name}'s language model isn't loaded in LM Studio. "
-                "Load it (or run `lms load`) and ask again.]")
+        # Reached only when no model could be named either: a model that has
+        # answered once is asked for by name (blue/lm_model.py).
+        text = (f"[System: {name}'s language model isn't loaded in LM Studio "
+                "or Bionic. Load it there (or set BLUE_LM_MODEL) and ask again.]")
     elif kind == "unreachable":
-        text = "[System: can't reach LM Studio at 127.0.0.1:1234. Its server isn't running.]"
+        text = ("[System: can't reach LM Studio or Bionic at 127.0.0.1:1234. "
+                "Neither server is running.]")
     elif kind == "dropped":
         text = "[System: LM Studio stopped in the middle of the reply. Ask again.]"
     elif kind == "timeout":
