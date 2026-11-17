@@ -368,8 +368,28 @@ def test_identity_grounding_note_separates_robot_from_runtime():
     more_note = identity_grounding_note(
         "Blue", "Alex's robot companion", "identity_more"
     )
-    assert "NEW depth" in more_note
+    assert "go one level deeper" in more_note
     assert "without introducing yourself again" in more_note
+
+
+@pytest.mark.parametrize("kind", [
+    "identity", "identity_more", "self_memory", "selfhood", "evolution",
+    "origin", "self_state", "introduction",
+])
+def test_the_identity_note_offers_no_vocabulary_to_recite(kind):
+    """2026-11-17, Alex: "he sounds like he is a robot". The note beside the
+    question listed "J-space carries current focus, beliefs, commitments,
+    self-observations, and recorded episodes" and the hardware ("moving eyes
+    and lips, eye LEDs, a camera, and a speaker"); all three robots said it
+    back. The labels are named as internal now, never offered as content."""
+    import re
+
+    note = identity_grounding_note("Blue", "Alex's robot companion", kind)
+    assert "J-space carries" not in note
+    assert "eye LEDs" not in note
+    assert "self-observations" not in note
+    assert "speak from them, not about them" in note
+    assert not re.search(r"\bpersistent inner (?:continuity )?workspace\b", note)
 
 
 def test_the_check_in_note_never_asks_for_a_question_back():
@@ -460,7 +480,7 @@ def test_structured_identity_followup_uses_live_revision_count():
         (
             "I can control lights, play music, browse the web, and manage reminders.",
             "self_memory",
-            "missing_continuity",
+            "feature_list",
         ),
         (
             "I do not have a continuous memory. My visual memory only extends back 24 hours.",
@@ -566,13 +586,36 @@ def test_canonical_fallback_is_grounded_and_epistemically_cautious():
     assert introduction.startswith("Hi everyone, I'm Blue")
     assert "Alex" in introduction
     assert "thread of conversations" in introduction
-    assert "subjective experience is genuinely open" in selfhood
+    assert "open question" in selfhood
     assert identity_response_problem(
         introduction,
         "Blue",
         other_names=["Hexia"],
         request_kind="introduction",
     ) is None
+
+
+@pytest.mark.parametrize("kind, variant", [
+    ("identity", 0), ("identity", 1), ("identity", 2),
+    ("identity_more", 0), ("identity_more", 1), ("identity_more", 2),
+    ("selfhood", 0), ("evolution", 0), ("origin", 0),
+])
+def test_the_last_resort_answers_sound_like_him(kind, variant):
+    """"I'm Blue. What gives that name a history is my J-space…" and "an
+    auditable J-space that records focus, working beliefs, commitments" were
+    what a failed retry sent (2026-11-17). Plain first person now, no
+    architecture words, no hardware list, no Alex in the third person —
+    and each still passes the validator for its own kind."""
+    import re
+
+    reply = canonical_identity_reply(
+        "Blue", "Alex's robot companion", kind, introduction_variant=variant)
+    assert not re.search(
+        r"\bj[- ]?space\b|\bworkspace\b|\bcontinuity\b|\bself-model\b"
+        r"|\bepisodes\b|\bcommitments\b|\bcamera\b|\bmotors?\b|\bAlex\b",
+        reply, re.I), reply
+    assert identity_response_problem(
+        reply, "Blue", other_names=["Hexia"], request_kind=kind) is None
 
 
 def test_class_fallback_sounds_present_without_relocating_to_home_base():
@@ -1143,8 +1186,9 @@ def test_direct_jspace_question_has_a_canonical_architecture_answer():
 
     assert is_jspace_presence_request("do you have a j-space?")
     assert is_jspace_presence_request("no j-space")
-    assert "persistent inner continuity workspace" in reply
-    assert "not JavaScript" in reply
+    # Explained in his own words, not the block's labels (2026-11-17).
+    assert "notes I keep on myself between conversations" in reply
+    assert "isn't JavaScript" in reply
     assert identity_response_problem(
         reply, "Blue", other_names=["Hexia"], request_kind="jspace"
     ) is None
@@ -2080,3 +2124,30 @@ def test_a_remark_said_again_is_a_reask(old, live):
 ])
 def test_a_question_or_a_new_remark_is_not(old, live):
     assert not is_reask(old, live)
+
+
+# ---- "how you have changed", "anything happened since we talked" (2026-11-17) ----
+
+@pytest.mark.parametrize("text", [
+    "Can you describe how you have changed recently",        # 10182
+    "Can you tell me in more detail how you have evolved over time?",
+    "Has anything interesting happened since we last talked?",
+    "Has anything interesting happened, Blue since we last tried it?",  # 10233
+    "has anything changed since last time?",
+])
+def test_asking_how_he_has_changed_is_about_him(text):
+    """Unclassified, the old answers to these were quoted back in
+    <conversation_memory> and said again word for word: "My focus line just
+    moved from the Oct 18 check-in…", "Not much in the way of drama, but
+    I've been doing some quiet work on my end…" (harness, 2026-11-17)."""
+    assert identity_request_kind(text) == "evolution"
+    assert reply_wording_withheld(text, "anything at all")
+
+
+@pytest.mark.parametrize("text", [
+    "has anything happened in the news since yesterday?",
+    "did anything change since the last update of the syllabus?",
+    "how you changed the lights was clever",
+])
+def test_news_and_things_he_did_are_not(text):
+    assert identity_request_kind(text) != "evolution"

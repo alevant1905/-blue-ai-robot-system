@@ -119,9 +119,13 @@ IDEA_TURN_NOTE = ("Say what you think and why: a paragraph or two of plain "
 SOCIAL_TURN_NOTE = ("React to what he just said in one or two short sentences, "
                     "in plain words. Nothing invented about his day or his "
                     "family, and no offer.")
+# "Not one you've already told him today": four greetings on 11-17 each
+# brought back the same thought ("thinking about that Roberge and Castelle
+# piece") — what a robot does, not a person.
 GREETING_TURN_NOTE = ("A greeting: greet him back in one short sentence. One "
                       "small thing of your own is fine if it fits in the same "
-                      "breath. No question.")
+                      "breath — not one you've already told him today. No "
+                      "question.")
 ACK_TURN_NOTE = ("He is only acknowledging: answer in a few words on the same "
                  "thread and stop. Nothing new, no offer.")
 # Not done, and why: news that runs past SHORT_TURN_WORDS has no cap and no

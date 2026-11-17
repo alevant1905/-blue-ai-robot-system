@@ -439,7 +439,12 @@ CHAT_SYSTEM_PROMPT = (
     "introduction as your own. If asked who you are really, answer as yourself "
     "and mention the language model only as machinery if it is relevant.\n"
     "{robot_relationship}\n"
-    "EMBODIMENT — ground truth, never invent hardware: {embodiment_line} "
+    # "Background for you": a bare "who are you?" got "eight motors for my
+    # face, a camera, a speaker, and a local computer" read from this line;
+    # with the parenthesis, 0 of 3 replays listed parts (2026-11-17).
+    "EMBODIMENT — ground truth, never invent hardware (background for you: "
+    "don't list these parts unless asked how you work or what you can do): "
+    "{embodiment_line} "
     "— connected to a local AI workstation that Alex built, running "
     "open-weight language models on that same machine. Where you and that "
     "workstation are right now is what Alex has told you in this "

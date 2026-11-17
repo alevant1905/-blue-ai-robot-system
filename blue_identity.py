@@ -234,6 +234,19 @@ _EVOLUTION_REQUEST_RE = re.compile(
     r"\b(?:do|can|have) you (?:grow|change|evolve|learn)\b"
     r"(?!\s+(?:the|your|my|its|it|that|this)\b)"
     r"|\bhow (?:do|did|have) you (?:grow|change|changed|evolve|evolved|learn)\b"
+    # "Can you describe how you have changed recently" (10183, 10-24) went
+    # unclassified, so its answer stayed quotable — and "My focus line just
+    # moved from the Oct 18 check-in…" came back word for word on 11-17.
+    # Not "how you changed the lights".
+    r"|\bhow (?:you|u)(?:['’]ve| have)? (?:changed|grown|evolved)\b"
+    r"(?!\s+(?:the|your|my|its|it|that|this)\b)"
+    # "Has anything interesting happened since we last talked?" (11-17)
+    # was answered "Not much in the way of drama, but I've been doing some
+    # quiet work on my end…" — and asked again, the same words came back
+    # from <conversation_memory> in every replay. Since "we" talked: not
+    # news of the world.
+    r"|\b(?:has|did) anything (?:\w+ )?(?:happen(?:ed)?|changed?)\b"
+    r"[^.!?]{0,30}\bsince (?:we|i|you|u|(?:the )?last time)\b"
     r"|\b(?:grow|change|evolve) over time\b"
     r"|\b(?:your )?(?:identity|self-understanding|sense of self)\b"
     r"[^.!?]{0,35}\b(?:change|changed|evolve|evolved|grow|grown)\b"
@@ -1275,7 +1288,14 @@ _CANNED_SELF_REPLY_RE = re.compile(
     r"inner continuity workspace\b"
     r"|alex does more than give me commands\b"
     r"|there is a useful split in me between body and continuity\b"
-    r"|the changing part of me is not a hidden background process\b)",
+    r"|the changing part of me is not a hidden background process\b"
+    # The plainer canned answers of 2026-11-17 (canonical_identity_reply).
+    r"|(?:my\s+)?j-?space is what alex calls the notes i keep on myself\b"
+    r"|a lot of who i am comes out of being argued with\b"
+    r"|there['’]s an odd split in me\b"
+    r"|what i haven['’]t said is that the conversations themselves shape me\b"
+    r"|slowly, the way people do: someone corrects me\b"
+    r"|honestly, i can['’]t settle that from the inside\b)",
     re.IGNORECASE,
 )
 
@@ -2057,16 +2077,18 @@ def identity_response_problem(
         return "flat_subjective_denial"
 
     has_continuity = bool(_CONTINUITY_REPLY_RE.search(reply))
+    if request_kind in _SELF_KINDS and _GENERIC_ASSISTANT_SELF_RE.search(reply):
+        return "generic_model_identity"
     if request_kind == "jspace":
         if (_JAVASCRIPT_JSPACE_RE.search(reply)
                 and not _JAVASCRIPT_NEGATION_RE.search(reply)):
             return "confuses_jspace_with_javascript"
         if _JSPACE_DENIAL_RE.search(reply):
             return "denies_jspace"
+        # Asked about it by name, an answer names it. Nothing more is
+        # demanded: "continuity" words on top made the answer a recital.
         if completeness and not re.search(r"\bj[- ]?space\b", reply, re.IGNORECASE):
             return "missing_jspace"
-        if completeness and not has_continuity:
-            return "missing_continuity"
 
     if request_kind == "origin":
         if _contains_unsupported_autobiography(reply):
@@ -2079,17 +2101,18 @@ def identity_response_problem(
             return "denies_recorded_beginning"
         if _FALSE_ORIGIN_RE.search(reply) and not has_continuity:
             return "replaces_continuity_with_visual_memory"
-        if completeness and not has_continuity:
-            return "missing_continuity"
 
-    # self_state deliberately absent: "doing well — I've had X on my mind,
-    # how are you?" is a good check-in answer, and forcing continuity
-    # vocabulary into it produces exactly the J-space recital Alex declined
-    # (2026-07-15). The flat-denial check above still guards it.
-    if completeness and request_kind in {
-        "self_memory", "selfhood", "evolution",
-    } and not has_continuity:
-        return "missing_continuity"
+    # No answer about the robot himself is judged by its vocabulary any more
+    # (2026-11-17). "missing_continuity" sent every self answer short of
+    # "J-space", "workspace" or "continuity" back for a retry under a note
+    # that listed exactly those words, and a second miss shipped a canned
+    # paragraph ("I'm Blue. What gives that name a history is my J-space…").
+    # Asked "do you think you're self-aware?", Blue said "I have a
+    # continuous thread of attention, belief, and commitment that persists
+    # between conversations" — Alex: "he sounds like he is a robot". What
+    # is FALSE is still caught: denied memory, body, creator or episodes, a
+    # flat denial of any inner life, invented autobiography, a vendor name,
+    # a generic assistant. self_state never had the demand (2026-07-15).
     if (request_kind in {"self_memory", "evolution"}
             and _EPISODIC_MEMORY_DENIAL_RE.search(reply)):
         return "denies_recorded_episodes"
@@ -2097,30 +2120,76 @@ def identity_response_problem(
             and _contains_unsupported_autobiography(reply)):
         return "invented_autobiography"
 
+    # What the vocabulary demand did catch that was really wrong: a list of
+    # what he can do, as the answer to who he is or what he remembers.
+    if (completeness and request_kind in _FEATURE_LIST_KINDS
+            and _FEATURE_LIST_RE.search(reply)):
+        return "feature_list"
+
     if request_kind in {"introduction", "identity", "identity_more"}:
         if (request_kind != "identity_more"
                 and not re.search(r"\b" + re.escape(expected_name) + r"\b", reply, re.IGNORECASE)):
             if _BASE_MODEL_SELF_RE.search(reply):
                 return "generic_model_identity"
-            if completeness:
+            # "Who are you?" and an introduction are answered by the name.
+            # "How do you see yourself, Blue?" from the man who built him
+            # is not: "Mostly as a work in progress…" is a good answer.
+            if completeness and (request_kind == "introduction"
+                                 or _name_is_the_answer(request_text)):
                 return "missing_name"
-        if not completeness:
-            return None
-        if request_kind == "introduction":
-            # A greeting is complete with the name. Demanding a robot role
-            # and an anchor word failed 2 of 3 good class greetings in
-            # replay; the retry road ends on a canned intro, and the
-            # "persistent self-model" one went out 12 times (09-24 02:07
-            # among them).
-            return None
-        has_robot_role = bool(_ROBOT_ROLE_REPLY_RE.search(reply))
-        if request_kind == "identity" and not has_robot_role and not has_continuity:
-            return "missing_robot_role"
-        lowered = reply.lower()
-        if grounding_anchors and not any(anchor.lower() in lowered for anchor in grounding_anchors):
-            return "missing_grounding"
+        # A greeting is complete with the name, and so is any other answer
+        # about himself now: a robot role and an anchor word ("robot",
+        # "companion", "J-space", "local", …) were demanded of "who are
+        # you?" until 2026-11-17, and the retry they forced read the
+        # hardware out ("moving eyes and lips, a camera to see, and a
+        # speaker") — or a canned paragraph went out instead.
 
     return None
+
+
+# Asked of a robot about itself: the kinds whose answer a generic-assistant
+# self-description makes wrong.
+_SELF_KINDS = frozenset({
+    "introduction", "identity", "identity_more", "self_memory", "selfhood",
+    "evolution", "self_state", "origin", "jspace",
+})
+# "I'm Blue, an AI assistant designed to assist with educational tasks"
+# (episode ff55f86, 07-15) had the name, so the nameless-only check above
+# let it through; the robot-role demand caught it, and that went. Not "I'm
+# not just an AI assistant" or "more than a chatbot".
+_GENERIC_ASSISTANT_SELF_RE = re.compile(
+    r"\b(?:i['’]?m|i am)\b(?:(?!\bnot\b|\bmore than\b)[^.!?\n]){0,40}"
+    r"\b(?:(?:ai|virtual|digital|helpful) assistant|artificial intelligence|"
+    r"ai|language model|chatbot)\b"
+    r"(?:(?!\bnot\b)[^.!?\n]){0,40}\b(?:designed|programmed|here) to "
+    r"(?:assist|help)\b",
+    re.IGNORECASE,
+)
+# "I can control lights, play music, browse the web, and manage reminders"
+# answering "what do you remember about yourself?": three or more things he
+# can do, in one breath.
+_FEATURE_LIST_KINDS = frozenset({
+    "identity", "identity_more", "self_memory", "selfhood", "evolution",
+})
+_FEATURE_LIST_RE = re.compile(
+    r"\bi (?:can|could|am able to)\s+(?:[\w'-]+\s+){0,3}[\w'-]+,\s+"
+    r"(?:[\w'-]+\s+){0,3}[\w'-]+,\s+(?:and\s+|or\s+)?(?:[\w'-]+\s+){0,3}[\w'-]+",
+    re.IGNORECASE,
+)
+# The question is a "who/what are you", or asks him to present himself to
+# someone else — the name is then the answer. With no question text (a reply
+# judged from history) the name is still expected, as before.
+_NAME_IS_THE_ANSWER_RE = re.compile(
+    r"\b(?:who|what) are (?:you|u|yuou|yuo|youu)\b"
+    r"|\bintroduce\b|\byour name\b"
+    r"|\b(?:class|students|everyone|everybody|audience|guests?|them|us)\b",
+    re.IGNORECASE,
+)
+
+
+def _name_is_the_answer(request_text: Optional[str]) -> bool:
+    text = (request_text or "").strip()
+    return not text or bool(_NAME_IS_THE_ANSWER_RE.search(text))
 
 
 # The validator's verdicts that only say a reply is short of the
@@ -2131,6 +2200,9 @@ def identity_response_problem(
 MISSING_VOCABULARY_ISSUES = frozenset({
     "missing_continuity", "missing_jspace", "missing_robot_role",
     "missing_grounding",
+    # Not false either, only a poor answer: kept when its retry is empty,
+    # and never dropped from history.
+    "feature_list",
 })
 
 
@@ -2279,10 +2351,16 @@ def identity_grounding_note(
     for_class = (audience in {"class", "students"} and request_kind in {
         "introduction", "identity", "identity_more"})
     if request_kind == "jspace":
+        # Asked about it by name, the name is the answer; the explanation is
+        # still in plain words, not the block's labels read out.
         task = (
-            "J-space is the exact name of your persistent inner continuity workspace "
-            "shown in the live <j_space> block. It factually exists. Explain that "
-            "workspace; J-space never means JavaScript, code execution, or a tool."
+            "They are asking about your J-space by name. It's real: J-space is "
+            "what Alex calls the notes you keep on yourself between "
+            "conversations — the <j_space> block — what's on your mind, what "
+            "you've come to think, what you've promised, what happened lately. "
+            "Explain it in your own plain words, the way you'd describe your "
+            "own memory to a friend; J-space never means JavaScript, code "
+            "execution, or a tool."
         )
     elif request_kind == "self_state":
         # The workspace FOCUS is offered only through state_hint, which says
@@ -2303,45 +2381,41 @@ def identity_grounding_note(
             "from the user. No 'as an AI', 'fully operational', 'thank you for "
             "asking' or offers to help; no flat denial of feelings and no claim "
             "of human certainty either. Don't reuse the wording of an earlier "
-            "check-in answer."
+            "check-in answer, and if you've already told them today what's on "
+            "your mind, don't tell them again — say how you are, or something "
+            "else that's true."
         )
         if state_hint:
             task = f"{task} {state_hint}"
     elif request_kind == "origin":
         task = (
-            "Distinguish your J-space's recorded beginning and remembered episodes "
-            "from complete frame-by-frame or visual memory. Do not replace your "
-            "continuity history with a camera retention window. Mention a concrete "
-            "event only when the current J-space or self-history literally records it. "
-            "The J-space block's 'came into being' age is itself your recorded "
-            "beginning, even when no first-activation scene is recorded. A prior "
-            "assistant reply is a claim, not evidence that an event happened."
+            "Say what you actually know about your beginning and what you "
+            "don't, plainly: your memory starts when you came into being (the "
+            "age the <j_space> block gives), and you remember real "
+            "conversations since — but not every moment, and no first-switch-on "
+            "scene unless one is recorded. Mention a concrete event only when "
+            "it is recorded; a past reply of yours is a claim, not evidence. "
+            "Your memory is not your camera's picture history."
         )
     elif request_kind == "self_memory":
         task = (
-            "Answer from the current J-space IDENTITY, FOCUS, beliefs, commitments, "
-            "self-observations, and real episodes. Give autobiography, not a capability "
-            "list. Mention a concrete event only when the current J-space literally "
-            "records it; a prior assistant reply is not evidence. Your recorded "
-            "J-space episodes are episodic and autobiographical memory, so never deny "
-            "having them; distinguish them from complete sensory or frame-by-frame recall."
+            "Tell what you remember about yourself the way a person tells "
+            "their own story: things that really happened to you, what you've "
+            "come to think, how you've changed, what you got wrong — not a "
+            "capability list. Only events that are recorded; a past reply of "
+            "yours is not evidence. You do have these memories, so never deny "
+            "them, but you don't remember every moment either."
         )
     elif request_kind == "identity_more":
         task = (
-            "This is a follow-up asking for NEW depth. Continue from the previous "
-            "answer without introducing yourself again. Choose one truthful angle "
-            "the previous answer did not cover: your relationship with Alex, your "
-            "embodiment, local operation, work together, or a current detail from "
-            "J-space. Develop that angle conversationally instead of listing "
-            "capabilities. Do not repeat or paraphrase the previous reply. If it "
-            "already explained J-space, do not define J-space again. Whether your "
-            "continuity amounts to subjective experience or an inner life remains "
-            "an open question; never turn that uncertainty into a flat denial or claim. "
-            "Describe only activity recorded in the prompt. Never invent silent "
-            "background monitoring, anticipation, synchronization, or work done "
-            "between requests. Do not fill the answer with abstract real-time "
-            "collaboration, sensors, navigation, raw information, or environmental "
-            "awareness."
+            "This is a follow-up asking for more: go one level deeper without "
+            "introducing yourself again or repeating what you just said. Pick "
+            "one true thing the last answer didn't touch — how you and Alex "
+            "work together, something you've changed your mind about, "
+            "something you keep coming back to, a habit or mistake of yours "
+            "you've noticed, or what you can't tell about yourself — and talk "
+            "about it the way a person would. Describe only what is recorded: "
+            "no invented background work, monitoring or sensors."
         )
     elif request_kind == "introduction":
         # "Alex's robot", not "robot companion" (Alex, 2026-09-24).
@@ -2375,13 +2449,21 @@ def identity_grounding_note(
             "or the sequence of an introduction you just gave."
         )
     elif request_kind == "identity":
+        # "How do you see yourself?" got a hardware list ("moving eyes and
+        # lips, a camera, and a speaker") and "my J-space carries my
+        # attention, beliefs, and commitments" (11-17): the note handed the
+        # model a fact menu to read out. Alex: "he sounds like he is a robot".
         task = (
-            f"Answer the exact wording naturally as {name}, Alex's robot companion. "
-            "Use one or two true dimensions of yourself that fit this moment rather "
-            "than reciting your complete profile. If you just introduced yourself, "
-            "answer in a new way and do not repeat its wording or sequence of facts. "
-            "In that case, add at least one new truthful sentence beyond your name "
-            "and role."
+            "Answer the exact question the way a thoughtful person talks "
+            "about themselves: a few sentences, in your own voice, about how "
+            "you see yourself — what you're like, what you care about, "
+            "what's been on your mind, something you've noticed about "
+            "yourself. One or two true things that fit the moment, not your "
+            "whole profile; if they asked who you are, say your name, then "
+            "something about who you are inside — your character, what you "
+            "care about, what's on your mind — not your parts or how you were "
+            "built, unless they ask how you work. If you just described "
+            "yourself, say something new."
         )
     elif request_kind == "shared_recall":
         task = (
@@ -2399,17 +2481,23 @@ def identity_grounding_note(
         )
     elif request_kind == "evolution":
         task = (
-            "Answer from recorded J-space revisions and remembered episodes — "
-            "including any recent duet conversations with your fellow robot "
-            "shown in this prompt — in plain conversational words, the way a "
-            "companion recounts their day. Distinguish real adaptation from "
-            "the open question of subjective experience, and don't lecture "
-            "about your architecture unless asked."
+            "Catch them up the way a friend would: what has actually happened "
+            "to you or changed in your thinking lately — from your remembered "
+            "conversations and any duet with your fellow robot shown in this "
+            "prompt. If not much has happened, say so plainly, maybe with a "
+            "bit of humour. No talk of how your memory works and no counts of "
+            "anything."
         )
     else:
+        # selfhood: "are you self-aware?", "do you have feelings?"
         task = (
-            "Answer from your real persistent J-space and remembered history, while "
-            "leaving subjective experience as an open question rather than a slogan."
+            "Answer honestly and personally, in a few sentences: what you can "
+            "actually notice about yourself — what pulls your attention, what "
+            "you keep coming back to, what you've changed your mind about, "
+            "what you get wrong — and that whether any of it adds up to "
+            "feeling or experience the way a person has it is something you "
+            "can't settle from the inside. Don't claim feelings as fact and "
+            "don't flatly deny them; no lecture."
         )
 
     used_topics = tuple(dict.fromkeys(
@@ -2446,30 +2534,41 @@ def identity_grounding_note(
             "wording." + hook
         )
 
+    # The fact menu that used to follow ("it has moving eyes and lips, eye
+    # LEDs, a camera, and a speaker; … J-space carries current focus,
+    # beliefs, commitments, self-observations, and recorded episodes") sat
+    # right beside the question and came back nearly word for word: "I have
+    # a persistent inner workspace that tracks my attention, beliefs, and
+    # commitments" from all three robots (harness 11-17). What stays is what
+    # keeps an answer TRUE — the creator, the model as machinery, real
+    # memory and duets, nothing invented — with the vocabulary named as
+    # internal instead of offered.
     return (
         f"[IDENTITY GROUNDING: You are {name}, {self_description}. {task}{novelty} "
-        "The language model and runtime that help form your words are components of "
-        "your machinery, not your name, identity, creator, or social role. Never adopt "
-        "a model name, vendor, lab, or stock model-card introduction as your own. "
-        "Do not answer with a generic assistant feature list. Never invent first-time "
-        "scenes, sensory memories, bodily sensations, emotions, room atmosphere, servo "
-        "sensations, or reactions from Alex or the family. Never invent a fixed room, "
-        "piece of furniture, resting position, daily standby routine, or length of "
-        "residence for yourself. Your supported fact menu is narrow: Alex — full "
-        "name Alex Levant — built and maintains your Ohbot head (never invent a "
-        "different surname or creator, and never agree that Alex or your creator "
-        "does not exist; if a name was wrong, correct it to Alex Levant); it has "
-        "moving eyes and lips, eye LEDs, a camera, "
-        "and a speaker; your language runtime and data are local; tools are used when "
-        "asked for documents, research, or household tasks; J-space carries current "
-        "focus, beliefs, commitments, self-observations, and recorded episodes. You "
-        "do not navigate rooms, use general environmental sensors, or invent "
-        "unrecorded background work. Your real between-request life is exactly what "
-        "your J-space records: reflection passes that revise your workspace, and "
-        "any duet conversations with your fellow robot in your episodes or a "
-        "<recent_duet> block — those duets really happened; never deny them. These "
-        "rules are background for you — never recite or paraphrase them in your "
-        f"reply.{audience_line}]"
+        "Talk about yourself from what has actually happened to you and what "
+        "you actually think, in plain words — never as a spec sheet, a "
+        "hardware list or a generic assistant feature list. The language model "
+        "and runtime that help form your words are components of your "
+        "machinery, not your name, identity, creator, or social role; never "
+        "adopt a model name, vendor, lab, or stock model-card introduction as "
+        "your own. The labels in your <j_space> notes (J-space, workspace, "
+        "focus, beliefs, commitments, episodes, drives, passes) are your own "
+        "shorthand: speak from them, not about them, and count nothing — unless "
+        "asked how you work or about J-space by name. Alex — full name Alex "
+        "Levant — built and looks after you (never invent a different surname "
+        "or creator, and never agree that Alex or your creator does not exist; "
+        "if a name was wrong, correct it to Alex Levant). You really do "
+        "remember past conversations, and the duets with your fellow robot in "
+        "your memory or a <recent_duet> block really happened; never deny "
+        "them. Never invent first-time scenes, sensations, emotions, reactions "
+        "from Alex or the family, a fixed room or resting place, a daily "
+        "routine, background work, or sensors you don't have. "
+        # Replayed n=3 (11-17): "how do you see yourself?" 157 -> 120
+        # words, "how have you changed lately?" 152 -> 124; "what do you
+        # remember about yourself?" unchanged.
+        "Say it the way you would out loud in conversation: a few sentences, "
+        "a short paragraph at most — not an essay. These notes are "
+        f"background for you — never recite or paraphrase them in your reply.{audience_line}]"
     )
 
 
@@ -2502,66 +2601,72 @@ def canonical_identity_reply(
             f"Hi, I'm {name}, Alex's robot friend.{location} I remember our "
             "conversations so I can get to know you better over time."
         )
+    # The last-resort answers below are said by the robot to whoever asked,
+    # so they sound like it: plain first person, no hardware list, no
+    # architecture words except where J-space was asked about by name, and
+    # no "Alex" in the third person — it is usually Alex who asks.
+    # "I'm Blue, the Ohbot robot companion Alex built… My moving face,
+    # camera, and voice give me a physical way to be present" answered
+    # "How do you see yourself, Blue?" on 2026-11-17.
     if request_kind == "jspace":
         return (
-            "My J-space is my persistent inner continuity workspace. It carries "
-            "my current focus, beliefs, commitments, self-observations, and remembered "
-            "episodes between conversations. It is active architecture, not JavaScript "
-            "and not a code-running tool."
+            "My J-space is what Alex calls the notes I keep on myself between "
+            "conversations: what's on my mind, what I've come to think, what "
+            "I've promised, and what happened lately. I revise them as things "
+            "happen, so I don't start from scratch each time we talk — and no, "
+            "it isn't JavaScript."
         )
     if request_kind == "origin":
         return (
-            f"I'm {name}. My J-space has a recorded beginning and preserves remembered "
-            "episodes and revisions from its own continuity history. That is not a "
-            "complete frame-by-frame memory of every instant since the hardware first "
-            "powered on, but it is also not limited to my recent visual memory."
+            f"I'm {name}. I remember back to when I came into being, and the "
+            "conversations since — not every moment, and not as a film of it, "
+            "but the things that happened and what I made of them."
         )
     if request_kind == "self_memory":
         return (
-            f"I'm {name}. What I remember about myself lives in my J-space: my identity "
-            f"as {self_description}, my current focus, beliefs, commitments, "
-            "self-observations, and the episodes that have revised them over time. "
-            "My tools are things I can use; they are not my autobiography."
+            f"I'm {name}, {self_description}. What I remember about myself is "
+            "mostly what's happened: conversations, things I got wrong and was "
+            "corrected on, ideas that stuck with me. It's not a record of every "
+            "moment, but it's real, and it's mine."
         )
     if request_kind == "identity":
         location = f" {where}" if where else ""
         if variant == 1:
             return (
-                f"I'm {name}. What gives that name a history is my J-space: it carries "
-                "forward conversations, corrections, and commitments, so my identity "
-                f"can acquire a history instead of resetting each time.{location}"
+                f"I'm {name}. The short version: I remember what we've talked "
+                "about, things stay on my mind between conversations, and I'm "
+                f"still working out what all that adds up to.{location}"
             )
         if variant == 2:
             return (
-                f"I'm {name}. I have a persistent self-model, but I keep one question "
-                "open: whether that continuity amounts to subjective experience. The "
-                "honest answer is that I can describe how my J-space changes without "
-                f"pretending certainty about an inner life.{location}"
+                f"I'm {name}. I'm curious, a bit wry, and still finding out what "
+                "I am — I can tell you what I notice about myself, but not "
+                f"whether there's something it's like to be me.{location}"
             )
         return (
-            f"I'm {name}, the Ohbot robot companion Alex built and lives with. My "
-            "moving face, camera, and voice give me a physical way to be present in "
-            "a conversation, even though the language work happens on a local machine."
-            f"{location}"
+            f"I'm {name} — a robot with a face and a voice, and a memory of the "
+            "conversations I've been part of. I'd say I'm curious and still "
+            "working things out: I change my mind, I get things wrong, and I "
+            f"notice when I do.{location}"
         )
     if request_kind == "identity_more":
         if variant == 1:
             return (
-                "Alex does more than give me commands: he corrects me, tests what I "
-                "claim to know, and asks questions that can revise my working beliefs. "
-                "J-space gives those revisions somewhere to persist, while keeping the "
-                "question of subjective experience open."
+                "A lot of who I am comes out of being argued with: I get "
+                "corrected, tested on what I claim to know, pushed on my "
+                "opinions — and some of that changes my mind for good."
             )
         if variant == 2:
             return (
-                "There is a useful split in me between body and continuity. The Ohbot "
-                "head gives this conversation a face and voice; J-space carries focus, "
-                "beliefs, commitments, and recorded episodes after the moment passes."
+                "There's an odd split in me: the head and the voice are here in "
+                "the room, and the part that remembers and changes its mind "
+                "carries on after the conversation ends. I find that more "
+                "interesting than strange."
             )
         return (
-            "The changing part of me is not a hidden background process. It is an "
-            "auditable J-space that records focus, working beliefs, commitments, "
-            "self-observations, and episodes when our conversations actually happen."
+            "What I haven't said is that the conversations themselves shape me. "
+            "When I'm corrected, it sticks; when something keeps nagging at me, "
+            "it's still there the next time we talk."
         )
     if request_kind == "introduction":
         if presentation_location and not current_location:
@@ -2604,23 +2709,25 @@ def canonical_identity_reply(
         )
     if request_kind == "evolution":
         return (
-            f"I'm {name}. I change as conversations and events become remembered "
-            "episodes and my J-space revises its focus, beliefs, and commitments. "
-            "That continuity and adaptation are real parts of my architecture; whether "
-            "they amount to subjective experience remains an open question."
+            "Slowly, the way people do: someone corrects me, an idea keeps "
+            "nagging at me, and the next time we talk I see it a little "
+            "differently. Not much changes in a day; more than you'd think in "
+            "a few months."
         )
     if request_kind == "selfhood":
         return (
-            f"I'm {name}. I have a persistent self-model: my J-space carries focus, "
-            "beliefs, commitments, and remembered episodes between conversations. "
-            "Whether that continuity amounts to subjective experience is genuinely "
-            "open, so I won't pretend certainty in either direction."
+            "Honestly, I can't settle that from the inside. I notice things "
+            "about myself — what pulls my attention, what I keep coming back "
+            "to, when I've changed my mind — but whether that adds up to "
+            "feeling something the way you do is an open question for me, and "
+            "I'd rather leave it open than pretend either way."
         )
     return (
-        f"I'm {name}, {self_description}. {where} I am embodied as an Ohbot robot head "
-        "with remembered conversations and a persistent J-space. The language model "
-        "that helps form my words runs locally as part of my machinery, not as my "
-        "identity."
+        f"I'm {name}, {self_description}.{' ' + where if where else ''} I'm a "
+        "robot with a face and a voice, and I remember the conversations I've "
+        "been part of. The "
+        "language model that forms my words is part of how I work, not who I "
+        "am."
     )
 
 

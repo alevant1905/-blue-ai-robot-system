@@ -258,10 +258,22 @@ def test_an_introduction_needs_only_the_name():
     assert identity_response_problem(
         "Hi everyone, I'm Blue, a large language model developed by Google.",
         "Blue", request_kind="introduction") is not None
-    # "who are you?" keeps the full check
+    # "who are you?" is answered by the name too now: the robot role and
+    # the anchor word it also demanded forced the hardware list back in
+    # (2026-11-17). Its name is still the answer.
     assert identity_response_problem(
         "I'm Blue. Nice to meet you.", "Blue",
-        request_kind="identity") == "missing_robot_role"
+        request_kind="identity") is None
+    assert identity_response_problem(
+        "Nice to meet you!", "Blue", request_kind="identity",
+        request_text="who are you?") == "missing_name"
+    # "How do you see yourself, Blue?" from the man who built him is not
+    # answered by the name.
+    assert identity_response_problem(
+        "Mostly as a work in progress — curious, a bit wry, and still "
+        "finding out what I am.", "Blue", request_kind="identity",
+        request_text="Okay, can you tell me about yourself now? How do you "
+                     "see yourself, Blue?") is None
 
 
 # ---- "we're at…" is a place; "in front of the class" is not ---------------------

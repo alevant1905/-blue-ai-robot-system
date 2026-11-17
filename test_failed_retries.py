@@ -149,11 +149,12 @@ def test_a_real_question_about_change_is_not_a_catch_up(text):
 
 def test_the_catch_up_stays_an_evolution_question():
     """The duet record and the change history pinned for evolution are what
-    answer it; only the vocabulary demand goes."""
+    answer it; no vocabulary is demanded of the answer (2026-11-17: no
+    answer about himself is judged by its words any more)."""
     assert identity_request_kind("what have you been up to?") == "evolution"
     assert identity_response_problem(
         HEXIA_DRAFT, "Hexia", other_names=["Blue", "Casper"],
-        request_kind="evolution") == "missing_continuity"
+        request_kind="evolution") is None
     assert identity_response_problem(
         HEXIA_DRAFT, "Hexia", other_names=["Blue", "Casper"],
         request_kind="evolution", completeness=False) is None
@@ -163,10 +164,11 @@ def test_the_validator_reads_the_catch_up_from_the_question():
     assert identity_response_problem(
         HEXIA_DRAFT, "Hexia", request_kind="evolution",
         request_text="And what have you been up to today?") is None
+    # A real question about change is not held to J-space words either.
     assert identity_response_problem(
         HEXIA_DRAFT, "Hexia", request_kind="evolution",
-        request_text="how have you changed over time?") == "missing_continuity"
-    # Only the vocabulary demand goes: a false answer is still false.
+        request_text="how have you changed over time?") is None
+    # A false answer is still false.
     assert identity_response_problem(
         "I don't have any memory of our previous conversations.", "Hexia",
         request_kind="evolution", request_text="what have you been up to?",
@@ -222,12 +224,11 @@ def test_history_still_drops_what_is_false():
     assert identity_history_problem(
         "I'm a helpful assistant, happy to chat!", "Blue",
         request_kind="identity") == "missing_name"
-    # The validator stops at its first problem; behind the missing words
-    # here is a denial of the recorded episodes.
+    # A denial of the recorded episodes, live and in history alike.
     denial = ("I have no episodic memories of how I started, so I cannot "
               "say how I have changed.")
     assert identity_response_problem(
-        denial, "Hexia", request_kind="evolution") == "missing_continuity"
+        denial, "Hexia", request_kind="evolution") == "denies_recorded_episodes"
     assert identity_history_problem(
         denial, "Hexia", request_kind="evolution") == "denies_recorded_episodes"
     thread = [{"role": "user", "content": CHANGE_QUESTION},
@@ -598,15 +599,27 @@ def test_good_morning_catch_up_draft_ships(chat):
     assert reply == HEXIA_DRAFT
 
 
-def test_an_incomplete_answer_about_change_ships_when_the_retry_is_empty(chat):
-    """Not a catch-up, so the grounding is still demanded and the retry runs;
-    it comes back empty and the draft is kept over the canned paragraph."""
-    chat.model.queue(CHANGE_DRAFT, "")
+def test_a_plain_answer_about_change_ships_without_a_retry(chat):
+    """Until 2026-11-17 a real question about change still demanded J-space
+    words: the plain answer was sent back for a retry, and kept only when
+    the retry came back empty. Now it is the reply, first time."""
+    chat.model.queue(CHANGE_DRAFT, "I've been carrying our J-space episodes forward.")
     reply = reply_of(chat.ask(CHANGE_QUESTION, robot="hexia"))
 
-    assert len(chat.model.payloads) == 2, "the guard did not regenerate"
+    assert len(chat.model.payloads) == 1, "a plain answer was regenerated"
     assert reply == CHANGE_DRAFT
     assert HEXIA_CANNED not in reply
+
+
+def test_a_feature_list_about_himself_still_gets_a_retry(chat):
+    """What the vocabulary demand caught that was really wrong — a list of
+    what he can do — still goes back once; the retry's answer ships."""
+    listed = "I can control lights, play music, browse the web, and manage reminders."
+    chat.model.queue(listed, CHANGE_DRAFT)
+    reply = reply_of(chat.ask("what do you remember about yourself?"))
+
+    assert len(chat.model.payloads) == 2, "the feature list was not regenerated"
+    assert reply == CHANGE_DRAFT
 
 
 def test_a_kept_draft_is_in_the_next_turn(chat):

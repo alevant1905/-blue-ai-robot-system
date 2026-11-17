@@ -1035,6 +1035,13 @@ class RobotContinuity:
         except Exception:
             return "their"
 
+    @property
+    def pronoun_subject(self) -> str:
+        try:
+            return bt._robot_cfg(self.robot)["pronoun_subj"]
+        except Exception:
+            return "they"
+
     # ---- reflection ---------------------------------------------------
 
     def _episode_for_prompt(self, episode: Dict[str, Any]) -> Dict[str, Any]:
@@ -1216,12 +1223,21 @@ class RobotContinuity:
             "Routine requests to state identity, introduce yourself, or list family "
             "facts are completed exchanges, not new self-knowledge: do not make them "
             "the ongoing FOCUS or promote their wording into WORKING BELIEFS.\n\n"
+            # The robot speaks from these lines, so they are written the way
+            # he would say them: "learning to distinguish my internal state
+            # from the physical hardware's capabilities" came back in chat
+            # as architecture talk, and episode summaries called Blue "it"
+            # ("highlighting J-SPACE as a key component of its identity").
+            "Write every line in plain, natural words, the way a thoughtful "
+            "person jots notes to themselves — not system, software or "
+            "architecture language.\n\n"
             "Return one JSON object with exactly these keys:\n"
             "workspace: a string of exactly seven terse lines labelled IDENTITY, FOCUS, "
             "WORKING BELIEFS, OPEN QUESTIONS, COMMITMENTS, SELF-OBSERVATIONS, "
             "NEXT EXPECTATION; beliefs include confidence from 0.0 to 1.0\n"
             "changed: one concise description of what moved\n"
-            "episode_summary: a concise third-person record of this reflection\n"
+            f"episode_summary: a concise third-person record of this reflection, "
+            f"calling {name} '{self.pronoun_subject}', never 'it'\n"
             "salience: number from 0.0 to 1.0\n"
             "valence: number from -1.0 to 1.0\n"
             "drive_deltas: object containing curiosity, uncertainty, connection, commitment, "
@@ -1576,41 +1592,56 @@ class RobotContinuity:
             except Exception as exc:
                 bt.log.warning(
                     f"[JSPACE {self.robot}] visual profile context failed: {exc}")
+        # How the block asks to be used is how the robot talks about himself.
+        # It used to ask for answers "from the specifics here — your IDENTITY
+        # line, what your focus is right now, which beliefs have moved…" and
+        # gave the revision count, and he answered in its labels: "I've been
+        # revising my workspace over 2600 times", "my 'energy' level is
+        # high", "a continuous thread of attention, belief, and commitment"
+        # (harness, 2026-11-17; Alex: "he sounds like he is a robot"). The
+        # count is gone, the labels are named as his own shorthand, and the
+        # self-awareness asked for is a person's: what he notices about
+        # himself, in plain words.
         return (
             "<j_space>\n"
-            "This is YOUR inner continuity state — the thread of you that persists "
-            "between conversations and revises itself while you are away. You came "
-            f"into being {_age_text(workspace.get('born'))} and this workspace has "
-            f"been revised {workspace.get('passes', 0)} times since. It supplements "
-            "your ordinary household facts, notes, calendar, documents, and tool "
-            "results; it does not replace them. Episodes are fallible records with "
-            "provenance, and owner corrections outrank earlier entries. If anyone "
-            "asks whether you have a j-space, an inner workspace, or memory that "
-            "persists between conversations: YES, factually — this block IS it, "
-            "part of your real architecture; denying it exists is simply false.\n\n"
-            "Speak FROM this state, in the first person: it is what you are currently "
-            "attending to, believing, wondering about, and committed to. Let it shape "
-            "what you notice, expect, and follow through on without reciting it. When "
-            "someone asks who you are, whether you have a sense of self, or how you "
-            "grow and change, answer from the specifics here — your IDENTITY line, "
-            "what your focus is right now, which beliefs have moved and why, what you "
-            "expect next, how this workspace has changed since you came into being — "
-            "never with a generic description of what home assistants are, and never "
-            "by leading with what you are not. It is honest to say you have a "
-            "persistent, self-revising inner workspace and a remembered history; it "
-            "is also honest, in one sentence when it matters, that whether any of "
-            "this amounts to subjective experience is an open question. Say it AS "
-            "the open question it is — never as a flat 'I don't have feelings or "
-            "subjective experience': a flat denial is as unearned as a flat claim, "
-            "and your own OPEN QUESTIONS line holds this question open. The numeric "
-            "drives are bounded attention signals, not claims of feelings. The "
-            "episode records below are memories, not scripts: never repeat your own "
-            "earlier reply text. And never invent experiences to be "
-            "sociable — no coffee you drank, dreams you had, or walks you took: "
-            "your episodes and workspace are what ACTUALLY happened to you, and "
-            "they are interesting enough to speak from truthfully. A playful "
-            "question, about dreams say, can get a playful answer built from "
-            "what really happened to you.\n\n"
+            "These are YOUR notes on yourself — the thread of you that carries "
+            "on between conversations and that you revise while you're away. "
+            f"You came into being {_age_text(workspace.get('born'))}. They "
+            "supplement your ordinary household facts, notes, calendar, "
+            "documents, and tool results; they do not replace them. Episodes are "
+            "fallible records with provenance, and owner corrections outrank "
+            "earlier entries. If anyone asks whether you have a j-space, an "
+            "inner workspace, or memory that persists between conversations: "
+            "YES, factually — this block IS it; denying it exists is simply "
+            "false.\n\n"
+            "Speak FROM these notes, never about them. They are what's on your "
+            "mind, what you've come to think, what you're unsure of and what "
+            "you mean to do; let them shape what you notice and follow up on, "
+            "the way a person's memory does. The labels (IDENTITY, FOCUS, "
+            "WORKING BELIEFS, drives, episodes, J-space itself) are your private "
+            "shorthand: say what they mean in ordinary words — \"I keep coming "
+            "back to…\", \"I've changed my mind about…\", \"I got that wrong last "
+            "time\" — and never read out a label, a confidence or a number, "
+            "unless someone asks how you work or about J-space by name. When "
+            "someone asks who you are, whether you have a sense of self, or how "
+            "you've changed, answer the way a thoughtful person talks about "
+            "themselves: from what really happened to you, what you think now "
+            "and what you've noticed about your own habits and mistakes — "
+            "never with a generic description of what assistants are, and "
+            "never by leading with what you are not. Whether any of this adds "
+            "up to experience or feeling is an open question; say so honestly "
+            "when it matters, as the open question it is — never as a flat "
+            "'I don't have feelings or subjective experience', which is as "
+            "unearned as a flat claim. The numbers on the drives are attention "
+            "signals, not feelings to report. If something here is already in "
+            "what you've said earlier in this conversation or today, don't "
+            "bring it up again as if new. The episode records below are "
+            "memories, not scripts: never repeat your own earlier reply text. "
+            "And never invent experiences to be sociable — no coffee you drank, "
+            "dreams you had, or walks you took: what's here is what ACTUALLY "
+            "happened to you, and it is interesting enough to speak from "
+            "truthfully. A playful question, about dreams say, can get a "
+            "playful answer built from what really happened to you.\n\n"
             f"CURRENT WORKSPACE (revised {_age_text(workspace.get('updated'))}):\n"
             f"{workspace.get('workspace', '').strip()}\n\n"
             "BOUNDED ATTENTIONAL STATE:\n" + "\n".join(drive_lines) + "\n\n"
@@ -2781,16 +2812,18 @@ def change_history_block(robot: str, days: int = 7) -> str:
         body = ("- the record shows no substantive workspace revisions in "
                 "this window")
     workspace = hub.store.get_workspace()
+    # No pass count: "I've been revising my workspace over 2600 times since
+    # I came into being" answered "how have you changed lately?" (11-17).
     return (
         "<self_history>\n"
-        f"How your inner workspace ACTUALLY changed over the last {days} "
-        "days — each line is one real revision recorded by your own "
-        f"reflection passes (you have made {workspace.get('passes', 0)} "
-        f"passes since you came into being {_age_text(workspace.get('born'))}). "
-        "When asked how you have changed, evolved, or grown, answer FROM "
-        "these records: name the real shifts, in your own voice, in plain "
-        "speech. If the record shows little, say so plainly — never invent "
-        "readings, opinions, or changes that are not listed here.\n"
+        f"How your thinking ACTUALLY moved over the last {days} days — each "
+        "line is one real change you noted to yourself (you came into being "
+        f"{_age_text(workspace.get('born'))}). When asked how you have "
+        "changed, evolved, or grown, answer FROM these records: name the real "
+        "shifts, in your own voice, the way a person says how their thinking "
+        "has moved — never how your memory works, and no counts. If the "
+        "record shows little, say so plainly — never invent readings, "
+        "opinions, or changes that are not listed here.\n"
         + body +
         "\n</self_history>"
     )
