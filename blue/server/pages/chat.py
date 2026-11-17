@@ -160,6 +160,16 @@ CHAT_HTML = """
         .lang-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 18px 10px; border-bottom: 1px solid var(--line); }
         .lang-chip { border: 1px solid var(--line); background: var(--paper); border-radius: 16px; padding: 5px 12px; font-size: 0.82em; cursor: pointer; }
         .lang-chip.sel { border-color: var(--forest); background: #eef4ee; font-weight: 600; }
+        .lang-chip:disabled { opacity: 0.55; cursor: progress; }
+        /* The pale green of a picked chip or row is the light theme's; on the
+           dark one (the default, blue.css) its light text sat on it unread. */
+        :root:not([data-theme="light"]) .lang-chip.sel,
+        :root:not([data-theme="light"]) .voice-row.sel,
+        :root:not([data-theme="light"]) .ctx-item.sel { background: rgba(127,178,255,0.18); }
+        /* ---- Speed panel (thinking + context of the shared model) ---- */
+        .speed-h { padding: 12px 18px 0; font-weight: 600; font-size: 0.86em; color: var(--ink); }
+        .speed-status { padding: 10px 18px 14px; min-height: 1.2em; font-family: 'IBM Plex Mono', monospace;
+                        font-size: 0.76em; color: var(--forest); }
         /* ---- Context & focus panel (document picker + location override) ---- */
         .ctx-place { display: flex; gap: 6px; padding: 4px 18px 6px; }
         .ctx-place input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 0.92em; }
@@ -489,6 +499,9 @@ CHAT_HTML = """
                 <button class="iconbtn" id="contextBtn" title="Focus {{ robot_name }} on specific library documents" aria-label="Focus &amp; place: library documents and location" aria-pressed="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 13l9 5 9-5"/></svg><span class="tl">Focus &amp; place</span>
                 </button>
+                <button class="iconbtn" id="speedBtn" type="button" title="Speed: whether the robots think first, and how much context the model holds" aria-label="Speed: thinking and context">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13.5H11L10 22l8.5-11.5H12L13 2z"/></svg><span class="tl">Speed</span>
+                </button>
                 {% endif %}
                 {% if kid %}
                 <button class="iconbtn" id="eyeBtn" title="Let Blue look through the camera" aria-label="Blue's eyes" aria-pressed="false">
@@ -538,6 +551,22 @@ CHAT_HTML = """
             <div class="voice-list" id="voiceList"></div>
         </div>
     </div>
+
+    {% if not kid %}
+    <div class="voice-panel" id="speedPanel" style="display:none">
+        <div class="voice-card">
+            <div class="voice-head"><span>Speed &mdash; thinking &amp; context</span><button id="speedClose" aria-label="Close">&times;</button></div>
+            <div class="voice-sub">One model answers Blue, Hexia and Casper, so these are theirs together. They hold from the next message.</div>
+            <div class="speed-h">Thinking first</div>
+            <div class="lang-row" id="speedThinking"></div>
+            <div class="voice-sub" id="speedThinkingNote"></div>
+            <div class="speed-h">Context the model holds</div>
+            <div class="lang-row" id="speedContext"></div>
+            <div class="voice-sub" id="speedContextNote"></div>
+            <div class="speed-status" id="speedStatus" role="status" aria-live="polite"></div>
+        </div>
+    </div>
+    {% endif %}
 
     {% if not kid %}
     <div class="cam-panel" id="camPanel" style="display:none">
@@ -742,7 +771,7 @@ CHAT_HTML = """
         // These open a panel of their own, so the tray folds away behind them;
         // switches (research, Wikipedia, read aloud, hands-free) leave it open
         // so you can see what you just turned on.
-        const MORE_CLOSERS = ['camBtn', 'contextBtn', 'voiceBtn', 'eyeBtn', 'connHeadBtn'];
+        const MORE_CLOSERS = ['camBtn', 'contextBtn', 'voiceBtn', 'eyeBtn', 'connHeadBtn', 'speedBtn'];
         if (moreBtn && toolsMoreEl) {
             moreBtn.addEventListener('click', function () {
                 const open = !moreIsOpen();
@@ -1898,6 +1927,98 @@ CHAT_HTML = """
             if (voiceSearch) voiceSearch.addEventListener('input', buildVoiceList);
         }
         refreshNeuralVoices();
+
+        // ---- Speed panel: whether the shared model thinks first, and the
+        // context it is loaded with (blue/model_settings.py, /model/settings).
+        const speedBtn = document.getElementById('speedBtn');
+        const speedPanel = document.getElementById('speedPanel');
+        const SPEED_THINKING = [['off', 'Off'], ['low', 'Light'], ['medium', 'Medium'], ['high', 'Deep']];
+        const SPEED_THINKING_NOTES = {
+            off: 'Fastest: no message thinks first.',
+            low: 'Real questions think briefly first; greetings and small talk never do.',
+            medium: 'Real questions think longer first. Slower, more careful.',
+            high: 'Real questions think the longest first. Slowest.'
+        };
+        let SPEED = null;
+        let speedBusy = false;
+
+        function speedTokens(n) { return Math.round(n / 1024) + 'k'; }
+        function speedSay(text) {
+            const el = document.getElementById('speedStatus');
+            if (el) el.textContent = text || '';
+        }
+        function speedChip(row, label, selected, onPick) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'lang-chip' + (selected ? ' sel' : '');
+            b.textContent = label;
+            b.disabled = speedBusy;
+            b.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            b.addEventListener('click', function () { if (!selected) onPick(); });
+            row.appendChild(b);
+        }
+        function renderSpeed() {
+            if (!SPEED) return;
+            const th = document.getElementById('speedThinking');
+            th.innerHTML = '';
+            SPEED_THINKING.forEach(function (t) {
+                speedChip(th, t[1], SPEED.thinking === t[0], function () { saveSpeed({ thinking: t[0] }); });
+            });
+            const srv = SPEED.server || {};
+            let note = SPEED_THINKING_NOTES[SPEED.thinking] || '';
+            if (srv.model && !srv.can_think) note = srv.model + ' never thinks first, whatever is picked here.';
+            document.getElementById('speedThinkingNote').textContent = note;
+
+            const cx = document.getElementById('speedContext');
+            cx.innerHTML = '';
+            speedChip(cx, 'Server default', SPEED.context_length === null, function () { saveSpeed({ context_length: null }); });
+            (SPEED.choices.context_length || []).forEach(function (n) {
+                speedChip(cx, speedTokens(n), SPEED.context_length === n, function () { saveSpeed({ context_length: n }); });
+            });
+            let now;
+            if (!srv.reachable) now = "Can't reach LM Studio or Bionic right now.";
+            else if (srv.loaded) now = 'Loaded now: ' + srv.model + (srv.context_length ? ' at ' + srv.context_length.toLocaleString() + ' tokens.' : '.');
+            else if (srv.model) now = 'Nothing loaded now: ' + srv.model + ' loads on the next message' + (SPEED.context_length ? ' at ' + SPEED.context_length.toLocaleString() + ' tokens.' : '.');
+            else now = 'Nothing loaded now.';
+            document.getElementById('speedContextNote').textContent =
+                'Smaller is faster and lighter on the graphics card, but a long conversation is remembered less. ' + now;
+        }
+        function loadSpeed() {
+            speedSay('Reading the model settings...');
+            fetch('/model/settings').then(function (r) { return r.json(); }).then(function (d) {
+                SPEED = d; speedSay(''); renderSpeed();
+            }).catch(function () { speedSay("Couldn't read the model settings."); });
+        }
+        function saveSpeed(change) {
+            if (speedBusy) return;
+            speedBusy = true;
+            renderSpeed();
+            speedSay(change.context_length !== undefined && change.context_length !== null
+                ? 'Reloading the model at the new size (10 to 30 seconds)...' : 'Saving...');
+            fetch('/model/settings', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(change)
+            }).then(function (r) {
+                return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+            }).then(function (res) {
+                speedBusy = false;
+                if (res.d && res.d.choices) SPEED = res.d;
+                const rl = res.d && res.d.reload;
+                if (!res.ok) speedSay((res.d && res.d.error) || (rl && rl.error) || "That didn't work.");
+                else if (rl && rl.changed) speedSay('Reloaded ' + rl.model + ' in ' + rl.seconds + ' s.');
+                else speedSay('Saved. It holds from the next message.');
+                renderSpeed();
+            }).catch(function () {
+                speedBusy = false;
+                speedSay("Couldn't save. Is Blue's server running?");
+                renderSpeed();
+            });
+        }
+        if (speedBtn && speedPanel) {
+            speedBtn.addEventListener('click', function () { speedPanel.style.display = 'flex'; loadSpeed(); });
+            document.getElementById('speedClose').addEventListener('click', function () { speedPanel.style.display = 'none'; });
+            speedPanel.addEventListener('click', function (e) { if (e.target === speedPanel) speedPanel.style.display = 'none'; });
+        }
 
         // The iPad Mini (iOS 12) has no MediaRecorder, so we capture raw audio
         // with the Web Audio API (works back to iOS 12) and encode a WAV here,

@@ -1593,6 +1593,7 @@ from blue_reply_text import (strip_reasoning_tags, strip_tool_markup,
 from blue import head as blue_head
 from blue import llm as _blue_llm   # shared abandonable transport
 from blue import lm_model as _lm_model   # names a model when none is loaded (Bionic)
+from blue import model_settings as _model_settings   # thinking + context, set from the chat page
 from blue.mood_eyes import mood_eye_color
 from blue.agreement import agreement_gesture
 # Every call to the single local model goes through this gate, so a background
@@ -10245,7 +10246,9 @@ def _detect_lm_context_size() -> Optional[int]:
         if not model:
             return None
         _lm_loaded_model["id"] = model
-        return _lm_model.fallback_context_length()
+        # Loaded at the chat page's chosen size when there is one.
+        return (_model_settings.context_length()
+                or _lm_model.fallback_context_length())
     answering = next((m for m in loaded if m.get("id") == _lm_loaded_model["id"]),
                      loaded[0] if len(loaded) == 1 else None)
     _lm_loaded_model["id"] = (answering or {}).get("id")
@@ -11309,6 +11312,17 @@ def _thinking_effort() -> str:
 
 _REASONING_EFFORT = {_thinking.THINK_OFF: "none", _thinking.THINK_ON: _thinking_effort()}
 
+
+def _reasoning_effort_for(thinking) -> str:
+    """The reasoning_effort a turn's decision goes out as. The chat page's
+    Speed setting (blue/model_settings.py) is read on every call: "off" means
+    no turn thinks; otherwise a turn that thinks does so at that effort.
+    Unset, it is BLUE_THINKING_EFFORT or "low", as before."""
+    if thinking != _thinking.THINK_ON:
+        return _REASONING_EFFORT[_thinking.THINK_OFF]
+    chosen = _model_settings.thinking()
+    return _REASONING_EFFORT[_thinking.THINK_OFF] if chosen == "off" else chosen
+
 # Which models think at all. Blue asks for no model by name (Alex, 10-07:
 # "use whatever is loaded"), so the thinking adapts to the one answering.
 # qwen/qwen3.8-27b is measured: at "low", 11 of 11 calls under the chat prompt
@@ -11436,7 +11450,7 @@ def _lm_studio_payload(messages, *, include_tools, force_tool, iteration,
         "frequency_penalty": 0.4,  # Strong penalty to reduce repetition of tokens
         "presence_penalty": 0.3    # Strong penalty to encourage topic diversity
     }
-    _effort = _REASONING_EFFORT.get(thinking) or _REASONING_EFFORT[_thinking.THINK_OFF]
+    _effort = _reasoning_effort_for(thinking)
     # A forced call's answer is the call. With "medium" a forced send_gmail
     # had 9,728 tokens of room, and this model's reasoning streams as
     # delta.reasoning_content, which the stop on prose in _stream_from_model
@@ -14772,6 +14786,10 @@ def process_with_tools(messages: List[Dict], _pre_selection=None, user_name: str
     def _decide_thinking(forced_tool=None, greeting=False):
         if not decide_thinking:
             return None
+        # Thinking switched off on the chat page's Speed panel: no turn
+        # thinks, and the reply caps are settled as for one that doesn't.
+        if _model_settings.thinking() == "off":
+            return _thinking.THINK_OFF
         return _thinking.thinking_for_turn(
             _turn_words, voice=heard,
             kid=_turn_kid,
@@ -17741,6 +17759,9 @@ _system_routes.register(app)
 
 from blue.server.routes import transcripts as _transcript_routes
 _transcript_routes.register(app)
+
+from blue.server.routes import model as _model_routes   # the chat page's Speed panel
+_model_routes.register(app)
 
 
 

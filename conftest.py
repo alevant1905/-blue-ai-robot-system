@@ -65,6 +65,10 @@ for _var, _name in (("BLUEJ_CONTINUITY_DIR", "blue"),
 _LM_MODEL_FILE = os.path.join(_JSPACE_TMP, "lm_model.json")
 os.environ["BLUE_LM_MODEL_FILE"] = _LM_MODEL_FILE
 os.environ.pop("BLUE_LM_MODEL", None)
+# Likewise the chat page's Speed settings (thinking off, a context size):
+# Alex's saved choice must not decide what the suite's turns send.
+_MODEL_SETTINGS_FILE = os.path.join(_JSPACE_TMP, "model_settings.json")
+os.environ["BLUE_MODEL_SETTINGS_FILE"] = _MODEL_SETTINGS_FILE
 
 os.environ.setdefault("BLUE_CONTINUITY_THREADS", "0")
 os.environ.setdefault("BLUE_EMAIL_AUTOREPLY_DISABLED", "1")
@@ -106,12 +110,14 @@ _PINNED_LIBRARY = [
 
 @pytest.fixture(autouse=True)
 def _no_remembered_model():
-    try:
-        os.remove(_LM_MODEL_FILE)
-    except FileNotFoundError:
-        pass
-    from blue import lm_model
+    for path in (_LM_MODEL_FILE, _MODEL_SETTINGS_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    from blue import lm_model, model_settings
     lm_model._cache.update(path=None, record=None)
+    model_settings._cache.update(path=None, mtime=None, data=None)
     yield
 
 

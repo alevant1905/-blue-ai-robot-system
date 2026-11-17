@@ -19,6 +19,12 @@ restarts (BLUE_LM_MODEL_FILE moves it; the test suite does). Nothing changes
 while a model is loaded, and a request that already names a model of its own
 is left alone. With nothing remembered and nothing set, the refusal stands and
 Blue says the model isn't loaded, as before.
+
+When Alex has chosen a context size (blue/model_settings.py, the chat page's
+Speed panel), the model is loaded at that size through the server's load
+endpoint instead of by name: a model loaded that way has no idle timer, and
+loaded by name it would come back at Bionic's own size (206,336 tokens, which
+filled the GPU). apply_context reloads it at a new size when he changes it.
 """
 
 from __future__ import annotations
@@ -29,9 +35,11 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
+
+from . import model_settings
 
 # Names that mean "whatever is loaded", not a model. blue/llm.py and the older
 # client in bluetools.py send "local-model" when LM_STUDIO_MODEL is unset.
@@ -154,10 +162,134 @@ def post(url: str, payload: Any, **kwargs: Any):
     model = fallback_model()
     if not model:
         return response
-    print(f"   [LM] no model loaded: asking for {model} by name "
-          f"(Bionic loads it on request)", flush=True)
     try:
         response.close()
     except Exception:
         pass
+    ctx = model_settings.context_length()
+    if ctx:
+        print(f"   [LM] no model loaded: loading {model} at {ctx:,} tokens",
+              flush=True)
+        try:
+            load_model(server_base(url), model, ctx)
+        except Exception as exc:
+            print(f"   [LM] could not load it at that size ({exc}); "
+                  f"asking for it by name", flush=True)
+    else:
+        print(f"   [LM] no model loaded: asking for {model} by name "
+              f"(Bionic loads it on request)", flush=True)
     return requests.post(url, json={**payload, "model": model}, **kwargs)
+
+
+# --- loading and reloading at a chosen size --------------------------------
+
+def server_base(url: str) -> str:
+    """http://127.0.0.1:1234 from the chat-completions URL."""
+    return (url or "").split("/v1/")[0].rstrip("/")
+
+
+def loaded_models(base: str, timeout: float = 5) -> Optional[List[Dict[str, Any]]]:
+    """The language-model instances loaded now, as
+    [{"model", "instance_id", "context_length"}], or None when the server
+    can't be read. Embedding models are left out."""
+    try:
+        r = requests.get(f"{base}/api/v1/models", timeout=timeout)
+        if getattr(r, "status_code", 200) == 200:
+            out: List[Dict[str, Any]] = []
+            seen = set()
+            for m in r.json().get("models") or []:
+                if m.get("type") not in (None, "llm"):
+                    continue
+                for inst in m.get("loaded_instances") or []:
+                    iid = inst.get("id") or m.get("key")
+                    if not iid or iid in seen:
+                        continue
+                    seen.add(iid)
+                    ctx = (inst.get("config") or {}).get("context_length")
+                    out.append({"model": m.get("key"), "instance_id": iid,
+                                "context_length": ctx if isinstance(ctx, int) else None})
+            return out
+    except (requests.RequestException, ValueError, AttributeError):
+        pass
+    # Older LM Studio: the v0 list says which models are loaded, one each.
+    try:
+        r = requests.get(f"{base}/api/v0/models", timeout=timeout)
+        r.raise_for_status()
+        return [{"model": m.get("id"), "instance_id": m.get("id"),
+                 "context_length": m.get("loaded_context_length")}
+                for m in r.json().get("data") or []
+                if m.get("state") == "loaded"
+                and m.get("type") not in ("embeddings", "embedding")]
+    except (requests.RequestException, ValueError, AttributeError):
+        return None
+
+
+class ModelServerError(RuntimeError):
+    """The server refused to load or unload a model."""
+
+
+def load_model(base: str, model: str, context_length: Optional[int] = None,
+               timeout: float = 600) -> Dict[str, Any]:
+    """Load `model` through the server's load endpoint, at `context_length`
+    tokens when given. A model loaded this way has no idle timer."""
+    body: Dict[str, Any] = {"model": model, "echo_load_config": True}
+    if context_length:
+        body["context_length"] = int(context_length)
+    r = requests.post(f"{base}/api/v1/models/load", json=body, timeout=timeout)
+    if r.status_code >= 400:
+        raise ModelServerError(f"load refused ({r.status_code}): {(r.text or '')[:200]}")
+    data = r.json()
+    ctx = (data.get("load_config") or {}).get("context_length") or context_length
+    remember(model, ctx if isinstance(ctx, int) else None)
+    return data
+
+
+def unload_instance(base: str, instance_id: str, timeout: float = 60) -> None:
+    r = requests.post(f"{base}/api/v1/models/unload",
+                      json={"instance_id": instance_id}, timeout=timeout)
+    if r.status_code >= 400:
+        raise ModelServerError(f"unload refused ({r.status_code}): {(r.text or '')[:200]}")
+
+
+def blues_model(loaded: List[Dict[str, Any]]) -> Optional[str]:
+    """Which model is Blue's: the remembered one when it is loaded, else the
+    one loaded, else the remembered one."""
+    names = [i["model"] for i in loaded if i.get("model")]
+    remembered_model = fallback_model()
+    if remembered_model and remembered_model in names:
+        return remembered_model
+    return names[0] if names else remembered_model
+
+
+def apply_context(base: str, context_length: Optional[int]) -> Dict[str, Any]:
+    """Reload Blue's model at `context_length` tokens, unless it is loaded at
+    that size already. None (the server's own size) reloads nothing: the
+    server picks its size the next time it loads the model.
+
+    Returns {"ok", "changed", "model", "context_length", "seconds"} or
+    {"ok": False, "error"}. The caller holds the model gate, so no reply is
+    cut off by the unload."""
+    loaded = loaded_models(base)
+    if loaded is None:
+        return {"ok": False, "error": "Can't reach LM Studio or Bionic at "
+                                      f"{base}."}
+    model = blues_model(loaded)
+    if not model:
+        return {"ok": False, "error": "No model is loaded and Blue doesn't know "
+                                      "which to load yet. Load one in Bionic "
+                                      "or LM Studio first."}
+    mine = [i for i in loaded if i.get("model") == model]
+    now = mine[0]["context_length"] if mine else None
+    if context_length is None or (mine and all(
+            i.get("context_length") == context_length for i in mine)):
+        return {"ok": True, "changed": False, "model": model, "context_length": now}
+    started = time.time()
+    try:
+        for inst in mine:
+            unload_instance(base, inst["instance_id"])
+        data = load_model(base, model, context_length)
+    except (ModelServerError, requests.RequestException, ValueError) as exc:
+        return {"ok": False, "error": f"Couldn't reload {model}: {exc}"}
+    ctx = (data.get("load_config") or {}).get("context_length") or context_length
+    return {"ok": True, "changed": True, "model": model, "context_length": ctx,
+            "seconds": round(time.time() - started, 1)}
